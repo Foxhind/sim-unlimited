@@ -10,6 +10,7 @@ export class FreeCamera {
   readonly pos = vec3.fromValues(0, 300, 0);
   yaw = 0; // 0 = looking north (-Z)
   pitch = -0.1;
+  speedScale = 1;
   readonly view = mat4.create();
   readonly proj = mat4.create();
   private target = vec3.create();
@@ -24,7 +25,7 @@ export class FreeCamera {
     if (input.down('ArrowDown')) this.pitch -= LOOK_RATE * dt;
     this.pitch = Math.max(-1.55, Math.min(1.55, this.pitch));
 
-    const speed = BASE_SPEED * (input.down('ShiftLeft') || input.down('ShiftRight') ? BOOST : 1);
+    const speed = BASE_SPEED * this.speedScale * (input.down('ShiftLeft') || input.down('ShiftRight') ? BOOST : 1);
     const cp = Math.cos(this.pitch);
     const forward = vec3.fromValues(Math.sin(this.yaw) * cp, Math.sin(this.pitch), -Math.cos(this.yaw) * cp);
     const right = vec3.fromValues(Math.cos(this.yaw), 0, Math.sin(this.yaw));
