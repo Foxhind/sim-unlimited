@@ -1,7 +1,7 @@
 import { mat3, vec3, type mat4 } from 'gl-matrix';
 import { must } from '../engine/gl';
 import type { Mesh, Renderer } from '../engine/renderer';
-import { aircraftMesh, type AircraftConfig } from './aircraft';
+import { aircraftMesh, flameMesh, type AircraftConfig } from './aircraft';
 import type { FlightModel } from './model';
 
 /**
@@ -17,6 +17,9 @@ export class AircraftRenderer {
   private live: Float32Array;
   private rot = mat3.create();
   private cfgId = '';
+  private fMesh: Mesh;
+  private fvbo: WebGLBuffer;
+  private frbo: WebGLBuffer;
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
@@ -38,6 +41,21 @@ export class AircraftRenderer {
     gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
     gl.bindVertexArray(null);
     this.mesh = { vao, vertexCount: 0 };
+
+    const fvao = must(gl.createVertexArray(), 'flame VAO');
+    gl.bindVertexArray(fvao);
+    this.fvbo = must(gl.createBuffer(), 'flame vertices');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fvbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    this.frbo = must(gl.createBuffer(), 'flame ramps');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.frbo);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
+    gl.bindVertexArray(null);
+    this.fMesh = { vao: fvao, vertexCount: 0 };
   }
 
   private ensureMesh(cfg: AircraftConfig): void {
@@ -54,7 +72,7 @@ export class AircraftRenderer {
     this.mesh.vertexCount = src.ramps.length;
   }
 
-  draw(renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3): void {
+  draw(renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, throttle = 0, time = 0): void {
     if (model.crashed) return;
     this.ensureMesh(model.cfg);
     mat3.fromQuat(this.rot, model.quat);
@@ -76,5 +94,29 @@ export class AircraftRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.live);
     renderer.drawWorld(this.mesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
+    this.drawFlame(renderer, model, view, proj, camPos, sunDir, throttle, time);
+  }
+
+  private drawFlame(
+    renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, throttle: number, time: number,
+  ): void {
+    const src = flameMesh(model.cfg, throttle, time);
+    if (src.ramps.length === 0) return;
+    const out = new Float32Array(src.vertices.length);
+    const p = vec3.create();
+    for (let i = 0; i < out.length; i += 6) {
+      vec3.set(p, src.vertices[i], src.vertices[i + 1], src.vertices[i + 2]);
+      vec3.transformMat3(p, p, this.rot);
+      out[i] = p[0]; out[i + 1] = p[1]; out[i + 2] = p[2];
+      // self-lit: normal faces the sun so the brightest ramp step is always used
+      out[i + 3] = sunDir[0]; out[i + 4] = sunDir[1]; out[i + 5] = sunDir[2];
+    }
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.fvbo);
+    gl.bufferData(gl.ARRAY_BUFFER, out, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.frbo);
+    gl.bufferData(gl.ARRAY_BUFFER, src.ramps, gl.DYNAMIC_DRAW);
+    this.fMesh.vertexCount = src.ramps.length;
+    renderer.drawWorld(this.fMesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
   }
 }

@@ -176,3 +176,18 @@ export function nearestMaterialRamp(rgb: RGB): number {
   }
   return best;
 }
+
+const EGA_RED: RGB = [170, 0, 0];
+const EGA_LIGHT_RED: RGB = [255, 85, 85];
+const EGA_YELLOW: RGB = [255, 255, 85];
+/** Flame ramp steps: outer plume (HUD_AMBER) and core (EMISSIVE); step 11 is unused elsewhere. */
+export const FLAME_STEP = 11;
+const FLAME_OUTER: RGB[] = [EGA_YELLOW, EGA_RED, EGA_YELLOW, EGA_LIGHT_RED];
+const FLAME_CORE: RGB[] = [EGA_RED, EGA_YELLOW, EGA_LIGHT_RED, EGA_YELLOW];
+
+/** Exhaust flicker: the plume and its core swap EGA red/yellow ~20 times a second. */
+export function applyFlameColors(lut: Uint8Array, timeSec: number): void {
+  const tick = Math.floor(timeSec * 20) & 3;
+  writeEntry(lut, RAMP.HUD_AMBER * RAMP_STEPS + FLAME_STEP, FLAME_OUTER[tick]);
+  writeEntry(lut, RAMP.EMISSIVE * RAMP_STEPS + FLAME_STEP, FLAME_CORE[tick]);
+}

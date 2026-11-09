@@ -4,7 +4,7 @@ import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
 import { Renderer } from './engine/renderer';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { buildLUT, paletteAt } from './engine/palette';
+import { applyFlameColors, buildLUT, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -364,12 +364,13 @@ function frame(now: number): void {
   }
   const flashing = state === 'crashed' && now - crashTime < 150;
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut);
   renderer.drawSky(view, proj, camPos, sunDir);
   chunks.draw(renderer, view, proj, camPos, sunDir, 15000, 55000);
   osm.draw(renderer, view, proj, camPos, sunDir, 15000, 55000, sun.elevationDeg < 2, 3 * u);
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
-    aircraftRenderer.draw(renderer, model, view, proj, camPos, sunDir);
+    aircraftRenderer.draw(renderer, model, view, proj, camPos, sunDir, flight.throttle, now / 1000);
   }
 
   renderer.beginOverlay();

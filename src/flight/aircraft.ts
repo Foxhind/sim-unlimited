@@ -36,6 +36,8 @@ export interface AircraftConfig {
   speedbrakeCd: number;
   brakeDecel: number;
   stallAlpha: number;
+  /** exhaust exits in body space (x right, y up, z aft) with radius */
+  nozzles: { pos: [number, number, number]; r: number }[];
 }
 
 export const SU27: AircraftConfig = {
@@ -68,6 +70,7 @@ export const SU27: AircraftConfig = {
   speedbrakeCd: 0.05,
   brakeDecel: 4.5,
   stallAlpha: 20,
+  nozzles: [{ pos: [0.95, -0.5, 10.8], r: 0.5 }, { pos: [-0.95, -0.5, 10.8], r: 0.5 }],
 };
 
 export const F117: AircraftConfig = {
@@ -100,6 +103,7 @@ export const F117: AircraftConfig = {
   speedbrakeCd: 0.06,
   brakeDecel: 4.0,
   stallAlpha: 15,
+  nozzles: [{ pos: [0.68, -0.02, 10.2], r: 0.28 }, { pos: [-0.68, -0.02, 10.2], r: 0.28 }],
 };
 
 export const AIRCRAFT: Record<string, AircraftConfig> = { su27: SU27, f117: F117 };
@@ -160,6 +164,14 @@ class MeshBuilder {
   loft(rings: V3[][], ramp: number, capFront = true, capBack = true): void {
     for (let r = 0; r < rings.length - 1; r++) {
       const a = rings[r], b = rings[r + 1];
+      if (a.length === 1) {
+        for (let i = 0; i < b.length; i++) this.tri(a[0], b[(i + 1) % b.length], b[i], ramp);
+        continue;
+      }
+      if (b.length === 1) {
+        for (let i = 0; i < a.length; i++) this.tri(a[i], a[(i + 1) % a.length], b[0], ramp);
+        continue;
+      }
       for (let i = 0; i < a.length; i++) {
         const j = (i + 1) % a.length;
         this.poly([a[i], a[j], b[j], b[i]], ramp);
@@ -185,9 +197,10 @@ function buildSu27(): AircraftMesh {
   const ring = (z: number, w: number, top: number, bot: number): V3[] => [
     [0, top, z], [w, (top + bot) / 2 + 0.15, z], [0, bot, z], [-w, (top + bot) / 2 + 0.15, z],
   ];
+  const nose = ring(-9.2, 0.55, 0.55, -0.45);
+  m.loft([[[0, 0.1, -11]], nose], DARK, false, false); // radome
   m.loft([
-    [[0, 0.1, -11]],
-    ring(-9.2, 0.55, 0.55, -0.45),
+    nose,
     ring(-6.5, 0.95, 0.95, -0.7),
     ring(-3.0, 1.25, 1.15, -0.8),
     ring(1.0, 1.5, 1.2, -0.85),
@@ -195,21 +208,24 @@ function buildSu27(): AircraftMesh {
     ring(9.0, 1.5, 0.85, -0.65),
     ring(10.5, 1.35, 0.7, -0.55),
   ], HULL, false, true);
-  // radome
-  m.poly([[0, 0.1, -11], [0.55, 0.05, -9.2], [0, -0.45, -9.2]], DARK);
-  m.poly([[0, 0.1, -11], [0, -0.45, -9.2], [-0.55, 0.05, -9.2]], DARK);
-  m.poly([[0, 0.1, -11], [0, 0.55, -9.2], [0.55, 0.05, -9.2]], DARK);
-  m.poly([[0, 0.1, -11], [-0.55, 0.05, -9.2], [0, 0.55, -9.2]], DARK);
   // canopy
   m.poly([[0, 0.95, -6.5], [0.5, 1.35, -5.2], [0, 1.5, -3.6], [-0.5, 1.35, -5.2]], DARK);
   m.poly([[0.5, 1.35, -5.2], [0.7, 1.0, -3.2], [0, 1.5, -3.6]], DARK);
   m.poly([[-0.5, 1.35, -5.2], [0, 1.5, -3.6], [-0.7, 1.0, -3.2]], DARK);
   // wing glove + main wing (right, mirrored)
-  const wing: V3[] = [
-    [1.4, 0.15, -2.5], [1.6, 0.1, 2.0], [7.35, 0.45, 6.2], [7.35, 0.45, 7.4], [2.0, 0.05, 5.5],
+  const [wA, wB, wC, wD, wE, wF, wG]: V3[] = [
+    [0.8, 0.2, -2.7], [1.4, 0.15, -2.5], [1.6, 0.1, 2.0], [7.35, 0.45, 6.2], [7.35, 0.45, 7.4], [2.0, 0.05, 5.5], [0.8, 0.1, 5.5],
   ];
-  m.poly(wing, HULL);
-  m.poly([...wing].reverse().map(mirror), HULL);
+  // explicit triangles (the planform is concave); every triangle gets an upward normal on both wings
+  const upTri = (p: V3, q: V3, r: V3): void => {
+    const ny = (q[2] - p[2]) * (r[0] - p[0]) - (q[0] - p[0]) * (r[2] - p[2]);
+    if (ny >= 0) m.tri(p, q, r, HULL);
+    else m.tri(p, r, q, HULL);
+  };
+  for (const t of [[wA, wB, wC], [wA, wC, wG], [wG, wC, wF], [wC, wD, wE], [wC, wE, wF]] as V3[][]) {
+    upTri(t[0], t[1], t[2]);
+    upTri(mirror(t[0]), mirror(t[1]), mirror(t[2]));
+  }
   // LERX strakes
   m.poly([[0.9, 0.4, -6.0], [1.4, 0.15, -2.5], [1.25, 0.3, -3.0]], HULL);
   m.poly([[-0.9, 0.4, -6.0], [-1.25, 0.3, -3.0], [-1.4, 0.15, -2.5]], HULL);
@@ -223,13 +239,13 @@ function buildSu27(): AircraftMesh {
     ], DARK, true, true);
   }
   // stabilators
-  const stab: V3[] = [[1.6, 0.0, 6.5], [1.7, 0.0, 9.8], [4.6, 0.15, 10.6], [4.4, 0.15, 9.2]];
+  const stab: V3[] = [[1.0, 0.0, 6.5], [1.0, 0.0, 9.8], [4.6, 0.15, 10.6], [4.4, 0.15, 9.2]];
   m.poly(stab, HULL);
   m.poly([...stab].reverse().map(mirror), HULL);
   // twin canted fins
   for (const s of [1, -1]) {
     const fin: V3[] = [
-      [s * 1.3, 0.6, 5.2], [s * 1.35, 0.6, 9.6],
+      [s * 1.2, 0.25, 5.2], [s * 1.25, 0.25, 9.6],
       [s * 2.3, 3.4, 9.9], [s * 2.2, 3.4, 7.6],
     ];
     m.poly(fin, HULL);
@@ -239,12 +255,12 @@ function buildSu27(): AircraftMesh {
   for (const s of [1, -1]) {
     m.poly([[s * 0.9, -0.8, 7.0], [s * 1.0, -0.8, 9.8], [s * 1.3, -1.7, 9.6]], DARK);
   }
-  // intake ramps under the LERX
+  // intake ramps under the LERX, flowing into the nacelles
   for (const s of [1, -1]) {
-    const x = s * 1.05;
+    const x = s * 0.95;
     m.loft([
-      [[x, -0.35, -3.2], [x + s * 0.5, -0.45, -3.2], [x + s * 0.5, -0.95, -3.2], [x, -0.9, -3.2]],
-      [[x, -0.4, 0.8], [x + s * 0.55, -0.5, 0.8], [x + s * 0.55, -1.0, 0.8], [x, -0.95, 0.8]],
+      [[x, -0.3, -3.2], [x + s * 0.5, -0.55, -3.2], [x, -0.95, -3.2], [x - s * 0.5, -0.55, -3.2]],
+      [[x, -0.2, 1.5], [x + s * 0.55, -0.5, 1.5], [x, -1.0, 1.5], [x - s * 0.55, -0.5, 1.5]],
     ], DARK, true, false);
   }
   // tailcone between nozzles
@@ -256,6 +272,10 @@ function buildSu27(): AircraftMesh {
   for (const s of [1, -1]) {
     m.poly([[s * 7.25, 0.45, 6.0], [s * 7.45, 0.45, 6.0], [s * 7.45, 0.45, 7.8], [s * 7.25, 0.45, 7.8]], DARK);
     m.poly([[s * 7.25, 0.6, 6.0], [s * 7.25, 0.6, 7.8], [s * 7.45, 0.6, 7.8], [s * 7.45, 0.6, 6.0]], DARK);
+    m.poly([[s * 7.25, 0.45, 6.0], [s * 7.25, 0.45, 7.8], [s * 7.25, 0.6, 7.8], [s * 7.25, 0.6, 6.0]], DARK);
+    m.poly([[s * 7.45, 0.45, 6.0], [s * 7.45, 0.6, 6.0], [s * 7.45, 0.6, 7.8], [s * 7.45, 0.45, 7.8]], DARK);
+    m.poly([[s * 7.25, 0.45, 6.0], [s * 7.25, 0.6, 6.0], [s * 7.45, 0.6, 6.0], [s * 7.45, 0.45, 6.0]], DARK);
+    m.poly([[s * 7.25, 0.45, 7.8], [s * 7.45, 0.45, 7.8], [s * 7.45, 0.6, 7.8], [s * 7.25, 0.6, 7.8]], DARK);
   }
   return m.build();
 }
@@ -332,4 +352,52 @@ export function aircraftMesh(id: 'su27' | 'f117'): AircraftMesh {
     meshCache.set(id, mesh);
   }
   return mesh;
+}
+
+/**
+ * F-19 style exhaust: a short, hard-edged amber cone with a bright core that
+ * stretches and flickers with throttle; afterburner adds a long tail.
+ * Normals are filled by the renderer (flame is self-lit).
+ */
+export function flameMesh(cfg: AircraftConfig, throttle: number, t: number): AircraftMesh {
+  const m = new MeshBuilder();
+  if (throttle < 0.04) return m.build();
+  const ab = cfg.thrustAfterburner > cfg.thrustDry ? Math.max(0, (throttle - 0.85) / 0.15) : 0;
+  const SIDES = 6;
+  const circle = (cx: number, cy: number, z: number, r: number, phase: number): V3[] => {
+    const pts: V3[] = [];
+    for (let i = 0; i < SIDES; i++) {
+      const a = phase + (i / SIDES) * Math.PI * 2;
+      pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r, z]);
+    }
+    return pts;
+  };
+  cfg.nozzles.forEach((n, k) => {
+    const [cx, cy, z0] = n.pos;
+    const flick = 1 + 0.10 * Math.sin(t * 47 + k * 2.1) + 0.07 * Math.sin(t * 91 + k * 0.7);
+    const len = n.r * (1.0 + 3.0 * throttle + 7.0 * ab) * flick;
+    const ph = k * 0.5;
+    // amber outer plume: flared mouth, taper, tip
+    m.loft([
+      circle(cx, cy, z0 - 0.05, n.r * 0.92, ph),
+      circle(cx, cy, z0 + len * 0.28, n.r * (ab > 0 ? 0.85 : 0.7), ph),
+      [[cx, cy, z0 + len]],
+    ], RAMP.HUD_AMBER, false, false);
+    // bright core, shorter
+    m.loft([
+      circle(cx, cy, z0 - 0.02, n.r * 0.5, ph),
+      circle(cx, cy, z0 + len * 0.22, n.r * 0.4, ph),
+      [[cx, cy, z0 + len * 0.6]],
+    ], RAMP.EMISSIVE, false, false);
+    if (ab > 0.3) {
+      // shock diamond further back
+      const zd = z0 + len * 0.55;
+      m.loft([
+        [[cx, cy, zd - len * 0.12]],
+        circle(cx, cy, zd, n.r * 0.55, ph),
+        [[cx, cy, zd + len * 0.12]],
+      ], RAMP.EMISSIVE, false, false);
+    }
+  });
+  return m.build();
 }
