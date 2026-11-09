@@ -92,7 +92,7 @@ export class Renderer {
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
-    this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir']);
+    this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir']);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, DOWNSAMPLE_FS);
     this.dsU = uniformMap(gl, this.dsProg, ['uIndexTex', 'uLut']);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
@@ -168,7 +168,7 @@ export class Renderer {
     gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([1]));
   }
 
-  drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3): void {
+  drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, moonDir: vec3): void {
     const gl = this.gl;
     mat4.multiply(this.invViewProj, proj, view);
     mat4.invert(this.invViewProj, this.invViewProj);
@@ -179,6 +179,7 @@ export class Renderer {
     gl.uniformMatrix4fv(this.skyU.uInvViewProj, false, this.invViewProj);
     gl.uniform3fv(this.skyU.uCamPos, camPos);
     gl.uniform3fv(this.skyU.uSunDir, sunDir);
+    gl.uniform3fv(this.skyU.uMoonDir, moonDir);
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }

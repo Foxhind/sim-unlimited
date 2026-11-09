@@ -116,6 +116,7 @@ in vec2 vNdc;
 uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
+uniform vec3 uMoonDir;
 out uint oIndex;
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
@@ -123,6 +124,22 @@ void main() {
   float t = clamp(dir.y, 0.0, 1.0);
   float band = floor(pow(1.0 - t, 1.6) * 9.0);
   uint idx = 192u + uint(min(band, 8.0));
+  // moon: disc (exaggerated ~1.8 deg radius) lit by the sun; the dark limb stays sky-coloured
+  float md = dot(dir, uMoonDir);
+  if (md > 0.0) {
+    vec3 o = dir - uMoonDir * md;
+    float moonR = 0.031;
+    if (length(o) < moonR) {
+      vec3 s = uSunDir - uMoonDir * dot(uSunDir, uMoonDir);
+      float sl = length(s);
+      vec3 a = sl > 1e-5 ? s / sl : normalize(cross(uMoonDir, vec3(0.0, 1.0, 0.0)));
+      vec3 b = cross(uMoonDir, a);
+      vec2 xy = vec2(dot(o, a), dot(o, b)) / moonR;
+      float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
+      vec3 n = xy.x * a + xy.y * b - z * uMoonDir;
+      if (dot(n, uSunDir) > 0.0) idx = 208u + 13u;
+    }
+  }
   float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
   if (ang < 0.018) {
     idx = 208u + 15u;

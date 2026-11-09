@@ -6,6 +6,7 @@ import { t, type StringKey } from './i18n';
 import { saveSettings, type Settings } from './settings';
 import { AIRFIELDS, Minimap } from './minimap';
 import type { LatLon } from '../world/geodesy';
+import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
 import { DEFAULT_BINDINGS, type Action } from '../flight/controls';
 
 export type MenuScreen = 'consent' | 'start' | 'settings' | 'pause' | 'crashed' | 'none';
@@ -16,6 +17,7 @@ export interface FlightConfig {
   customPoint: LatLon | null;
   startMode: 'runway' | 'air';
   timeAccel: number;
+  timeOfDay: TimeOfDay;
 }
 
 export interface MenuCallbacks {
@@ -42,14 +44,19 @@ const REMAP_ACTIONS: Action[] = [
 ];
 
 const TIME_STEPS = [1, 10, 60, 600];
+const TOD_KEY: Record<TimeOfDay, StringKey> = {
+  real: 'todReal', morning: 'todMorning', day: 'todDay', evening: 'todEvening', night: 'todNight',
+};
 const PANEL = rampIndex(RAMP.SKY, 2);
 const DIM = rampIndex(RAMP.HUD_GREEN, 6);
 
 export class Menu {
   screen: MenuScreen = 'none';
-  config: FlightConfig = { aircraft: 'su27', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1 };
+  config: FlightConfig = { aircraft: 'su27', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1, timeOfDay: 'real' };
   readonly minimap = new Minimap();
   crashReason = '';
+  /** sim clock / sun / moon summary shown on the pause screen */
+  clockText = '';
   private buttons: Button[] = [];
   private remap: Action | null = null;
   private returnTo: MenuScreen = 'start';
@@ -187,6 +194,8 @@ export class Menu {
     ]);
     label('time');
     row(TIME_STEPS.map((s) => [`x${s}`, () => { cfg.timeAccel = s; }, cfg.timeAccel === s] as [string, () => void, boolean]));
+    label('timeOfDay');
+    row(TIMES_OF_DAY.map((k) => [t(L, TOD_KEY[k]), () => { cfg.timeOfDay = k; }, cfg.timeOfDay === k] as [string, () => void, boolean]));
 
     // minimap: click to pick an arbitrary point (Q29)
     const size = Math.min(w * 0.42, h * 0.52);
@@ -258,6 +267,7 @@ export class Menu {
   private drawPause(w: number, h: number, u: number, marker?: LatLon): void {
     const L = this.settings.lang;
     this.center(t(L, 'paused'), w / 2, h * 0.06, u * 3, HUD_AMBER);
+    if (this.clockText) this.center(this.clockText, w / 2, h * 0.06 + 50 * u, u, HUD_GREEN);
     const size = Math.min(w * 0.4, h * 0.5);
     const mx = w / 2 - size / 2, my = h * 0.16;
     if (marker) this.minimap.setView(marker, 120000);

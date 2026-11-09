@@ -10,7 +10,8 @@ import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
 import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geodesy';
 import { GroundProbe, towerAnchor } from './world/ground';
-import { sunPosition } from './world/sun';
+import { moonPosition, sunPosition } from './world/sun';
+import { timeForPreset } from './world/time-of-day';
 import { AIRCRAFT } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
@@ -92,10 +93,42 @@ const camWorld: CameraWorld = {
 
 let simTime = start.time ?? new Date();
 let sun = sunPosition(simTime, start.latLon);
+let moon = moonPosition(simTime, start.latLon);
 const sunDir = vec3.clone(sun.dir);
+const moonDir = vec3.clone(moon.dir);
+/** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
+const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg));
 const flashLut = new Uint8Array(256 * 4).fill(255);
 let lastSunUpdate = 0;
+let previewKey = '';
+let sunLoc: LatLon = start.latLon;
+
+function updateLight(): void {
+  sun = sunPosition(simTime, sunLoc);
+  moon = moonPosition(simTime, sunLoc);
+  vec3.copy(sunDir, sun.dir);
+  vec3.copy(moonDir, moon.dir);
+  const sw = Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6));
+  const mw = Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - sw);
+  if (sw + mw < 1e-3) {
+    vec3.copy(lightDir, sunDir);
+  } else {
+    vec3.set(
+      lightDir,
+      sunDir[0] * sw + moonDir[0] * mw,
+      sunDir[1] * sw + moonDir[1] * mw,
+      sunDir[2] * sw + moonDir[2] * mw,
+    );
+    vec3.normalize(lightDir, lightDir);
+  }
+  lut = buildLUT(paletteAt(sun.elevationDeg));
+}
+
+function startLocation(fc: { location: string; customPoint: LatLon | null }): LatLon {
+  const af = AIRFIELDS.find((a) => a.icao === fc.location);
+  return fc.location === 'custom' && fc.customPoint ? fc.customPoint : af ?? start.latLon;
+}
 
 // Q40: a fresh runway tile invalidates nearby terrain so flattening is applied
 osm.onTileReady = (tile, detail, runways) => {
@@ -140,9 +173,11 @@ function respawn(): void {
 const menu = new Menu(font, vectors, settings, {
   onFly: (fc) => {
     const af = AIRFIELDS.find((a) => a.icao === fc.location);
-    const ll = fc.location === 'custom' && fc.customPoint ? fc.customPoint : af ?? start.latLon;
+    const ll = startLocation(fc);
     const alt = fc.startMode === 'runway' ? '0' : '';
-    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft}`;
+    // 'real' leaves the time field empty so a reload always starts at the current clock
+    const when = fc.timeOfDay === 'real' ? '' : Math.floor(timeForPreset(fc.timeOfDay, ll, new Date()).getTime() / 1000);
+    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when}`;
     window.location.reload();
   },
   onConsent: (allow) => {
@@ -170,7 +205,7 @@ if (state === 'menu') menu.screen = consent === null ? 'consent' : 'start';
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, camWorld, menu,
+    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu,
     get state() { return state; },
     get simTime() { return simTime; },
     get consent() { return consent; },
@@ -356,21 +391,37 @@ function frame(now: number): void {
   chunks.update(camWorld, view, proj, now);
   osm.update(camWorld, view, proj, now, chunks.origin);
 
-  if (now - lastSunUpdate > 1000) {
+  if (state === 'menu' && menu.screen === 'start') {
+    // live backdrop follows the chosen place and time of day
+    const ll = startLocation(menu.config);
+    const key = `${menu.config.timeOfDay}|${ll.lat}|${ll.lon}`;
+    if (key !== previewKey) {
+      previewKey = key;
+      simTime = timeForPreset(menu.config.timeOfDay, ll, new Date());
+      sunLoc = ll;
+      lastSunUpdate = 0;
+    }
+  } else {
+    sunLoc = camWorld.latLon;
+  }
+  // fast clocks need a finer refresh than the 1 s default or the sky visibly steps
+  if (now - lastSunUpdate > (menu.config.timeAccel > 1 && state === 'flying' ? 100 : 1000)) {
     lastSunUpdate = now;
-    sun = sunPosition(simTime, camWorld.latLon);
-    vec3.copy(sunDir, sun.dir);
-    lut = buildLUT(paletteAt(sun.elevationDeg));
+    updateLight();
+  }
+  if (menu.screen === 'pause') {
+    const hh = simTime.toISOString().slice(0, 16).replace('T', ' ');
+    menu.clockText = `${hh} UTC  SUN ${Math.round(sun.elevationDeg)}\u00B0  MOON ${Math.round(moon.illumination * 100)}% ${Math.round(moon.elevationDeg)}\u00B0`;
   }
   const flashing = state === 'crashed' && now - crashTime < 150;
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
   applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut);
-  renderer.drawSky(view, proj, camPos, sunDir);
-  chunks.draw(renderer, view, proj, camPos, sunDir, 15000, 55000);
-  osm.draw(renderer, view, proj, camPos, sunDir, 15000, 55000, sun.elevationDeg < 2, 3 * u);
+  renderer.drawSky(view, proj, camPos, sunDir, moonDir);
+  chunks.draw(renderer, view, proj, camPos, lightDir, 15000, 55000);
+  osm.draw(renderer, view, proj, camPos, lightDir, 15000, 55000, sun.elevationDeg < 2, 3 * u);
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
-    aircraftRenderer.draw(renderer, model, view, proj, camPos, sunDir, flight.throttle, now / 1000);
+    aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }
 
   renderer.beginOverlay();
