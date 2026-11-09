@@ -77,9 +77,9 @@ describe('frustum culling', () => {
 });
 
 describe('gridForZoom', () => {
-  it('uses coarser grids for distant LODs', () => {
-    expect(gridForZoom(14)).toBe(8);
-    expect(gridForZoom(12)).toBe(6);
-    expect(gridForZoom(8)).toBe(4);
+  it('uses a coarser contour work lattice for distant LODs', () => {
+    expect(gridForZoom(14)).toBe(32);
+    expect(gridForZoom(12)).toBe(32);
+    expect(gridForZoom(8)).toBe(24);
   });
 });

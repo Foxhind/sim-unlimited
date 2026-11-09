@@ -20,10 +20,10 @@ const LOD_FACTOR = 1.7;
 const ALT_WEIGHT = 1.5;
 const UNLOAD_DELAY_MS = 10000;
 
+/** Work-lattice resolution on which terrain contours are traced (not the mesh density). */
 export function gridForZoom(z: number): number {
-  if (z >= 13) return 8;
-  if (z >= 11) return 6;
-  return 4;
+  if (z >= 12) return 32;
+  return 24;
 }
 
 function horizontalDistance(a: LatLon, b: LatLon): number {

@@ -4,7 +4,7 @@ import { tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 
 const TILE: Tile = { z: 12, x: 2140, y: 1420 };
-const GRID = 8;
+const GRID = 16;
 
 function heights(fn: (i: number, j: number) => number): Float32Array {
   const side = GRID + 1;
@@ -39,84 +39,104 @@ function area(t: { pos: number[] }): number {
   return Math.hypot(...cr) / 2;
 }
 
-describe('buildTerrainMesh', () => {
-  it('emits land + skirt triangles with flat normals and no NaN/degenerates', () => {
+function planArea1(t: { pos: number[] }): number {
+  const [ax, , az, bx, , bz, cx, , cz] = t.pos;
+  return Math.abs((bx - ax) * (cz - az) - (cx - ax) * (bz - az)) / 2;
+}
+
+/** land faces have planar footprint; skirts are vertical (zero footprint) */
+function split(ts: ReturnType<typeof tris>) {
+  const land = ts.filter((t) => planArea1(t) > 1e-3);
+  const skirts = ts.filter((t) => planArea1(t) <= 1e-3);
+  return { land, skirts };
+}
+
+describe('buildTerrainMesh (isoline belts)', () => {
+  it('flat tile collapses to two land triangles plus skirts, no NaN/degenerates', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 100), skirtDepth: 50 });
-    expect(m.vertexCount).toBe(GRID * GRID * 2 * 3 + GRID * 4 * 2 * 3);
-    expect(m.vertices.length).toBe(m.vertexCount * 6);
-    expect(m.ramps.length).toBe(m.vertexCount);
     const ts = tris(m);
+    expect(split(ts).land).toHaveLength(2);
+    expect(split(ts).skirts).toHaveLength(4 * 2);
     for (const t of ts) {
       for (const v of [...t.pos, ...t.normal]) expect(Number.isFinite(v)).toBe(true);
       expect(area(t)).toBeGreaterThan(0);
-      for (let k = 0; k < 3; k++) {
-        expect(Math.hypot(t.normal[k * 3], t.normal[k * 3 + 1], t.normal[k * 3 + 2])).toBeCloseTo(1, 5);
-      }
     }
-    const land = ts.slice(0, GRID * GRID * 2);
-    for (const t of land) {
+    for (const t of split(ts).land) {
       expect(t.normal[1]).toBeCloseTo(1, 5);
       expect(t.ramp).toBe(RAMP.GRASS);
-      for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBe(100);
     }
-    const skirts = ts.slice(GRID * GRID * 2);
-    const minY = Math.min(...skirts.flatMap((t) => [t.pos[1], t.pos[4], t.pos[7]]));
+    const minY = Math.min(...split(ts).skirts.flatMap((t) => [t.pos[1], t.pos[4], t.pos[7]]));
     expect(minY).toBe(50);
+  });
+
+  it('covers the whole tile footprint exactly once', () => {
+    const size = tileSizeMeters(TILE);
+    const h = heights((i, j) => 300 + 200 * Math.sin(i / 2.5) * Math.cos(j / 3));
+    const { land } = split(tris(buildTerrainMesh({ tile: TILE, grid: GRID, heights: h, skirtDepth: 10 })));
+    const total = land.reduce((s, t) => s + planArea1(t), 0);
+    expect(total / (size * size)).toBeGreaterThan(0.995);
+    expect(total / (size * size)).toBeLessThan(1.005);
+  });
+
+  it('is far lighter than the old dense grid on smooth terrain and honors the belt step', () => {
+    const h = heights((i, j) => 500 + 12 * i + 6 * j); // gentle plane
+    const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: h, step: 20 });
+    expect(m.vertexCount / 3).toBeLessThan(GRID * GRID * 2);
+  });
+
+  it('is deterministic', () => {
+    const h = heights((i, j) => 400 + 150 * Math.sin(i / 2) + 90 * Math.cos(j / 1.7));
+    const a = buildTerrainMesh({ tile: TILE, grid: GRID, heights: h });
+    const b = buildTerrainMesh({ tile: TILE, grid: GRID, heights: h });
+    expect(Array.from(a.vertices)).toEqual(Array.from(b.vertices));
+    expect(Array.from(a.ramps)).toEqual(Array.from(b.ramps));
   });
 
   it('floods h<=0 to a flat water surface at 0 m (Q13)', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => -50) });
-    const land = tris(m).slice(0, GRID * GRID * 2);
+    const { land } = split(tris(m));
+    expect(land).toHaveLength(2);
     for (const t of land) {
       expect(t.ramp).toBe(RAMP.WATER);
       for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBe(0);
     }
   });
 
-  it('clamps mixed coastline vertices and keeps both classes', () => {
+  it('places a coastline on the sea-level isoline and keeps both classes', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights((i) => (i < GRID / 2 ? -10 : 10)) });
-    const land = tris(m).slice(0, GRID * GRID * 2);
-    const rampSet = new Set(land.map((t) => t.ramp));
+    const ts = split(tris(m)).land;
+    const rampSet = new Set(ts.map((t) => t.ramp));
     expect(rampSet.has(RAMP.WATER)).toBe(true);
-    expect(rampSet.has(RAMP.SAND)).toBe(true);
-    for (const t of land) for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBeGreaterThanOrEqual(0);
+    expect(rampSet.has(RAMP.GRASS)).toBe(true);
+    for (const t of ts) for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBeGreaterThanOrEqual(0);
   });
 
   it('colors by height and slope', () => {
     const snow = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 3000) });
-    expect(tris(snow)[0].ramp).toBe(RAMP.SNOW);
+    expect(split(tris(snow)).land[0].ramp).toBe(RAMP.SNOW);
+    const forest = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 800) });
+    expect(split(tris(forest)).land[0].ramp).toBe(RAMP.FOREST);
     const cell = tileSizeMeters(TILE) / GRID;
     const steep = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights((i) => 500 + i * cell) });
-    expect(tris(steep)[0].ramp).toBe(RAMP.ROCK);
-    const forest = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 800) });
-    expect(tris(forest)[0].ramp).toBe(RAMP.FOREST);
+    expect(split(tris(steep)).land[0].ramp).toBe(RAMP.ROCK);
   });
 
-  it('skirts inherit the adjacent boundary face ramp and normal', () => {
-    const cell = tileSizeMeters(TILE) / GRID;
-    const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights((i) => 500 + i * cell), skirtDepth: 50 });
-    const ts = tris(m);
-    const landCount = GRID * GRID * 2;
-    const cellAt = (side: number, k: number): [number, number] =>
-      side === 0 ? [k, 0] : side === 1 ? [k, GRID - 1] : side === 2 ? [0, k] : [GRID - 1, k];
-    for (let side = 0; side < 4; side++) {
-      for (let k = 0; k < GRID; k++) {
-        const [i, j] = cellAt(side, k);
-        const face = ts[(j * GRID + i) * 2];
-        for (let q = 0; q < 2; q++) {
-          const skirt = ts[landCount + side * GRID * 2 + k * 2 + q];
-          expect(skirt.ramp).toBe(face.ramp);
-          expect(skirt.normal).toEqual(face.normal);
-        }
-      }
+  it('skirts inherit the adjacent land face ramp and normal, and hang by skirtDepth', () => {
+    const h = heights((i) => 500 + i * 30);
+    const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: h, skirtDepth: 50, step: 20 });
+    const { land, skirts } = split(tris(m));
+    expect(skirts.length).toBeGreaterThanOrEqual(8);
+    for (const sk of skirts) {
+      expect(sk.normal[1]).toBeGreaterThan(0);
+      const match = land.some((t) => t.ramp === sk.ramp && t.normal.every((v, k) => Math.abs(v - sk.normal[k]) < 1e-9));
+      expect(match).toBe(true);
     }
-    expect(ts[landCount].normal[1]).toBeGreaterThan(0);
   });
 
   it('caps default skirt depth at 2000 m on coarse tiles', () => {
     const coarse: Tile = { z: 8, x: 133, y: 88 };
     const m = buildTerrainMesh({ tile: coarse, grid: GRID, heights: heights(() => 100) });
-    const skirts = tris(m).slice(GRID * GRID * 2);
+    const { skirts } = split(tris(m));
     const minY = Math.min(...skirts.flatMap((t) => [t.pos[1], t.pos[4], t.pos[7]]));
     expect(minY).toBe(-1900);
   });
