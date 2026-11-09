@@ -55,13 +55,16 @@ interface OsmChunk {
 interface WorkerSlot {
   worker: Worker;
   nextId: number;
-  waiting: Map<number, { resolve: (m: { vertices: ArrayBuffer; ramps: ArrayBuffer }) => void; reject: (e: unknown) => void }>;
+  waiting: Map<number, { resolve: (m: { vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }) => void; reject: (e: unknown) => void }>;
 }
 
 /** Draped OSM overlay: a detailed near ring plus a coarse far layer (Q32, M2). */
 export class OsmManager {
   readonly chunks = new Map<string, OsmChunk>();
   renderList: OsmChunk[] = [];
+  /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
+  onTileReady?: (tile: Tile, detail: OsmDetail, runways: number) => void;
+  private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
   private workers: WorkerSlot[] = [];
@@ -75,11 +78,11 @@ export class OsmManager {
       const worker = new Worker(new URL('../workers/osm.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; runways?: number; retryable?: boolean; message?: string };
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
-        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps! });
+        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, runways: msg.runways ?? 0 });
         else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
       };
@@ -179,7 +182,7 @@ export class OsmManager {
       });
   }
 
-  private buildInWorker(chunk: OsmChunk): Promise<{ vertices: ArrayBuffer; ramps: ArrayBuffer }> {
+  private buildInWorker(chunk: OsmChunk): Promise<{ vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }> {
     const slot = this.workers[this.rr++ % this.workers.length];
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
@@ -188,7 +191,7 @@ export class OsmManager {
     });
   }
 
-  private upload(chunk: OsmChunk, data: { vertices: ArrayBuffer; ramps: ArrayBuffer }): void {
+  private upload(chunk: OsmChunk, data: { vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }): void {
     if (!this.chunks.has(chunk.key)) return;
     const gl = this.gl;
     const vao = must(gl.createVertexArray(), 'osm VAO');
@@ -210,6 +213,10 @@ export class OsmManager {
     chunk.buffers = [vb, rb];
     chunk.mesh = { vao, vertexCount: data.ramps.byteLength };
     chunk.status = 'ready';
+    if (!this.readyFired.has(chunk.key)) {
+      this.readyFired.add(chunk.key);
+      this.onTileReady?.(chunk.tile, chunk.detail, data.runways);
+    }
   }
 
   private dispose(chunk: OsmChunk): void {

@@ -1,8 +1,9 @@
 import { RetryableError } from '../engine/queue';
-import { getCachedMesh, putCachedMesh } from '../world/tile-cache';
+import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
-import { OverpassSource } from '../world/osm-source';
+import { OverpassSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
+import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
 import { decodePngToSampler, fetchTerrariumPng } from '../world/terrain-source';
 
@@ -20,6 +21,7 @@ export interface OsmMeshResponse {
   id: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  runways: number;
 }
 
 export interface OsmErrorResponse {
@@ -37,13 +39,24 @@ interface WorkerScope {
 const ctx = self as unknown as WorkerScope;
 const source = new OverpassSource();
 
+async function runwayCount(tile: Tile): Promise<number> {
+  const raw = await getOsmRaw(tileKey('osm', tile, OSM_SCHEMA_VERSION)).catch(() => undefined);
+  if (!raw) return 0;
+  try {
+    return parseOverpass(JSON.parse(raw.json)).lines.filter((l) => l.tags.aeroway === 'runway').length;
+  } catch {
+    return 0;
+  }
+}
+
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
   const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/${detail}`;
   try {
     const cached = await getCachedMesh(key);
     if (cached) {
-      const res: OsmMeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps };
+      const runways = detail === 'full' ? await runwayCount(tile) : 0;
+      const res: OsmMeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, runways };
       ctx.postMessage(res, [res.vertices, res.ramps]);
       return;
     }
@@ -54,7 +67,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
     if (mesh.vertexCount > 0) await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
-    const res: OsmMeshResponse = { type: 'mesh', id, vertices, ramps };
+    const runways = data.lines.filter((l) => l.tags.aeroway === 'runway').length;
+    const res: OsmMeshResponse = { type: 'mesh', id, vertices, ramps, runways };
     ctx.postMessage(res, [vertices, ramps]);
   } catch (err) {
     const res: OsmErrorResponse = {

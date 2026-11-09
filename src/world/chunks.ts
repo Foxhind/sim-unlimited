@@ -169,7 +169,8 @@ export class ChunkManager {
 
   /** Rebase when the camera drifts >5 km: offsets become uniforms again, buffers untouched. */
   rebaseIfNeeded(cam: CameraWorld): boolean {
-    if (Math.hypot(cam.pos[0], cam.pos[2]) < REBASE_DISTANCE_M) return false;
+    const dist = Math.hypot(cam.pos[0], cam.pos[2]);
+    if (!(dist >= REBASE_DISTANCE_M)) return false; // also guards NaN
     this.origin = cam.latLon;
     cam.pos[0] = 0;
     cam.pos[2] = 0;
@@ -325,6 +326,17 @@ export class ChunkManager {
       }
     }
     return near > 0;
+  }
+
+  /** Q40: drop near chunks so they rebuild with runway flattening once OSM arrives. */
+  invalidateNear(center: LatLon, radiusM: number, minZ: number): void {
+    for (const [key, c] of this.chunks) {
+      if (c.tile.z < minZ) continue;
+      if (horizontalDistance(center, tileCenter(c.tile)) > radiusM + tileSizeMeters(c.tile)) continue;
+      this.queue.cancel(key);
+      this.dispose(c);
+      this.chunks.delete(key);
+    }
   }
 
   disposeAll(): void {

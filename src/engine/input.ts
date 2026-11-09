@@ -2,6 +2,9 @@ export class Input {
   readonly keys = new Set<string>();
   mouseDX = 0;
   mouseDY = 0;
+  mouseX = 0;
+  mouseY = 0;
+  wheel = 0;
   private dragging = false;
 
   constructor(target: HTMLElement) {
@@ -18,10 +21,17 @@ export class Input {
     });
     window.addEventListener('mouseup', () => (this.dragging = false));
     window.addEventListener('mousemove', (e) => {
+      const rect = target.getBoundingClientRect();
+      this.mouseX = e.clientX - rect.left - rect.width / 2;
+      this.mouseY = e.clientY - rect.top - rect.height / 2;
       if (!this.dragging) return;
       this.mouseDX += e.movementX;
       this.mouseDY += e.movementY;
     });
+    target.addEventListener('wheel', (e) => {
+      this.wheel += e.deltaY;
+      e.preventDefault();
+    }, { passive: false });
   }
 
   down(code: string): boolean {
@@ -33,5 +43,11 @@ export class Input {
     this.mouseDX = 0;
     this.mouseDY = 0;
     return d;
+  }
+
+  consumeWheel(): number {
+    const w = this.wheel;
+    this.wheel = 0;
+    return w;
   }
 }
