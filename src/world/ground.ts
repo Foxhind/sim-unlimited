@@ -1,6 +1,7 @@
 import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
-import { decodePngToHeights, decodePngToSampler, fetchTerrariumPng, latticeSampler, type HeightSampler } from './terrain-source';
+import { decodePngToSampler, decodePngToTile, fetchTerrariumPng, type HeightSampler } from './terrain-source';
+import { buildTerrainTin, tinSampler } from './terrain-tin';
 import { flattenRunways } from './runway';
 import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
@@ -79,18 +80,25 @@ export class GroundProbe {
       const sampler = await decodePngToSampler(png, tile);
       // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
       const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
-      let surface = sampler;
       let data: ReturnType<typeof parseOverpass> | undefined;
       if (raw) {
         try {
           data = parseOverpass(JSON.parse(raw.json));
-          const grid = gridForZoom(tile.z);
-          const lattice = await decodePngToHeights(png, grid);
-          if (flattenRunways(lattice, tile, grid, data.lines, sampler)) surface = latticeSampler(lattice, tile, grid);
         } catch {
           data = undefined;
         }
       }
+      // the surface is the rendered one: same lattice (runway-flattened when OSM is cached) → same isoline TIN as the mesh
+      const grid = gridForZoom(tile.z);
+      const { heights: lattice, borders } = await decodePngToTile(png, grid);
+      if (data) {
+        try {
+          flattenRunways(lattice, tile, grid, data.lines, sampler);
+        } catch {
+          // fall back to the unflattened lattice, like the terrain worker
+        }
+      }
+      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, { borders }), tile);
       this.samplers.set(key, surface);
       if (data) {
         try {

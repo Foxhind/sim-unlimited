@@ -250,11 +250,9 @@ export class ChunkManager {
       }
     }
 
-    const camRel = vec3.fromValues(cam.pos[0], cam.pos[1], cam.pos[2]);
-    this.renderList = list.filter((c) => {
-      const rel = vec3.sub(vec3.create(), c.centerEnu, camRel);
-      return sphereInFrustum(this.planes, rel, c.radius + 2500);
-    });
+    // planes come from proj*view where view is a full lookAt (translation included): they live in
+    // the same world frame as centerEnu, so the sphere centre must NOT be made camera-relative
+    this.renderList = list.filter((c) => sphereInFrustum(this.planes, c.centerEnu, c.radius + 2500));
 
     for (const [key, c] of this.chunks) {
       if (!needed.has(key) && !seen.has(key) && now - c.lastUsed > UNLOAD_DELAY_MS) {

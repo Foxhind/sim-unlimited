@@ -6,7 +6,8 @@ import { buildProps } from '../world/props-mesher';
 import { OverpassSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
-import { decodePngToHeights, decodePngToSampler, fetchTerrariumPng, latticeSampler } from '../world/terrain-source';
+import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
+import { buildTerrainTin, tinSampler } from '../world/terrain-tin';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 
@@ -71,12 +72,10 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const png = await fetchTerrariumPng(tile);
     const sampleHeight = await decodePngToSampler(png, tile);
     const grid = gridForZoom(tile.z);
-    // Q40: one shared flattened lattice surface for terrain, drape and lights
-    let drape = sampleHeight;
-    if (detail === 'full') {
-      const lattice = await decodePngToHeights(png, grid);
-      if (flattenRunways(lattice, tile, grid, data.lines, sampleHeight)) drape = latticeSampler(lattice, tile, grid);
-    }
+    // Q40: one shared lattice surface (runway-flattened for 'full') → the same isoline TIN the terrain mesh renders
+    const { heights: lattice, borders } = await decodePngToTile(png, grid);
+    if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
+    const drape = tinSampler(buildTerrainTin(tile, grid, lattice, { borders }), tile);
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape });
     const props = buildProps({ tile, detail, data, sampleHeight: drape });
     const vertices = mesh.vertices.slice().buffer;

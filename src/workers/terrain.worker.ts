@@ -2,7 +2,7 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildTerrainMesh } from '../world/terrain-mesher';
-import { decodePngToHeights, decodePngToSampler, fetchTerrariumPng } from '../world/terrain-source';
+import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { flattenRunways } from '../world/runway';
@@ -51,7 +51,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       return;
     }
     const png = await fetchTerrariumPng(tile);
-    const heights = await decodePngToHeights(png, grid);
+    const { heights, borders } = await decodePngToTile(png, grid);
     if (osmRaw) {
       try {
         const lines = parseOverpass(JSON.parse(osmRaw.json)).lines;
@@ -60,7 +60,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         // corrupt raw cache: fall back to unflattened relief
       }
     }
-    const mesh = buildTerrainMesh({ tile, grid, heights });
+    const mesh = buildTerrainMesh({ tile, grid, heights, borders });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
     await putCachedMesh({ key, ts: Date.now(), vertices, ramps });

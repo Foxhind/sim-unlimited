@@ -21,7 +21,22 @@ export async function fetchTerrariumPng(t: Tile): Promise<ArrayBuffer> {
   return buf;
 }
 
-export async function decodePngToHeights(png: ArrayBuffer, grid: number): Promise<Float32Array> {
+/** Full-resolution heights of the four tile edges (one sample per DEM pixel), shared by all LODs. */
+export interface TileBorders {
+  /** top row, west→east */
+  n: Float32Array;
+  /** bottom row, west→east */
+  s: Float32Array;
+  /** left column, north→south */
+  w: Float32Array;
+  /** right column, north→south */
+  e: Float32Array;
+}
+
+export async function decodePngToTile(
+  png: ArrayBuffer,
+  grid: number,
+): Promise<{ heights: Float32Array; borders: TileBorders }> {
   const bitmap = await createImageBitmap(new Blob([png], { type: 'image/png' }));
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -55,7 +70,25 @@ export async function decodePngToHeights(png: ArrayBuffer, grid: number): Promis
         h00 * (1 - tx) * (1 - ty) + h10 * tx * (1 - ty) + h01 * (1 - tx) * ty + h11 * tx * ty;
     }
   }
-  return heights;
+  const borders: TileBorders = {
+    n: new Float32Array(width),
+    s: new Float32Array(width),
+    w: new Float32Array(height),
+    e: new Float32Array(height),
+  };
+  for (let x = 0; x < width; x++) {
+    borders.n[x] = elev(x, 0);
+    borders.s[x] = elev(x, height - 1);
+  }
+  for (let y = 0; y < height; y++) {
+    borders.w[y] = elev(0, y);
+    borders.e[y] = elev(width - 1, y);
+  }
+  return { heights, borders };
+}
+
+export async function decodePngToHeights(png: ArrayBuffer, grid: number): Promise<Float32Array> {
+  return (await decodePngToTile(png, grid)).heights;
 }
 
 export type HeightSampler = (lon: number, lat: number) => number;

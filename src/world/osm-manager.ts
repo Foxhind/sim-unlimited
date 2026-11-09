@@ -184,12 +184,11 @@ export class OsmManager {
       if (chunk.status === 'ready') chunk.lastUsed = now;
     }
 
-    const camRel = vec3.fromValues(cam.pos[0], cam.pos[1], cam.pos[2]);
     this.renderList = [];
     for (const c of this.chunks.values()) {
       if (c.status !== 'ready' || !c.mesh || c.mesh.vertexCount === 0) continue;
-      const rel = vec3.sub(vec3.create(), c.centerEnu, camRel);
-      if (sphereInFrustum(this.planes, rel, c.radius + 2000)) {
+      // world-space planes (view includes the camera translation): test the world-space centre
+      if (sphereInFrustum(this.planes, c.centerEnu, c.radius + 2000)) {
         this.renderList.push(c);
         c.lastUsed = now;
       }

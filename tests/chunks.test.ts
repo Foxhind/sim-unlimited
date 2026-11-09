@@ -76,6 +76,25 @@ describe('frustum culling', () => {
   });
 });
 
+describe('frustum culling with a camera away from the origin', () => {
+  // regression: planes from a full lookAt view are world-space; the chunk centre must be passed
+  // in the same frame (not camera-relative), or near ground below/ahead of the jet is culled
+  const eye = vec3.fromValues(-1870, 4423, 608);
+  const view = mat4.lookAt(mat4.create(), eye, vec3.fromValues(-1870, 4423, 608 - 1000), vec3.fromValues(0, 1, 0));
+  const proj = mat4.perspective(mat4.create(), Math.PI / 3, 1, 0.5, 200000);
+  const planes = frustumPlanes(mat4.multiply(mat4.create(), proj, view));
+  const offset = vec3.fromValues(0, -1500, -3000); // 26° below the view axis: inside a 60° fov
+  const world = vec3.add(vec3.create(), eye, offset);
+
+  it('keeps ground ahead-and-below when the centre is given in world space', () => {
+    expect(sphereInFrustum(planes, world, 100)).toBe(true);
+  });
+
+  it('would wrongly reject it if the centre were camera-relative', () => {
+    expect(sphereInFrustum(planes, offset, 100)).toBe(false);
+  });
+});
+
 describe('gridForZoom', () => {
   it('uses a coarser contour work lattice for distant LODs', () => {
     expect(gridForZoom(14)).toBe(32);

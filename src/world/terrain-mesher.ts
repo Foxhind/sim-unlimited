@@ -1,5 +1,6 @@
 import { RAMP } from '../engine/palette';
-import { contourLevels, delaunay, extractIsolines, simplifyOpen, simplifyRing, type Pt } from './contours';
+import type { TileBorders } from './terrain-source';
+import { buildTerrainTin } from './terrain-tin';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
 export interface TerrainMeshData {
@@ -19,17 +20,9 @@ export interface TerrainMeshOptions {
   step?: number;
   /** contour simplification tolerance in lattice cells (default 2) */
   epsCells?: number;
+  /** full-resolution edge profiles (see TileBorders) */
+  borders?: TileBorders;
 }
-
-/** Vertical thickness of one belt: coarser for distant (low-zoom) tiles. */
-export function beltStepForZoom(z: number): number {
-  if (z >= 13) return 50;
-  if (z >= 11) return 120;
-  if (z >= 9) return 300;
-  return 600;
-}
-
-const MAX_VERTS = 120;
 
 function faceRamp(avgH: number, ny: number): number {
   if (avgH > 2200 && ny > 0.6) return RAMP.SNOW;
@@ -47,11 +40,10 @@ function faceRamp(avgH: number, ny: number): number {
 export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const { tile, grid, heights } = opts;
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
-  let step = opts.step ?? beltStepForZoom(tile.z);
   const center = tileCenter(tile);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const cellM = tileSizeMeters(tile) / grid;
+  const { vx, vy, vh, tris } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders });
 
   const nx = new Float64Array(side * side);
   const nz = new Float64Array(side * side);
@@ -75,67 +67,6 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
       nz[k00] * w00 + nz[k10] * w10 + nz[k01] * w01 + nz[k11] * w11,
     ];
   };
-
-  let minH = Infinity, maxH = -Infinity;
-  for (let k = 0; k < heights.length; k++) {
-    minH = Math.min(minH, heights[k]);
-    maxH = Math.max(maxH, heights[k]);
-  }
-  let raw: ReturnType<typeof extractIsolines> = [];
-
-  let vx: number[] = [];
-  let vy: number[] = [];
-  let vh: number[] = [];
-  const collect = (eps: number): void => {
-    vx = [];
-    vy = [];
-    vh = [];
-    const seen = new Map<string, number>();
-    const add = (x: number, y: number, h: number) => {
-      const key = `${Math.round(x * 4096)},${Math.round(y * 4096)}`;
-      if (seen.has(key)) return;
-      seen.set(key, vx.length);
-      vx.push(x);
-      vy.push(y);
-      vh.push(h);
-    };
-    // border: corners + height-significant nodes of each edge (vertical tolerance = half a belt)
-    const edgeNodes: Array<(s: number) => [number, number, number]> = [
-      (s) => [s, 0, heights[s]],
-      (s) => [s, grid, heights[grid * side + s]],
-      (s) => [0, s, heights[s * side]],
-      (s) => [grid, s, heights[s * side + grid]],
-    ];
-    for (const at of edgeNodes) {
-      const prof: Pt[] = [];
-      for (let s = 0; s <= grid; s++) prof.push({ x: s * cellM, y: at(s)[2] });
-      for (const p of simplifyOpen(prof, (step / 2) * Math.max(1, eps / 2))) {
-        const [x, y, h] = at(Math.round(p.x / cellM));
-        add(x, y, h);
-      }
-    }
-    for (const line of raw) {
-      const pts = line.closed ? simplifyRing(line.pts, eps) : simplifyOpen(line.pts, eps);
-      if (line.closed) {
-        // rings smaller than the tolerance are noise at this detail level
-        const xs = line.pts.map((p) => p.x), ys = line.pts.map((p) => p.y);
-        const ext = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-        if (pts.length < 3 || ext < eps * 2) continue;
-      }
-      for (const p of pts) add(p.x, p.y, line.level);
-    }
-  };
-  // over budget → thicker belts and a looser tolerance (every open isoline costs
-  // two border vertices, so tolerance alone cannot meet the budget on rough terrain)
-  let eps = opts.epsCells ?? 2;
-  for (let attempt = 0; ; attempt++) {
-    raw = contourLevels(minH, maxH, step).flatMap((l) => extractIsolines(heights, grid, l));
-    collect(eps);
-    if (vx.length <= MAX_VERTS || attempt >= 8) break;
-    step *= 1.5;
-    eps *= 1.3;
-  }
-
   const wx: number[] = [];
   const wz: number[] = [];
   for (let k = 0; k < vx.length; k++) {
@@ -144,7 +75,6 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
     wz.push(z);
   }
   const vyH = vh.map((h) => Math.max(h, 0));
-  const tris = delaunay(vx.map((x, k) => ({ x, y: vy[k] })));
 
   const landTris = tris.length;
   // skirts: one quad per consecutive border-vertex pair
