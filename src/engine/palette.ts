@@ -158,3 +158,21 @@ export function buildLUT(p: PaletteParams): Uint8Array {
 export function rampIndex(ramp: number, step: number): number {
   return ramp * RAMP_STEPS + Math.max(0, Math.min(RAMP_STEPS - 1, step));
 }
+
+/** Quantize an arbitrary RGB to the closest material ramp (S3DB colours, Q4). */
+export function nearestMaterialRamp(rgb: RGB): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let r = 0; r < MATERIALS.length; r++) {
+    const d0 = MATERIALS[r].dark;
+    const l0 = MATERIALS[r].light;
+    // compare against the ramp midpoint so mid-tone colours map sensibly
+    const c = [(d0[0] + l0[0]) / 2, (d0[1] + l0[1]) / 2, (d0[2] + l0[2]) / 2];
+    const d = (c[0] - rgb[0]) ** 2 + (c[1] - rgb[1]) ** 2 + (c[2] - rgb[2]) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = r;
+    }
+  }
+  return best;
+}

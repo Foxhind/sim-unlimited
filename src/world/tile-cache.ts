@@ -1,8 +1,10 @@
 export const SCHEMA_VERSION = 4;
 const DB_NAME = 'sim-unlimited';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 const STORE = 'meshes';
 const META = 'meta';
+const OSM_STORE = 'osm';
+export const OSM_TTL_MS = 30 * 24 * 3600 * 1000;
 export const MAX_ENTRIES = 4000;
 export const MAX_BYTES = 1_000_000_000;
 
@@ -55,6 +57,7 @@ function openDB(): Promise<IDBDatabase> {
           cur.continue();
         };
       }
+      if (!db.objectStoreNames.contains(OSM_STORE)) db.createObjectStore(OSM_STORE, { keyPath: 'key' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -116,4 +119,20 @@ export async function putCachedMesh(mesh: CachedMesh): Promise<void> {
         }),
     );
   }
+}
+
+export interface CachedOsmRaw {
+  key: string;
+  ts: number;
+  json: string;
+}
+
+export async function getOsmRaw(key: string): Promise<CachedOsmRaw | undefined> {
+  const hit = await tx<CachedOsmRaw | undefined>('readonly', (s) => s.get(key), OSM_STORE);
+  if (hit && Date.now() - hit.ts > OSM_TTL_MS) return undefined;
+  return hit;
+}
+
+export async function putOsmRaw(entry: CachedOsmRaw): Promise<void> {
+  await tx('readwrite', (s) => s.put(entry), OSM_STORE);
 }

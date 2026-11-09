@@ -7,6 +7,7 @@ import { buildLUT, paletteAt } from './engine/palette';
 import { FreeCamera } from './engine/camera';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
+import { OsmManager } from './world/osm-manager';
 import { enuToLatLon, type LatLon } from './world/geodesy';
 
 function parseStart(): { latLon: LatLon; alt: number; hdg: number } {
@@ -37,6 +38,7 @@ camera.yaw = (start.hdg * Math.PI) / 180;
 camera.pitch = -0.15;
 
 const chunks = new ChunkManager(gl, start.latLon);
+const osm = new OsmManager(gl, start.latLon);
 const camWorld: CameraWorld = {
   pos: camera.pos,
   latLon: start.latLon,
@@ -49,7 +51,7 @@ const sunDir = vec3.normalize(vec3.create(), vec3.fromValues(0.35, 0.8, 0.45));
 const lut = buildLUT(paletteAt(45));
 
 if (import.meta.env.DEV) {
-  (window as unknown as Record<string, unknown>).__sim = { renderer, camera, chunks, font, sunDir, lut, camWorld };
+  (window as unknown as Record<string, unknown>).__sim = { renderer, camera, chunks, osm, font, sunDir, lut, camWorld };
 }
 
 let last = performance.now();
@@ -77,28 +79,32 @@ function frame(now: number): void {
   }
 
   chunks.update(camWorld, camera.view, camera.proj, now);
-  if (!loaded && chunks.nearReady(camWorld.latLon, 3000)) loaded = true;
+  osm.update(camWorld, camera.view, camera.proj, now, chunks.origin);
+  if (!loaded && chunks.nearReady(camWorld.latLon, 3000) && osm.nearReady(camWorld.latLon, 3000)) loaded = true;
 
   renderer.beginFrame(lut);
   renderer.drawSky(camera.view, camera.proj, camera.pos, sunDir);
   chunks.draw(renderer, camera.view, camera.proj, camera.pos, sunDir, 15000, 55000);
+  osm.draw(renderer, camera.view, camera.proj, camera.pos, sunDir, 15000, 55000);
 
   renderer.beginOverlay();
   const s = Math.max(1, Math.round(window.devicePixelRatio || 1));
   const pad = 8 * s;
   const st = chunks.stats;
-  font.text('SIM-UNLIMITED  M1', pad, pad, s, HUD_AMBER);
+  const os = osm.stats;
+  font.text('SIM-UNLIMITED  M2', pad, pad, s, HUD_AMBER);
   font.text(
     `FPS ${Math.round(fpsAvg)}  ALT ${Math.round(camera.pos[1])} M\n` +
       `LAT ${camWorld.latLon.lat.toFixed(4)}  LON ${camWorld.latLon.lon.toFixed(4)}\n` +
-      `CHUNKS ${st.chunks}  PEND ${st.pending}  DRAW ${st.drawCalls}  BUF ${st.gpuBuffers}`,
+      `CHUNKS ${st.chunks}  PEND ${st.pending}  DRAW ${st.drawCalls}  BUF ${st.gpuBuffers}\n` +
+      `OSM ${os.chunks}  PEND ${os.pending}  DRAW ${os.drawCalls}  ERR ${os.errors}`,
     pad,
     pad + 20 * s,
     s,
     HUD_GREEN,
   );
   if (!loaded) {
-    const msg = 'LOADING TERRAIN...';
+    const msg = 'LOADING TERRAIN + OSM...';
     font.text(msg, (renderer.width - font.measure(msg, s * 2)) / 2, renderer.height / 2, s * 2, HUD_AMBER);
   }
   font.text(

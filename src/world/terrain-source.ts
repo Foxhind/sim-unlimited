@@ -57,3 +57,40 @@ export async function decodePngToHeights(png: ArrayBuffer, grid: number): Promis
   }
   return heights;
 }
+
+export type HeightSampler = (lon: number, lat: number) => number;
+
+/** Bilinear DEM sampler over a tile's Mercator extent, for draping OSM geometry. */
+export async function decodePngToSampler(png: ArrayBuffer, tile: Tile): Promise<HeightSampler> {
+  const bitmap = await createImageBitmap(new Blob([png], { type: 'image/png' }));
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('2d context unavailable in worker');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const n = 2 ** tile.z;
+  const elev = (x: number, y: number): number => {
+    const cx = Math.max(0, Math.min(width - 1, x));
+    const cy = Math.max(0, Math.min(height - 1, y));
+    const o = (cy * width + cx) * 4;
+    return decodeTerrarium(data[o], data[o + 1], data[o + 2]);
+  };
+  return (lon, lat) => {
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    const sinLat = Math.sin((clamped * Math.PI) / 180);
+    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    const fx = (((lon + 180) / 360) * n - tile.x) * (width - 1);
+    const fy = (merc * n - tile.y) * (height - 1);
+    const x0 = Math.floor(fx);
+    const y0 = Math.floor(fy);
+    const tx = fx - x0;
+    const ty = fy - y0;
+    return (
+      elev(x0, y0) * (1 - tx) * (1 - ty) +
+      elev(x0 + 1, y0) * tx * (1 - ty) +
+      elev(x0, y0 + 1) * (1 - tx) * ty +
+      elev(x0 + 1, y0 + 1) * tx * ty
+    );
+  };
+}
