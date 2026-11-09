@@ -230,6 +230,8 @@ export class FlightModel {
         if (sink > cfg.landingSinkLimit) return this.crash('HARD IMPACT');
         if (bank > cfg.landingBankLimit) return this.crash('WINGTIP STRIKE');
         this.onGround = true;
+        // a bounce with residual upward velocity must not keep the airframe creeping up the runway
+        if (this.vel[1] > 0) this.vel[1] = 0;
         this.touchdownSink = sink;
         this.touchdownTimer = 2;
       }

@@ -6,6 +6,8 @@ export interface Settings {
   lang: Lang;
   mouseJoystick: boolean;
   sound: boolean;
+  /** Q12: MSAA off by default — jaggies are part of the style */
+  msaa: boolean;
   /** action → KeyboardEvent.code overrides (Q37 remapping) */
   bindings: Record<string, string>;
 }
@@ -20,7 +22,7 @@ export function defaultLang(): Lang {
 }
 
 export function defaultSettings(): Settings {
-  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, bindings: {} };
+  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, msaa: false, bindings: {} };
 }
 
 export function loadSettings(): Settings {

@@ -1,6 +1,8 @@
 import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
-import { decodePngToSampler, fetchTerrariumPng, type HeightSampler } from './terrain-source';
+import { decodePngToHeights, decodePngToSampler, fetchTerrariumPng, latticeSampler, type HeightSampler } from './terrain-source';
+import { flattenRunways } from './runway';
+import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
 import { OSM_SCHEMA_VERSION } from './osm-source';
 import { parseOverpass } from './overpass';
@@ -75,11 +77,23 @@ export class GroundProbe {
     try {
       const png = await fetchTerrariumPng(tile);
       const sampler = await decodePngToSampler(png, tile);
-      this.samplers.set(key, sampler);
-      const raw = await getOsmRaw(tileKey('osm', tile, OSM_SCHEMA_VERSION)).catch(() => undefined);
+      // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
+      const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
+      let surface = sampler;
+      let data: ReturnType<typeof parseOverpass> | undefined;
       if (raw) {
         try {
-          const data = parseOverpass(JSON.parse(raw.json));
+          data = parseOverpass(JSON.parse(raw.json));
+          const grid = gridForZoom(tile.z);
+          const lattice = await decodePngToHeights(png, grid);
+          if (flattenRunways(lattice, tile, grid, data.lines, sampler)) surface = latticeSampler(lattice, tile, grid);
+        } catch {
+          data = undefined;
+        }
+      }
+      this.samplers.set(key, surface);
+      if (data) {
+        try {
           const list: Prism[] = [];
           for (const b of data.buildings) {
             const outer = b.rings[0];
@@ -99,7 +113,7 @@ export class GroundProbe {
                 return [e, -n] as [number, number];
               }),
             );
-            const base = Math.max(0, sampler(lon, lat));
+            const base = Math.max(0, surface(lon, lat));
             const boundR = rings[0].reduce((m, [x, z]) => Math.max(m, Math.hypot(x, z)), 0);
             list.push({ lat, lon, rings, base, top: base + h.min + h.wall + h.roof, boundR });
           }

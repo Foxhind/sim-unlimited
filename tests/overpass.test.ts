@@ -84,6 +84,25 @@ describe('parseOverpass', () => {
     expect(d.areas).toHaveLength(0);
     expect(d.lines).toHaveLength(1);
   });
+
+  it('routes open runway/taxiway ways to lines and closed aprons to areas', () => {
+    const d = parseOverpass({
+      elements: [
+        { type: 'node', id: 1, lat: 0, lon: 0 },
+        { type: 'node', id: 2, lat: 0, lon: 1 },
+        { type: 'node', id: 3, lat: 1, lon: 1 },
+        { type: 'node', id: 4, lat: 1, lon: 0 },
+        { type: 'way', id: 10, nodes: [1, 2], tags: { aeroway: 'runway', width: '45' } },
+        { type: 'way', id: 11, nodes: [2, 3], tags: { aeroway: 'taxiway' } },
+        { type: 'way', id: 12, nodes: [1, 2, 3, 4, 1], tags: { aeroway: 'apron' } },
+      ],
+    });
+    expect(d.lines).toHaveLength(2);
+    expect(d.lines[0].tags.aeroway).toBe('runway');
+    expect(d.lines[1].tags.aeroway).toBe('taxiway');
+    expect(d.areas).toHaveLength(1);
+    expect(d.areas[0].tags.aeroway).toBe('apron');
+  });
 });
 
 describe('parseOverpass buildings', () => {

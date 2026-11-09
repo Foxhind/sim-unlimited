@@ -205,7 +205,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     path.push(line.points[line.points.length - 1]);
     if (path.length < 2) return;
 
-    const centers = path.map(([lon, lat]) => makePt(lon, lat, groundY(lon, lat, bias)));
+    const centers = path.map(([lon, lat]) => {
+      const [x, z] = enu(lon, lat);
+      const base = Math.max(sampleHeight(lon, lat), 0);
+      return { lon, lat, x, z, y: base + bias * biasScale };
+    });
     const left: Pt[] = [];
     const right: Pt[] = [];
     for (let i = 0; i < centers.length; i++) {

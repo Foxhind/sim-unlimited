@@ -107,6 +107,16 @@ export class VectorRenderer {
     this.polyline([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], width, index, true);
   }
 
+  fillRect(x: number, y: number, w: number, h: number, index: number): void {
+    this.begin(index);
+    this.push(x, y);
+    this.push(x + w, y);
+    this.push(x + w, y + h);
+    this.push(x, y);
+    this.push(x + w, y + h);
+    this.push(x, y + h);
+  }
+
   flush(): void {
     if (this.count === 0) return;
     const gl = this.gl;

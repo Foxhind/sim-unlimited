@@ -5,11 +5,15 @@ export class Input {
   mouseX = 0;
   mouseY = 0;
   wheel = 0;
+  /** absolute click position in CSS px relative to target, null when consumed */
+  click: [number, number] | null = null;
+  lastKey: string | null = null;
   private dragging = false;
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
+      this.lastKey = e.code;
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
         e.preventDefault();
       }
@@ -17,7 +21,11 @@ export class Input {
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
     target.addEventListener('mousedown', (e) => {
-      if (e.button === 0) this.dragging = true;
+      if (e.button === 0) {
+        this.dragging = true;
+        const rect = target.getBoundingClientRect();
+        this.click = [e.clientX - rect.left, e.clientY - rect.top];
+      }
     });
     window.addEventListener('mouseup', () => (this.dragging = false));
     window.addEventListener('mousemove', (e) => {
@@ -49,5 +57,17 @@ export class Input {
     const w = this.wheel;
     this.wheel = 0;
     return w;
+  }
+
+  consumeClick(): [number, number] | null {
+    const c = this.click;
+    this.click = null;
+    return c;
+  }
+
+  consumeKey(): string | null {
+    const k = this.lastKey;
+    this.lastKey = null;
+    return k;
   }
 }

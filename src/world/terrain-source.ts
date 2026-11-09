@@ -94,3 +94,31 @@ export async function decodePngToSampler(png: ArrayBuffer, tile: Tile): Promise<
     );
   };
 }
+
+/**
+ * Bilinear sampler over a (grid+1)^2 height lattice covering the tile's Mercator extent.
+ * Shared by terrain, drape, lights and physics so they all see the same (flattened) surface.
+ */
+export function latticeSampler(heights: Float32Array, tile: Tile, grid: number): HeightSampler {
+  const n = 2 ** tile.z;
+  const side = grid + 1;
+  const at = (i: number, j: number): number =>
+    heights[Math.max(0, Math.min(grid, j)) * side + Math.max(0, Math.min(grid, i))];
+  return (lon, lat) => {
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    const sinLat = Math.sin((clamped * Math.PI) / 180);
+    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    const fx = Math.max(0, Math.min(grid, (((lon + 180) / 360) * n - tile.x) * grid));
+    const fy = Math.max(0, Math.min(grid, (merc * n - tile.y) * grid));
+    const i0 = Math.min(grid - 1, Math.floor(fx));
+    const j0 = Math.min(grid - 1, Math.floor(fy));
+    const tx = fx - i0;
+    const ty = fy - j0;
+    return (
+      at(i0, j0) * (1 - tx) * (1 - ty) +
+      at(i0 + 1, j0) * tx * (1 - ty) +
+      at(i0, j0 + 1) * (1 - tx) * ty +
+      at(i0 + 1, j0 + 1) * tx * ty
+    );
+  };
+}

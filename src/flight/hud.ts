@@ -59,6 +59,8 @@ export interface HudState {
   units: Units;
   now: number;
   soundOn: boolean;
+  /** engaged autopilot targets, or null when off */
+  autopilot?: { altitude: number; speed: number; heading: number; mode?: string } | null;
 }
 
 export function drawHud(
@@ -231,6 +233,10 @@ export function drawHud(
   config.forEach((line, i) => {
     font.text(line, w - font.measure(line, u) - 8 * u, h - 60 * u - i * 18 * u, u, i === 0 ? green : amber);
   });
+  if (st.autopilot) {
+    const ap = st.autopilot.mode ? `AUTOLAND ${st.autopilot.mode.toUpperCase()}` : `AP ALT ${Math.round(st.autopilot.altitude)}  SPD ${Math.round(st.autopilot.speed * 3.6)}  HDG ${Math.round(st.autopilot.heading)}`;
+    font.text(ap, (w - font.measure(ap, u)) / 2, 8 * u, u, amber);
+  }
   font.text(st.soundOn ? 'M SOUND ON' : 'M SOUND OFF', w - font.measure('M SOUND OFF', u) - 8 * u, 8 * u, u, green);
 
   // warnings

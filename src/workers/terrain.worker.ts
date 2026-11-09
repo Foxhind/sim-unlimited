@@ -2,7 +2,7 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildTerrainMesh } from '../world/terrain-mesher';
-import { decodePngToHeights, fetchTerrariumPng } from '../world/terrain-source';
+import { decodePngToHeights, decodePngToSampler, fetchTerrariumPng } from '../world/terrain-source';
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { flattenRunways } from '../world/runway';
@@ -41,7 +41,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     // Q40: when OSM is cached for this tile, build with runway flattening;
     // the '/o' suffix keeps pre-OSM and flattened meshes in separate cache slots
     const osmRaw = tile.z >= 12
-      ? await getOsmRaw(tileKey('osm', tile, OSM_SCHEMA_VERSION)).catch(() => undefined)
+      ? await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined)
       : undefined;
     const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? '/o' : '');
     const cached = await getCachedMesh(key);
@@ -54,7 +54,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const heights = await decodePngToHeights(png, grid);
     if (osmRaw) {
       try {
-        flattenRunways(heights, tile, grid, parseOverpass(JSON.parse(osmRaw.json)).lines);
+        const lines = parseOverpass(JSON.parse(osmRaw.json)).lines;
+        flattenRunways(heights, tile, grid, lines, await decodePngToSampler(png, tile));
       } catch {
         // corrupt raw cache: fall back to unflattened relief
       }

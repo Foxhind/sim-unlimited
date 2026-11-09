@@ -5,7 +5,7 @@ import type { Settings } from '../ui/settings';
 export type Action =
   | 'pitchUp' | 'pitchDown' | 'rollLeft' | 'rollRight' | 'yawLeft' | 'yawRight'
   | 'throttleUp' | 'throttleDown' | 'gear' | 'flaps' | 'brakes' | 'speedbrake'
-  | 'pause' | 'mute' | 'restart' | 'newPoint'
+  | 'pause' | 'mute' | 'restart' | 'newPoint' | 'autopilot' | 'autoland'
   | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget';
 
 /** Q37 default layout; arrows are the stick (Up pushes the nose down). */
@@ -26,6 +26,8 @@ export const DEFAULT_BINDINGS: Record<Action, string> = {
   mute: 'KeyM',
   restart: 'KeyR',
   newPoint: 'KeyN',
+  autopilot: 'KeyP',
+  autoland: 'KeyL',
   camCockpit: 'F1',
   camOrbit: 'F2',
   camChase: 'F3',
@@ -102,7 +104,7 @@ export class Controls {
     this.throttle = Math.max(0, Math.min(1, this.throttle + ((down('throttleUp') ? 1 : 0) - (down('throttleDown') ? 1 : 0) + padThr) * 0.55 * dt));
     if (edge('gear')) this.gearDown = !this.gearDown;
     if (edge('flaps')) this.flaps = !this.flaps;
-    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake'] as Action[]) {
+    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake'] as Action[]) {
       edge(a);
     }
 

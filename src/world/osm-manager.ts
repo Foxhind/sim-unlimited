@@ -12,6 +12,7 @@ import {
   type Tile,
 } from './geodesy';
 import type { OsmDetail } from './osm-types';
+import { CONE_VERTICES } from './props-mesher';
 
 export const OSM_NEAR_Z = 14;
 export const OSM_FAR_Z = 10;
@@ -37,12 +38,20 @@ function tilesInRadius(cam: LatLon, radiusM: number, z: number): Tile[] {
   return tiles;
 }
 
+interface PropSet {
+  vao: WebGLVertexArrayObject;
+  buffer: WebGLBuffer;
+  count: number;
+}
+
 interface OsmChunk {
   tile: Tile;
   detail: OsmDetail;
   key: string;
   status: 'pending' | 'ready' | 'error';
   mesh?: Mesh;
+  trees?: PropSet;
+  lights?: PropSet;
   buffers: WebGLBuffer[];
   vao?: WebGLVertexArrayObject;
   offset: vec3;
@@ -52,10 +61,18 @@ interface OsmChunk {
   lastAttempt: number;
 }
 
+interface MeshPayload {
+  vertices: ArrayBuffer;
+  ramps: ArrayBuffer;
+  trees: ArrayBuffer;
+  lights: ArrayBuffer;
+  runways: number;
+}
+
 interface WorkerSlot {
   worker: Worker;
   nextId: number;
-  waiting: Map<number, { resolve: (m: { vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }) => void; reject: (e: unknown) => void }>;
+  waiting: Map<number, { resolve: (m: MeshPayload) => void; reject: (e: unknown) => void }>;
 }
 
 /** Draped OSM overlay: a detailed near ring plus a coarse far layer (Q32, M2). */
@@ -71,19 +88,30 @@ export class OsmManager {
   private rr = 0;
   private vp = mat4.create();
   private planes: Float32Array[] = [];
+  private coneBuffer: WebGLBuffer;
 
   constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = 2) {
     this.origin = origin;
+    this.coneBuffer = must(gl.createBuffer(), 'cone geometry');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.coneBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, CONE_VERTICES, gl.STATIC_DRAW);
     for (let i = 0; i < workerCount; i++) {
       const worker = new Worker(new URL('../workers/osm.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; runways?: number; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; trees?: ArrayBuffer; lights?: ArrayBuffer; runways?: number; retryable?: boolean; message?: string };
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
-        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, runways: msg.runways ?? 0 });
-        else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
+        if (msg.type === 'mesh') {
+          w.resolve({
+            vertices: msg.vertices!,
+            ramps: msg.ramps!,
+            trees: msg.trees ?? new ArrayBuffer(0),
+            lights: msg.lights ?? new ArrayBuffer(0),
+            runways: msg.runways ?? 0,
+          });
+        } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
       };
       worker.onerror = (e) => {
@@ -97,11 +125,17 @@ export class OsmManager {
   get stats(): { chunks: number; pending: number; drawCalls: number; errors: number } {
     let pending = 0;
     let errors = 0;
+    let draws = 0;
     for (const c of this.chunks.values()) {
       if (c.status === 'pending') pending++;
       if (c.status === 'error') errors++;
     }
-    return { chunks: this.chunks.size, pending, drawCalls: this.renderList.length, errors };
+    for (const c of this.renderList) {
+      if (c.mesh) draws++;
+      if (c.trees) draws++;
+      if (c.lights) draws++;
+    }
+    return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
 
   private refreshOffset(c: OsmChunk): void {
@@ -182,7 +216,7 @@ export class OsmManager {
       });
   }
 
-  private buildInWorker(chunk: OsmChunk): Promise<{ vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }> {
+  private buildInWorker(chunk: OsmChunk): Promise<MeshPayload> {
     const slot = this.workers[this.rr++ % this.workers.length];
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
@@ -191,27 +225,64 @@ export class OsmManager {
     });
   }
 
-  private upload(chunk: OsmChunk, data: { vertices: ArrayBuffer; ramps: ArrayBuffer; runways: number }): void {
+  private upload(chunk: OsmChunk, data: MeshPayload): void {
     if (!this.chunks.has(chunk.key)) return;
     const gl = this.gl;
-    const vao = must(gl.createVertexArray(), 'osm VAO');
-    gl.bindVertexArray(vao);
-    const vb = must(gl.createBuffer(), 'osm vertices');
-    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-    gl.bufferData(gl.ARRAY_BUFFER, data.vertices, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-    const rb = must(gl.createBuffer(), 'osm ramps');
-    gl.bindBuffer(gl.ARRAY_BUFFER, rb);
-    gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
-    gl.bindVertexArray(null);
-    chunk.vao = vao;
-    chunk.buffers = [vb, rb];
-    chunk.mesh = { vao, vertexCount: data.ramps.byteLength };
+    if (data.ramps.byteLength > 0) {
+      const vao = must(gl.createVertexArray(), 'osm VAO');
+      gl.bindVertexArray(vao);
+      const vb = must(gl.createBuffer(), 'osm vertices');
+      gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+      gl.bufferData(gl.ARRAY_BUFFER, data.vertices, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const rb = must(gl.createBuffer(), 'osm ramps');
+      gl.bindBuffer(gl.ARRAY_BUFFER, rb);
+      gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
+      gl.bindVertexArray(null);
+      chunk.vao = vao;
+      chunk.buffers = [vb, rb];
+      chunk.mesh = { vao, vertexCount: data.ramps.byteLength };
+    }
+    if (data.trees.byteLength > 0) {
+      const count = data.trees.byteLength / 20;
+      const vao = must(gl.createVertexArray(), 'tree VAO');
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.coneBuffer);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      const ib = must(gl.createBuffer(), 'tree instances');
+      gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+      gl.bufferData(gl.ARRAY_BUFFER, data.trees, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 3, gl.FLOAT, false, 20, 0);
+      gl.vertexAttribDivisor(3, 1);
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 20, 12);
+      gl.vertexAttribDivisor(4, 1);
+      gl.bindVertexArray(null);
+      chunk.trees = { vao, buffer: ib, count };
+    }
+    if (data.lights.byteLength > 0) {
+      const count = data.lights.byteLength / 16;
+      const vao = must(gl.createVertexArray(), 'light VAO');
+      gl.bindVertexArray(vao);
+      const lb = must(gl.createBuffer(), 'light points');
+      gl.bindBuffer(gl.ARRAY_BUFFER, lb);
+      gl.bufferData(gl.ARRAY_BUFFER, data.lights, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 16, 12);
+      gl.bindVertexArray(null);
+      chunk.lights = { vao, buffer: lb, count };
+    }
     chunk.status = 'ready';
     if (!this.readyFired.has(chunk.key)) {
       this.readyFired.add(chunk.key);
@@ -223,14 +294,44 @@ export class OsmManager {
     const gl = this.gl;
     for (const b of chunk.buffers) gl.deleteBuffer(b);
     if (chunk.vao) gl.deleteVertexArray(chunk.vao);
+    if (chunk.trees) {
+      gl.deleteBuffer(chunk.trees.buffer);
+      gl.deleteVertexArray(chunk.trees.vao);
+    }
+    if (chunk.lights) {
+      gl.deleteBuffer(chunk.lights.buffer);
+      gl.deleteVertexArray(chunk.lights.vao);
+    }
     chunk.buffers = [];
     chunk.mesh = undefined;
     chunk.vao = undefined;
+    chunk.trees = undefined;
+    chunk.lights = undefined;
   }
 
-  draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, fogStart: number, fogEnd: number): void {
+  draw(
+    renderer: Renderer,
+    view: mat4,
+    proj: mat4,
+    camPos: vec3,
+    sunDir: vec3,
+    fogStart: number,
+    fogEnd: number,
+    lightsOn: boolean,
+    pointSize: number,
+  ): void {
     for (const c of this.renderList) {
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      if (c.trees) {
+        const dx = camPos[0] - c.centerEnu[0];
+        const dz = camPos[2] - c.centerEnu[2];
+        if (Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
+          renderer.drawTrees(c.trees.vao, c.trees.count, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        }
+      }
+      if (c.lights && lightsOn) {
+        renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
+      }
     }
   }
 

@@ -13,6 +13,12 @@ export interface CachedMesh {
   ts: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  trees?: ArrayBuffer;
+  lights?: ArrayBuffer;
+}
+
+export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps' | 'trees' | 'lights'>): number {
+  return m.vertices.byteLength + m.ramps.byteLength + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0);
 }
 
 export interface CacheEntryMeta {
@@ -53,7 +59,7 @@ function openDB(): Promise<IDBDatabase> {
           const cur = (e.target as IDBRequest<IDBCursorWithValue | null>).result;
           if (!cur) return;
           const m = cur.value as CachedMesh;
-          meta.put({ key: m.key, ts: m.ts, bytes: m.vertices.byteLength + m.ramps.byteLength });
+          meta.put({ key: m.key, ts: m.ts, bytes: meshBytes(m) });
           cur.continue();
         };
       }
@@ -80,7 +86,7 @@ function tx<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBReque
 export async function getCachedMesh(key: string): Promise<CachedMesh | undefined> {
   const hit = await tx<CachedMesh | undefined>('readonly', (s) => s.get(key));
   if (hit) {
-    const meta: CacheEntryMeta = { key, ts: Date.now(), bytes: hit.vertices.byteLength + hit.ramps.byteLength };
+    const meta: CacheEntryMeta = { key, ts: Date.now(), bytes: meshBytes(hit) };
     // bookkeeping must never fail the tile read
     void tx('readwrite', (s) => s.put(meta), META).catch(() => {});
   }
@@ -91,7 +97,7 @@ export async function putCachedMesh(mesh: CachedMesh): Promise<void> {
   const meta: CacheEntryMeta = {
     key: mesh.key,
     ts: mesh.ts,
-    bytes: mesh.vertices.byteLength + mesh.ramps.byteLength,
+    bytes: meshBytes(mesh),
   };
   await openDB().then(
     (db) =>

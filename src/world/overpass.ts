@@ -57,7 +57,7 @@ function isAreaTags(tags: Record<string, string>): boolean {
 }
 
 function isLineTags(tags: Record<string, string>): boolean {
-  return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined;
+  return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined;
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {
