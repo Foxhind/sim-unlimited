@@ -4,6 +4,8 @@ const R2D = 180 / Math.PI;
 /** deg of intercept heading per metre of cross-track error on final */
 const KP_XTRK = 0.05;
 const XTRK_LEAD = 12; // s
+const SETTLE_H = 8; // m
+const SETTLE_GAIN = 0.04;
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 
 /**
@@ -189,7 +191,10 @@ export class Autopilot {
       const flare = h < 25;
       if (flare) gammaT = Math.asin(clamp(-(0.7 + 0.055 * h) / V, -0.1, 0));
       const gammaM = Math.asin(clamp(this.vsF / V, -0.5, 0.5));
-      const stick = (this.gamma.step(gammaT, gammaM, dt) - 0.35 * m.omega[0]) * (flare ? 2.5 : 1);
+      // low and not sinking: the slow integral term holds the nose up as speed bleeds off and the
+      // aircraft would float on down the runway, so add a gentle direct sink-rate push to settle it
+      const settle = h < SETTLE_H && this.vsF > -0.6 ? SETTLE_GAIN * (-0.9 - this.vsF) : 0;
+      const stick = (this.gamma.step(gammaT, gammaM, dt) - 0.35 * m.omega[0]) * (flare ? 2.5 : 1) + settle;
       const vTarget = dAim > 10000 ? vApp + 35 : vApp;
       const thrT = h < 9 ? 0 : this.speedPid.step(vTarget, m.speed, dt);
       this.throttle += (thrT - this.throttle) * Math.min(1, dt / (h < 9 ? 0.3 : 1.5));

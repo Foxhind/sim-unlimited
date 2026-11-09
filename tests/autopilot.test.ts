@@ -113,6 +113,7 @@ describe('autoland (intercept, 3 deg glide, flare, rollout)', () => {
       expect(touchSink).toBeLessThan(2.5);
       expect(maxCross).toBeLessThan(70); // runway is ~45 m wide; allow a little shoulder
       expect(touchAlong).toBeGreaterThan(0); // not short of the threshold
+      if (process.env.AL_LOG) console.log('TD', s.cfg.id, s.rwy, 'along', touchAlong.toFixed(0), 'sink', touchSink.toFixed(2));
       expect(touchAlong).toBeLessThan(2000);
     });
   }
