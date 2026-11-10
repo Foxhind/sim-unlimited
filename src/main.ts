@@ -2,6 +2,7 @@ import { mat4, vec3 } from 'gl-matrix';
 import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
 import { Renderer } from './engine/renderer';
+import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
 import { applyFlameColors, buildLUT, paletteAt } from './engine/palette';
@@ -245,7 +246,7 @@ function frame(now: number): void {
   if (dt > 0) fpsAvg += (1 / dt - fpsAvg) * 0.05;
 
   renderer.resize(canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio || 1);
-  mat4.perspective(proj, (60 * Math.PI) / 180, renderer.width / renderer.height, 0.5, 200000);
+  mat4.perspective(proj, (60 * Math.PI) / 180, renderer.width / renderer.height, 0.5, DEPTH_FAR);
   font.setScreenSize(renderer.width, renderer.height);
   vectors.setScreenSize(renderer.width, renderer.height);
 

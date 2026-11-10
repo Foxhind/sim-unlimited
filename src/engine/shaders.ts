@@ -1,3 +1,16 @@
+/**
+ * Logarithmic depth for every world pass (terrain, OSM drape, aircraft, trees, lights).
+ * A standard 24-bit depth buffer with near 0.5 m resolves only ~0.5 m at 2 km and ~3 m at 5 km,
+ * so overlays draped 0.3-1.4 m above the terrain z-fought with it beyond a couple of km.
+ * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
+ * Must match the far plane of the projection (main.ts / camera.ts).
+ */
+export const DEPTH_FAR = 200000;
+const LOG_DEPTH_FS = `
+in float vLogW;
+void writeLogDepth() { gl_FragDepth = log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0); }
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
@@ -11,6 +24,7 @@ uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
 flat out uint vIndex;
+out float vLogW;
 void main() {
   vec3 wp = aPos + uOffset;
   vec3 rel = wp - uCamPos;
@@ -24,6 +38,7 @@ void main() {
   float idx = mix(litStep, 15.0, fog);
   vIndex = aRamp * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
   gl_Position = uProj * uView * vec4(wp, 1.0);
+  vLogW = 1.0 + max(gl_Position.w, 0.0);
 }
 `;
 
@@ -31,7 +46,9 @@ export const WORLD_FS = `#version 300 es
 precision highp float;
 flat in uint vIndex;
 out uint oIndex;
+${LOG_DEPTH_FS}
 void main() {
+  writeLogDepth();
   oIndex = vIndex;
 }
 `;
@@ -50,6 +67,7 @@ uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
 flat out uint vIndex;
+out float vLogW;
 void main() {
   vec3 wp = aPos * aInstSR.x + aInstPos + uOffset;
   vec3 rel = wp - uCamPos;
@@ -63,6 +81,7 @@ void main() {
   float idx = mix(litStep, 15.0, fog);
   vIndex = uint(aInstSR.y) * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
   gl_Position = uProj * uView * vec4(wp, 1.0);
+  vLogW = 1.0 + max(gl_Position.w, 0.0);
 }
 `;
 
@@ -76,6 +95,7 @@ uniform vec3 uOffset;
 uniform vec3 uCamPos;
 uniform float uPointSize;
 flat out uint vIndex;
+out float vLogW;
 void main() {
   vec3 wp = aPos + uOffset;
   vec3 rel = wp - uCamPos;
@@ -83,6 +103,7 @@ void main() {
   wp.y -= (d * d) / (2.0 * 6371000.0);
   vIndex = uint(aIndex);
   gl_Position = uProj * uView * vec4(wp, 1.0);
+  vLogW = 1.0 + max(gl_Position.w, 0.0);
   gl_PointSize = uPointSize;
 }
 `;
@@ -92,8 +113,10 @@ precision highp float;
 flat in uint vIndex;
 uniform int uOn;
 out uint oIndex;
+${LOG_DEPTH_FS}
 void main() {
   if (uOn == 0) discard;
+  writeLogDepth();
   vec2 c = gl_PointCoord - 0.5;
   if (dot(c, c) > 0.25) discard;
   oIndex = vIndex;

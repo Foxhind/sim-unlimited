@@ -1,5 +1,6 @@
 import { mat4, vec3 } from 'gl-matrix';
 import type { Input } from './input';
+import { DEPTH_FAR } from './shaders';
 
 const BASE_SPEED = 60; // m/s
 const BOOST = 10;
@@ -46,6 +47,6 @@ export class FreeCamera {
   }
 
   setAspect(width: number, height: number): void {
-    mat4.perspective(this.proj, (60 * Math.PI) / 180, width / height, 0.5, 200000);
+    mat4.perspective(this.proj, (60 * Math.PI) / 180, width / height, 0.5, DEPTH_FAR);
   }
 }
