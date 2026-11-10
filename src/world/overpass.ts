@@ -22,26 +22,31 @@ const LARGE_FILTER = `
   way["highway"~"motorway|trunk"];
 `;
 
+/** Overpass filter statements for a detail level (also the client-side filter of the OSM API) */
+export function osmFilter(detail: OsmDetail): string {
+  return detail === 'full' ? FULL_FILTER : LARGE_FILTER;
+}
+
 export function overpassQuery(tile: Tile, detail: OsmDetail): string {
   const b = tileBounds(tile);
-  const filter = detail === 'full' ? FULL_FILTER : LARGE_FILTER;
+  const filter = osmFilter(detail);
   return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${filter});out body; >; out skel qt;`;
 }
 
-interface RawNode {
+export interface RawNode {
   type: 'node';
   id: number;
   lat: number;
   lon: number;
   tags?: Record<string, string>;
 }
-interface RawWay {
+export interface RawWay {
   type: 'way';
   id: number;
   nodes: number[];
   tags?: Record<string, string>;
 }
-interface RawRelation {
+export interface RawRelation {
   type: 'relation';
   id: number;
   members: { type: string; ref: number; role: string }[];

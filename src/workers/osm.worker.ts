@@ -3,7 +3,7 @@ import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
 import { buildProps } from '../world/props-mesher';
-import { OverpassSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
+import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
 import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
@@ -11,7 +11,7 @@ import { buildTerrainTin, tinSampler } from '../world/terrain-tin';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 
-export const OSM_MESH_SCHEMA = 6;
+export const OSM_MESH_SCHEMA = 7;
 
 export interface OsmRequest {
   type: 'osm';
@@ -43,7 +43,7 @@ interface WorkerScope {
 }
 
 const ctx = self as unknown as WorkerScope;
-const source = new OverpassSource();
+const source = new OsmSource();
 
 async function runwayCount(tile: Tile): Promise<number> {
   const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);

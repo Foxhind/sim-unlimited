@@ -2,6 +2,7 @@ import earcut from 'earcut';
 import { RAMP } from '../engine/palette';
 import { latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
+import { clipTileData } from './clip';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
@@ -83,7 +84,9 @@ function classifyLine(tags: Record<string, string>): LineStyle | undefined {
 }
 
 export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
-  const { tile, data, sampleHeight } = opts;
+  const { tile, sampleHeight } = opts;
+  // only this tile's share: the drape knows no terrain beyond the tile border
+  const data = clipTileData(opts.data, tile);
   const center = tileCenter(tile);
   const maxEdge = opts.maxEdgeMeters ?? Math.max(120, Math.min(500, tileSizeMeters(tile) / 12));
   // far 'large' layer sits slightly lower so the near 'full' layer wins depth where they overlap

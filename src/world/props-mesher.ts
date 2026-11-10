@@ -1,5 +1,6 @@
 import { RAMP, rampIndex } from '../engine/palette';
-import { latLonToEnu, tileCenter, type Tile } from './geodesy';
+import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
+import { clipTileData } from './clip';
 import type { LonLat, OsmDetail, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 
@@ -82,6 +83,9 @@ export const CONE_VERTICES = (() => {
 export function buildProps(opts: PropsOptions): PropsData {
   const { tile, data, sampleHeight } = opts;
   if (opts.detail !== 'full') return { trees: new Float32Array(0), lights: new Float32Array(0) };
+  // forests cut at the tile border; lights follow whole runways but only those inside the tile are kept
+  const areas = clipTileData({ ...data, lines: [], points: [], buildings: [] }, tile).areas;
+  const b = tileBounds(tile);
   const center = tileCenter(tile);
   const cosLat = Math.cos((center.lat * Math.PI) / 180);
   const enu = (lon: number, lat: number): [number, number] => {
@@ -91,7 +95,7 @@ export function buildProps(opts: PropsOptions): PropsData {
   const rng = mulberry32((tile.z * 73856093) ^ (tile.x * 19349663) ^ (tile.y * 83492791));
 
   const trees: number[] = [];
-  for (const area of data.areas) {
+  for (const area of areas) {
     if (area.tags.landuse !== 'forest' && area.tags.natural !== 'wood') continue;
     const outer = area.rings[0];
     if (!outer || outer.length < 3) continue;
@@ -116,7 +120,9 @@ export function buildProps(opts: PropsOptions): PropsData {
   }
 
   const lights: number[] = [];
+  const M_PER_DEG = 111320;
   const pushLight = (lon: number, lat: number, index: number): void => {
+    if (lon < b.west || lon >= b.east || lat <= b.south || lat > b.north) return;
     const [x, z] = enu(lon, lat);
     // above the draped runway ribbon (bias 1.4) so depth test keeps the points visible
     lights.push(x, Math.max(sampleHeight(lon, lat), 0) + 1.8, z, index);
@@ -147,9 +153,9 @@ export function buildProps(opts: PropsOptions): PropsData {
       const dl = Math.hypot(dx * cosLat, dy) || 1;
       dx = (dx * cosLat) / dl;
       dy = dy / dl;
-      // perpendicular in degrees: (-dy, dx) un-scaled by cosLat on the lon axis
-      const plon = -dy / cosLat;
-      const plat = dx;
+      // unit perpendicular (-dy, dx) in metres, converted to degrees (lon shrinks by cosLat)
+      const plon = -dy / cosLat / M_PER_DEG;
+      const plat = dx / M_PER_DEG;
       const [lon, lat] = path[i];
       if (runway) {
         pushLight(lon + plon * half, lat + plat * half, LIGHT_EDGE);
@@ -169,7 +175,7 @@ export function buildProps(opts: PropsOptions): PropsData {
         dx = (dx * cosLat) / dl;
         dy = dy / dl;
         for (let k = -2; k <= 2; k++) {
-          const f = (k / 2) * half;
+          const f = ((k / 2) * half) / M_PER_DEG;
           pushLight(end[0] - (dy / cosLat) * f, end[1] + dx * f, LIGHT_THRESHOLD);
         }
       }

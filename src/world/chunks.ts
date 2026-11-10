@@ -21,9 +21,11 @@ const ALT_WEIGHT = 1.5;
 const UNLOAD_DELAY_MS = 10000;
 
 /** Work-lattice resolution on which terrain contours are traced (not the mesh density). */
-export function gridForZoom(z: number): number {
-  if (z >= 12) return 32;
-  return 24;
+export const TERRAIN_GRID = 48;
+
+/** the same lattice at every zoom (tuned in the terrain inspector) */
+export function gridForZoom(_z: number): number {
+  return TERRAIN_GRID;
 }
 
 function horizontalDistance(a: LatLon, b: LatLon): number {

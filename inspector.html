@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Terrain inspector</title>
+    <style>
+      :root {
+        --bg: #101318; --panel: #171b22; --line: #2a303a; --text: #d6dbe2; --dim: #8a93a0;
+        --accent: #f0b54a; --border: #4fc3d9;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+      body { display: grid; grid-template-columns: 300px 1fr; }
+      aside { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+      h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); }
+      h2 { font-size: 11px; margin: 14px 0 6px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+      label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+      .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+      .row > * { flex: 1; min-width: 0; }
+      input[type=number], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 3px 5px; font: inherit; width: 100%; }
+      button { background: #222833; color: var(--text); border: 1px solid var(--line); padding: 4px 6px; font: inherit; cursor: pointer; }
+      button:hover { border-color: var(--accent); }
+      pre { margin: 0; white-space: pre-wrap; }
+      .hint { color: var(--dim); }
+      .err { color: #ff6b6b; }
+      main { display: grid; grid-template-columns: 3fr 2fr; min-width: 0; min-height: 0; }
+      .pane { position: relative; min-width: 0; min-height: 0; border-left: 1px solid var(--line); }
+      #right { display: grid; grid-template-rows: 1fr 1fr; min-height: 0; }
+      #right .pane { border-top: 1px solid var(--line); }
+      canvas { display: block; width: 100%; height: 100%; }
+      .overlay { position: absolute; left: 8px; bottom: 8px; background: rgba(16,19,24,.85); padding: 6px 8px; border: 1px solid var(--line); pointer-events: none; }
+      .title { position: absolute; left: 8px; top: 6px; color: var(--dim); pointer-events: none; }
+      .tag { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+      @media (max-width: 900px) {
+        body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+        main { grid-template-columns: 1fr; grid-template-rows: 60vh 80vh; }
+        html, body { height: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Terrain inspector</h1>
+      <div class="hint">DEM Terrarium → решётка → пояса → TIN, тем же кодом, что и в игре.</div>
+
+      <h2>Место</h2>
+      <select id="preset"></select>
+      <div class="row">
+        <input id="lat" type="number" step="0.0001" title="широта" />
+        <input id="lon" type="number" step="0.0001" title="долгота" />
+        <input id="z" type="number" min="8" max="15" step="1" title="zoom" style="flex:.5" />
+      </div>
+      <div class="row"><button id="load">Загрузить</button></div>
+      <div class="row">
+        <button data-nav="w">← W</button><button data-nav="n">↑ N</button><button data-nav="s">↓ S</button><button data-nav="e">E →</button>
+      </div>
+      <div class="row"><button data-nav="out">z − 1</button><button data-nav="in">z + 1 (центр)</button></div>
+      <div id="tileInfo" class="hint"></div>
+      <div id="pasteMsg" class="hint">⌘V / Ctrl+V — вставить ссылку Google Maps, Apple Maps, Яндекс Карт, OpenStreetMap или «широта, долгота».</div>
+
+      <h2>Параметры TIN</h2>
+      <div class="row"><span>решётка</span><input id="grid" type="number" min="4" max="256" step="1" /></div>
+      <div class="row"><span>шаг пояса, м</span><input id="step" type="number" min="1" step="1" /></div>
+      <div class="row"><span>eps (старт), ячеек</span><input id="eps" type="number" min="0" step="0.1" /></div>
+      <div class="row"><button id="asGame">Как в игре</button></div>
+
+      <h2>Карта</h2>
+      <label>Фон <select id="fill">
+        <option value="dem">DEM: высоты + отмывка</option>
+        <option value="tinshade">TIN: отмывка</option>
+        <option value="belts">TIN: пояса</option>
+        <option value="error">Ошибка TIN − DEM</option>
+        <option value="none">нет</option>
+      </select></label>
+      <label><input type="checkbox" data-layer="lattice" /> узлы решётки</label>
+      <label><input type="checkbox" data-layer="raw" checked /> изолинии (сырые)</label>
+      <label><input type="checkbox" data-layer="constraints" checked /> <span class="tag" style="background:var(--accent)"></span>границы поясов (упрощ.)</label>
+      <label><input type="checkbox" data-layer="edges" checked /> рёбра TIN</label>
+      <label><input type="checkbox" data-layer="flat" checked /> <span class="tag" style="background:#ff4d6d"></span>плоские треугольники</label>
+      <label><input type="checkbox" data-layer="verts" /> вершины</label>
+
+      <h2>3D</h2>
+      <label>Поверхность <select id="surf3d">
+        <option value="tin">TIN</option>
+        <option value="dem">DEM (64×64)</option>
+        <option value="lattice">решётка</option>
+      </select></label>
+      <div class="row"><span>превышение ×</span><input id="exag" type="number" min="0.5" max="10" step="0.5" value="1.5" /></div>
+
+      <h2>Статистика</h2>
+      <pre id="stats"></pre>
+
+      <h2>Управление</h2>
+      <div class="hint">Карта: колесо — масштаб, перетаскивание — сдвиг, Shift+перетаскивание — линия профиля.<br />3D: перетаскивание — поворот, колесо — масштаб.</div>
+    </aside>
+    <main>
+      <div class="pane"><canvas id="map"></canvas><div class="title">План тайла (единицы решётки)</div><div id="hover" class="overlay"></div></div>
+      <div id="right">
+        <div class="pane"><canvas id="view3d"></canvas><div class="title">3D</div></div>
+        <div class="pane"><canvas id="profile"></canvas><div class="title">Профиль</div></div>
+      </div>
+    </main>
+    <script type="module" src="/src/tools/inspector.ts"></script>
+  </body>
+</html>

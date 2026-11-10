@@ -63,7 +63,11 @@ export function extractIsolines(heights: Float32Array, n: number, level: number)
       if (code === 0 || code === 15) continue;
       const top = hId(i, j), bottom = hId(i, j + 1), left = vId(i, j), right = vId(i + 1, j);
       if (code === 5 || code === 10) {
-        const centerIn = (ha + hb + hc + hd) / 4 >= level;
+        // asymptotic decider: the saddle value of the bilinear patch. Unlike the cell average it is
+        // the same test for every level, so isolines of different levels never cross in a cell.
+        const den = ha + hc - hb - hd;
+        const saddle = den !== 0 ? (ha * hc - hb * hd) / den : (ha + hb + hc + hd) / 4;
+        const centerIn = saddle >= level;
         const aIn = code === 5; // a,c inside
         if (aIn === centerIn) {
           addSeg(top, right);
@@ -83,20 +87,23 @@ export function extractIsolines(heights: Float32Array, n: number, level: number)
     }
   }
 
+  // a node exactly at the level would put the crossing on the node and make it shared by up to
+  // four lattice edges; keep it strictly inside its edge so isoline points stay distinct
+  const clampT = (t: number) => Math.min(1 - 1e-4, Math.max(1e-4, t));
   const edgePt = (e: number): Pt => {
     if (e < hEdges) {
       const j = Math.floor(e / n);
       const i = e - j * n;
       const a = heights[j * side + i];
       const b = heights[j * side + i + 1];
-      return { x: i + (level - a) / (b - a), y: j };
+      return { x: i + clampT((level - a) / (b - a)), y: j };
     }
     const k = e - hEdges;
     const j = Math.floor(k / side);
     const i = k - j * side;
     const a = heights[j * side + i];
     const b = heights[(j + 1) * side + i];
-    return { x: i, y: j + (level - a) / (b - a) };
+    return { x: i, y: j + clampT((level - a) / (b - a)) };
   };
 
   const visited = new Uint8Array(segA.length);
@@ -267,4 +274,124 @@ export function delaunay(points: Pt[]): Tri[] {
   // canonical order → deterministic regardless of Map iteration details
   out.sort((s, t) => s.a - t.a || s.b - t.b || s.c - t.c);
   return out;
+}
+
+/**
+ * Constrained Delaunay triangulation: Delaunay of `points`, then every segment of `constraints`
+ * is forced in as an edge (Sloan's edge flipping) and the Delaunay property is restored around
+ * the fixed edges (Lawson flips). `prefer(u, v, p, q)`, when given, is a final flip pass on free
+ * edges: edge u–v (opposite vertices p, q) is replaced by p–q when it returns true; it must
+ * describe a strictly decreasing potential. Constraints must not cross each other or pass
+ * through points. Deterministic: edges are visited in index order.
+ */
+export function constrainedDelaunay(
+  points: Pt[],
+  constraints: ReadonlyArray<readonly [number, number]>,
+  prefer?: (u: number, v: number, p: number, q: number) => boolean,
+): { tris: Tri[]; missing: number } {
+  const n = points.length;
+  const px = points.map((p) => p.x), py = points.map((p) => p.y);
+  const orient = (a: number, b: number, c: number) => (px[b] - px[a]) * (py[c] - py[a]) - (py[b] - py[a]) * (px[c] - px[a]);
+  const tri: Array<[number, number, number]> = [];
+  const he = new Map<number, number>(); // directed edge u→v → triangle having it (CCW)
+  const K = (u: number, v: number) => u * n + v;
+  const U = (u: number, v: number) => (u < v ? u * n + v : v * n + u);
+  const set = (t: number, a: number, b: number, c: number) => {
+    tri[t] = [a, b, c];
+    he.set(K(a, b), t);
+    he.set(K(b, c), t);
+    he.set(K(c, a), t);
+  };
+  delaunay(points).forEach((t, i) => (orient(t.a, t.b, t.c) > 0 ? set(i, t.a, t.b, t.c) : set(i, t.a, t.c, t.b)));
+  const third = (t: number, u: number, v: number) => tri[t].find((w) => w !== u && w !== v)!;
+  /** the quad around interior edge u–v, or undefined on the hull */
+  const quad = (u: number, v: number): [number, number, number, number] | undefined => {
+    const t1 = he.get(K(u, v)), t2 = he.get(K(v, u));
+    if (t1 === undefined || t2 === undefined) return undefined;
+    return [t1, t2, third(t1, u, v), third(t2, u, v)];
+  };
+  const convex = (u: number, v: number, p: number, q: number) => orient(p, q, u) * orient(p, q, v) < 0;
+  /** flip u–v (u→v in t1 with apex p, v→u in t2 with apex q) into p–q */
+  const flip = (t1: number, t2: number, u: number, v: number, p: number, q: number) => {
+    for (const t of [t1, t2]) {
+      const [a, b, c] = tri[t];
+      he.delete(K(a, b));
+      he.delete(K(b, c));
+      he.delete(K(c, a));
+    }
+    set(t1, q, v, p);
+    set(t2, p, u, q);
+  };
+  const crosses = (u: number, v: number, a: number, b: number) =>
+    orient(a, b, u) * orient(a, b, v) < 0 && orient(u, v, a) * orient(u, v, b) < 0;
+  const freeEdges = () =>
+    [...he.keys()]
+      .filter((k) => {
+        const u = Math.floor(k / n), v = k % n;
+        return u < v && he.has(K(v, u));
+      })
+      .sort((x, y) => x - y);
+
+  const fixed = new Set<number>();
+  let missing = 0;
+  for (const [a, b] of constraints) {
+    if (a === b) continue;
+    if (!he.has(K(a, b)) && !he.has(K(b, a))) {
+      const queue: Array<[number, number]> = freeEdges()
+        .map((k) => [Math.floor(k / n), k % n] as [number, number])
+        .filter(([u, v]) => crosses(u, v, a, b));
+      let guard = queue.length * 64 + 64;
+      while (queue.length && guard-- > 0) {
+        const [u, v] = queue.shift()!;
+        const qd = quad(u, v);
+        if (!qd || fixed.has(U(u, v))) break; // a crossing constraint: give up on this one
+        const [t1, t2, p, q] = qd;
+        if (!convex(u, v, p, q)) {
+          queue.push([u, v]);
+          continue;
+        }
+        flip(t1, t2, u, v, p, q);
+        if (crosses(p, q, a, b)) queue.push([p, q]);
+      }
+    }
+    if (he.has(K(a, b)) || he.has(K(b, a))) fixed.add(U(a, b));
+    else missing++;
+  }
+
+  const sweep = (want: (u: number, v: number, p: number, q: number) => boolean) => {
+    for (let pass = 0; pass < 200; pass++) {
+      let flips = 0;
+      for (const k of freeEdges()) {
+        if (fixed.has(k)) continue;
+        const u = Math.floor(k / n), v = k % n;
+        const qd = quad(u, v);
+        if (!qd) continue;
+        const [t1, t2, p, q] = qd;
+        if (!convex(u, v, p, q) || !want(u, v, p, q)) continue;
+        flip(t1, t2, u, v, p, q);
+        flips++;
+      }
+      if (!flips) return;
+    }
+  };
+  let span = 1e-9;
+  for (let k = 0; k < n; k++) span = Math.max(span, Math.abs(px[k] - px[0]), Math.abs(py[k] - py[0]));
+  const tol = 1e-10 * span ** 4;
+  // d strictly inside the circumcircle of CCW triangle (a, b, c)
+  const inCircle = (a: number, b: number, c: number, d: number) => {
+    const ax = px[a] - px[d], ay = py[a] - py[d];
+    const bx = px[b] - px[d], by = py[b] - py[d];
+    const cx = px[c] - px[d], cy = py[c] - py[d];
+    return (
+      (ax * ax + ay * ay) * (bx * cy - cx * by) - (bx * bx + by * by) * (ax * cy - cx * ay) + (cx * cx + cy * cy) * (ax * by - bx * ay) > tol
+    );
+  };
+  sweep((u, v, p, q) => inCircle(u, v, p, q));
+  if (prefer) sweep(prefer);
+
+  const out: Tri[] = tri.map(([a, b, c]) =>
+    a < b && a < c ? { a, b, c } : b < c ? { a: b, b: c, c: a } : { a: c, b: a, c: b },
+  );
+  out.sort((s, t) => s.a - t.a || s.b - t.b || s.c - t.c);
+  return { tris: out, missing };
 }
