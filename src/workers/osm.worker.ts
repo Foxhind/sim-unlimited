@@ -10,8 +10,9 @@ import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world
 import { buildTerrainTin, tinSampler } from '../world/terrain-tin';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
+import { loadLandsatTerrain } from '../world/landsat-process';
 
-export const OSM_MESH_SCHEMA = 8;
+export const OSM_MESH_SCHEMA = 9;
 
 export interface OsmRequest {
   type: 'osm';
@@ -75,14 +76,17 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // Q40: one shared lattice surface (runway-flattened for 'full') → the same isoline TIN the terrain mesh renders
     const { heights: lattice, borders } = await decodePngToTile(png, grid);
     if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
-    const drape = tinSampler(buildTerrainTin(tile, grid, lattice, { borders }), tile);
+    // the same TIN as the terrain mesh, Landsat colour boundaries included
+    const ls = await loadLandsatTerrain(tile, grid);
+    const drape = tinSampler(buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined }), tile);
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape });
     const props = buildProps({ tile, detail, data, sampleHeight: drape });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
     const trees = props.trees.slice().buffer;
     const lights = props.lights.slice().buffer;
-    if (mesh.vertexCount > 0 || props.trees.length > 0 || props.lights.length > 0) {
+    // without imagery the drape is the plain TIN: do not cache it (see terrain.worker)
+    if (ls && (mesh.vertexCount > 0 || props.trees.length > 0 || props.lights.length > 0)) {
       await putCachedMesh({ key, ts: Date.now(), vertices, ramps, trees, lights });
     }
     const runways = data.lines.filter((l) => l.tags.aeroway === 'runway').length;

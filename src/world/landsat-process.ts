@@ -10,7 +10,7 @@
  */
 import { nearestVga, TERRAIN_RAMP_BASE, VGA_PALETTE, type RGB } from '../engine/palette';
 import { tileSizeMeters, type Tile } from './geodesy';
-import { landsatSource, type FaceColor, type RgbaImage } from './landsat';
+import { fetchLandsatTile, landsatSource, type FaceColor, type RgbaImage } from './landsat';
 
 /** settings chosen in the terrain inspector (the inspector starts from these) */
 export const LANDSAT_TUNING = {
@@ -443,4 +443,47 @@ function simplifyRing(pts: P[], eps: number): P[] {
   }
   const a = douglasPeucker(pts.slice(0, far + 1), eps), b = douglasPeucker(pts.slice(far), eps);
   return [...a, ...b.slice(1)];
+}
+
+// ---------- the game's terrain colouring ----------
+
+export interface LandsatTerrain {
+  /** colour boundaries for buildTerrainTin (lattice coordinates, longest first) */
+  lines: ColourLine[];
+  maxVerts: number;
+  /** face colour: most frequent quantized colour under the face */
+  faceColor: FaceColor;
+}
+
+/**
+ * The 3×3 imagery mosaic around `t`'s imagery tile. Any failed fetch throws (a retry later then
+ * sees the same imagery), so every consumer of a tile builds its TIN from identical input.
+ */
+export async function fetchLandsatMosaic(t: Tile): Promise<RgbaImage> {
+  const tiles = neighbourTiles(landsatSource(t).tile);
+  return stitch3x3(await Promise.all(tiles.map((n) => (n ? fetchLandsatTile(n) : Promise.resolve(null)))));
+}
+
+/** imagery → colour boundaries and face colours for a terrain tile, with the inspector-tuned settings */
+export function landsatTerrain(mosaic: RgbaImage, tile: Tile, grid: number, tuning: typeof LANDSAT_TUNING = LANDSAT_TUNING): LandsatTerrain {
+  const p = processLandsat(mosaic, tile, { blurM: tuning.blurM, colours: tuning.colours });
+  const size = p.quantized.image.width;
+  const lines = tuning.edges
+    ? colourBoundaries(cleanLabels(p.quantized.index, size, tuning.minAreaCells * (size / grid) ** 2), size, grid, tuning.eps)
+    : [];
+  return { lines, maxVerts: tuning.maxVerts, faceColor: faceColorByMode(p.quantized, size, grid) };
+}
+
+/**
+ * Landsat colouring of a terrain tile, or null when the imagery is unreachable: callers then
+ * build the plain TIN and must not cache the result, so the tile is rebuilt with imagery later.
+ * Shared by the terrain mesh, the OSM drape and the collision probe, which must see one surface.
+ */
+export async function loadLandsatTerrain(tile: Tile, grid: number): Promise<LandsatTerrain | null> {
+  try {
+    return landsatTerrain(await fetchLandsatMosaic(tile), tile, grid);
+  } catch (err) {
+    console.warn(`[landsat] ${tile.z}/${tile.x}/${tile.y}: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
 }

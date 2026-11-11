@@ -106,3 +106,35 @@ describe('colour boundaries', () => {
     expect(split.pts.every((p) => p.x === 8 && p.y >= 0.5 && p.y <= 15.5)).toBe(true);
   });
 });
+
+describe('landsatTerrain (game)', () => {
+  it('mesh and drape/collision build the same TIN from the same imagery', async () => {
+    const { landsatTerrain, LANDSAT_TUNING } = await import('../src/world/landsat-process');
+    const { buildTerrainTin, tinSampler } = await import('../src/world/terrain-tin');
+    const { buildTerrainMesh } = await import('../src/world/terrain-mesher');
+    const f = (await import('./fixtures/terrarium-12-2379-1599.json')).default;
+    const borders = { n: Float32Array.from(f.borders.n), s: Float32Array.from(f.borders.s), w: Float32Array.from(f.borders.w), e: Float32Array.from(f.borders.e) };
+    const heights = Float32Array.from(f.heights);
+    // a mosaic with a sand disc in a forest, so there are colour boundaries
+    const W = 768, data = new Uint8ClampedArray(W * W * 4);
+    for (let y = 0; y < W; y++) for (let x = 0; x < W; x++) {
+      const c = Math.hypot(x - 380, y - 400) < 70 ? [196, 180, 140] : [38, 58, 32];
+      data.set([...c, 255], (y * W + x) * 4);
+    }
+    const ls = landsatTerrain({ data, width: W, height: W }, f.tile, f.grid);
+    expect(ls.lines.length).toBeGreaterThan(0);
+    expect(ls.maxVerts).toBe(LANDSAT_TUNING.maxVerts);
+    const colourLines = { lines: ls.lines, maxVerts: ls.maxVerts };
+    const tin = buildTerrainTin(f.tile, f.grid, heights, { borders, colourLines });
+    const mesh = buildTerrainMesh({ tile: f.tile, grid: f.grid, heights, borders, faceColor: ls.faceColor, colourLines, skirtDepth: 0 });
+    // mesh = the same land triangles + skirt quads along the border
+    const skirt = mesh.vertexCount - tin.tris.length * 3;
+    expect(skirt).toBeGreaterThan(0);
+    expect(skirt % 6).toBe(0);
+    // the drape sampler sees the mesh's vertex heights
+    const s = tinSampler(tin, f.tile);
+    expect(Number.isFinite(s(29.1, 36.65))).toBe(true);
+    const plain = buildTerrainTin(f.tile, f.grid, heights, { borders });
+    expect(tin.vx.length).toBeGreaterThan(plain.vx.length);
+  });
+});

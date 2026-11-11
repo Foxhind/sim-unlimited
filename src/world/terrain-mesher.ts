@@ -1,7 +1,7 @@
 import { RAMP } from '../engine/palette';
 import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
-import { buildTerrainTin } from './terrain-tin';
+import { buildTerrainTin, type TinOptions } from './terrain-tin';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
 export interface TerrainMeshData {
@@ -22,6 +22,8 @@ export interface TerrainMeshOptions {
   step?: number;
   /** land face colour from imagery (lattice coords of the corners) instead of height/slope rules */
   faceColor?: FaceColor;
+  /** colour boundaries as fixed TIN edges (see TinOptions.colourLines) */
+  colourLines?: TinOptions['colourLines'];
   /** contour simplification tolerance in lattice cells (default 2) */
   epsCells?: number;
   /** full-resolution edge profiles (see TileBorders) */
@@ -47,7 +49,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const center = tileCenter(tile);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders });
+  const { vx, vy, vh, tris } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines });
 
   const nx = new Float64Array(side * side);
   const nz = new Float64Array(side * side);

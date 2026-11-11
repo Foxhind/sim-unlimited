@@ -2,6 +2,7 @@ import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
 import { decodePngToSampler, decodePngToTile, fetchTerrariumPng, type HeightSampler } from './terrain-source';
 import { buildTerrainTin, tinSampler } from './terrain-tin';
+import { loadLandsatTerrain } from './landsat-process';
 import { flattenRunways } from './runway';
 import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
@@ -39,6 +40,8 @@ export class GroundProbe {
   private prisms = new Map<string, Prism[]>();
   private pending = new Set<string>();
   private retryAt = new Map<string, number>();
+  /** tiles built without Landsat imagery: reload after this time */
+  private stale = new Map<string, number>();
   private active = 0;
 
   constructor(private origin: () => LatLon) {}
@@ -55,7 +58,7 @@ export class GroundProbe {
         const tile = { z: 14, x: ((center.x + dx) % n + n) % n, y: Math.max(0, Math.min(n - 1, center.y + dy)) };
         const key = `${tile.z}/${tile.x}/${tile.y}`;
         wanted.add(key);
-        if (this.samplers.has(key) || this.pending.has(key)) continue;
+        if ((this.samplers.has(key) && !((this.stale.get(key) ?? Infinity) <= now)) || this.pending.has(key)) continue;
         if ((this.retryAt.get(key) ?? 0) > now) continue;
         if (this.active >= 2) continue;
         this.pending.add(key);
@@ -70,6 +73,7 @@ export class GroundProbe {
       if (!wanted.has(key)) {
         this.samplers.delete(key);
         this.prisms.delete(key);
+        this.stale.delete(key);
       }
     }
   }
@@ -98,8 +102,13 @@ export class GroundProbe {
           // fall back to the unflattened lattice, like the terrain worker
         }
       }
-      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, { borders }), tile);
+      // Landsat colour boundaries are part of the TIN; without imagery use the plain TIN for now and
+      // reload the tile later so collision matches the mesh once it is rebuilt with imagery
+      const ls = await loadLandsatTerrain(tile, grid);
+      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined }), tile);
       this.samplers.set(key, surface);
+      if (!ls) this.stale.set(key, now + 10000);
+      else this.stale.delete(key);
       if (data) {
         try {
           const list: Prism[] = [];

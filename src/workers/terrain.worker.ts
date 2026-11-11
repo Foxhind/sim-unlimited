@@ -6,7 +6,7 @@ import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { flattenRunways } from '../world/runway';
-import { fetchLandsat, landsatFaceColor, type FaceColor } from '../world/landsat';
+import { loadLandsatTerrain } from '../world/landsat-process';
 
 export interface TileRequest {
   type: 'tile';
@@ -61,18 +61,18 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         // corrupt raw cache: fall back to unflattened relief
       }
     }
-    // colours from Landsat; without imagery fall back to the height/slope rules and do not cache,
-    // so the tile is coloured properly once the imagery is reachable
-    let faceColor: FaceColor | undefined;
-    try {
-      faceColor = landsatFaceColor(await fetchLandsat(tile), tile, grid);
-    } catch (err) {
-      console.warn(`[landsat] ${tile.z}/${tile.x}/${tile.y}: ${err instanceof Error ? err.message : err}`);
-    }
-    const mesh = buildTerrainMesh({ tile, grid, heights, borders, faceColor });
+    // Landsat: colour boundaries shape the TIN and faces take the imagery colour; without imagery
+    // fall back to the plain TIN with height/slope colours and do not cache, so the tile is rebuilt
+    // (and matches the OSM drape and collision surface) once the imagery is reachable
+    const ls = await loadLandsatTerrain(tile, grid);
+    const mesh = buildTerrainMesh({
+      tile, grid, heights, borders,
+      faceColor: ls?.faceColor,
+      colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined,
+    });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
-    if (faceColor) await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
+    if (ls) await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
     const res: MeshResponse = { type: 'mesh', id, vertices, ramps };
     ctx.postMessage(res, [vertices, ramps]);
   } catch (err) {
