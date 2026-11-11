@@ -1,11 +1,13 @@
 import { RAMP } from '../engine/palette';
+import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
 import { buildTerrainTin } from './terrain-tin';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
 export interface TerrainMeshData {
   vertices: Float32Array; // interleaved pos.xyz + normal.xyz
-  ramps: Uint8Array;
+  /** ramp per vertex; terrain uses Uint16 (VGA ramps go past 255), OSM and buildings Uint8 */
+  ramps: Uint8Array | Uint16Array;
   vertexCount: number;
 }
 
@@ -18,6 +20,8 @@ export interface TerrainMeshOptions {
   skirtDepth?: number;
   /** belt height in meters (default: beltStepForZoom) */
   step?: number;
+  /** land face colour from imagery (lattice coords of the corners) instead of height/slope rules */
+  faceColor?: FaceColor;
   /** contour simplification tolerance in lattice cells (default 2) */
   epsCells?: number;
   /** full-resolution edge profiles (see TileBorders) */
@@ -93,7 +97,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
 
   const vertexCount = (landTris + skirtQuads * 2) * 3;
   const vertices = new Float32Array(vertexCount * 6);
-  const ramps = new Uint8Array(vertexCount);
+  const ramps = new Uint16Array(vertexCount);
   let fi = 0;
   let ri = 0;
   const pushV = (x: number, y: number, z: number, n: [number, number, number], ramp: number) => {
@@ -126,7 +130,11 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
     }
     const water = idx.every((k) => vh[k] <= 0);
     const avgH = water ? -1 : (vh[t.a] + vh[t.b] + vh[t.c]) / 3;
-    const ramp = water ? RAMP.WATER : faceRamp(avgH, ay);
+    const ramp = water
+      ? RAMP.WATER
+      : opts.faceColor
+        ? opts.faceColor(vx[t.a], vy[t.a], vx[t.b], vy[t.b], vx[t.c], vy[t.c])
+        : faceRamp(avgH, ay);
     const info = { n: [ax, ay, az] as [number, number, number], ramp };
     edgeInfo.set(ekey(t.a, t.b), info);
     edgeInfo.set(ekey(t.b, t.c), info);

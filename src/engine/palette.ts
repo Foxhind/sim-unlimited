@@ -21,6 +21,13 @@ export const RAMP = {
 
 export const RAMP_COUNT = 16;
 export const RAMP_STEPS = 16;
+/**
+ * Terrain colours: ramp TERRAIN_RAMP_BASE + i shades VGA palette entry i (0..255), so a face can
+ * take any of the 256 default VGA colours and still get lighting, fog and night from the LUT.
+ */
+export const TERRAIN_RAMP_BASE = RAMP_COUNT;
+/** LUT entries: 16 material ramps + 256 VGA ramps, 16 steps each (a 256-wide texture, 17 rows) */
+export const LUT_SIZE = (RAMP_COUNT + 256) * RAMP_STEPS;
 export const LIT_STEPS = 12; // steps 0..11: lighting range, 12..15: fog range toward haze
 
 interface MaterialRamp {
@@ -72,6 +79,63 @@ const DAY: PaletteParams = {
   lightMul: 1.0,
   tint: [1, 1, 1],
 };
+
+
+/** The default 256-colour VGA (mode 13h) palette, 8-bit per channel. */
+export const VGA_PALETTE: RGB[] = (() => {
+  const six: number[][] = [];
+  // 0..15: EGA colours
+  for (const c of [
+    [0, 0, 0], [0, 0, 42], [0, 42, 0], [0, 42, 42], [42, 0, 0], [42, 0, 42], [42, 21, 0], [42, 42, 42],
+    [21, 21, 21], [21, 21, 63], [21, 63, 21], [21, 63, 63], [63, 21, 21], [63, 21, 63], [63, 63, 21], [63, 63, 63],
+  ]) six.push(c);
+  // 16..31: greys
+  for (const g of [0, 5, 8, 11, 14, 17, 20, 24, 28, 32, 36, 40, 45, 50, 56, 63]) six.push([g, g, g]);
+  // 32..247: 24 hues x 3 saturations x 3 intensities
+  for (const [hi, lo, m1, m2, m3] of [
+    [63, 0, 16, 31, 47], [63, 31, 39, 47, 55], [63, 45, 49, 54, 58],
+    [28, 0, 7, 14, 21], [28, 14, 17, 21, 24], [28, 20, 22, 24, 26],
+    [16, 0, 4, 8, 12], [16, 8, 10, 12, 14], [16, 11, 12, 13, 15],
+  ]) {
+    for (let k = 0; k < 24; k++) {
+      // hue order: blue, magenta, red, yellow, green, cyan (as in the VGA BIOS table)
+      const seg = Math.floor(k / 4), q = k % 4;
+      const rise = [lo, m1, m2, m3][q], fall = [hi, m3, m2, m1][q];
+      const rgb =
+        seg === 0 ? [rise, lo, hi] : seg === 1 ? [hi, lo, fall] : seg === 2 ? [hi, rise, lo]
+        : seg === 3 ? [fall, hi, lo] : seg === 4 ? [lo, hi, rise] : [lo, fall, hi];
+      six.push(rgb);
+    }
+  }
+  // 248..255: black
+  while (six.length < 256) six.push([0, 0, 0]);
+  return six.map(([r, g, b]) => [Math.round((r * 255) / 63), Math.round((g * 255) / 63), Math.round((b * 255) / 63)] as RGB);
+})();
+
+/** nearest VGA palette entry (0..247: the black filler 248..255 is never chosen) */
+export function nearestVga(r: number, g: number, b: number): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < 248; i++) {
+    const [pr, pg, pb] = VGA_PALETTE[i];
+    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * Shade of a VGA terrain colour at lighting step s (0..LIT_STEPS-1): the imagery colour is what
+ * the ground looks like under ordinary daylight, so it sits at ~3/4 of the lighting range; full sun
+ * brightens it a little, the shadow side darkens it to about 40 %.
+ */
+export function vgaShade(c: RGB, s: number): RGB {
+  const k = 0.4 + (0.8 * s) / (LIT_STEPS - 1);
+  return [Math.min(255, c[0] * k), Math.min(255, c[1] * k), Math.min(255, c[2] * k)];
+}
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
@@ -125,7 +189,7 @@ function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
  * The haze end equals the sky horizon color so fogged geometry meets the sky.
  */
 export function buildLUT(p: PaletteParams): Uint8Array {
-  const lut = new Uint8Array(RAMP_COUNT * RAMP_STEPS * 4);
+  const lut = new Uint8Array(LUT_SIZE * 4);
   const haze = p.horizon;
 
   for (let r = 0; r < MATERIALS.length; r++) {
@@ -150,6 +214,16 @@ export function buildLUT(p: PaletteParams): Uint8Array {
   ] as const) {
     for (let s = 0; s < RAMP_STEPS; s++) {
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
+    }
+  }
+  for (let v = 0; v < 256; v++) {
+    const base = (TERRAIN_RAMP_BASE + v) * RAMP_STEPS;
+    const light = scaleRGB(vgaShade(VGA_PALETTE[v], LIT_STEPS - 1), p);
+    for (let s = 0; s < RAMP_STEPS; s++) {
+      const c = s < LIT_STEPS
+        ? scaleRGB(vgaShade(VGA_PALETTE[v], s), p)
+        : lerpRGB(light, haze, (s - LIT_STEPS + 1) / (RAMP_STEPS - LIT_STEPS));
+      writeEntry(lut, base + s, c);
     }
   }
   return lut;

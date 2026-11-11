@@ -2,10 +2,11 @@ import { mat4, vec3 } from 'gl-matrix';
 import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
 import { Renderer } from './engine/renderer';
+import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { applyFlameColors, buildLUT, paletteAt } from './engine/palette';
+import { LUT_SIZE, applyFlameColors, buildLUT, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -100,7 +101,7 @@ const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg));
-const flashLut = new Uint8Array(256 * 4).fill(255);
+const flashLut = new Uint8Array(LUT_SIZE * 4).fill(255);
 let lastSunUpdate = 0;
 let previewKey = '';
 let sunLoc: LatLon = start.latLon;
@@ -447,7 +448,7 @@ function frame(now: number): void {
       pad, renderer.height - pad - 16 * u, u, HUD_GREEN,
     );
   }
-  const attr = '© OpenStreetMap contributors';
+  const attr = `© OpenStreetMap contributors · ${LANDSAT_ATTRIBUTION}`;
   font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
   font.flush();
   vectors.flush();

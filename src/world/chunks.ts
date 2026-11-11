@@ -294,11 +294,11 @@ export class ChunkManager {
     gl.bindBuffer(gl.ARRAY_BUFFER, rb);
     gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA terrain colours)
     gl.bindVertexArray(null);
     chunk.vao = vao;
     chunk.buffers = [vb, rb];
-    chunk.mesh = { vao, vertexCount: data.ramps.byteLength };
+    chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 2 };
     chunk.status = 'ready';
   }
 

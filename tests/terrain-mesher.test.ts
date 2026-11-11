@@ -13,7 +13,7 @@ function heights(fn: (i: number, j: number) => number): Float32Array {
   return h;
 }
 
-function tris(m: { vertices: Float32Array; ramps: Uint8Array; vertexCount: number }) {
+function tris(m: { vertices: Float32Array; ramps: Uint8Array | Uint16Array; vertexCount: number }) {
   const out: Array<{ pos: number[]; normal: number[]; ramp: number }> = [];
   for (let v = 0; v < m.vertexCount; v += 3) {
     const pos: number[] = [];

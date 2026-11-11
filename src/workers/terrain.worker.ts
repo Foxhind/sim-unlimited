@@ -6,6 +6,7 @@ import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { flattenRunways } from '../world/runway';
+import { fetchLandsat, landsatFaceColor, type FaceColor } from '../world/landsat';
 
 export interface TileRequest {
   type: 'tile';
@@ -60,10 +61,18 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         // corrupt raw cache: fall back to unflattened relief
       }
     }
-    const mesh = buildTerrainMesh({ tile, grid, heights, borders });
+    // colours from Landsat; without imagery fall back to the height/slope rules and do not cache,
+    // so the tile is coloured properly once the imagery is reachable
+    let faceColor: FaceColor | undefined;
+    try {
+      faceColor = landsatFaceColor(await fetchLandsat(tile), tile, grid);
+    } catch (err) {
+      console.warn(`[landsat] ${tile.z}/${tile.x}/${tile.y}: ${err instanceof Error ? err.message : err}`);
+    }
+    const mesh = buildTerrainMesh({ tile, grid, heights, borders, faceColor });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
-    await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
+    if (faceColor) await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
     const res: MeshResponse = { type: 'mesh', id, vertices, ramps };
     ctx.postMessage(res, [vertices, ramps]);
   } catch (err) {

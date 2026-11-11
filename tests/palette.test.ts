@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildLUT, paletteAt, quantize6bit, RAMP, RAMP_STEPS } from '../src/engine/palette';
+import { buildLUT, LUT_SIZE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
 
 const VALID_6BIT = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
 
@@ -24,9 +24,9 @@ describe('quantize6bit', () => {
 describe('buildLUT', () => {
   const lut = buildLUT(paletteAt(45));
 
-  it('covers all 256 entries with 6-bit channels', () => {
-    expect(lut.length).toBe(256 * 4);
-    for (let i = 0; i < 256; i++) {
+  it('covers every entry (materials + VGA terrain ramps) with 6-bit channels', () => {
+    expect(lut.length).toBe(LUT_SIZE * 4);
+    for (let i = 0; i < LUT_SIZE; i++) {
       const [r, g, b] = entry(lut, i);
       expect(VALID_6BIT.has(r)).toBe(true);
       expect(VALID_6BIT.has(g)).toBe(true);
@@ -77,5 +77,34 @@ describe('paletteAt', () => {
     const a = paletteAt(-0.001);
     const b = paletteAt(0.001);
     expect(Math.abs(a.horizon[0] - b.horizon[0])).toBeLessThan(1);
+  });
+});
+
+describe('VGA terrain colours', () => {
+  it('is the default mode 13h palette', () => {
+    expect(VGA_PALETTE).toHaveLength(256);
+    expect(VGA_PALETTE[1]).toEqual([0, 0, 170]);
+    expect(VGA_PALETTE[6]).toEqual([170, 85, 0]);
+    expect(VGA_PALETTE[31]).toEqual([255, 255, 255]);
+    expect(VGA_PALETTE[32]).toEqual([0, 0, 255]);
+    expect(VGA_PALETTE[40]).toEqual([255, 0, 0]);
+    expect(VGA_PALETTE[48]).toEqual([0, 255, 0]);
+    expect(VGA_PALETTE[104]).toEqual([0, 0, 113]);
+    expect(VGA_PALETTE[247]).toEqual([45, 49, 65]);
+  });
+
+  it('nearestVga picks exact entries and never the black filler', () => {
+    for (const i of [2, 20, 77, 150, 200, 247]) expect(nearestVga(...VGA_PALETTE[i])).toBe(i);
+    expect(nearestVga(0, 0, 0)).toBe(0);
+  });
+
+  it('each VGA ramp is lit dark → bright and fogs toward the horizon', () => {
+    const day = buildLUT(paletteAt(60));
+    const v = nearestVga(38, 58, 32);
+    const at = (s: number) => entry(day, rampIndex(TERRAIN_RAMP_BASE + v, s));
+    const lum = (c: number[]) => c[0] + c[1] + c[2];
+    for (let s = 1; s < 12; s++) expect(lum(at(s))).toBeGreaterThanOrEqual(lum(at(s - 1)));
+    const night = buildLUT(paletteAt(-30));
+    expect(lum(entry(night, rampIndex(TERRAIN_RAMP_BASE + v, 9)))).toBeLessThan(lum(at(9)));
   });
 });

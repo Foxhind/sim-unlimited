@@ -1,5 +1,6 @@
 import { mat4, vec3 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
+import { LUT_SIZE } from './palette';
 import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -57,7 +58,7 @@ export class Renderer {
     this.colorFbo = must(gl.createFramebuffer(), 'resolve color framebuffer');
     this.lutTex = must(gl.createTexture(), 'LUT texture');
     for (const [tex, internal, format, type] of [
-      [this.indexTex, gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE],
+      [this.indexTex, gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT],
       [this.overlayTex, gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE],
       [this.colorTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
       [this.lutTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
@@ -67,7 +68,7 @@ export class Renderer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, 1, 0, format, type, null);
+      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, LUT_SIZE / 256, 0, format, type, null);
     }
 
     this.triVao = must(gl.createVertexArray(), 'fullscreen VAO');
@@ -126,7 +127,7 @@ export class Renderer {
     const s = this.msaa ? 2 : 1;
     const w = this.width * s, h = this.height * s;
     gl.bindTexture(gl.TEXTURE_2D, this.indexTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, w, h, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16UI, w, h, 0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, null);
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthRb);
     gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -157,7 +158,7 @@ export class Renderer {
   beginFrame(lut: Uint8Array): void {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_SIZE / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
 
     const s = this.msaa ? 2 : 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);

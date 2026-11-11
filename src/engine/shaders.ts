@@ -178,7 +178,7 @@ precision highp float;
 uniform highp usampler2D uIndexTex;
 uniform sampler2D uLut;
 out vec4 oColor;
-vec3 lut(uint i) { return texelFetch(uLut, ivec2(int(i), 0), 0).rgb; }
+vec3 lut(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) * 2;
   uint a = texelFetch(uIndexTex, p, 0).r;
@@ -203,12 +203,12 @@ void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   uint o = texelFetch(uOverlayTex, p, 0).r;
   if (o > 0u) {
-    oColor = vec4(texelFetch(uLut, ivec2(int(o), 0), 0).rgb, 1.0);
+    oColor = vec4(texelFetch(uLut, ivec2(int(o), 0), 0).rgb, 1.0); // overlay: first row only
   } else if (uMsaa == 1) {
     oColor = vec4(texelFetch(uColorTex, p, 0).rgb, 1.0);
   } else {
     uint idx = texelFetch(uIndexTex, p, 0).r;
-    oColor = vec4(texelFetch(uLut, ivec2(int(idx), 0), 0).rgb, 1.0);
+    oColor = vec4(texelFetch(uLut, ivec2(int(idx & 255u), int(idx >> 8u)), 0).rgb, 1.0);
   }
 }
 `;
