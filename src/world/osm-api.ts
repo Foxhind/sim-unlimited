@@ -118,7 +118,24 @@ function quarters(b: TileBounds): TileBounds[] {
   ];
 }
 
+/**
+ * The limit is per client IP, not per request: after a 429/509 every request to the API is
+ * pointless until the penalty ends, so all of them wait on one shared deadline instead of each
+ * tile finding out for itself (that is what turned one 509 into a burst of failed requests).
+ */
+let blockedUntil = 0;
+/** for tests */
+export function resetOsmApiCooldown(): void {
+  blockedUntil = 0;
+}
+
+/** the penalty the API announces with 509 ("try again in 60 seconds") when Retry-After is unreadable */
+const DEFAULT_LIMIT_MS = 60000;
+const DEFAULT_DOWN_MS = 10000;
+
 async function getJson(url: string, fetchImpl: typeof fetch): Promise<Response> {
+  const wait = blockedUntil - Date.now();
+  if (wait > 0) throw new RetryableError(wait, 'osm api rate limited, waiting for Retry-After');
   try {
     return await fetchImpl(url, { signal: AbortSignal.timeout(30000) });
   } catch (err) {
@@ -127,11 +144,27 @@ async function getJson(url: string, fetchImpl: typeof fetch): Promise<Response> 
 }
 
 const retryable = (status: number) => status === 429 || status === 509 || status >= 500;
-/** rate limited or down: retry after the server's Retry-After (seconds) when it gives one */
-const retryLater = (res: Response) => {
-  const after = Number(res.headers.get('retry-after'));
-  return new RetryableError(Number.isFinite(after) && after > 0 ? after * 1000 : 10000, `osm api ${res.status}`);
-};
+
+/** Retry-After: delta-seconds or an HTTP date → ms from now; null when absent or malformed */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (value === null || value.trim() === '') return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return secs > 0 ? secs * 1000 : null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at > now ? at - now : null;
+}
+
+/**
+ * Rate limited or down: wait for the server's Retry-After. Across origins the browser hides that
+ * header unless the server lists it in Access-Control-Expose-Headers (api.openstreetmap.org does
+ * not), so for 429/509 fall back to the 60 s the response body announces. Limits stop all requests.
+ */
+function retryLater(res: Response): RetryableError {
+  const limited = res.status === 429 || res.status === 509;
+  const ms = parseRetryAfter(res.headers.get('retry-after')) ?? (limited ? DEFAULT_LIMIT_MS : DEFAULT_DOWN_MS);
+  if (limited) blockedUntil = Math.max(blockedUntil, Date.now() + ms);
+  return new RetryableError(ms, `osm api ${res.status}`);
+}
 
 /**
  * Selected relations (multipolygons, buildings) that `map` cut at the bbox get their missing

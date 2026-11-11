@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { RetryableError } from '../src/engine/queue';
-import { completeRelations, fetchOsmApiMap, filterOsmApi, parseFilter } from '../src/world/osm-api';
+import { completeRelations, fetchOsmApiMap, filterOsmApi, parseFilter, parseRetryAfter, resetOsmApiCooldown } from '../src/world/osm-api';
 import { osmFilter, parseOverpass, type OverpassJson } from '../src/world/overpass';
 
 const node = (id: number, lon: number, lat: number, tags?: Record<string, string>) => ({ type: 'node' as const, id, lon, lat, ...(tags ? { tags } : {}) });
@@ -22,6 +22,8 @@ const API: OverpassJson = {
     { type: 'relation', id: 201, members: [{ type: 'way', ref: 103, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
   ],
 };
+
+beforeEach(resetOsmApiCooldown);
 
 describe('parseFilter', () => {
   it('reads every Overpass statement of both detail levels', () => {
@@ -140,5 +142,33 @@ describe('completeRelations', () => {
     const err = await completeRelations(cut, 'full', limited).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RetryableError);
     expect((err as RetryableError).retryMs).toBe(7000);
+  });
+});
+
+describe('rate limit cooldown', () => {
+  const B = { west: 29, south: 36, east: 29.1, north: 36.1 };
+  it('parses Retry-After seconds and HTTP dates', () => {
+    expect(parseRetryAfter('60')).toBe(60000);
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter('0')).toBeNull();
+    expect(parseRetryAfter('Wed, 11 Nov 2026 17:58:44 GMT', Date.parse('Wed, 11 Nov 2026 17:57:44 GMT'))).toBe(60000);
+  });
+
+  it('assumes 60 s for a 509 whose Retry-After the browser hides', async () => {
+    const f = (async () => new Response('You have downloaded too much data. Please try again in 60 seconds.', { status: 509 })) as unknown as typeof fetch;
+    const err = await fetchOsmApiMap(B, f).catch((e: unknown) => e);
+    expect((err as RetryableError).retryMs).toBe(60000);
+  });
+
+  it('sends no request while the penalty lasts', async () => {
+    let calls = 0;
+    const limited = (async () => { calls++; return new Response('', { status: 509 }); }) as unknown as typeof fetch;
+    await fetchOsmApiMap(B, limited).catch(() => {});
+    for (let i = 0; i < 5; i++) {
+      const err = await fetchOsmApiMap(B, limited).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(RetryableError);
+      expect((err as RetryableError).retryMs).toBeGreaterThan(50000);
+    }
+    expect(calls).toBe(1);
   });
 });

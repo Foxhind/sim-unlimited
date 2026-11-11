@@ -93,4 +93,17 @@ describe('RequestQueue', () => {
     await expectation;
     expect(attempts).toBe(7); // initial + 6 retries
   });
+
+  it('waits the full delay the server asked for, beyond the backoff ceiling', async () => {
+    const q = new RequestQueue(1, 10, 100);
+    let attempts = 0;
+    const p = q.submit('limited', 0, async () => {
+      if (++attempts === 1) throw new RetryableError(60000);
+      return 'ok';
+    });
+    await vi.advanceTimersByTimeAsync(59000);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(await p).toBe('ok');
+  });
 });

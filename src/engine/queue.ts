@@ -4,6 +4,8 @@ export class RetryableError extends Error {
   }
 }
 
+const MAX_SERVER_DELAY_MS = 600000;
+
 interface Entry<T> {
   key: string;
   priority: number;
@@ -82,7 +84,8 @@ export class RequestQueue {
     } catch (err) {
       if (err instanceof RetryableError && e.attempts < 6) {
         e.attempts++;
-        const delay = Math.min(this.maxBackoffMs, err.retryMs || this.baseBackoffMs * 2 ** e.attempts);
+        // a delay the server asked for (Retry-After) is honoured, not capped by the backoff ceiling
+        const delay = err.retryMs > 0 ? Math.min(MAX_SERVER_DELAY_MS, err.retryMs) : Math.min(this.maxBackoffMs, this.baseBackoffMs * 2 ** e.attempts);
         e.notBefore = Date.now() + delay;
         this.pending.set(e.key, e);
         e.timer = setTimeout(() => {
