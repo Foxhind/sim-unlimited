@@ -5,6 +5,7 @@ import type { Input } from '../engine/input';
 import { t, type StringKey } from './i18n';
 import { saveSettings, type Settings } from './settings';
 import { AIRFIELDS, Minimap } from './minimap';
+import { MAP_SOURCE_NAME, parseMapLink } from './map-links';
 import type { LatLon } from '../world/geodesy';
 import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
 import { DEFAULT_BINDINGS, type Action } from '../flight/controls';
@@ -60,6 +61,8 @@ export class Menu {
   private buttons: Button[] = [];
   private remap: Action | null = null;
   private returnTo: MenuScreen = 'start';
+  /** result of the last pasted map link, shown under the start map */
+  private pasteNote: { text: string; error: boolean } | null = null;
 
   constructor(
     private font: FontRenderer,
@@ -67,6 +70,24 @@ export class Menu {
     readonly settings: Settings,
     private cb: MenuCallbacks,
   ) {}
+
+  /**
+   * A map link (Google, Apple, Yandex, OSM, geo:, "lat, lon") pasted on the start screen becomes
+   * the custom start point, like a click on the map. Returns false when not on the start screen.
+   */
+  pasteLink(text: string): boolean {
+    if (this.screen !== 'start') return false;
+    const L = this.settings.lang;
+    const p = parseMapLink(text);
+    if (!p) {
+      this.pasteNote = { text: t(L, 'pasteError'), error: true };
+      return true;
+    }
+    this.config.customPoint = { lat: p.lat, lon: p.lon };
+    this.config.location = 'custom';
+    this.pasteNote = { text: `${t(L, 'pastedPoint')} ${MAP_SOURCE_NAME[p.source].toUpperCase()}`, error: false };
+    return true;
+  }
 
   openSettings(from: MenuScreen): void {
     this.returnTo = from;
@@ -206,9 +227,10 @@ export class Menu {
     this.minimap.draw(this.vec, this.font, mx, my, size, u, cfg.customPoint ?? undefined);
     if (click) {
       const p = this.minimap.pick(click[0], click[1], mx, my, size);
-      if (p) { cfg.customPoint = p; cfg.location = 'custom'; }
+      if (p) { cfg.customPoint = p; cfg.location = 'custom'; this.pasteNote = null; }
     }
-    this.center(t(L, 'pickOnMap'), mx + size / 2, my + size + 10 * u, u, DIM);
+    const note = this.pasteNote;
+    this.center(note ? note.text : t(L, 'pickOnMap'), mx + size / 2, my + size + 10 * u, u, note ? (note.error ? HUD_AMBER : HUD_GREEN) : DIM);
     const pt = cfg.location === 'custom' && cfg.customPoint
       ? `${cfg.customPoint.lat.toFixed(3)}, ${cfg.customPoint.lon.toFixed(3)}`
       : af ? `${af.icao} ${af.name}  ${af.lat.toFixed(3)}, ${af.lon.toFixed(3)}` : '';

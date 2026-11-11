@@ -205,6 +205,13 @@ const menu = new Menu(font, vectors, settings, {
 });
 if (state === 'menu') menu.screen = consent === null ? 'consent' : 'start';
 
+// a map link pasted on the start screen sets the custom start point (same parser as the inspector)
+document.addEventListener('paste', (e) => {
+  if (state !== 'menu') return;
+  const text = e.clipboardData?.getData('text/plain') ?? '';
+  if (menu.pasteLink(text)) e.preventDefault();
+});
+
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
     renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu,

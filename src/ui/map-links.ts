@@ -110,6 +110,11 @@ const isApple = (h: string) => h === 'maps.apple.com' || h === 'maps.apple';
 const isYandex = (h: string, p: string) => YANDEX.test(h) && (h.startsWith('maps.') || p.startsWith('/maps') || p.startsWith('/web-maps'));
 const isOsm = (h: string) => /(^|\.)(openstreetmap\.(org|ru|de|fr)|osm\.org)$/.test(h);
 
+/** human name of a link's source (inspector and game menu) */
+export const MAP_SOURCE_NAME: Record<MapPoint['source'], string> = {
+  google: 'Google Maps', apple: 'Apple Maps', yandex: 'Yandex Maps', osm: 'OpenStreetMap', geo: 'geo:', coords: 'lat, lon',
+};
+
 export function parseMapLink(text: string): MapPoint | null {
   const s = text.trim();
   const geo = new RegExp(`^geo:(${NUM}),(${NUM})(?:[^?]*\\?(.*))?$`, 'i').exec(s);

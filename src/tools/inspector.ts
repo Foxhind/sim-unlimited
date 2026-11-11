@@ -7,7 +7,7 @@ import { gridForZoom, MAX_Z, MIN_Z } from '../world/chunks';
 import { decodeTerrarium, gridLatLon, tileCenter, tileForLatLon, tileSizeMeters, type Tile } from '../world/geodesy';
 import { decodePngToTile, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
 import { beltStepForZoom, buildTerrainTin, EPS_START, type TerrainTin, type TinDebug } from '../world/terrain-tin';
-import { parseMapLink, type MapPoint } from './map-links';
+import { parseMapLink, type MapPoint } from '../ui/map-links';
 import { VGA_PALETTE, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
 import { cleanLabels, colourBoundaries, faceColorByMode, LANDSAT_TUNING, neighbourTiles, processLandsat, stitch3x3, type ColourLine, type ProcessedLandsat } from '../world/landsat-process';

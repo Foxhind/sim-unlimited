@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseMapLink } from '../src/tools/map-links';
+import { parseMapLink } from '../src/ui/map-links';
 
 const near = (text: string, lat: number, lon: number, zoom?: number) => {
   const p = parseMapLink(text);
