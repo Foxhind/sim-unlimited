@@ -75,6 +75,13 @@ describe('buildProps trees (Q36)', () => {
     expect(buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount).toBe(0);
   });
 
+  it('foliage takes the ramp given for the ground under each tree', () => {
+    const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
+    const p = buildProps({ tile: TILE, detail: 'full', data, sampleHeight: flat, treeRamp: () => 77 });
+    expect(p.trees.length).toBeGreaterThan(0);
+    for (let i = 4; i < p.trees.length; i += 5) expect(p.trees[i]).toBe(77);
+  });
+
   it('ignores non-forest areas and the large detail layer', () => {
     const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'residential' } }] };
     expect(props(data).trees.length).toBe(0);

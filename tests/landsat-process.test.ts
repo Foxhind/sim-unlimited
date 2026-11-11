@@ -138,3 +138,25 @@ describe('landsatTerrain (game)', () => {
     expect(tin.vx.length).toBeGreaterThan(plain.vx.length);
   });
 });
+
+describe('one water colour', () => {
+  it('imagery water becomes the water ramp; sea-level boundary vertices do not lift sea faces', async () => {
+    const { RAMP } = await import('../src/engine/palette');
+    const { quantize, faceColorByMode } = await import('../src/world/landsat-process');
+    const q = quantize(solid([10, 30, 90], 8, 8), [1, 2]); // EGA blue / green
+    expect(faceColorByMode(q, 8, 4)(0, 0, 4, 0, 0, 4)).toBe(RAMP.WATER);
+    // a fixture with sea: boundaries drawn over the sea keep water faces at 0 m
+    const { buildTerrainTin } = await import('../src/world/terrain-tin');
+    const f = (await import('./fixtures/terrarium-12-2379-1599.json')).default;
+    const borders = { n: Float32Array.from(f.borders.n), s: Float32Array.from(f.borders.s), w: Float32Array.from(f.borders.w), e: Float32Array.from(f.borders.e) };
+    const heights = Float32Array.from(f.heights);
+    const ring = [{ x: 2, y: 6 }, { x: 9, y: 6 }, { x: 9, y: 14 }, { x: 2, y: 14 }, { x: 2, y: 6 }]; // in the bay (west)
+    const tin = buildTerrainTin(f.tile, f.grid, heights, { borders, colourLines: { lines: [{ pts: ring, closed: true }] } });
+    const at = (p: { x: number; y: number }) => tin.vx.findIndex((x, k) => Math.abs(x - p.x) < 1e-9 && Math.abs(tin.vy[k] - p.y) < 1e-9);
+    for (const p of ring) {
+      const k = at(p);
+      expect(k).toBeGreaterThanOrEqual(0);
+      expect(tin.vh[k] === 0 || tin.vh[k] >= 0.5).toBe(true);
+    }
+  });
+});

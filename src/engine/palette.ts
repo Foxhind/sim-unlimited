@@ -127,6 +127,39 @@ export function nearestVga(r: number, g: number, b: number): number {
   return best;
 }
 
+function hsv([r, g, b]: RGB): [number, number, number] {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d > 0) h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [(h * 60 + 360) % 360, mx ? d / mx : 0, mx / 255];
+}
+
+/** a VGA colour one would call green (hue 70°–170°, not grey, not black) */
+export function isGreenVga(i: number): boolean {
+  const [h, s, v] = hsv(VGA_PALETTE[i]);
+  return h >= 70 && h <= 170 && s >= 0.2 && v >= 0.12;
+}
+const GREEN_VGA = Array.from({ length: 248 }, (_, i) => i).filter(isGreenVga);
+
+/** the colour itself when green, else the nearest green VGA colour */
+export function greenVga(i: number): number {
+  if (isGreenVga(i)) return i;
+  const [r, g, b] = VGA_PALETTE[i];
+  let best = GREEN_VGA[0], bd = Infinity;
+  for (const k of GREEN_VGA) {
+    const [pr, pg, pb] = VGA_PALETTE[k];
+    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    if (d < bd) { bd = d; best = k; }
+  }
+  return best;
+}
+
+/** a VGA colour that reads as open water in the imagery (clearly blue, not a bluish grey) */
+export function isWaterVga(i: number): boolean {
+  const [r, g, b] = VGA_PALETTE[i];
+  return b >= r + 40 && b >= g + 15;
+}
+
 /**
  * Shade of a VGA terrain colour at lighting step s (0..LIT_STEPS-1): the imagery colour is what
  * the ground looks like under ordinary daylight, so it sits at ~3/4 of the lighting range; full sun

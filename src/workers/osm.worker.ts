@@ -7,12 +7,13 @@ import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
 import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
-import { buildTerrainTin, tinSampler } from '../world/terrain-tin';
+import { buildTerrainTin, tinLocator, tinSampler } from '../world/terrain-tin';
+import { greenVga, RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { loadLandsatTerrain } from '../world/landsat-process';
 
-export const OSM_MESH_SCHEMA = 9;
+export const OSM_MESH_SCHEMA = 10;
 
 export interface OsmRequest {
   type: 'osm';
@@ -78,9 +79,22 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
     // the same TIN as the terrain mesh, Landsat colour boundaries included
     const ls = await loadLandsatTerrain(tile, grid);
-    const drape = tinSampler(buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined }), tile);
+    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined });
+    const drape = tinSampler(tin, tile);
+    // foliage: the colour of the land face under the tree, pulled to the nearest green VGA colour
+    let treeRamp: ((lon: number, lat: number) => number) | undefined;
+    if (ls) {
+      const locate = tinLocator(tin, tile);
+      treeRamp = (lon, lat) => {
+        const r = locate(lon, lat);
+        if (!r) return RAMP.FOREST;
+        const t = tin.tris[r.tri];
+        const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
+        return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
+      };
+    }
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape });
-    const props = buildProps({ tile, detail, data, sampleHeight: drape });
+    const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
     const trees = props.trees.slice().buffer;

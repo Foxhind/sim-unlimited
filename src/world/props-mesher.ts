@@ -9,6 +9,8 @@ export interface PropsOptions {
   detail: OsmDetail;
   data: OsmTileData;
   sampleHeight: HeightSampler;
+  /** foliage ramp at a lon/lat (the land colour under the tree); default RAMP.FOREST */
+  treeRamp?: (lon: number, lat: number) => number;
 }
 
 export interface PropsData {
@@ -115,7 +117,7 @@ export function buildProps(opts: PropsOptions): PropsData {
       const y = sampleHeight(lon, lat);
       if (y <= 0) continue;
       const [x, z] = enu(lon, lat);
-      trees.push(x, y, z, 8 + rng() * 8, RAMP.FOREST);
+      trees.push(x, y, z, 8 + rng() * 8, opts.treeRamp?.(lon, lat) ?? RAMP.FOREST);
       placed++;
     }
   }

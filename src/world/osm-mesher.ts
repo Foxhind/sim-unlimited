@@ -255,7 +255,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
   const vertexCount = ramps.length;
   return {
     vertices: new Float32Array(verts),
-    ramps: new Uint8Array(ramps),
+    ramps: new Uint16Array(ramps), // VGA ramps (building colours) go past 255
     vertexCount,
   };
 }

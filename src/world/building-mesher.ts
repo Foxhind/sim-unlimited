@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { RAMP, nearestMaterialRamp, type RGB } from '../engine/palette';
+import { RAMP, TERRAIN_RAMP_BASE, nearestVga, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -96,9 +96,12 @@ const TYPE_WALL: Record<string, number> = {
   hotel: RAMP.SAND, roof: RAMP.HULL_DARK, shed: RAMP.HULL_DARK, barn: RAMP.BRICK,
 };
 
+/** an OSM colour → its nearest default-VGA colour, shaded through the LUT like the terrain */
+const vgaRamp = (c: RGB) => TERRAIN_RAMP_BASE + nearestVga(c[0], c[1], c[2]);
+
 export function wallRamp(tags: Record<string, string>): number {
   const c = parseColor(tags['building:colour'] ?? tags.colour);
-  if (c) return nearestMaterialRamp(c);
+  if (c) return vgaRamp(c);
   const mat = tags['building:material'];
   if (mat && MATERIAL_RAMP[mat] !== undefined) return MATERIAL_RAMP[mat];
   const type = tags['building:part'] || tags.building || 'yes';
@@ -107,7 +110,7 @@ export function wallRamp(tags: Record<string, string>): number {
 
 export function roofRamp(tags: Record<string, string>): number {
   const c = parseColor(tags['roof:colour']);
-  if (c) return nearestMaterialRamp(c);
+  if (c) return vgaRamp(c);
   const mat = tags['roof:material'];
   if (mat && MATERIAL_RAMP[mat] !== undefined) return MATERIAL_RAMP[mat];
   return RAMP.BRICK;
@@ -300,7 +303,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
   }
 
   const vertexCount = ramps.length;
-  return { vertices: new Float32Array(verts), ramps: new Uint8Array(ramps), vertexCount };
+  return { vertices: new Float32Array(verts), ramps: new Uint16Array(ramps), vertexCount };
 }
 
 /** Normalized roof height field in [0,1] for axis-based shapes. */

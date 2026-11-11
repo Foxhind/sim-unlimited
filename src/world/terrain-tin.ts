@@ -573,7 +573,11 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
 
     // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
     // level) or another boundary; their own vertices take the lattice height
-    if (colourPicked.length) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => latticeHeight(heights, grid, p), stats);
+    if (colourPicked.length) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => {
+      // at sea level like the coastline: a boundary vertex in the sea must not lift a water face
+      const h = latticeHeight(heights, grid, p);
+      return h < COAST_LEVEL ? 0 : h;
+    }, stats);
 
     // a triangle is flat when all three corners sit at one height (one isoline): it lies on a belt
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.
@@ -671,7 +675,19 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
  * 0 m like the mesh) at a lon/lat inside `tile`; clamps to the tile outside it.
  */
 export function tinSampler(tin: TerrainTin, tile: Tile): HeightSampler {
-  const { grid, vx, vy, vh, tris } = tin;
+  const locate = tinLocator(tin, tile);
+  const h = tin.vh.map((v) => Math.max(v, 0));
+  return (lon, lat) => {
+    const r = locate(lon, lat);
+    if (!r) return 0;
+    const t = tin.tris[r.tri];
+    return h[t.a] * r.w[0] + h[t.b] * r.w[1] + h[t.c] * r.w[2];
+  };
+}
+
+/** the TIN triangle under a lon/lat (clamped into the tile) and its barycentric weights */
+export function tinLocator(tin: TerrainTin, tile: Tile): (lon: number, lat: number) => { tri: number; w: [number, number, number] } | null {
+  const { grid, vx, vy, tris } = tin;
   const n = 2 ** tile.z;
   const buckets: number[][] = Array.from({ length: grid * grid }, () => []);
   tris.forEach((t, ti) => {
@@ -682,7 +698,6 @@ export function tinSampler(tin: TerrainTin, tile: Tile): HeightSampler {
     const j1 = Math.max(0, Math.min(grid - 1, Math.floor(Math.max(...ys))));
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) buckets[j * grid + i].push(ti);
   });
-  const h = vh.map((v) => Math.max(v, 0));
 
   return (lon, lat) => {
     const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
@@ -710,8 +725,6 @@ export function tinSampler(tin: TerrainTin, tile: Tile): HeightSampler {
         if (m >= -1e-9) break;
       }
     }
-    if (best < 0) return 0;
-    const t = tris[best];
-    return h[t.a] * bw[0] + h[t.b] * bw[1] + h[t.c] * bw[2];
+    return best < 0 ? null : { tri: best, w: bw };
   };
 }

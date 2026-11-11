@@ -8,7 +8,7 @@
  *      k colours of a median cut of this tile (each snapped to VGA).
  * A terrain face then takes the most frequent quantized colour under it.
  */
-import { nearestVga, TERRAIN_RAMP_BASE, VGA_PALETTE, type RGB } from '../engine/palette';
+import { isWaterVga, nearestVga, RAMP, TERRAIN_RAMP_BASE, VGA_PALETTE, type RGB } from '../engine/palette';
 import { tileSizeMeters, type Tile } from './geodesy';
 import { fetchLandsatTile, landsatSource, type FaceColor, type RgbaImage } from './landsat';
 
@@ -240,6 +240,7 @@ export function processLandsat(mosaic: RgbaImage, tile: Tile, opts: LandsatOptio
 /**
  * Face colour = the most frequent quantized colour among the pixels whose centres fall in the
  * face (the centroid pixel for a face thinner than a pixel); ties go to the lower VGA index.
+ * Imagery water (a clearly blue colour) gets the one water ramp, like the sea and OSM water.
  */
 export function faceColorByMode(q: Quantized, size: number, grid: number): FaceColor {
   const k = size / grid;
@@ -266,11 +267,12 @@ export function faceColorByMode(q: Quantized, size: number, grid: number): FaceC
     if (!n) {
       const i = Math.max(0, Math.min(size - 1, Math.floor((x0 + x1 + x2) / 3)));
       const j = Math.max(0, Math.min(size - 1, Math.floor((y0 + y1 + y2) / 3)));
-      return TERRAIN_RAMP_BASE + q.index[j * size + i];
+      const v = q.index[j * size + i];
+      return isWaterVga(v) ? RAMP.WATER : TERRAIN_RAMP_BASE + v;
     }
     let best = 0;
     for (let v = 1; v < 256; v++) if (counts[v] > counts[best]) best = v;
-    return TERRAIN_RAMP_BASE + best;
+    return isWaterVga(best) ? RAMP.WATER : TERRAIN_RAMP_BASE + best;
   };
 }
 

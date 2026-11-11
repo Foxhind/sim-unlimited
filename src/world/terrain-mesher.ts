@@ -6,8 +6,8 @@ import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from '
 
 export interface TerrainMeshData {
   vertices: Float32Array; // interleaved pos.xyz + normal.xyz
-  /** ramp per vertex; terrain uses Uint16 (VGA ramps go past 255), OSM and buildings Uint8 */
-  ramps: Uint8Array | Uint16Array;
+  /** ramp per vertex: Uint16, VGA ramps go past 255 */
+  ramps: Uint16Array;
   vertexCount: number;
 }
 

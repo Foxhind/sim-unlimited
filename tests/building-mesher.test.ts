@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP } from '../src/engine/palette';
+import { nearestVga, RAMP, TERRAIN_RAMP_BASE } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import {
   buildBuildingMesh,
@@ -64,7 +64,9 @@ describe('colors', () => {
     expect(parseColor('#ff0000')).toEqual([255, 0, 0]);
     expect(parseColor('#f00')).toEqual([255, 0, 0]);
     expect(parseColor('white')).toBeDefined();
-    expect(wallRamp({ 'building:colour': '#646464' })).toBe(RAMP.CONCRETE);
+    // OSM colours snap to the default VGA palette, the same function as the terrain
+    expect(wallRamp({ 'building:colour': '#646464' })).toBe(TERRAIN_RAMP_BASE + nearestVga(100, 100, 100));
+    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(TERRAIN_RAMP_BASE + 40);
     expect(wallRamp({ 'building:material': 'brick' })).toBe(RAMP.BRICK);
     expect(wallRamp({ building: 'garage' })).toBe(RAMP.CONCRETE);
     expect(roofRamp({ 'roof:material': 'metal' })).toBe(RAMP.HULL_DARK);

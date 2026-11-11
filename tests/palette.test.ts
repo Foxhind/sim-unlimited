@@ -108,3 +108,20 @@ describe('VGA terrain colours', () => {
     expect(lum(entry(night, rampIndex(TERRAIN_RAMP_BASE + v, 9)))).toBeLessThan(lum(at(9)));
   });
 });
+
+describe('green and water VGA colours', () => {
+  it('greenVga keeps greens and pulls other colours to the nearest green', async () => {
+    const { greenVga, isGreenVga, isWaterVga } = await import('../src/engine/palette');
+    expect(isGreenVga(48)).toBe(true); // (0,255,0)
+    expect(greenVga(48)).toBe(48);
+    for (const i of [7, 24, 40, 6, 114, 247]) {
+      const g = greenVga(i);
+      expect(isGreenVga(g), `VGA ${i} → ${g}`).toBe(true);
+      const [r, gg, b] = VGA_PALETTE[g];
+      expect(gg).toBeGreaterThan(Math.max(r, b));
+    }
+    expect(isWaterVga(1)).toBe(true); // EGA blue
+    expect(isWaterVga(247)).toBe(false); // bluish grey
+    expect(isWaterVga(24)).toBe(false); // grey
+  });
+});
