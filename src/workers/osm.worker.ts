@@ -11,7 +11,7 @@ import { buildTerrainTin, tinSampler } from '../world/terrain-tin';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 
-export const OSM_MESH_SCHEMA = 7;
+export const OSM_MESH_SCHEMA = 8;
 
 export interface OsmRequest {
   type: 'osm';

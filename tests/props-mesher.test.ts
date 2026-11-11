@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, rampIndex } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { buildOsmMesh } from '../src/world/osm-mesher';
 import { buildProps, CONE_VERTICES } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
@@ -66,6 +67,12 @@ describe('buildProps trees (Q36)', () => {
     expect(big.trees.length / 5).toBeLessThanOrEqual(2500);
     const wet = props(data, 'full', () => -5);
     expect(wet.trees.length).toBe(0);
+  });
+
+  it('plants trees in forest whose fill the drape no longer draws', () => {
+    const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
+    expect(props(data).trees.length).toBeGreaterThan(0);
+    expect(buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount).toBe(0);
   });
 
   it('ignores non-forest areas and the large detail layer', () => {

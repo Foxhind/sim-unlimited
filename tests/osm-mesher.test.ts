@@ -22,7 +22,7 @@ const flat = () => 100;
 
 describe('buildOsmMesh', () => {
   it('emits interleaved pos+normal with one ramp per vertex', () => {
-    const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'wood' } }], lines: [], points: [], buildings: [] };
+    const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'scrub' } }], lines: [], points: [], buildings: [] };
     const m = mesh(data, flat);
     expect(m.vertexCount).toBeGreaterThan(0);
     expect(m.vertices.length).toBe(m.vertexCount * 6);
@@ -42,7 +42,7 @@ describe('buildOsmMesh', () => {
   });
 
   it('subdivides large triangles to follow varying terrain', () => {
-    const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'wood' } }], lines: [], points: [], buildings: [] };
+    const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'scrub' } }], lines: [], points: [], buildings: [] };
     const sample = (_lon: number, lat: number) => lat * 1000;
     const coarse = mesh(data, sample, 100000);
     const fine = mesh(data, sample, 40);
@@ -90,10 +90,17 @@ describe('buildOsmMesh', () => {
     const cx = (b.west + b.east) / 2, cy = (b.south + b.north) / 2;
     const d = (b.east - b.west) * 0.05;
     const hole: [number, number][] = [[cx - d, cy - d], [cx + d, cy - d], [cx + d, cy + d], [cx - d, cy + d], [cx - d, cy - d]];
-    const data: OsmTileData = { areas: [{ rings: [outer, hole], tags: { natural: 'wood' } }], lines: [], points: [], buildings: [] };
+    const data: OsmTileData = { areas: [{ rings: [outer, hole], tags: { natural: 'scrub' } }], lines: [], points: [], buildings: [] };
     const m = mesh(data, flat, 60);
     expect(m.vertexCount).toBeGreaterThan(0);
     for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(RAMP.FOREST);
+  });
+
+  it('skips wood/forest and landuse other than farmland (Landsat colours the terrain)', () => {
+    for (const tags of [{ natural: 'wood' }, { landuse: 'forest' }, { landuse: 'residential' }, { landuse: 'commercial' }, { landuse: 'meadow' }, { landuse: 'grass' }] as Record<string, string>[]) {
+      const data: OsmTileData = { areas: [{ rings: [squareRing()], tags }], lines: [], points: [], buildings: [] };
+      expect(buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount, JSON.stringify(tags)).toBe(0);
+    }
   });
 
   it('returns an empty mesh for unclassifiable data', () => {

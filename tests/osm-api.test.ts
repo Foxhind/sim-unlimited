@@ -18,7 +18,7 @@ const API: OverpassJson = {
     way(102, [5, 6], { highway: 'primary_link', name: 'Link' }),
     way(103, [9, 10], { highway: 'service' }),
     way(104, [1, 2, 3, 4, 1], { barrier: 'fence' }),
-    { type: 'relation', id: 200, members: [{ type: 'way', ref: 104, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'grass' } },
+    { type: 'relation', id: 200, members: [{ type: 'way', ref: 104, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'farmland' } },
     { type: 'relation', id: 201, members: [{ type: 'way', ref: 103, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
   ],
 };
@@ -59,7 +59,7 @@ describe('filterOsmApi', () => {
   it('parses into the same shapes as an Overpass answer', () => {
     const data = parseOverpass(out);
     expect(data.buildings).toHaveLength(1);
-    expect(data.areas.map((a) => a.tags.landuse)).toEqual(['grass']);
+    expect(data.areas.map((a) => a.tags.landuse)).toEqual(['farmland']);
     expect(data.lines.map((l) => l.tags.highway)).toEqual(['primary_link']);
     expect(data.points.map((p) => p.tags.aeroway)).toEqual(['helipad']);
   });
@@ -109,7 +109,7 @@ describe('completeRelations', () => {
     elements: [
       node(1, 0, 0), node(2, 0.001, 0),
       way(300, [1, 2]),
-      { type: 'relation', id: 400, members: [{ type: 'way', ref: 300, role: 'outer' }, { type: 'way', ref: 301, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'grass' } },
+      { type: 'relation', id: 400, members: [{ type: 'way', ref: 300, role: 'outer' }, { type: 'way', ref: 301, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'farmland' } },
       { type: 'relation', id: 401, members: [{ type: 'way', ref: 999, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
     ],
   };

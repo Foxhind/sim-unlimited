@@ -1,6 +1,9 @@
 import { tileBounds, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 
+// Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
+// bare rock, parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
+// other landuse is not fetched.
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -9,14 +12,15 @@ const FULL_FILTER = `
   way["railway"="rail"];
   way["aeroway"~"runway|taxiway|apron|helipad"]; node["aeroway"="helipad"];
   way["natural"~"water|wood|scrub|beach|bare_rock"]; relation["natural"="water"];
+  way["landuse"="forest"]; relation["landuse"="forest"]; relation["natural"="wood"];
   way["waterway"~"river|riverbank|canal"];
-  way["landuse"]; relation["landuse"];
+  way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
 `;
 
 const LARGE_FILTER = `
-  way["natural"~"water|wood"]; relation["natural"~"water|wood"];
-  way["landuse"~"forest|farmland|meadow|grass|residential|industrial"]; relation["landuse"~"forest|farmland|meadow|grass|residential|industrial"];
+  way["natural"="water"]; relation["natural"="water"];
+  way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["waterway"="river"];
   way["aeroway"~"runway|aerodrome"]; relation["aeroway"="aerodrome"];
   way["highway"~"motorway|trunk"];

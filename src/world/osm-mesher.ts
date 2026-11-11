@@ -42,18 +42,12 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
   if (aeroway === 'runway' || aeroway === 'taxiway' || aeroway === 'apron' || aeroway === 'helipad') {
     return { ramp: RAMP.ASPHALT, bias: 1.0, water: false };
   }
-  if (natural === 'wood' || natural === 'scrub' || landuse === 'forest') {
-    return { ramp: RAMP.FOREST, bias: 0.6, water: false };
-  }
+  // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
+  if (natural === 'scrub') return { ramp: RAMP.FOREST, bias: 0.6, water: false };
   if (natural === 'beach') return { ramp: RAMP.SAND, bias: 0.6, water: false };
   if (natural === 'bare_rock' || natural === 'scree') return { ramp: RAMP.ROCK, bias: 0.6, water: false };
-  if (landuse === 'residential' || landuse === 'industrial' || landuse === 'commercial' || landuse === 'retail') {
-    return { ramp: RAMP.CONCRETE, bias: 0.6, water: false };
-  }
-  if (landuse === 'farmland' || landuse === 'meadow' || landuse === 'orchard' || landuse === 'vineyard') {
-    return { ramp: RAMP.FIELD, bias: 0.6, water: false };
-  }
-  if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course' || leisure === 'pitch' || landuse === 'grass') {
+  if (landuse === 'farmland') return { ramp: RAMP.FIELD, bias: 0.6, water: false };
+  if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course' || leisure === 'pitch') {
     return { ramp: RAMP.GRASS, bias: 0.6, water: false };
   }
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
