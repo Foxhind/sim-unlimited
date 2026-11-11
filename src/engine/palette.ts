@@ -249,6 +249,7 @@ export function buildLUT(p: PaletteParams): Uint8Array {
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
+  for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
   for (let v = 0; v < 256; v++) {
     const base = (TERRAIN_RAMP_BASE + v) * RAMP_STEPS;
     const light = scaleRGB(vgaShade(VGA_PALETTE[v], LIT_STEPS - 1), p);
@@ -260,6 +261,44 @@ export function buildLUT(p: PaletteParams): Uint8Array {
     }
   }
   return lut;
+}
+
+/**
+ * Fixed light colours kept in the tail of the sky ramp (the sky shader uses steps 0..8 only).
+ * They are written unscaled, so they glow the same by day and by night.
+ */
+export const LIGHT = {
+  WINDOW_YELLOW: RAMP.SKY * RAMP_STEPS + 10,
+  WINDOW_WHITE: RAMP.SKY * RAMP_STEPS + 11,
+  RED: RAMP.SKY * RAMP_STEPS + 12,
+  /** sun disc and its halo: white by day, yellow when low (applySunColors) */
+  SUN_HALO: RAMP.SKY * RAMP_STEPS + 13,
+  SUN: RAMP.SKY * RAMP_STEPS + 14,
+} as const;
+const LIGHT_COLORS: [number, RGB][] = [
+  [LIGHT.WINDOW_YELLOW, [255, 204, 72]],
+  [LIGHT.WINDOW_WHITE, [236, 240, 255]],
+  [LIGHT.RED, [255, 24, 16]],
+];
+
+const SUN_DAY: RGB = [255, 255, 255];
+const SUN_HALO_DAY: RGB = [212, 224, 240];
+const SUN_LOW: RGB = [255, 224, 64];
+const SUN_HALO_LOW: RGB = [255, 160, 32];
+/** fully yellow up to this sun elevation, fully white from SUN_WHITE_DEG */
+const SUN_YELLOW_DEG = 10;
+const SUN_WHITE_DEG = 20;
+
+/** sun disc and halo colours: yellow in the morning and evening (low sun), white by day */
+export function sunColors(sunElevationDeg: number): { sun: RGB; halo: RGB } {
+  const t = Math.max(0, Math.min(1, (sunElevationDeg - SUN_YELLOW_DEG) / (SUN_WHITE_DEG - SUN_YELLOW_DEG)));
+  return { sun: lerpRGB(SUN_LOW, SUN_DAY, t), halo: lerpRGB(SUN_HALO_LOW, SUN_HALO_DAY, t) };
+}
+
+export function applySunColors(lut: Uint8Array, sunElevationDeg: number): void {
+  const { sun, halo } = sunColors(sunElevationDeg);
+  writeEntry(lut, LIGHT.SUN, sun);
+  writeEntry(lut, LIGHT.SUN_HALO, halo);
 }
 
 export function rampIndex(ramp: number, step: number): number {

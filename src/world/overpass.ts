@@ -16,6 +16,7 @@ const FULL_FILTER = `
   way["waterway"~"river|riverbank|canal"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
+  node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
 `;
 
 const LARGE_FILTER = `

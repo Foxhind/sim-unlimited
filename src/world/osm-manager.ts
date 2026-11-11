@@ -28,6 +28,12 @@ interface OsmChunk {
   dots?: PropSet;
   trees?: PropSet;
   lights?: PropSet;
+  /** night: lit windows (near), building lights (far), mast beacons (any distance) */
+  windows?: PropSet;
+  nightDots?: PropSet;
+  beacons?: PropSet;
+  /** masts beyond the building radius: vertical GL lines */
+  mastLines?: PropSet;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   offset: vec3;
@@ -45,6 +51,10 @@ interface MeshPayload {
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
+  windows: ArrayBuffer;
+  nightDots: ArrayBuffer;
+  beacons: ArrayBuffer;
+  mastLines: ArrayBuffer;
   runways: number;
 }
 
@@ -90,7 +100,9 @@ export class OsmManager {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
             bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), dots: buf(msg.dots),
-            trees: buf(msg.trees), lights: buf(msg.lights), runways: msg.runways ?? 0,
+            trees: buf(msg.trees), lights: buf(msg.lights),
+            windows: buf(msg.windows), nightDots: buf(msg.nightDots),
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), runways: msg.runways ?? 0,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -111,7 +123,10 @@ export class OsmManager {
       if (c.status === 'pending') pending++;
       if (c.status === 'error') errors++;
     }
-    for (const c of this.renderList) draws += (c.mesh ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0);
+    for (const c of this.renderList) {
+      draws += (c.mesh ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0) +
+        (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0);
+    }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
 
@@ -253,6 +268,10 @@ export class OsmManager {
     chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps);
     chunk.dots = this.points(chunk, data.dots);
     chunk.lights = this.points(chunk, data.lights);
+    chunk.windows = this.points(chunk, data.windows);
+    chunk.nightDots = this.points(chunk, data.nightDots);
+    chunk.beacons = this.points(chunk, data.beacons);
+    chunk.mastLines = this.points(chunk, data.mastLines);
     if (data.trees.byteLength > 0) {
       const count = data.trees.byteLength / 20;
       const vao = must(gl.createVertexArray(), 'tree VAO');
@@ -291,6 +310,7 @@ export class OsmManager {
     chunk.vaos = [];
     chunk.mesh = chunk.bmesh = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
+    chunk.windows = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
   }
 
   draw(
@@ -311,9 +331,19 @@ export class OsmManager {
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       if (slant < HOUSE_RADIUS_M) {
         if (c.bmesh) renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
-      } else if (c.dots) {
-        // far buildings: fat roof-coloured dots at their centroids
-        renderer.drawLights(c.dots.vao, c.dots.count, c.offset, view, proj, camPos, pointSize * 1.5, true);
+        if (c.windows && lightsOn) {
+          renderer.drawLights(c.windows.vao, c.windows.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
+        }
+      } else {
+        // far buildings: fat dots at their centroids, roof-coloured by day, yellow/white lights by night
+        const dots = lightsOn ? c.nightDots : c.dots;
+        if (dots) renderer.drawLights(dots.vao, dots.count, c.offset, view, proj, camPos, pointSize * (lightsOn ? 1 : 1.5), true);
+        if (c.mastLines) {
+          renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
+        }
+      }
+      if (c.beacons && lightsOn) {
+        renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
         renderer.drawTrees(c.trees.vao, c.trees.count, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);

@@ -19,11 +19,18 @@ export interface CachedMesh {
   bVertices?: ArrayBuffer;
   bRamps?: ArrayBuffer;
   dots?: ArrayBuffer;
+  /** OSM tiles, night: lit windows (near), building night dots (far), mast lines (far), mast beacons */
+  windows?: ArrayBuffer;
+  nightDots?: ArrayBuffer;
+  mastLines?: ArrayBuffer;
+  beacons?: ArrayBuffer;
 }
 
-export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots'>): number {
+type MeshBuffers = 'vertices' | 'ramps' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons';
+export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
-    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0);
+    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
+    (m.windows?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0);
 }
 
 export interface CacheEntryMeta {

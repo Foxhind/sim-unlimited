@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { LUT_SIZE, applyFlameColors, buildLUT, paletteAt } from './engine/palette';
+import { LUT_SIZE, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -101,6 +101,7 @@ const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg));
+applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_SIZE * 4).fill(255);
 let lastSunUpdate = 0;
 let previewKey = '';
@@ -125,6 +126,7 @@ function updateLight(): void {
     vec3.normalize(lightDir, lightDir);
   }
   lut = buildLUT(paletteAt(sun.elevationDeg));
+  applySunColors(lut, sun.elevationDeg);
 }
 
 function startLocation(fc: { location: string; customPoint: LatLon | null }): LatLon {

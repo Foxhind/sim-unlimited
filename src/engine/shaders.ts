@@ -5,6 +5,8 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
+import { LIGHT } from './palette';
+
 export const DEPTH_FAR = 200000;
 const LOG_DEPTH_FS = `
 in float vLogW;
@@ -112,13 +114,17 @@ export const POINTS_FS = `#version 300 es
 precision highp float;
 flat in uint vIndex;
 uniform int uOn;
+/** 1: round points; 0: GL lines (gl_PointCoord is undefined for lines) */
+uniform int uRound;
 out uint oIndex;
 ${LOG_DEPTH_FS}
 void main() {
   if (uOn == 0) discard;
   writeLogDepth();
-  vec2 c = gl_PointCoord - 0.5;
-  if (dot(c, c) > 0.25) discard;
+  if (uRound == 1) {
+    vec2 c = gl_PointCoord - 0.5;
+    if (dot(c, c) > 0.25) discard;
+  }
   oIndex = vIndex;
 }
 `;
@@ -165,9 +171,9 @@ void main() {
   }
   float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
   if (ang < 0.018) {
-    idx = 208u + 15u;
+    idx = ${LIGHT.SUN}u;
   } else if (ang < 0.045) {
-    idx = 208u + 11u;
+    idx = ${LIGHT.SUN_HALO}u;
   }
   oIndex = idx;
 }

@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { RAMP, TERRAIN_RAMP_BASE, nearestVga, rampIndex, type RGB } from '../engine/palette';
+import { LIGHT, RAMP, TERRAIN_RAMP_BASE, nearestVga, rampIndex, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -392,4 +392,127 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     out.push(e, Math.max(0, sampleHeight(lon, lat)) + h.min + h.wall + h.roof, -n, rampIndex(roofRamp(b.tags), 9));
   }
   return new Float32Array(out);
+}
+
+/** buildings that nobody lives or works in stay dark at night */
+const UNLIT_TYPES = new Set([
+  'garage', 'garages', 'carport', 'shed', 'hut', 'cabin', 'roof', 'barn', 'greenhouse', 'storage_tank',
+  'silo', 'transformer_tower', 'service', 'ruins', 'construction', 'bunker', 'kiosk', 'toilets',
+]);
+export function isLitBuilding(tags: Record<string, string>): boolean {
+  return !UNLIT_TYPES.has(tags['building:part'] || tags.building || 'yes');
+}
+
+/** taller than this (top above ground), a building carries red obstruction lights on its roof */
+export const TALL_BUILDING_M = 50;
+const WINDOW_SPACING_M = 4;
+const FLOOR_M = 3;
+const WINDOW_LIT_SHARE = 0.3;
+const WINDOW_YELLOW_SHARE = 0.7;
+/** windows stand off the wall so the depth test keeps them in front of it */
+const WINDOW_OFFSET_M = 0.4;
+const MAX_WINDOWS_PER_BUILDING = 600;
+const MAX_WINDOWS_PER_TILE = 80000;
+
+/** deterministic 0..1 hash of a position (lights do not reshuffle when a tile is rebuilt) */
+function hash01(x: number, y: number, z: number): number {
+  let h = Math.imul(Math.round(x * 10) | 0, 73856093) ^ Math.imul(Math.round(y * 10) | 0, 19349663) ^ Math.imul(Math.round(z * 10) | 0, 83492791);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+const windowColour = (r: number) => (r < WINDOW_YELLOW_SHARE ? LIGHT.WINDOW_YELLOW : LIGHT.WINDOW_WHITE);
+
+export interface NightLights {
+  /** near (with the building mesh): lit windows on the walls, red lights on the roof corners of tall buildings */
+  windows: Float32Array;
+  /** far (instead of the roof-coloured dots): one yellow or white dot per building, red at roof height for tall ones */
+  dots: Float32Array;
+}
+
+/**
+ * Night lights of buildings; per point x, y, z (tile-centre ENU), palette index, like buildingDots.
+ * Windows: every 4 m along each outer wall on every 3 m floor, about a third of them lit, mostly yellow.
+ */
+export function buildingNightLights(buildings: OsmBuilding[], tile: Tile, sampleHeight: HeightSampler): NightLights {
+  const center = tileCenter(tile);
+  const windows: number[] = [];
+  const dots: number[] = [];
+  const toXZ = (ll: LonLat): XZ => {
+    const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
+    return [e, -n];
+  };
+
+  for (const b of buildings) {
+    const ringLL = b.rings[0];
+    if (!ringLL?.length) continue;
+    const ring = ringLL.map(toXZ);
+    // drop the closing duplicate
+    if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
+    if (ring.length < 3) continue;
+    const h = computeHeights(b.tags);
+    let minTerrain = Infinity;
+    for (const [x, z] of ring) {
+      const ll = enuToLatLon(center, x, -z, 0);
+      minTerrain = Math.min(minTerrain, sampleHeight(ll.lon, ll.lat));
+    }
+    const base = Math.max(minTerrain, 0);
+    const wallBase = base + h.min;
+    const roofTop = wallBase + h.wall + h.roof;
+    const cx = ring.reduce((s, p) => s + p[0], 0) / ring.length;
+    const cz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+    const tall = h.min + h.wall + h.roof > TALL_BUILDING_M;
+    const lit = isLitBuilding(b.tags) && b.tags.building !== 'roof';
+
+    if (lit) {
+      const r = hash01(cx, wallBase, cz);
+      dots.push(cx, wallBase + h.wall * 0.5, cz, windowColour(hash01(cz, r, cx)));
+    }
+    if (tall) dots.push(cx, roofTop, cz, LIGHT.RED);
+
+    if (lit && h.wall >= 2.5 && windows.length / 4 < MAX_WINDOWS_PER_TILE) {
+      const floors = Math.max(1, Math.floor(h.wall / FLOOR_M));
+      let count = 0;
+      for (let i = 0; i < ring.length && count < MAX_WINDOWS_PER_BUILDING; i++) {
+        const a = ring[i];
+        const c = ring[(i + 1) % ring.length];
+        const ex = c[0] - a[0], ez = c[1] - a[1];
+        const len = Math.hypot(ex, ez);
+        if (len < WINDOW_SPACING_M * 0.75) continue;
+        // outward normal: away from the centroid
+        let nx = ez / len, nz = -ex / len;
+        if (nx * ((a[0] + c[0]) / 2 - cx) + nz * ((a[1] + c[1]) / 2 - cz) < 0) { nx = -nx; nz = -nz; }
+        const slots = Math.max(1, Math.floor(len / WINDOW_SPACING_M));
+        for (let f = 0; f < floors && count < MAX_WINDOWS_PER_BUILDING; f++) {
+          const y = wallBase + (f + 0.5) * (h.wall / floors);
+          for (let k = 0; k < slots && count < MAX_WINDOWS_PER_BUILDING; k++) {
+            const t = (k + 0.5) / slots;
+            const x = a[0] + ex * t + nx * WINDOW_OFFSET_M;
+            const z = a[1] + ez * t + nz * WINDOW_OFFSET_M;
+            const r = hash01(x, y, z);
+            if (r >= WINDOW_LIT_SHARE) continue;
+            windows.push(x, y, z, windowColour(r / WINDOW_LIT_SHARE));
+            count++;
+          }
+        }
+      }
+    }
+
+    if (tall) {
+      // the outermost corners of the footprint, just above the roof
+      const ext = new Set<XZ>();
+      for (const [sx, sz] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        let best = ring[0], bv = -Infinity;
+        for (const p of ring) {
+          const v = sx * (p[0] - cx) + sz * (p[1] - cz);
+          if (v > bv) { bv = v; best = p; }
+        }
+        ext.add(best);
+      }
+      // on the eaves of a pitched roof (its ridge is not at the corners)
+      for (const p of ext) windows.push(p[0], wallBase + h.wall + 0.5, p[1], LIGHT.RED);
+    }
+  }
+  return { windows: new Float32Array(windows), dots: new Float32Array(dots) };
 }

@@ -2,7 +2,8 @@ import { RetryableError } from '../engine/queue';
 import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
-import { buildBuildingMesh, buildingDots } from '../world/building-mesher';
+import { buildBuildingMesh, buildingDots, buildingNightLights } from '../world/building-mesher';
+import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
@@ -15,7 +16,7 @@ import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { loadLandsatTerrain } from '../world/landsat-process';
 
-export const OSM_MESH_SCHEMA = 11;
+export const OSM_MESH_SCHEMA = 12;
 
 export interface OsmRequest {
   type: 'osm';
@@ -36,6 +37,12 @@ export interface OsmMeshResponse {
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
+  /** night: lit windows and roof obstruction lights (near), building lights (far), mast beacons (any distance) */
+  windows: ArrayBuffer;
+  nightDots: ArrayBuffer;
+  beacons: ArrayBuffer;
+  /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
+  mastLines: ArrayBuffer;
   runways: number;
 }
 
@@ -64,12 +71,28 @@ async function runwayCount(tile: Tile): Promise<number> {
   }
 }
 
+function concatF32(a: Float32Array, b: Float32Array): Float32Array {
+  const out = new Float32Array(a.length + b.length);
+  out.set(a);
+  out.set(b, a.length);
+  return out;
+}
+function concatU16(a: Uint16Array, b: Uint16Array): Uint16Array {
+  const out = new Uint16Array(a.length + b.length);
+  out.set(a);
+  out.set(b, a.length);
+  return out;
+}
+
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
   const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/${detail}`;
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
-    ctx.postMessage(res, [res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights]);
+    ctx.postMessage(res, [
+      res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights,
+      res.windows, res.nightDots, res.beacons, res.mastLines,
+    ]);
   };
   const empty = () => new ArrayBuffer(0);
   try {
@@ -79,6 +102,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         vertices: cached.vertices, ramps: cached.ramps,
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
+        windows: cached.windows ?? empty(), nightDots: cached.nightDots ?? empty(),
+        beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         runways: detail === 'full' ? await runwayCount(tile) : 0,
       });
       return;
@@ -106,14 +131,24 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
     };
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, buildings: false });
-    const own = clipTileData(data, tile).buildings;
-    const bmesh = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });
+    const clipped = clipTileData(data, tile);
+    const own = clipped.buildings;
+    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });
+    // antenna trusses are drawn with the buildings (near), as lines far away
+    const masts = buildMasts(clipped.points, tile, drape);
+    const bmesh = {
+      vertices: concatF32(houses.vertices, masts.vertices),
+      ramps: concatU16(houses.ramps, masts.ramps),
+    };
     const dotData = buildingDots(own, tile, drape);
+    const night = buildingNightLights(own, tile, drape);
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, dots: dotData.slice().buffer,
       trees: props.trees.slice().buffer, lights: props.lights.slice().buffer,
+      windows: night.windows.slice().buffer, nightDots: night.dots.slice().buffer,
+      beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
     };
     await putCachedMesh({ key, ts: Date.now(), ...out });
     send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });

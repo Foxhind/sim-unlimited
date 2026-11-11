@@ -90,7 +90,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir']);
@@ -237,7 +237,7 @@ export class Renderer {
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, count);
   }
 
-  /** Q7: fixed-screen-size emissive points; depth-tested but no depth writes. */
+  /** Q7: fixed-screen-size emissive points (or 1 px GL lines: vertex pairs); depth-tested but no depth writes. */
   drawLights(
     vao: WebGLVertexArrayObject,
     count: number,
@@ -247,11 +247,13 @@ export class Renderer {
     camPos: vec3,
     pointSize: number,
     on: boolean,
+    mode: 'points' | 'lines' = 'points',
   ): void {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(false);
     gl.useProgram(this.pointsProg);
+    gl.uniform1i(this.pointsU.uRound, mode === 'points' ? 1 : 0);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);
     gl.uniformMatrix4fv(this.pointsU.uProj, false, proj);
     gl.uniform3fv(this.pointsU.uOffset, offset);
@@ -259,7 +261,7 @@ export class Renderer {
     gl.uniform1f(this.pointsU.uPointSize, pointSize);
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
     gl.bindVertexArray(vao);
-    gl.drawArrays(gl.POINTS, 0, count);
+    gl.drawArrays(mode === 'points' ? gl.POINTS : gl.LINES, 0, count);
     gl.depthMask(true);
   }
 
