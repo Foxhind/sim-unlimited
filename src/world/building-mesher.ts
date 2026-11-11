@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { RAMP, TERRAIN_RAMP_BASE, nearestVga, type RGB } from '../engine/palette';
+import { RAMP, TERRAIN_RAMP_BASE, nearestVga, rampIndex, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -372,4 +372,24 @@ function roofDirection(tags: Record<string, string>): XZ {
 
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
+}
+/**
+ * Far stand-in for buildings: one point per building at its centroid, at roof-top height, in its
+ * roof colour (lit step 9). Per point: x, y, z (tile-centre ENU like the meshes), palette index.
+ */
+export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight: HeightSampler): Float32Array {
+  const center = tileCenter(tile);
+  const out: number[] = [];
+  for (const b of buildings) {
+    const ring = b.rings[0];
+    if (!ring?.length) continue;
+    let lon = 0, lat = 0;
+    for (const [lo, la] of ring) { lon += lo; lat += la; }
+    lon /= ring.length;
+    lat /= ring.length;
+    const h = computeHeights(b.tags);
+    const [e, n] = latLonToEnu(center, lat, lon, 0);
+    out.push(e, Math.max(0, sampleHeight(lon, lat)) + h.min + h.wall + h.roof, -n, rampIndex(roofRamp(b.tags), 9));
+  }
+  return new Float32Array(out);
 }

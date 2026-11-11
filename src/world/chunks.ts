@@ -5,6 +5,7 @@ import { must } from '../engine/gl';
 import {
   enuToLatLon,
   latLonToEnu,
+  tileBounds,
   tileCenter,
   tileForLatLon,
   tileSizeMeters,
@@ -19,6 +20,13 @@ export const REBASE_DISTANCE_M = 5000;
 const LOD_FACTOR = 1.7;
 const ALT_WEIGHT = 1.5;
 const UNLOAD_DELAY_MS = 10000;
+const RETRY_DELAY_MS = 5000;
+/**
+ * Two tile variants: coarse terrain without OSM (z8–z13 by distance) and detailed z14 terrain
+ * with OSM, used within this slant distance of the camera.
+ */
+export const DETAIL_RADIUS_M = 7000;
+export const DETAIL_Z = 14;
 
 /** Work-lattice resolution on which terrain contours are traced (not the mesh density). */
 export const TERRAIN_GRID = 48;
@@ -34,9 +42,10 @@ function horizontalDistance(a: LatLon, b: LatLon): number {
 }
 
 /**
- * Quadtree chunked LOD: subdivide while the distance metric (horizontal
- * distance plus weighted altitude, minimized over camera and velocity
- * lookahead) is below LOD_FACTOR × tile size.
+ * Quadtree chunked LOD. Coarse levels (up to z13) subdivide while the distance metric (horizontal
+ * distance plus weighted altitude, minimized over camera and velocity lookahead) is below
+ * LOD_FACTOR × tile size; detailed z14 tiles (with OSM) are used exactly where a tile comes
+ * within DETAIL_RADIUS_M slant distance (nearest point of the tile, altitude included).
  */
 export function selectLeaves(cam: LatLon, alt: number, lookahead?: LatLon): Tile[] {
   const leaves: Tile[] = [];
@@ -54,7 +63,15 @@ export function selectLeaves(cam: LatLon, alt: number, lookahead?: LatLon): Tile
     let d = horizontalDistance(cam, center);
     if (lookahead) d = Math.min(d, horizontalDistance(lookahead, center));
     const metric = Math.hypot(d, alt * ALT_WEIGHT);
-    if (t.z < MAX_Z && metric < size * LOD_FACTOR) {
+    // nearest point of the tile (camera or lookahead), slant with the altitude
+    const b = tileBounds(t);
+    const near = (p: LatLon) => horizontalDistance(p, {
+      lat: Math.max(b.south, Math.min(b.north, p.lat)),
+      lon: Math.max(b.west, Math.min(b.east, p.lon)),
+    });
+    const dn = lookahead ? Math.min(near(cam), near(lookahead)) : near(cam);
+    const detail = Math.hypot(dn, alt) < DETAIL_RADIUS_M;
+    if (detail ? t.z < DETAIL_Z : t.z < DETAIL_Z - 1 && metric < size * LOD_FACTOR) {
       for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
         visit({ z: t.z + 1, x: (t.x * 2 + dx) % (2 ** (t.z + 1)), y: t.y * 2 + dy });
       }
@@ -69,6 +86,28 @@ export function selectLeaves(cam: LatLon, alt: number, lookahead?: LatLon): Tile
     }
   }
   return leaves;
+}
+
+/**
+ * Which tiles to draw for a set of leaves: each leaf, or while it is not ready its nearest ready
+ * ancestor. A tile that stands in for one leaf covers its whole area, so its descendants that are
+ * ready for other leaves are not drawn with it (`drawn: false`) — no overlap, no mixed variants.
+ */
+export function shownTiles(leaves: Tile[], ready: (t: Tile) => boolean): Array<{ tile: Tile; drawn: boolean }> {
+  const shown = new Map<string, Tile>();
+  for (const leaf of leaves) {
+    for (let t: Tile | undefined = leaf; t; t = t.z > MIN_Z ? { z: t.z - 1, x: t.x >> 1, y: t.y >> 1 } : undefined) {
+      if (ready(t)) {
+        shown.set(`${t.z}/${t.x}/${t.y}`, t);
+        break;
+      }
+    }
+  }
+  return [...shown.values()].map((t) => {
+    let covered = false;
+    for (let z = t.z - 1; z >= MIN_Z && !covered; z--) covered = shown.has(`${z}/${t.x >> (t.z - z)}/${t.y >> (t.z - z)}`);
+    return { tile: t, drawn: !covered };
+  });
 }
 
 /** Six frustum planes from a view-projection matrix (Gribble–Hartmann). */
@@ -111,6 +150,7 @@ export interface Chunk {
   centerEnu: vec3;
   radius: number;
   lastUsed: number;
+  lastAttempt: number;
 }
 
 export interface CameraWorld {
@@ -131,6 +171,10 @@ export class ChunkManager {
   readonly chunks = new Map<string, Chunk>();
   origin: LatLon;
   renderList: Chunk[] = [];
+  /** z14 leaves wanted this frame: the detailed tiles whose OSM must load */
+  detailTiles: Tile[] = [];
+  /** z14 tiles drawn this frame (terrain and OSM both ready): only these show their OSM */
+  shownDetail = new Set<string>();
   private queue = new RequestQueue(4);
   private workers: WorkerSlot[] = [];
   private rr = 0;
@@ -187,7 +231,12 @@ export class ChunkManager {
     vec3.copy(c.offset, c.centerEnu);
   }
 
-  update(cam: CameraWorld, view: mat4, proj: mat4, now: number): void {
+  /**
+   * `detailReady(key)` says whether the OSM of a z14 tile is loaded: a detailed tile is shown only
+   * with all its data; until then its coarse ancestor stands in, and a tile shown whole is never
+   * drawn together with parts of itself.
+   */
+  update(cam: CameraWorld, view: mat4, proj: mat4, now: number, detailReady: (key: string) => boolean = () => true): void {
     mat4.multiply(this.vp, proj, view);
     this.planes = frustumPlanes(this.vp);
 
@@ -202,11 +251,25 @@ export class ChunkManager {
         : undefined;
 
     const leaves = selectLeaves(cam.latLon, cam.alt, lookahead);
+    this.detailTiles = leaves.filter((t) => t.z === DETAIL_Z);
+    // every detailed tile also loads its coarse parent: it stands in until the detail is complete
+    const wanted = [...leaves];
+    const parents = new Set<string>();
+    for (const t of this.detailTiles) {
+      const p = { z: t.z - 1, x: t.x >> 1, y: t.y >> 1 };
+      const k = `${p.z}/${p.x}/${p.y}`;
+      if (!parents.has(k)) { parents.add(k); wanted.push(p); }
+    }
     const needed = new Set<string>();
-    for (const tile of leaves) {
+    for (const tile of wanted) {
       const key = `${tile.z}/${tile.x}/${tile.y}`;
       needed.add(key);
       let chunk = this.chunks.get(key);
+      if (chunk?.status === 'error' && now - chunk.lastAttempt > RETRY_DELAY_MS) {
+        // imagery or DEM was unreachable: try again
+        this.chunks.delete(key);
+        chunk = undefined;
+      }
       if (!chunk) {
         chunk = {
           tile,
@@ -218,6 +281,7 @@ export class ChunkManager {
           centerEnu: vec3.create(),
           radius: tileSizeMeters(tile),
           lastUsed: now,
+          lastAttempt: now,
         };
         this.refreshOffset(chunk);
         this.chunks.set(key, chunk);
@@ -228,29 +292,27 @@ export class ChunkManager {
           .then((data) => this.upload(chunk!, data))
           .catch(() => {
             chunk!.status = 'error';
+            chunk!.lastAttempt = performance.now();
           });
       }
       if (chunk.status === 'ready') chunk.lastUsed = now;
     }
 
-    // render leaves, falling back to the nearest ready ancestor while children load
-    const list: Chunk[] = [];
+    // render leaves, falling back to the nearest ready ancestor while children load; a z14 leaf
+    // is ready only with its OSM. A tile shown whole hides any of its descendants shown too.
     const seen = new Set<string>();
-    for (const tile of leaves) {
-      let t: Tile | undefined = tile;
-      while (t) {
-        const c = this.chunks.get(`${t.z}/${t.x}/${t.y}`);
-        if (c?.status === 'ready') {
-          if (!seen.has(c.key)) {
-            seen.add(c.key);
-            list.push(c);
-            c.lastUsed = now;
-          }
-          break;
-        }
-        t = t.z > MIN_Z ? { z: t.z - 1, x: t.x >> 1, y: t.y >> 1 } : undefined;
-      }
+    const list: Chunk[] = [];
+    const isReady = (t: Tile) => {
+      const c = this.chunks.get(`${t.z}/${t.x}/${t.y}`);
+      return c?.status === 'ready' && (t.z !== DETAIL_Z || detailReady(c.key));
+    };
+    for (const { tile: t, drawn } of shownTiles(leaves, isReady)) {
+      const c = this.chunks.get(`${t.z}/${t.x}/${t.y}`)!;
+      seen.add(c.key); // keep loaded either way
+      c.lastUsed = now;
+      if (drawn) list.push(c);
     }
+    this.shownDetail = new Set(list.filter((c) => c.tile.z === DETAIL_Z).map((c) => c.key));
 
     // planes come from proj*view where view is a full lookAt (translation included): they live in
     // the same world frame as centerEnu, so the sphere centre must NOT be made camera-relative

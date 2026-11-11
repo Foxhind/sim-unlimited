@@ -61,18 +61,18 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         // corrupt raw cache: fall back to unflattened relief
       }
     }
-    // Landsat: colour boundaries shape the TIN and faces take the imagery colour; without imagery
-    // fall back to the plain TIN with height/slope colours and do not cache, so the tile is rebuilt
-    // (and matches the OSM drape and collision surface) once the imagery is reachable
+    // Landsat: colour boundaries shape the TIN and faces take the imagery colour. A tile is shown
+    // only with all its data: without imagery it fails as retryable and is requested again later.
     const ls = await loadLandsatTerrain(tile, grid);
+    if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
     const mesh = buildTerrainMesh({
       tile, grid, heights, borders,
-      faceColor: ls?.faceColor,
-      colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined,
+      faceColor: ls.faceColor,
+      colourLines: { lines: ls.lines, maxVerts: ls.maxVerts },
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
-    if (ls) await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
+    await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
     const res: MeshResponse = { type: 'mesh', id, vertices, ramps };
     ctx.postMessage(res, [vertices, ramps]);
   } catch (err) {

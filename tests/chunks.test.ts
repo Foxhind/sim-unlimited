@@ -102,3 +102,30 @@ describe('gridForZoom', () => {
     expect(gridForZoom(8)).toBe(48);
   });
 });
+describe('two tile variants', () => {
+  it('detailed z14 tiles only within the detail radius, coarse z ≤ 13 beyond', async () => {
+    const { DETAIL_RADIUS_M, DETAIL_Z } = await import('../src/world/chunks');
+    const leaves = selectLeaves(INNSBRUCK, 1000);
+    const detail = leaves.filter((t) => t.z === DETAIL_Z);
+    expect(detail.length).toBeGreaterThan(10);
+    // the radius is met at tile granularity: siblings of a z14 tile inside it come along (≤ one z13 tile more)
+    for (const t of detail) expect(distKm(t, INNSBRUCK.lat, INNSBRUCK.lon)).toBeLessThan(DETAIL_RADIUS_M / 1000 + 4.8) // + a z13 diagonal
+    for (const t of leaves.filter((l) => l.z < DETAIL_Z)) expect(distKm(t, INNSBRUCK.lat, INNSBRUCK.lon)).toBeGreaterThan(DETAIL_RADIUS_M / 1000 - 1);
+    expect(selectLeaves(INNSBRUCK, 9000).some((t) => t.z === DETAIL_Z)).toBe(false);
+  });
+
+  it('a leaf that is not ready shows its coarse ancestor, which then hides its ready siblings', async () => {
+    const { shownTiles } = await import('../src/world/chunks');
+    const p = { z: 13, x: 100, y: 200 };
+    const kids = [0, 1, 2, 3].map((k) => ({ z: 14, x: 200 + (k & 1), y: 400 + (k >> 1) }));
+    const key = (t: Tile) => `${t.z}/${t.x}/${t.y}`;
+    const ready = new Set([key(p), key(kids[0]), key(kids[1]), key(kids[2])]); // kid 3 waits for OSM
+    const out = shownTiles(kids, (t) => ready.has(key(t)));
+    expect(out.filter((o) => o.drawn).map((o) => key(o.tile))).toEqual([key(p)]);
+    ready.add(key(kids[3]));
+    const done = shownTiles(kids, (t) => ready.has(key(t)));
+    expect(done.filter((o) => o.drawn).map((o) => key(o.tile)).sort()).toEqual(kids.map(key).sort());
+    // nothing ready at all: nothing drawn
+    expect(shownTiles(kids, () => false)).toEqual([]);
+  });
+});

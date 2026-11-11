@@ -2,6 +2,8 @@ import { RetryableError } from '../engine/queue';
 import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
+import { buildBuildingMesh, buildingDots } from '../world/building-mesher';
+import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
@@ -13,7 +15,7 @@ import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { loadLandsatTerrain } from '../world/landsat-process';
 
-export const OSM_MESH_SCHEMA = 10;
+export const OSM_MESH_SCHEMA = 11;
 
 export interface OsmRequest {
   type: 'osm';
@@ -25,8 +27,13 @@ export interface OsmRequest {
 export interface OsmMeshResponse {
   type: 'mesh';
   id: number;
+  /** drape: areas, roads, points */
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** buildings (near) and their dots (far: x, y, z, palette index) */
+  bVertices: ArrayBuffer;
+  bRamps: ArrayBuffer;
+  dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
   runways: number;
@@ -60,14 +67,20 @@ async function runwayCount(tile: Tile): Promise<number> {
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
   const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/${detail}`;
+  const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
+    const res: OsmMeshResponse = { type: 'mesh', id, ...m };
+    ctx.postMessage(res, [res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights]);
+  };
+  const empty = () => new ArrayBuffer(0);
   try {
     const cached = await getCachedMesh(key);
     if (cached) {
-      const runways = detail === 'full' ? await runwayCount(tile) : 0;
-      const trees = cached.trees ?? new ArrayBuffer(0);
-      const lights = cached.lights ?? new ArrayBuffer(0);
-      const res: OsmMeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, trees, lights, runways };
-      ctx.postMessage(res, [res.vertices, res.ramps, trees, lights]);
+      send({
+        vertices: cached.vertices, ramps: cached.ramps,
+        bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), dots: cached.dots ?? empty(),
+        trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
+        runways: detail === 'full' ? await runwayCount(tile) : 0,
+      });
       return;
     }
     const data = await source.fetch(tile, detail);
@@ -77,35 +90,33 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // Q40: one shared lattice surface (runway-flattened for 'full') → the same isoline TIN the terrain mesh renders
     const { heights: lattice, borders } = await decodePngToTile(png, grid);
     if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
-    // the same TIN as the terrain mesh, Landsat colour boundaries included
+    // the same TIN as the terrain mesh, Landsat colour boundaries included; a tile is shown only
+    // with all its data, so without imagery fail as retryable like the terrain worker
     const ls = await loadLandsatTerrain(tile, grid);
-    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined });
+    if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
+    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts } });
     const drape = tinSampler(tin, tile);
     // foliage: the colour of the land face under the tree, pulled to the nearest green VGA colour
-    let treeRamp: ((lon: number, lat: number) => number) | undefined;
-    if (ls) {
-      const locate = tinLocator(tin, tile);
-      treeRamp = (lon, lat) => {
-        const r = locate(lon, lat);
-        if (!r) return RAMP.FOREST;
-        const t = tin.tris[r.tri];
-        const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
-        return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
-      };
-    }
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape });
+    const locate = tinLocator(tin, tile);
+    const treeRamp = (lon: number, lat: number) => {
+      const r = locate(lon, lat);
+      if (!r) return RAMP.FOREST;
+      const t = tin.tris[r.tri];
+      const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
+      return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
+    };
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, buildings: false });
+    const own = clipTileData(data, tile).buildings;
+    const bmesh = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });
+    const dotData = buildingDots(own, tile, drape);
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
-    const vertices = mesh.vertices.slice().buffer;
-    const ramps = mesh.ramps.slice().buffer;
-    const trees = props.trees.slice().buffer;
-    const lights = props.lights.slice().buffer;
-    // without imagery the drape is the plain TIN: do not cache it (see terrain.worker)
-    if (ls && (mesh.vertexCount > 0 || props.trees.length > 0 || props.lights.length > 0)) {
-      await putCachedMesh({ key, ts: Date.now(), vertices, ramps, trees, lights });
-    }
-    const runways = data.lines.filter((l) => l.tags.aeroway === 'runway').length;
-    const res: OsmMeshResponse = { type: 'mesh', id, vertices, ramps, trees, lights, runways };
-    ctx.postMessage(res, [vertices, ramps, trees, lights]);
+    const out = {
+      vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
+      bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, dots: dotData.slice().buffer,
+      trees: props.trees.slice().buffer, lights: props.lights.slice().buffer,
+    };
+    await putCachedMesh({ key, ts: Date.now(), ...out });
+    send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
   } catch (err) {
     const res: OsmErrorResponse = {
       type: 'error',

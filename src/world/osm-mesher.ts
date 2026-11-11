@@ -14,6 +14,8 @@ export interface OsmMeshOptions {
   sampleHeight: HeightSampler;
   /** Max horizontal triangle edge before subdivision; defaults from tile size. */
   maxEdgeMeters?: number;
+  /** include building geometry (default true); the game builds it as a separate mesh */
+  buildings?: boolean;
 }
 
 interface Pt {
@@ -246,7 +248,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
   for (const line of data.lines) buildLine(line);
   for (const p of data.points) buildPoint(p);
 
-  if (data.buildings.length) {
+  if (opts.buildings !== false && data.buildings.length) {
     const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight });
     for (let i = 0; i < bm.vertices.length; i++) verts.push(bm.vertices[i]);
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);

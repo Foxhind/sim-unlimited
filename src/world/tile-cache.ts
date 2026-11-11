@@ -15,10 +15,15 @@ export interface CachedMesh {
   ramps: ArrayBuffer;
   trees?: ArrayBuffer;
   lights?: ArrayBuffer;
+  /** OSM tiles: building mesh (vertices, ramps) and far building dots */
+  bVertices?: ArrayBuffer;
+  bRamps?: ArrayBuffer;
+  dots?: ArrayBuffer;
 }
 
-export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps' | 'trees' | 'lights'>): number {
-  return m.vertices.byteLength + m.ramps.byteLength + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0);
+export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots'>): number {
+  return m.vertices.byteLength + m.ramps.byteLength + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
+    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0);
 }
 
 export interface CacheEntryMeta {

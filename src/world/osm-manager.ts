@@ -3,40 +3,13 @@ import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
-import {
-  latLonToEnu,
-  tileCenter,
-  tileForLatLon,
-  tileSizeMeters,
-  type LatLon,
-  type Tile,
-} from './geodesy';
-import type { OsmDetail } from './osm-types';
+import { latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { CONE_VERTICES } from './props-mesher';
 
-export const OSM_NEAR_Z = 14;
-export const OSM_FAR_Z = 10;
-export const OSM_NEAR_RADIUS_M = 3500;
-export const OSM_FAR_RADIUS_M = 60000;
+/** within this slant distance a detailed tile draws its buildings; beyond, roof-coloured dots */
+export const HOUSE_RADIUS_M = 3500;
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
-
-function tilesInRadius(cam: LatLon, radiusM: number, z: number): Tile[] {
-  const degLat = radiusM / 111320;
-  const degLon = degLat / Math.max(0.2, Math.cos((cam.lat * Math.PI) / 180));
-  const n = 2 ** z;
-  const x0 = tileForLatLon(cam.lat, cam.lon - degLon, z).x;
-  const x1 = tileForLatLon(cam.lat, cam.lon + degLon, z).x;
-  const y0 = tileForLatLon(cam.lat + degLat, cam.lon, z).y;
-  const y1 = tileForLatLon(cam.lat - degLat, cam.lon, z).y;
-  const tiles: Tile[] = [];
-  for (let x = x0; x <= x1; x++) {
-    for (let y = Math.max(0, y0); y <= Math.min(n - 1, y1); y++) {
-      tiles.push({ z, x: ((x % n) + n) % n, y });
-    }
-  }
-  return tiles;
-}
 
 interface PropSet {
   vao: WebGLVertexArrayObject;
@@ -46,14 +19,17 @@ interface PropSet {
 
 interface OsmChunk {
   tile: Tile;
-  detail: OsmDetail;
   key: string;
   status: 'pending' | 'ready' | 'error';
+  /** drape: areas, roads, points */
   mesh?: Mesh;
+  /** buildings, and their far stand-in dots */
+  bmesh?: Mesh;
+  dots?: PropSet;
   trees?: PropSet;
   lights?: PropSet;
   buffers: WebGLBuffer[];
-  vao?: WebGLVertexArrayObject;
+  vaos: WebGLVertexArrayObject[];
   offset: vec3;
   centerEnu: vec3;
   radius: number;
@@ -64,6 +40,9 @@ interface OsmChunk {
 interface MeshPayload {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  bVertices: ArrayBuffer;
+  bRamps: ArrayBuffer;
+  dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
   runways: number;
@@ -75,12 +54,15 @@ interface WorkerSlot {
   waiting: Map<number, { resolve: (m: MeshPayload) => void; reject: (e: unknown) => void }>;
 }
 
-/** Draped OSM overlay: a detailed near ring plus a coarse far layer (Q32, M2). */
+/**
+ * OSM of the detailed z14 tiles (Q32, M2). The terrain manager decides which tiles are detailed
+ * and shows one only when its OSM here is ready; this draws the OSM of exactly the shown ones.
+ */
 export class OsmManager {
   readonly chunks = new Map<string, OsmChunk>();
   renderList: OsmChunk[] = [];
   /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
-  onTileReady?: (tile: Tile, detail: OsmDetail, runways: number) => void;
+  onTileReady?: (tile: Tile, runways: number) => void;
   private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
@@ -99,17 +81,16 @@ export class OsmManager {
       const worker = new Worker(new URL('../workers/osm.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; trees?: ArrayBuffer; lights?: ArrayBuffer; runways?: number; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; retryable?: boolean; message?: string } & Partial<MeshPayload>;
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
+        const buf = (b?: ArrayBuffer) => b ?? new ArrayBuffer(0);
         if (msg.type === 'mesh') {
           w.resolve({
-            vertices: msg.vertices!,
-            ramps: msg.ramps!,
-            trees: msg.trees ?? new ArrayBuffer(0),
-            lights: msg.lights ?? new ArrayBuffer(0),
-            runways: msg.runways ?? 0,
+            vertices: buf(msg.vertices), ramps: buf(msg.ramps),
+            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), dots: buf(msg.dots),
+            trees: buf(msg.trees), lights: buf(msg.lights), runways: msg.runways ?? 0,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -130,12 +111,13 @@ export class OsmManager {
       if (c.status === 'pending') pending++;
       if (c.status === 'error') errors++;
     }
-    for (const c of this.renderList) {
-      if (c.mesh) draws++;
-      if (c.trees) draws++;
-      if (c.lights) draws++;
-    }
+    for (const c of this.renderList) draws += (c.mesh ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0);
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
+  }
+
+  /** the OSM of tile `key` (z/x/y) is loaded and uploaded */
+  ready(key: string): boolean {
+    return this.chunks.get(key)?.status === 'ready';
   }
 
   private refreshOffset(c: OsmChunk): void {
@@ -145,7 +127,8 @@ export class OsmManager {
     vec3.copy(c.offset, c.centerEnu);
   }
 
-  update(cam: CameraWorld, view: mat4, proj: mat4, now: number, origin: LatLon): void {
+  /** `tiles`: the detailed tiles the terrain wants; `shown`: those it draws this frame */
+  update(cam: CameraWorld, view: mat4, proj: mat4, now: number, origin: LatLon, tiles: Tile[], shown: Set<string>): void {
     if (origin !== this.origin) {
       this.origin = origin;
       for (const c of this.chunks.values()) this.refreshOffset(c);
@@ -153,20 +136,17 @@ export class OsmManager {
     mat4.multiply(this.vp, proj, view);
     this.planes = frustumPlanes(this.vp);
 
-    const wanted: { tile: Tile; detail: OsmDetail }[] = [
-      ...tilesInRadius(cam.latLon, OSM_NEAR_RADIUS_M, OSM_NEAR_Z).map((tile) => ({ tile, detail: 'full' as const })),
-      ...tilesInRadius(cam.latLon, OSM_FAR_RADIUS_M, OSM_FAR_Z).map((tile) => ({ tile, detail: 'large' as const })),
-    ];
     const needed = new Set<string>();
-    for (const { tile, detail } of wanted) {
-      const key = `${tile.z}/${tile.x}/${tile.y}/${detail}`;
+    for (const tile of tiles) {
+      const key = `${tile.z}/${tile.x}/${tile.y}`;
       needed.add(key);
       let chunk = this.chunks.get(key);
       if (!chunk) {
         chunk = {
-          tile, detail, key,
+          tile, key,
           status: 'pending',
           buffers: [],
+          vaos: [],
           offset: vec3.create(),
           centerEnu: vec3.create(),
           radius: tileSizeMeters(tile),
@@ -175,29 +155,25 @@ export class OsmManager {
         };
         this.refreshOffset(chunk);
         this.chunks.set(key, chunk);
-        this.request(chunk);
+        this.request(chunk, cam);
       } else if (chunk.status === 'error' && now - chunk.lastAttempt > RETRY_DELAY_MS) {
         chunk.status = 'pending';
         chunk.lastAttempt = now;
-        this.request(chunk);
+        this.request(chunk, cam);
       }
-      if (chunk.status === 'ready') chunk.lastUsed = now;
+      chunk.lastUsed = now;
     }
 
     this.renderList = [];
-    for (const c of this.chunks.values()) {
-      if (c.status !== 'ready' || !c.mesh || c.mesh.vertexCount === 0) continue;
-      // world-space planes (view includes the camera translation): test the world-space centre
-      if (sphereInFrustum(this.planes, c.centerEnu, c.radius + 2000)) {
-        this.renderList.push(c);
-        c.lastUsed = now;
-      }
+    for (const key of shown) {
+      const c = this.chunks.get(key);
+      if (!c || c.status !== 'ready') continue;
+      c.lastUsed = now;
+      if (sphereInFrustum(this.planes, c.centerEnu, c.radius + 2000)) this.renderList.push(c);
     }
-    // far layer first so the higher-biased near layer wins depth where they overlap
-    this.renderList.sort((a, b) => (a.detail === b.detail ? 0 : a.detail === 'large' ? -1 : 1));
 
     for (const [key, c] of this.chunks) {
-      if (!needed.has(key) && now - c.lastUsed > UNLOAD_DELAY_MS) {
+      if (!needed.has(key) && !shown.has(key) && now - c.lastUsed > UNLOAD_DELAY_MS) {
         this.queue.cancel(key);
         this.dispose(c);
         this.chunks.delete(key);
@@ -205,13 +181,15 @@ export class OsmManager {
     }
   }
 
-  private request(chunk: OsmChunk): void {
-    const priority = chunk.detail === 'full' ? 0 : 1;
+  private request(chunk: OsmChunk, cam: CameraWorld): void {
+    // nearest first
+    const priority = Math.hypot(chunk.centerEnu[0] - cam.pos[0], chunk.centerEnu[2] - cam.pos[2]);
     void this.queue
       .submit(chunk.key, priority, () => this.buildInWorker(chunk))
       .then((data) => this.upload(chunk, data))
       .catch(() => {
         chunk.status = 'error';
+        chunk.lastAttempt = performance.now();
       });
   }
 
@@ -220,33 +198,61 @@ export class OsmManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: chunk.detail });
+      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full' });
     });
+  }
+
+  /** interleaved pos+normal (stride 24) with Uint16 ramps, as the world shader expects */
+  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer): Mesh | undefined {
+    if (ramps.byteLength === 0) return undefined;
+    const gl = this.gl;
+    const vao = must(gl.createVertexArray(), 'osm VAO');
+    gl.bindVertexArray(vao);
+    const vb = must(gl.createBuffer(), 'osm vertices');
+    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    const rb = must(gl.createBuffer(), 'osm ramps');
+    gl.bindBuffer(gl.ARRAY_BUFFER, rb);
+    gl.bufferData(gl.ARRAY_BUFFER, ramps, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA colours)
+    gl.bindVertexArray(null);
+    chunk.buffers.push(vb, rb);
+    chunk.vaos.push(vao);
+    return { vao, vertexCount: ramps.byteLength / 2 };
+  }
+
+  /** x, y, z, palette index per point */
+  private points(chunk: OsmChunk, data: ArrayBuffer): PropSet | undefined {
+    if (data.byteLength === 0) return undefined;
+    const gl = this.gl;
+    const vao = must(gl.createVertexArray(), 'point VAO');
+    gl.bindVertexArray(vao);
+    const buffer = must(gl.createBuffer(), 'points');
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 16, 12);
+    gl.bindVertexArray(null);
+    chunk.buffers.push(buffer);
+    chunk.vaos.push(vao);
+    return { vao, buffer, count: data.byteLength / 16 };
   }
 
   private upload(chunk: OsmChunk, data: MeshPayload): void {
     if (!this.chunks.has(chunk.key)) return;
+    this.dispose(chunk);
     const gl = this.gl;
-    if (data.ramps.byteLength > 0) {
-      const vao = must(gl.createVertexArray(), 'osm VAO');
-      gl.bindVertexArray(vao);
-      const vb = must(gl.createBuffer(), 'osm vertices');
-      gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-      gl.bufferData(gl.ARRAY_BUFFER, data.vertices, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-      const rb = must(gl.createBuffer(), 'osm ramps');
-      gl.bindBuffer(gl.ARRAY_BUFFER, rb);
-      gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(2);
-      gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA building colours)
-      gl.bindVertexArray(null);
-      chunk.vao = vao;
-      chunk.buffers = [vb, rb];
-      chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 2 };
-    }
+    chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps);
+    chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps);
+    chunk.dots = this.points(chunk, data.dots);
+    chunk.lights = this.points(chunk, data.lights);
     if (data.trees.byteLength > 0) {
       const count = data.trees.byteLength / 20;
       const vao = must(gl.createVertexArray(), 'tree VAO');
@@ -266,46 +272,25 @@ export class OsmManager {
       gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 20, 12);
       gl.vertexAttribDivisor(4, 1);
       gl.bindVertexArray(null);
+      chunk.buffers.push(ib);
+      chunk.vaos.push(vao);
       chunk.trees = { vao, buffer: ib, count };
-    }
-    if (data.lights.byteLength > 0) {
-      const count = data.lights.byteLength / 16;
-      const vao = must(gl.createVertexArray(), 'light VAO');
-      gl.bindVertexArray(vao);
-      const lb = must(gl.createBuffer(), 'light points');
-      gl.bindBuffer(gl.ARRAY_BUFFER, lb);
-      gl.bufferData(gl.ARRAY_BUFFER, data.lights, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 16, 0);
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 16, 12);
-      gl.bindVertexArray(null);
-      chunk.lights = { vao, buffer: lb, count };
     }
     chunk.status = 'ready';
     if (!this.readyFired.has(chunk.key)) {
       this.readyFired.add(chunk.key);
-      this.onTileReady?.(chunk.tile, chunk.detail, data.runways);
+      this.onTileReady?.(chunk.tile, data.runways);
     }
   }
 
   private dispose(chunk: OsmChunk): void {
     const gl = this.gl;
     for (const b of chunk.buffers) gl.deleteBuffer(b);
-    if (chunk.vao) gl.deleteVertexArray(chunk.vao);
-    if (chunk.trees) {
-      gl.deleteBuffer(chunk.trees.buffer);
-      gl.deleteVertexArray(chunk.trees.vao);
-    }
-    if (chunk.lights) {
-      gl.deleteBuffer(chunk.lights.buffer);
-      gl.deleteVertexArray(chunk.lights.vao);
-    }
+    for (const v of chunk.vaos) gl.deleteVertexArray(v);
     chunk.buffers = [];
-    chunk.mesh = undefined;
-    chunk.vao = undefined;
-    chunk.trees = undefined;
-    chunk.lights = undefined;
+    chunk.vaos = [];
+    chunk.mesh = chunk.bmesh = undefined;
+    chunk.dots = chunk.trees = chunk.lights = undefined;
   }
 
   draw(
@@ -320,33 +305,23 @@ export class OsmManager {
     pointSize: number,
   ): void {
     for (const c of this.renderList) {
+      const dx = camPos[0] - c.centerEnu[0];
+      const dz = camPos[2] - c.centerEnu[2];
+      const slant = Math.hypot(dx, dz, camPos[1]);
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
-      if (c.trees) {
-        const dx = camPos[0] - c.centerEnu[0];
-        const dz = camPos[2] - c.centerEnu[2];
-        if (Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
-          renderer.drawTrees(c.trees.vao, c.trees.count, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
-        }
+      if (slant < HOUSE_RADIUS_M) {
+        if (c.bmesh) renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      } else if (c.dots) {
+        // far buildings: fat roof-coloured dots at their centroids
+        renderer.drawLights(c.dots.vao, c.dots.count, c.offset, view, proj, camPos, pointSize * 1.5, true);
+      }
+      if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
+        renderer.drawTrees(c.trees.vao, c.trees.count, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       }
       if (c.lights && lightsOn) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
       }
     }
-  }
-
-  /** Q40 gate: every near overlay tile must be ready (errored tiles retry until they are). */
-  nearReady(cam: LatLon, radiusM: number): boolean {
-    let near = 0;
-    for (const c of this.chunks.values()) {
-      if (c.detail !== 'full') continue;
-      const center = tileCenter(c.tile);
-      const [e, n] = latLonToEnu(cam, center.lat, center.lon, 0);
-      if (Math.hypot(e, n) < radiusM) {
-        near++;
-        if (c.status !== 'ready') return false;
-      }
-    }
-    return near > 0;
   }
 
   disposeAll(): void {

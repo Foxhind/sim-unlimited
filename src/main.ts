@@ -133,8 +133,8 @@ function startLocation(fc: { location: string; customPoint: LatLon | null }): La
 }
 
 // Q40: a fresh runway tile invalidates nearby terrain so flattening is applied
-osm.onTileReady = (tile, detail, runways) => {
-  if (detail === 'full' && runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
+osm.onTileReady = (tile, runways) => {
+  if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
 };
 
 type SimState = 'menu' | 'loading' | 'flying' | 'paused' | 'crashed';
@@ -390,8 +390,9 @@ function frame(now: number): void {
     camPos = rig.pos;
   }
 
-  chunks.update(camWorld, view, proj, now);
-  osm.update(camWorld, view, proj, now, chunks.origin);
+  // a detailed (z14) tile is shown only once its OSM is ready; until then its coarse parent stands in
+  chunks.update(camWorld, view, proj, now, (key) => osm.ready(key));
+  osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
 
   if (state === 'menu' && menu.screen === 'start') {
     // live backdrop follows the chosen place and time of day
