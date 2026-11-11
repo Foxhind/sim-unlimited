@@ -83,7 +83,8 @@ export const CONE_VERTICES = (() => {
 export function buildProps(opts: PropsOptions): PropsData {
   const { tile, data, sampleHeight } = opts;
   if (opts.detail !== 'full') return { trees: new Float32Array(0), lights: new Float32Array(0) };
-  // forests cut at the tile border; lights follow whole runways but only those inside the tile are kept
+  // trees in OSM wood/forest (no fill: Landsat colours the ground), cut at the tile border;
+  // lights follow whole runways but only those inside the tile are kept
   const areas = clipTileData({ ...data, lines: [], points: [], buildings: [] }, tile).areas;
   const b = tileBounds(tile);
   const center = tileCenter(tile);

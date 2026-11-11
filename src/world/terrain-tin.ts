@@ -71,6 +71,26 @@ export interface TinOptions {
   borders?: TileBorders;
   /** filled with intermediate results when given (inspector tool); does not change the output */
   debug?: TinDebug;
+  /** colour labels over the tile: free edges are also flipped toward single-colour triangles */
+  colour?: ColourLabels;
+  /** colour boundaries (lattice coordinates) forced in as fixed edges, longest first */
+  colourLines?: { lines: Array<{ pts: Pt[]; closed: boolean }>; maxVerts?: number };
+}
+
+/** default cap on vertices taken from colour boundaries (crossings with isolines come on top) */
+export const MAX_COLOUR_VERTS = 80;
+
+/**
+ * Quantized imagery over the tile, `size`² pixels covering lattice [0, grid]² (row-major, north
+ * first). The final flip pass prefers, after fewer flat triangles, the diagonal whose two
+ * triangles hold fewer pixels off their own majority colour, while the lattice error under the
+ * quad stays within `maxDh` metres (or does not grow where it is already larger).
+ */
+export interface ColourLabels {
+  label: Uint8Array;
+  size: number;
+  /** height-error allowance for a colour flip, metres (default: step × REFINE_TOL) */
+  maxDh?: number;
 }
 
 export interface TinDebug {
@@ -87,6 +107,11 @@ export interface TinDebug {
   borderVerts?: number;
   /** vertices added by error-driven refinement */
   refined?: number;
+  /** flips made for colour purity in the last triangulation */
+  colourFlips?: number;
+  /** colour-boundary vertices and their crossings with isolines in the last triangulation */
+  colourVerts?: number;
+  colourCrossings?: number;
 }
 
 /** one isoline being simplified: raw points (rings repeat point 0 at the end) and a keep-mask */
@@ -255,6 +280,147 @@ function latticeError(t: { vx: number[]; vy: number[]; vh: number[]; tris: Tri[]
   return err;
 }
 
+/**
+ * Colour cost of triangles for the flip pass: pixels off the triangle's majority colour, and the
+ * largest lattice error under it. Memoized per triangle (the same triangles recur across passes).
+ */
+function colourCost(
+  c: ColourLabels, vx: number[], vy: number[], vh: number[], heights: Float32Array, grid: number, maxDh: number,
+): { better: (u: number, v: number, p: number, q: number) => boolean } {
+  const side = grid + 1;
+  const k = c.size / grid; // pixels per lattice cell
+  const counts = new Uint32Array(256);
+  const memo = new Map<string, [number, number]>();
+  const tri = (a: number, b: number, d: number): [number, number] => {
+    const key = [a, b, d].sort((x, y) => x - y).join(',');
+    const hit = memo.get(key);
+    if (hit) return hit;
+    const ax = vx[a], ay = vy[a], bx = vx[b], by = vy[b], dx = vx[d], dy = vy[d];
+    const det = (bx - ax) * (dy - ay) - (dx - ax) * (by - ay);
+    let off = 0, err = 0;
+    if (det !== 0) {
+      // off-colour pixels: pixel centres inside the triangle (one on an edge counts for both
+      // sides; the flip compares sums over the same quad, so the pass still strictly descends)
+      counts.fill(0);
+      let n = 0;
+      const i0 = Math.max(0, Math.floor(Math.min(ax, bx, dx) * k)), i1 = Math.min(c.size - 1, Math.ceil(Math.max(ax, bx, dx) * k));
+      const j0 = Math.max(0, Math.floor(Math.min(ay, by, dy) * k)), j1 = Math.min(c.size - 1, Math.ceil(Math.max(ay, by, dy) * k));
+      for (let j = j0; j <= j1; j++) {
+        const sy = (j + 0.5) / k;
+        for (let i = i0; i <= i1; i++) {
+          const sx = (i + 0.5) / k;
+          const w1 = ((sx - ax) * (dy - ay) - (dx - ax) * (sy - ay)) / det;
+          const w2 = ((bx - ax) * (sy - ay) - (sx - ax) * (by - ay)) / det;
+          if (w1 < 0 || w2 < 0 || w1 + w2 > 1) continue;
+          counts[c.label[j * c.size + i]]++;
+          n++;
+        }
+      }
+      let best = 0;
+      for (let v = 0; v < 256; v++) if (counts[v] > best) best = counts[v];
+      off = n - best;
+      const ha = Math.max(0, vh[a]), hb = Math.max(0, vh[b]), hd = Math.max(0, vh[d]);
+      for (let j = Math.max(0, Math.ceil(Math.min(ay, by, dy))); j <= Math.min(grid, Math.floor(Math.max(ay, by, dy))); j++) {
+        for (let i = Math.max(0, Math.ceil(Math.min(ax, bx, dx))); i <= Math.min(grid, Math.floor(Math.max(ax, bx, dx))); i++) {
+          const w1 = ((i - ax) * (dy - ay) - (dx - ax) * (j - ay)) / det;
+          const w2 = ((bx - ax) * (j - ay) - (i - ax) * (by - ay)) / det;
+          const w0 = 1 - w1 - w2;
+          if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+          err = Math.max(err, Math.abs(ha * w0 + hb * w1 + hd * w2 - Math.max(0, heights[j * side + i])));
+        }
+      }
+    }
+    const r: [number, number] = [off, err];
+    memo.set(key, r);
+    return r;
+  };
+  return {
+    // edge u–v with opposite p, q → diagonal p–q
+    better: (u, v, p, q) => {
+      const [o1, e1] = tri(u, v, p), [o2, e2] = tri(u, v, q);
+      const [n1, f1] = tri(p, q, u), [n2, f2] = tri(p, q, v);
+      if (n1 + n2 >= o1 + o2) return false;
+      return Math.max(f1, f2) <= Math.max(maxDh, e1, e2);
+    },
+  };
+}
+
+function latticeHeight(heights: Float32Array, grid: number, p: Pt): number {
+  const side = grid + 1;
+  const i = Math.min(grid - 1, Math.max(0, Math.floor(p.x))), j = Math.min(grid - 1, Math.max(0, Math.floor(p.y)));
+  const tx = p.x - i, ty = p.y - j;
+  const h = (a: number, b: number) => heights[b * side + a];
+  return (h(i, j) * (1 - tx) + h(i + 1, j) * tx) * (1 - ty) + (h(i, j + 1) * (1 - tx) + h(i + 1, j + 1) * tx) * ty;
+}
+
+/**
+ * Add colour boundaries to the fixed edges. A boundary segment crossing a fixed edge splits both
+ * at the crossing (height interpolated along the fixed edge: its level for an isoline); a crossing
+ * next to an end snaps to that end; a boundary point lying on a fixed edge is dropped (it would
+ * split the edge without being a crossing). Deterministic: boundaries in the given order.
+ */
+function insertColourLines(
+  lines: Pt[][],
+  constraints: Array<[number, number]>,
+  vx: number[], vy: number[], vh: number[],
+  vid: (p: Pt, h: number) => number,
+  heightAt: (p: Pt) => number,
+  stats: { verts: number; crossings: number },
+): void {
+  const SNAP = 1e-3; // lattice cells
+  const P = (k: number): Pt => ({ x: vx[k], y: vy[k] });
+  stats.verts = 0;
+  stats.crossings = 0;
+  for (const line of lines) {
+    // drop points sitting on an existing fixed edge (or on a vertex of one)
+    const pts = line.filter((p) => !constraints.some(([a, b]) => distToSeg(p, P(a), P(b)) < SNAP));
+    if (pts.length < 2) continue;
+    let prev = -1;
+    for (let k = 0; k < pts.length; k++) {
+      const p = pts[k];
+      const before = vx.length;
+      const id = vid(p, heightAt(p));
+      if (vx.length > before) stats.verts++;
+      if (prev >= 0 && prev !== id) {
+        // split this boundary segment at every crossing with the fixed edges, nearest first
+        const a = P(prev), b = P(id);
+        const hits: Array<{ t: number; ci: number; s: number }> = [];
+        constraints.forEach(([u, v], ci) => {
+          if (u === prev || v === prev || u === id || v === id) return;
+          const c = P(u), d = P(v);
+          const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+          if (den === 0) return;
+          const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+          const s2 = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+          if (t <= 0 || t >= 1 || s2 < 0 || s2 > 1) return;
+          hits.push({ t, ci, s: s2 });
+        });
+        hits.sort((h1, h2) => h1.t - h2.t || h1.ci - h2.ci);
+        let from = prev;
+        for (const h of hits) {
+          const [u, v] = constraints[h.ci];
+          const c = P(u), d = P(v);
+          const len = Math.hypot(d.x - c.x, d.y - c.y);
+          let w: number;
+          if (h.s * len < SNAP) w = u;
+          else if ((1 - h.s) * len < SNAP) w = v;
+          else {
+            const q = { x: c.x + (d.x - c.x) * h.s, y: c.y + (d.y - c.y) * h.s };
+            w = vid(q, vh[u] + (vh[v] - vh[u]) * h.s);
+            constraints[h.ci] = [u, w];
+            constraints.push([w, v]);
+            stats.crossings++;
+          }
+          if (w !== from) constraints.push([from, w]);
+          from = w;
+        }
+        if (from !== id) constraints.push([from, id]);
+      }
+      prev = id;
+    }
+  }
+}
+
 /** rings smaller than the tolerance are noise at this detail level */
 function tinyRing(line: Polyline, eps: number): boolean {
   if (!line.closed) return false;
@@ -405,18 +571,45 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       }
     }
 
+    // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
+    // level) or another boundary; their own vertices take the lattice height
+    if (colourPicked.length) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => latticeHeight(heights, grid, p), stats);
+
     // a triangle is flat when all three corners sit at one height (one isoline): it lies on a belt
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.
     const flat = (a: number, b: number, c: number) => vh[a] === vh[b] && vh[b] === vh[c];
     const flats = (a: number, b: number, c: number, d: number) => (flat(a, b, c) ? 1 : 0) + (flat(a, b, d) ? 1 : 0);
+    // with colour labels: fewer flat triangles first, then fewer off-colour pixels (lexicographic)
+    const cc = opts.colour ? colourCost(opts.colour, vx, vy, vh, heights, grid, opts.colour.maxDh ?? step * REFINE_TOL) : null;
+    let colourFlips = 0;
     const { tris, missing } = constrainedDelaunay(
       vx.map((x, k) => ({ x, y: vy[k] })),
       constraints,
-      (u, v, p, q) => flats(p, q, u, v) < flats(u, v, p, q),
+      (u, v, p, q) => {
+        const now = flats(u, v, p, q), next = flats(p, q, u, v);
+        if (next !== now || !cc) return next < now;
+        if (!cc.better(u, v, p, q)) return false;
+        colourFlips++;
+        return true;
+      },
     );
+    lastColourFlips = colourFlips;
     return { vx, vy, vh, tris, constraints, missing, borderVerts };
   };
 
+  let lastColourFlips = 0;
+  const stats = { verts: 0, crossings: 0 };
+  // colour boundaries up to the vertex cap, longest first
+  const colourPicked: Pt[][] = [];
+  {
+    let budget = opts.colourLines?.maxVerts ?? MAX_COLOUR_VERTS;
+    for (const l of opts.colourLines?.lines ?? []) {
+      const n = l.closed ? l.pts.length - 1 : l.pts.length;
+      if (n > budget) continue;
+      budget -= n;
+      colourPicked.push(l.pts);
+    }
+  }
   let res = triangulate(chains);
   const baseVerts = res.vx.length;
 
@@ -464,7 +657,12 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   }
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
-  if (opts.debug) Object.assign(opts.debug, { step, eps, raw: lines, constraints, missing, borderVerts, refined: added });
+  if (opts.debug) {
+    Object.assign(opts.debug, {
+      step, eps, raw: lines, constraints, missing, borderVerts, refined: added, colourFlips: lastColourFlips,
+      colourVerts: stats.verts, colourCrossings: stats.crossings,
+    });
+  }
   return { grid, vx, vy, vh, tris };
 }
 

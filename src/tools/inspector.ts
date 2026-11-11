@@ -8,6 +8,9 @@ import { decodeTerrarium, gridLatLon, tileCenter, tileForLatLon, tileSizeMeters,
 import { decodePngToTile, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
 import { beltStepForZoom, buildTerrainTin, EPS_START, type TerrainTin, type TinDebug } from '../world/terrain-tin';
 import { parseMapLink, type MapPoint } from './map-links';
+import { VGA_PALETTE, TERRAIN_RAMP_BASE } from '../engine/palette';
+import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
+import { cleanLabels, colourBoundaries, faceColorByMode, LANDSAT_TUNING, neighbourTiles, processLandsat, stitch3x3, type ColourLine, type ProcessedLandsat } from '../world/landsat-process';
 
 // ---------- data ----------
 
@@ -55,6 +58,13 @@ let demImg: HTMLCanvasElement | null = null;
 let errImg: HTMLCanvasElement | null = null;
 let profileLine: [[number, number], [number, number]] | null = null;
 let hover: [number, number] | null = null;
+/** Landsat: stitched 3×3 mosaic around the imagery tile, its processing, and per-face VGA colours */
+let lsMosaic: RgbaImage | null = null;
+let lsProc: ProcessedLandsat | null = null;
+let lsImgs: Record<'ls-raw' | 'ls-blur' | 'ls-quant', HTMLCanvasElement> | null = null;
+let lsFace: Int16Array | null = null;
+/** colour boundaries after cleanup and simplification (lattice coords) */
+let lsLines: ColourLine[] = [];
 /** point from a pasted map link, marked on the map while its tile (or a neighbour) is shown */
 let pin: { lat: number; lon: number } | null = null;
 
@@ -129,6 +139,12 @@ function build(): void {
     eps: num('eps'),
     borders: borders ?? undefined,
     debug: dbg,
+    colour: lsProc && $<HTMLInputElement>('lsMesh').checked
+      ? { label: lsProc.quantized.index, size: lsProc.quantized.image.width, maxDh: num('lsMaxDh') }
+      : undefined,
+    colourLines: lsProc && $<HTMLInputElement>('lsEdges').checked
+      ? { lines: lsLines, maxVerts: num('lsMaxVerts') }
+      : undefined,
   });
   const ms = performance.now() - t0;
   const hv = tin.vh.map((h) => Math.max(h, 0));
@@ -172,6 +188,7 @@ function build(): void {
 
   built = { tin, dbg, ms, atPx, locate, flat };
   errImg = makeErrImage();
+  colourFaces();
   renderStats();
   drawAll();
 }
@@ -294,7 +311,8 @@ function renderStats(): void {
     `шаг пояса ${b.dbg.step} м${b.dbg.step !== (num('step') ?? base) ? ' (поднят бюджетом)' : ''}`,
     `eps ${f(b.dbg.eps ?? 0)} ячеек, уровней ${levels}`,
     `изолиний ${(b.dbg.raw ?? []).length}, сырых точек ${rawPts}`,
-    `вершин ${tin.vx.length}: граница ${b.dbg.borderVerts}, изолинии ${tin.vx.length - (b.dbg.borderVerts ?? 0)}`,
+    `вершин ${tin.vx.length}: граница ${b.dbg.borderVerts}, изолинии ${tin.vx.length - (b.dbg.borderVerts ?? 0) - (b.dbg.colourVerts ?? 0) - (b.dbg.colourCrossings ?? 0)}` +
+      (b.dbg.colourVerts ? `, границы цветов ${b.dbg.colourVerts} + пересечения ${b.dbg.colourCrossings}` : ''),
     `треугольников ${tin.tris.length}, плоских ${flats}`,
     `рёбер-ограничений ${(b.dbg.constraints ?? []).length}` +
       (b.dbg.missing ? `, <span class="err">не вставлено ${b.dbg.missing}</span>` : ', все вставлены'),
@@ -356,6 +374,21 @@ function drawMap(): void {
   };
 
   if (fill === 'dem' && demImg) pxImage(demImg);
+  if ((fill === 'ls-raw' || fill === 'ls-blur' || fill === 'ls-quant') && lsImgs) {
+    // the imagery crop covers exactly [0, grid]²
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(lsImgs[fill], ...toScr(0, 0), grid * view.s, grid * view.s);
+  }
+  if (fill === 'ls-faces' && lsFace) {
+    tin.tris.forEach((_, ti) => {
+      ctx.fillStyle = faceRgb(ti);
+      tri(ti);
+      ctx.fill();
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = 0.6;
+      ctx.stroke();
+    });
+  }
   if (fill === 'error' && errImg) pxImage(errImg);
   if (fill === 'tinshade' || fill === 'belts') {
     const size = tileSizeMeters(tile) / grid;
@@ -476,6 +509,15 @@ function drawMap(): void {
       ctx.stroke();
     }
   }
+  if (layer('lsLines') && lsLines.length) {
+    ctx.strokeStyle = '#ff8c1a';
+    ctx.lineWidth = 1.5;
+    for (const l of lsLines) {
+      ctx.beginPath();
+      for (const p of l.pts) ctx.lineTo(...toScr(p.x, p.y));
+      ctx.stroke();
+    }
+  }
   if (profileLine) {
     ctx.strokeStyle = '#ff5ad1';
     ctx.lineWidth = 2;
@@ -510,7 +552,19 @@ function renderHover(): void {
     tri = `\nтреугольник #${r.tri}: ${[t.a, t.b, t.c].map((k) => `${k}@${tin.vh[k].toFixed(0)}`).join(' ')}${built.flat[r.tri] ? ' (плоский)' : ''}`;
   }
   el.innerHTML = `<pre>u ${u.toFixed(2)}  v ${v.toFixed(2)}   ${ll.lat.toFixed(5)}, ${ll.lon.toFixed(5)}
-DEM ${dh.toFixed(1)}  решётка ${lh.toFixed(1)}  TIN ${r ? r.h.toFixed(1) : '—'}  Δ ${r ? (r.h - Math.max(0, dh)).toFixed(1) : '—'} м${tri}</pre>`;
+DEM ${dh.toFixed(1)}  решётка ${lh.toFixed(1)}  TIN ${r ? r.h.toFixed(1) : '—'}  Δ ${r ? (r.h - Math.max(0, dh)).toFixed(1) : '—'} м${tri}${lsHover(u, v, r?.tri)}</pre>`;
+}
+
+function lsHover(u: number, v: number, ti?: number): string {
+  if (!lsProc) return '';
+  const size = lsProc.raw.width;
+  const i = Math.max(0, Math.min(size - 1, Math.floor((u / grid) * size)));
+  const j = Math.max(0, Math.min(size - 1, Math.floor((v / grid) * size)));
+  const o = (j * size + i) * 4;
+  const px = (img: RgbaImage) => `${img.data[o]},${img.data[o + 1]},${img.data[o + 2]}`;
+  const q = lsProc.quantized.index[j * size + i];
+  const face = ti !== undefined && lsFace ? (lsFace[ti] < 0 ? 'вода' : `VGA ${lsFace[ti]}`) : '—';
+  return `\nLandsat ${px(lsProc.raw)} → размыт ${px(lsProc.blurred)} → VGA ${q}; грань: ${face}`;
 }
 
 // ---------- profile ----------
@@ -633,6 +687,7 @@ function drawView3d(): void {
     const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
     return [r.width / 2 + x1 * scale, r.height / 2 - y2 * scale, z2] as const;
   };
+  let items0 = 0;
   const items = tris.map((t) => {
     const p = t.map(proj);
     const e1 = [(t[1][0] - t[0][0]) * size / grid, (t[1][2] - t[0][2]) * exag, (t[1][1] - t[0][1]) * size / grid];
@@ -640,7 +695,9 @@ function drawView3d(): void {
     let nx = e1[1] * e2[2] - e1[2] * e2[1], ny = e1[2] * e2[0] - e1[0] * e2[2], nz = e1[0] * e2[1] - e1[1] * e2[0];
     if (ny < 0) [nx, ny, nz] = [-nx, -ny, -nz];
     const avg = (t[0][2] + t[1][2] + t[2][2]) / 3;
-    return { p, depth: (p[0][2] + p[1][2] + p[2][2]) / 3, col: rgb(hyps(avg), shade(nx, ny, nz)) };
+    const ti = items0++;
+    const ls = surf === 'tin' && lsFace && $<HTMLSelectElement>('fill').value.startsWith('ls');
+    return { p, depth: (p[0][2] + p[1][2] + p[2][2]) / 3, col: ls ? faceRgb(ti, shade(nx, ny, nz)) : rgb(hyps(avg), shade(nx, ny, nz)) };
   });
   // painter: far (larger z2 is towards the viewer after the pitch) first
   items.sort((a, b) => a.depth - b.depth);
@@ -702,9 +759,98 @@ async function loadTile(t: Tile): Promise<void> {
     }
     fitView();
     build();
+    void loadLandsat(t);
   } catch (e) {
     $('tileInfo').innerHTML = `<span class="err">ошибка: ${(e as Error).message}</span>`;
   }
+}
+
+// ---------- Landsat ----------
+
+async function loadLandsat(t: Tile): Promise<void> {
+  lsMosaic = lsProc = lsImgs = null;
+  lsFace = null;
+  $('lsInfo').textContent = 'Landsat: загрузка 3×3 тайлов…';
+  const src = landsatSource(t).tile;
+  const imgs = await Promise.all(neighbourTiles(src).map((n) => (n ? fetchLandsatTile(n).catch(() => null) : Promise.resolve(null))));
+  if (tile !== t) return;
+  if (!imgs[4]) {
+    $('lsInfo').innerHTML = '<span class="err">Landsat: снимок тайла не загрузился</span>';
+    return;
+  }
+  lsMosaic = stitch3x3(imgs);
+  const missing = imgs.filter((x, k) => !x && k !== 4).length;
+  $('lsInfo').dataset.missing = String(missing);
+  processLs();
+}
+
+function toCanvas(img: RgbaImage): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = img.width;
+  c.height = img.height;
+  c.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(img.data), img.width, img.height), 0, 0);
+  return c;
+}
+
+function processLs(): void {
+  if (!lsMosaic) return;
+  const t0 = performance.now();
+  lsProc = processLandsat(lsMosaic, tile, { blurM: num('lsBlur') ?? 0, colours: Math.round(num('lsColours') ?? 0) });
+  const ms = performance.now() - t0;
+  lsImgs = { 'ls-raw': toCanvas(lsProc.raw), 'ls-blur': toCanvas(lsProc.blurred), 'ls-quant': toCanvas(lsProc.quantized.image) };
+  const size = lsProc.quantized.image.width;
+  const minPx = (num('lsMinArea') ?? 0) * (size / grid) ** 2;
+  lsLines = colourBoundaries(cleanLabels(lsProc.quantized.index, size, minPx), size, grid, num('lsEps') ?? 1);
+  if ($<HTMLInputElement>('lsMesh').checked || $<HTMLInputElement>('lsEdges').checked) build(); // the mesh follows the new colours
+  else colourFaces();
+  const p = lsProc, src = landsatSource(tile);
+  const missing = Number($('lsInfo').dataset.missing ?? 0);
+  $('lsInfo').innerHTML = [
+    `тайл снимка ${src.tile.z}/${src.tile.x}/${src.tile.y}, ${p.raw.width}×${p.raw.height} px на этот тайл`,
+    `σ ${p.sigmaPx.toFixed(1)} px, палитра ${p.palette.length} цв., использовано ${p.quantized.used.length}`,
+    `граней цветов: ${lsFace ? new Set(lsFace).size : '—'} · ${ms.toFixed(0)} мс`,
+    `чистота граней: ${lsPurity()}${built?.dbg.colourFlips ? ` · перекидок по цвету ${built.dbg.colourFlips}` : ''}`,
+    `границ ${lsLines.length}, точек ${lsLines.reduce((s, l) => s + l.pts.length, 0)}` +
+      (built?.dbg.colourVerts ? ` · в сетке вершин ${built.dbg.colourVerts} + пересечений ${built.dbg.colourCrossings}` : ''),
+    missing ? `<span class="err">соседей без снимка: ${missing} (край продлён)</span>` : '',
+    `<div style="display:flex;flex-wrap:wrap;gap:2px;margin-top:4px">${p.quantized.used.map((v) => `<span class="tag" title="VGA ${v}" style="background:rgb(${VGA_PALETTE[v].join(',')})"></span>`).join('')}</div>`,
+  ].join('<br>');
+  drawAll();
+}
+
+/** VGA colour per TIN face (−1: water by height) */
+function colourFaces(): void {
+  lsFace = null;
+  if (!lsProc || !built) return;
+  const tin = built.tin;
+  const f = faceColorByMode(lsProc.quantized, lsProc.quantized.image.width, grid);
+  lsFace = new Int16Array(tin.tris.length);
+  tin.tris.forEach((t, ti) => {
+    lsFace![ti] = [t.a, t.b, t.c].every((k) => tin.vh[k] <= 0)
+      ? -1
+      : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]) - TERRAIN_RAMP_BASE;
+  });
+}
+
+/** share of land pixels whose quantized colour equals the colour of the face over them */
+function lsPurity(): string {
+  if (!lsProc || !lsFace || !built) return '—';
+  const size = lsProc.quantized.image.width;
+  let same = 0, n = 0;
+  for (let j = 0; j < size; j++) {
+    for (let i = 0; i < size; i++) {
+      const r = built.locate(((i + 0.5) / size) * grid, ((j + 0.5) / size) * grid);
+      if (!r || lsFace[r.tri] < 0) continue;
+      n++;
+      if (lsFace[r.tri] === lsProc.quantized.index[j * size + i]) same++;
+    }
+  }
+  return n ? `${((100 * same) / n).toFixed(1)} %` : '—';
+}
+
+function faceRgb(ti: number, k = 1): string {
+  const v = lsFace![ti];
+  return rgb(v < 0 ? [44, 79, 124] : (VGA_PALETTE[v] as [number, number, number]), k);
 }
 
 /** grid/step/eps inputs show the game's values for this zoom unless the user typed their own */
@@ -772,6 +918,12 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
 // ---------- UI wiring ----------
 
 function init(): void {
+  const T = LANDSAT_TUNING;
+  for (const [id, v] of [['lsBlur', T.blurM], ['lsColours', T.colours], ['lsMinArea', T.minAreaCells], ['lsEps', T.eps], ['lsMaxVerts', T.maxVerts]] as const) {
+    $<HTMLInputElement>(id).value = String(v);
+  }
+  $<HTMLInputElement>('lsEdges').checked = T.edges;
+  $<HTMLInputElement>('lsMesh').checked = T.flips;
   const sel = $<HTMLSelectElement>('preset');
   sel.innerHTML = '<option value="">— пресеты —</option>' + PRESETS.map((p, k) => `<option value="${k}">${p[0]} (z${p[3]})</option>`).join('');
   sel.onchange = () => {
@@ -815,6 +967,19 @@ function init(): void {
     void relattice();
   };
   $('fill').onchange = drawAll;
+  $('lsBlur').onchange = processLs;
+  // processLs rebuilds the mesh when it follows the colours; switching that off needs one plain rebuild
+  $('lsMesh').onchange = () => {
+    if (!$<HTMLInputElement>('lsMesh').checked) build();
+    processLs();
+  };
+  $('lsMaxDh').onchange = processLs;
+  $('lsEdges').onchange = () => {
+    if (!$<HTMLInputElement>('lsEdges').checked) build();
+    processLs();
+  };
+  for (const id of ['lsMinArea', 'lsEps', 'lsMaxVerts']) $(id).onchange = processLs;
+  $('lsColours').onchange = processLs;
   $('surf3d').onchange = drawAll;
   $('exag').oninput = drawAll;
   document.querySelectorAll('[data-layer]').forEach((el) => el.addEventListener('change', drawAll));

@@ -82,9 +82,14 @@ export function landsatFaceColor(img: RgbaImage, tile: Tile, grid: number): Face
   };
 }
 
-/** the imagery tile for `t` (Cache API), decoded to RGBA; worker-side (OffscreenCanvas) */
-export async function fetchLandsat(t: Tile): Promise<RgbaImage> {
-  const url = LANDSAT_URL(landsatSource(t).tile);
+/** the imagery tile covering `t` (its z12 ancestor below z12), decoded to RGBA */
+export function fetchLandsat(t: Tile): Promise<RgbaImage> {
+  return fetchLandsatTile(landsatSource(t).tile);
+}
+
+/** one imagery tile (z ≤ 12) from the Cache API or GIBS, decoded to RGBA (OffscreenCanvas) */
+export async function fetchLandsatTile(s: Tile): Promise<RgbaImage> {
+  const url = LANDSAT_URL(s);
   const cache = await caches.open(IMAGE_CACHE);
   let buf: ArrayBuffer;
   const hit = await cache.match(url);
@@ -104,7 +109,7 @@ export async function fetchLandsat(t: Tile): Promise<RgbaImage> {
   const bitmap = await createImageBitmap(new Blob([buf], { type: 'image/jpeg' }));
   const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) throw new Error('2d context unavailable in worker');
+  if (!ctx) throw new Error('2d context unavailable');
   ctx.drawImage(bitmap, 0, 0);
   bitmap.close();
   const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);

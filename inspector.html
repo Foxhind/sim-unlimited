@@ -71,6 +71,10 @@
         <option value="tinshade">TIN: отмывка</option>
         <option value="belts">TIN: пояса</option>
         <option value="error">Ошибка TIN − DEM</option>
+        <option value="ls-raw">Landsat: снимок</option>
+        <option value="ls-blur">Landsat: размытый</option>
+        <option value="ls-quant">Landsat: квантованный</option>
+        <option value="ls-faces">TIN: цвета Landsat (мода)</option>
         <option value="none">нет</option>
       </select></label>
       <label><input type="checkbox" data-layer="lattice" /> узлы решётки</label>
@@ -79,6 +83,19 @@
       <label><input type="checkbox" data-layer="edges" checked /> рёбра TIN</label>
       <label><input type="checkbox" data-layer="flat" checked /> <span class="tag" style="background:#ff4d6d"></span>плоские треугольники</label>
       <label><input type="checkbox" data-layer="verts" /> вершины</label>
+      <label><input type="checkbox" data-layer="lsLines" checked /> <span class="tag" style="background:#ff8c1a"></span>границы цветов Landsat</label>
+
+      <h2>Landsat</h2>
+      <div class="hint">Снимок склеивается с 8 соседями, размывается и квантуется в VGA-палитру; грань берёт самый частый цвет под собой.</div>
+      <div class="row"><span>размытие σ, м</span><input id="lsBlur" type="number" min="0" step="10" value="150" /></div>
+      <div class="row"><span>цветов (0 = вся VGA)</span><input id="lsColours" type="number" min="0" max="248" step="1" value="0" /></div>
+      <label><input type="checkbox" id="lsMesh" /> сетка учитывает цвета (перекидка рёбер)</label>
+      <div class="row"><span>допуск по высоте, м (пусто = ¼ шага)</span><input id="lsMaxDh" type="number" min="0" step="5" /></div>
+      <label><input type="checkbox" id="lsEdges" /> границы цветов → рёбра сетки</label>
+      <div class="row"><span>мин. пятно, ячеек²</span><input id="lsMinArea" type="number" min="0" step="1" value="4" /></div>
+      <div class="row"><span>упрощение границ, ячеек</span><input id="lsEps" type="number" min="0" step="0.25" value="1" /></div>
+      <div class="row"><span>вершин на границы, макс.</span><input id="lsMaxVerts" type="number" min="0" step="10" value="80" /></div>
+      <div id="lsInfo" class="hint"></div>
 
       <h2>3D</h2>
       <label>Поверхность <select id="surf3d">
