@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP } from '../src/engine/palette';
+import { RAMP, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
@@ -27,7 +27,7 @@ describe('buildOsmMesh', () => {
     expect(m.vertexCount).toBeGreaterThan(0);
     expect(m.vertices.length).toBe(m.vertexCount * 6);
     expect(m.ramps.length).toBe(m.vertexCount);
-    for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(RAMP.FOREST);
+    for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(snowy(RAMP.FOREST));
     // every face normal points up
     for (let i = 0; i < m.vertexCount; i++) expect(m.vertices[i * 6 + 4]).toBeGreaterThanOrEqual(0);
   });
@@ -37,7 +37,7 @@ describe('buildOsmMesh', () => {
     const m = mesh(data, () => 250, 50);
     for (let i = 0; i < m.vertexCount; i++) {
       expect(m.vertices[i * 6 + 1]).toBeCloseTo(250.6, 3);
-      expect(m.ramps[i]).toBe(RAMP.FIELD);
+      expect(m.ramps[i]).toBe(snowy(RAMP.FIELD));
     }
   });
 
@@ -93,7 +93,7 @@ describe('buildOsmMesh', () => {
     const data: OsmTileData = { areas: [{ rings: [outer, hole], tags: { natural: 'scrub' } }], lines: [], points: [], buildings: [] };
     const m = mesh(data, flat, 60);
     expect(m.vertexCount).toBeGreaterThan(0);
-    for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(RAMP.FOREST);
+    for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(snowy(RAMP.FOREST));
   });
 
   it('skips wood/forest and landuse other than farmland (Landsat colours the terrain)', () => {

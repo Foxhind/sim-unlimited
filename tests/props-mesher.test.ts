@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, rampIndex } from '../src/engine/palette';
+import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import { buildProps, CONE_VERTICES } from '../src/world/props-mesher';
@@ -57,7 +57,7 @@ describe('buildProps trees (Q36)', () => {
       expect(a.trees[i * 5 + 1]).toBe(100);
       expect(a.trees[i * 5 + 3]).toBeGreaterThanOrEqual(8);
       expect(a.trees[i * 5 + 3]).toBeLessThanOrEqual(16);
-      expect(a.trees[i * 5 + 4]).toBe(RAMP.FOREST);
+      expect(a.trees[i * 5 + 4]).toBe(snowy(RAMP.FOREST));
     }
   });
 
@@ -79,7 +79,7 @@ describe('buildProps trees (Q36)', () => {
     const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
     const p = buildProps({ tile: TILE, detail: 'full', data, sampleHeight: flat, treeRamp: () => 77 });
     expect(p.trees.length).toBeGreaterThan(0);
-    for (let i = 4; i < p.trees.length; i += 5) expect(p.trees[i]).toBe(77);
+    for (let i = 4; i < p.trees.length; i += 5) expect(p.trees[i]).toBe(snowy(77));
   });
 
   it('ignores non-forest areas and the large detail layer', () => {
@@ -120,7 +120,7 @@ describe('buildProps lights (Q7)', () => {
     const p = props(data);
     expect(p.lights.length).toBeGreaterThan(0);
     for (let i = 0; i < p.lights.length / 4; i++) {
-      expect(p.lights[i * 4 + 3]).toBe(rampIndex(RAMP.WATER, 13));
+      expect(p.lights[i * 4 + 3]).toBe(LIGHT.TAXI_BLUE);
     }
   });
 

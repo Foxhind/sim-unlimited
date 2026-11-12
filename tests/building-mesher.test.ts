@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { nearestVga, RAMP, TERRAIN_RAMP_BASE } from '../src/engine/palette';
+import { nearestVga, SNOW_FLAG, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import {
   buildBuildingMesh,
+  buildingSeed,
   computeHeights,
   parseColor,
   parseLength,
@@ -60,16 +61,56 @@ describe('computeHeights', () => {
 });
 
 describe('colors', () => {
-  it('parses hex and CSS names and quantizes to ramps', () => {
+  const vga = (r: number, g: number, b: number) => TERRAIN_RAMP_BASE + nearestVga(r, g, b);
+  const isVga = (ramp: number) => ramp >= TERRAIN_RAMP_BASE && ramp < TERRAIN_RAMP_BASE + 248;
+
+  it('parses hex, rgb() and the full CSS name list', () => {
     expect(parseColor('#ff0000')).toEqual([255, 0, 0]);
     expect(parseColor('#f00')).toEqual([255, 0, 0]);
-    expect(parseColor('white')).toBeDefined();
-    // OSM colours snap to the default VGA palette, the same function as the terrain
-    expect(wallRamp({ 'building:colour': '#646464' })).toBe(TERRAIN_RAMP_BASE + nearestVga(100, 100, 100));
+    expect(parseColor('rgb(10, 20, 30)')).toEqual([10, 20, 30]);
+    expect(parseColor('Light Gray')).toEqual([211, 211, 211]);
+    expect(parseColor('red;white')).toEqual([255, 0, 0]);
+    expect(parseColor('salmon')).toEqual([250, 128, 114]);
+    expect(parseColor('nonsense')).toBeUndefined();
+  });
+
+  it('snaps OSM wall colours, materials and type defaults to the nearest VGA colour', () => {
+    expect(wallRamp({ 'building:colour': '#646464' })).toBe(vga(100, 100, 100));
+    expect(wallRamp({ 'building:colour': 'white', 'building:material': 'brick' })).toBe(vga(255, 255, 255));
+    expect(wallRamp({ 'building:part': 'yes', 'building:colour': 'beige' })).toBe(vga(245, 245, 220));
+    expect(wallRamp({ building: 'yes', 'building:material': 'brick' })).toBe(vga(156, 88, 64));
+    expect(isVga(wallRamp({ building: 'garage' }))).toBe(true);
+    expect(isVga(wallRamp({}))).toBe(true);
+  });
+
+  it('takes roof colour, then roof material, from OSM', () => {
     expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(TERRAIN_RAMP_BASE + 40);
-    expect(wallRamp({ 'building:material': 'brick' })).toBe(RAMP.BRICK);
-    expect(wallRamp({ building: 'garage' })).toBe(RAMP.CONCRETE);
-    expect(roofRamp({ 'roof:material': 'metal' })).toBe(RAMP.HULL_DARK);
+    expect(roofRamp({ 'roof:material': 'slate' })).toBe(vga(72, 76, 84));
+    expect(roofRamp({ 'roof:colour': 'red', 'roof:material': 'slate' })).toBe(vga(255, 0, 0));
+  });
+
+  it('picks an untagged roof deterministically: grey/dark grey, orange only on low-rise', () => {
+    const tall = { building: 'apartments', height: '40' };
+    const low = { building: 'house', height: '6' };
+    const tallSet = new Set<number>(), lowSet = new Set<number>();
+    for (let i = 0; i < 200; i++) {
+      const seed = i / 200;
+      expect(roofRamp(low, seed)).toBe(roofRamp(low, seed));
+      tallSet.add(roofRamp(tall, seed));
+      lowSet.add(roofRamp(low, seed));
+    }
+    const orange = (ramp: number) => {
+      const [r, g, b] = VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+      return r > g + 40 && g > b;
+    };
+    for (const r of tallSet) expect(orange(r)).toBe(false);
+    expect([...lowSet].some(orange)).toBe(true);
+    expect([...lowSet].some((r) => !orange(r))).toBe(true);
+  });
+
+  it('seeds from the footprint, not from the tile build', () => {
+    expect(buildingSeed(rect())).toBe(buildingSeed(rect()));
+    expect(buildingSeed(undefined)).toBe(0.5);
   });
 });
 
@@ -113,6 +154,23 @@ describe('buildBuildingMesh', () => {
     expect(maxY).toBeGreaterThanOrEqual(110.5);
     expect(maxY).toBeLessThanOrEqual(112.01);
     expect(m.vertexCount).toBeGreaterThan(0);
+  });
+
+  it('winter: snow can lie on a flat roof only (not on walls or a pitched roof)', () => {
+    const flagged = (m: { vertices: Float32Array; ramps: Uint16Array; vertexCount: number }, up: boolean) => {
+      const out: boolean[] = [];
+      for (let i = 0; i < m.vertexCount; i++) {
+        const ny = m.vertices[i * 6 + 4];
+        if (up ? ny > 0.99 : Math.abs(ny) < 0.01) out.push((m.ramps[i] & SNOW_FLAG) !== 0);
+      }
+      return out;
+    };
+    const flat = build([{ rings: [rect()], tags: { building: 'apartments', height: '15' } }]);
+    expect(flagged(flat, true).length).toBeGreaterThan(0);
+    expect(flagged(flat, true).every(Boolean)).toBe(true);
+    expect(flagged(flat, false).some(Boolean)).toBe(false);
+    const gabled = build([{ rings: [rect()], tags: { building: 'house', height: '12', 'roof:shape': 'gabled', 'roof:height': '3' } }]);
+    for (let i = 0; i < gabled.vertexCount; i++) expect(gabled.ramps[i] & SNOW_FLAG).toBe(0);
   });
 
   it('handles multipolygon footprints with a hole', () => {

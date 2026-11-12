@@ -1,4 +1,4 @@
-import { RAMP, rampIndex } from '../engine/palette';
+import { LIGHT, RAMP, rampIndex, snowy } from '../engine/palette';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import { clipTileData } from './clip';
 import type { LonLat, OsmDetail, OsmTileData } from './osm-types';
@@ -51,7 +51,7 @@ function ringAreaM2(ring: LonLat[], cosLat: number): number {
 const LIGHT_EDGE = rampIndex(RAMP.EMISSIVE, 13);
 const LIGHT_CENTER = rampIndex(RAMP.EMISSIVE, 10);
 const LIGHT_THRESHOLD = rampIndex(RAMP.HUD_GREEN, 13);
-const LIGHT_TAXI = rampIndex(RAMP.WATER, 13);
+const LIGHT_TAXI = LIGHT.TAXI_BLUE;
 
 /** Unit pyramid (18 verts, flat normals): base half-width 0.3, apex at y=1. Scaled per instance. */
 export const CONE_VERTICES = (() => {
@@ -117,7 +117,7 @@ export function buildProps(opts: PropsOptions): PropsData {
       const y = sampleHeight(lon, lat);
       if (y <= 0) continue;
       const [x, z] = enu(lon, lat);
-      trees.push(x, y, z, 8 + rng() * 8, opts.treeRamp?.(lon, lat) ?? RAMP.FOREST);
+      trees.push(x, y, z, 8 + rng() * 8, snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST));
       placed++;
     }
   }

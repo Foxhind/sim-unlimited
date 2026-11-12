@@ -5,18 +5,21 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP_MASK } from './palette';
+import { GLOW_LEVEL_MASK, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP, RAMP_MASK, SNOW_FLAG } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
  * Night glow (palette.ts): ramp | level << GLOW_SHIFT. With uGlow on, a glowing face is shaded at
  * least at step GLOW_STEP_BASE + level and looked up in that level's street-lit copy of the LUT.
+ * Winter: with uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp.
  */
 const GLOW_VS = `
 uniform int uGlow;
+uniform int uSnow;
 uint glowIndex(uint packedRamp, float litStep, float fog) {
   uint ramp = packedRamp & ${RAMP_MASK}u;
-  uint lvl = uGlow == 1 ? packedRamp >> ${GLOW_SHIFT}u : 0u;
+  if (uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u) ramp = ${RAMP.SNOW}u;
+  uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   float idx = mix(litStep, 15.0, fog);
   return lvl * ${LUT_SIZE}u + ramp * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));

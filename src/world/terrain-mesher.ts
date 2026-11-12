@@ -1,4 +1,4 @@
-import { RAMP, withGlow } from '../engine/palette';
+import { RAMP, snowy, withGlow } from '../engine/palette';
 import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
 import { buildTerrainTin, type TerrainTin, type TinOptions } from './terrain-tin';
@@ -93,12 +93,14 @@ function faceNormal(wx: number[], wy: number[], wz: number[], t: Tri): [number, 
   return [ax, ay, az];
 }
 
-/** colour of a TIN face: sea, imagery colour, or height/slope rules */
+/** colour of a TIN face: sea, imagery colour, or height/slope rules; land (not water) takes snow */
 function terrainFaceRamp(tin: TerrainTin, t: Tri, ny: number, faceColor?: FaceColor): number {
   const { vx, vy, vh } = tin;
-  if (vh[t.a] <= 0 && vh[t.b] <= 0 && vh[t.c] <= 0) return RAMP.WATER;
-  if (faceColor) return faceColor(vx[t.a], vy[t.a], vx[t.b], vy[t.b], vx[t.c], vy[t.c]);
-  return faceRamp((vh[t.a] + vh[t.b] + vh[t.c]) / 3, ny);
+  if (vh[t.a] <= 0 && vh[t.b] <= 0 && vh[t.c] <= 0) return RAMP.SEA;
+  const ramp = faceColor
+    ? faceColor(vx[t.a], vy[t.a], vx[t.b], vy[t.b], vx[t.c], vy[t.c])
+    : faceRamp((vh[t.a] + vh[t.b] + vh[t.c]) / 3, ny);
+  return ramp === RAMP.WATER ? ramp : snowy(ramp);
 }
 
 /**

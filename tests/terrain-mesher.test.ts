@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP } from '../src/engine/palette';
+import { RAMP, snowy } from '../src/engine/palette';
 import { tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 
@@ -63,7 +63,7 @@ describe('buildTerrainMesh (isoline belts)', () => {
     }
     for (const t of split(ts).land) {
       expect(t.normal[1]).toBeCloseTo(1, 5);
-      expect(t.ramp).toBe(RAMP.GRASS);
+      expect(t.ramp).toBe(snowy(RAMP.GRASS));
     }
     const minY = Math.min(...split(ts).skirts.flatMap((t) => [t.pos[1], t.pos[4], t.pos[7]]));
     expect(minY).toBe(50);
@@ -92,12 +92,12 @@ describe('buildTerrainMesh (isoline belts)', () => {
     expect(Array.from(a.ramps)).toEqual(Array.from(b.ramps));
   });
 
-  it('floods h<=0 to a flat water surface at 0 m (Q13)', () => {
+  it('floods h<=0 to a flat sea surface at 0 m (Q13), with no snow on it', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => -50) });
     const { land } = split(tris(m));
     expect(land).toHaveLength(2);
     for (const t of land) {
-      expect(t.ramp).toBe(RAMP.WATER);
+      expect(t.ramp).toBe(RAMP.SEA);
       for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBe(0);
     }
   });
@@ -106,19 +106,19 @@ describe('buildTerrainMesh (isoline belts)', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights((i) => (i < GRID / 2 ? -10 : 10)) });
     const ts = split(tris(m)).land;
     const rampSet = new Set(ts.map((t) => t.ramp));
-    expect(rampSet.has(RAMP.WATER)).toBe(true);
-    expect(rampSet.has(RAMP.GRASS)).toBe(true);
+    expect(rampSet.has(RAMP.SEA)).toBe(true);
+    expect(rampSet.has(snowy(RAMP.GRASS))).toBe(true);
     for (const t of ts) for (let k = 1; k < 9; k += 3) expect(t.pos[k]).toBeGreaterThanOrEqual(0);
   });
 
   it('colors by height and slope', () => {
     const snow = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 3000) });
-    expect(split(tris(snow)).land[0].ramp).toBe(RAMP.SNOW);
+    expect(split(tris(snow)).land[0].ramp).toBe(snowy(RAMP.SNOW));
     const forest = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 800) });
-    expect(split(tris(forest)).land[0].ramp).toBe(RAMP.FOREST);
+    expect(split(tris(forest)).land[0].ramp).toBe(snowy(RAMP.FOREST));
     const cell = tileSizeMeters(TILE) / GRID;
     const steep = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights((i) => 500 + i * cell) });
-    expect(split(tris(steep)).land[0].ramp).toBe(RAMP.ROCK);
+    expect(split(tris(steep)).land[0].ramp).toBe(snowy(RAMP.ROCK));
   });
 
   it('skirts inherit the adjacent land face ramp and normal, and hang by skirtDepth', () => {

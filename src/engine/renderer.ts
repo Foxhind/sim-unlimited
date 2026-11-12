@@ -40,6 +40,8 @@ export class Renderer {
   private invViewProj = mat4.create();
   /** night: faces whose ramp carries a glow level are drawn street-lit (palette.ts GLOW_*) */
   nightGlow = false;
+  /** winter: faces flagged SNOW_FLAG are drawn in snow (palette.ts) */
+  snow = false;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -84,11 +86,11 @@ export class Renderer {
 
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -209,6 +211,7 @@ export class Renderer {
     gl.uniform1f(this.worldU.uFogStart, fogStart);
     gl.uniform1f(this.worldU.uFogEnd, fogEnd);
     gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
+    gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
   }
@@ -237,6 +240,7 @@ export class Renderer {
     gl.uniform1f(this.treeU.uFogStart, fogStart);
     gl.uniform1f(this.treeU.uFogEnd, fogEnd);
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
+    gl.uniform1i(this.treeU.uSnow, this.snow ? 1 : 0);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, count);
   }

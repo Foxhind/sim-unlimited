@@ -14,6 +14,7 @@ import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geode
 import { GroundProbe, towerAnchor } from './world/ground';
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
+import { WEATHER_ATTRIBUTION, WeatherService } from './world/weather';
 import { AIRCRAFT } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
@@ -93,6 +94,13 @@ const camWorld: CameraWorld = {
   velocity: model.vel,
 };
 
+/** live weather at the aircraft; ?temp=-20 in the URL forces the temperature (winter looks anywhere) */
+const weather = new WeatherService();
+{
+  const forced = new URLSearchParams(window.location.search).get('temp');
+  if (forced !== null && forced.trim() !== '' && Number.isFinite(Number(forced))) weather.tempOverride = Number(forced);
+}
+
 let simTime = start.time ?? new Date();
 let sun = sunPosition(simTime, start.latLon);
 let moon = moonPosition(simTime, start.latLon);
@@ -100,10 +108,12 @@ const sunDir = vec3.clone(sun.dir);
 const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
-let lut = buildLUT(paletteAt(sun.elevationDeg));
+let lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
+/** whether the current LUT was built with frozen water */
+let lutIce = weather.surface.ice;
 let previewKey = '';
 let sunLoc: LatLon = start.latLon;
 
@@ -125,7 +135,7 @@ function updateLight(): void {
     );
     vec3.normalize(lightDir, lightDir);
   }
-  lut = buildLUT(paletteAt(sun.elevationDeg));
+  lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
   applySunColors(lut, sun.elevationDeg);
 }
 
@@ -216,7 +226,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu,
+    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather,
     get state() { return state; },
     get simTime() { return simTime; },
     get consent() { return consent; },
@@ -421,10 +431,14 @@ function frame(now: number): void {
   } else {
     sunLoc = camWorld.latLon;
   }
+  weather.update(sunLoc, now);
+  const surface = weather.surface;
+  if (surface.ice !== lutIce) lastSunUpdate = 0; // rebuild the LUT now: water freezes or thaws
   // fast clocks need a finer refresh than the 1 s default or the sky visibly steps
   if (now - lastSunUpdate > (menu.config.timeAccel > 1 && state === 'flying' ? 100 : 1000)) {
     lastSunUpdate = now;
     updateLight();
+    lutIce = surface.ice;
   }
   if (menu.screen === 'pause') {
     const hh = simTime.toISOString().slice(0, 16).replace('T', ' ');
@@ -437,6 +451,7 @@ function frame(now: number): void {
   renderer.drawSky(view, proj, camPos, sunDir, moonDir);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
+  renderer.snow = surface.snow;
   chunks.draw(renderer, view, proj, camPos, lightDir, 15000, 55000);
   osm.draw(renderer, view, proj, camPos, lightDir, 15000, 55000, lightsOn, 3 * u);
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
@@ -448,6 +463,7 @@ function frame(now: number): void {
   if (spawned && state === 'flying') {
     drawHud(font, vectors, renderer.width, renderer.height, u, {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound, autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined } : null,
+      weather: { data: weather.current, tempC: weather.tempC },
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
     const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
@@ -473,7 +489,7 @@ function frame(now: number): void {
       pad, renderer.height - pad - 16 * u, u, HUD_GREEN,
     );
   }
-  const attr = `© OpenStreetMap contributors · ${LANDSAT_ATTRIBUTION}`;
+  const attr = `© OpenStreetMap contributors · ${LANDSAT_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
   font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
   font.flush();
   vectors.flush();

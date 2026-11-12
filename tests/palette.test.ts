@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildLUT, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, OVERLAY_LUT_BASE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { buildLUT, LIGHT, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, OVERLAY_LUT_BASE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
 
 const VALID_6BIT = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
@@ -142,5 +142,49 @@ describe('overlay LUT row', () => {
       expect(entry(night, OVERLAY_LUT_BASE + i)).toEqual(entry(night, i));
     }
     expect(RESOLVE_FS).toContain(`ivec2(int(o), ${OVERLAY_LUT_BASE / 256})`);
+  });
+});
+
+describe('winter surface (weather)', () => {
+  const p = paletteAt(45);
+  const plain = buildLUT(p);
+  const frost = buildLUT(p, { snow: true, ice: false });
+  const ice = buildLUT(p, { snow: true, ice: true });
+  const lit = (lut: Uint8Array, ramp: number) => entry(lut, rampIndex(ramp, LIT_STEP));
+  const LIT_STEP = 9;
+
+  it('unfrozen seas look like any other water', () => {
+    for (let s = 0; s < RAMP_STEPS; s++) expect(entry(plain, rampIndex(RAMP.SEA, s))).toEqual(entry(plain, rampIndex(RAMP.WATER, s)));
+  });
+
+  it('snow alone does not touch the palette (the shader swaps flagged faces to the snow ramp)', () => {
+    expect(frost).toEqual(plain);
+  });
+
+  it('in hard frost inland water turns light grey and seas steel grey', () => {
+    const [ir, ig, ib] = lit(ice, RAMP.WATER);
+    expect(Math.max(ir, ig, ib) - Math.min(ir, ig, ib)).toBeLessThan(16); // grey, not blue
+    expect(ir).toBeGreaterThan(140); // light
+    const [sr, sg, sb] = lit(ice, RAMP.SEA);
+    expect(sb).toBeGreaterThan(sr); // a cool steel grey
+    expect(sb - sr).toBeLessThan(40); // ...not blue water any more
+    expect(sr + sg + sb).toBeLessThan(ir + ig + ib); // darker than the ice
+    const [wr, , wb] = lit(plain, RAMP.WATER);
+    expect(wb - wr).toBeGreaterThan(60); // plain water was clearly blue
+  });
+
+  it('frost changes only the water ramps; the taxiway lights stay blue', () => {
+    const changed = new Set<number>();
+    for (let i = 0; i < LUT_SIZE; i++) {
+      if (entry(ice, i).join() !== entry(plain, i).join()) changed.add(Math.floor(i / RAMP_STEPS));
+    }
+    expect([...changed].sort((a, b) => a - b)).toEqual([RAMP.WATER, RAMP.SEA]);
+    const [r, , b] = entry(ice, LIGHT.TAXI_BLUE);
+    expect(b - r).toBeGreaterThan(100);
+  });
+
+  it('the sea ramp is a VGA filler slot no imagery colour maps to', () => {
+    expect(RAMP.SEA).toBe(TERRAIN_RAMP_BASE + 248);
+    expect(nearestVga(0, 0, 0)).toBeLessThan(248);
   });
 });

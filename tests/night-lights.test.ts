@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, GLOW_LEVELS, GLOW_SHIFT, LIGHT, LUT_SIZE, paletteAt, RAMP, RAMP_MASK, rampIndex, sunColors, withGlow,
+  applySunColors, buildLUT, GLOW_LEVELS, LIGHT, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColors, withGlow,
 } from '../src/engine/palette';
 import { POINTS_FS, SKY_FS, TREE_VS, WORLD_VS } from '../src/engine/shaders';
 import { buildBuildingMesh, buildingNightLights, TALL_BUILDING_M } from '../src/world/building-mesher';
@@ -235,8 +235,8 @@ describe('night glow by building density', () => {
       expect(g.vertices[k * 6]).toBe(terrain.vertices[o]);
       expect(g.vertices[k * 6 + 2]).toBe(terrain.vertices[o + 2]);
       expect(g.vertices[k * 6 + 1]).toBeCloseTo(terrain.vertices[o + 1] + GLOW_GROUND_LIFT_M, 5);
-      expect(g.ramps[k] >> GLOW_SHIFT).toBe(5);
-      expect(g.ramps[k] & RAMP_MASK).toBe(terrain.ramps[under * 3 + k]);
+      expect(rampGlowLevel(g.ramps[k])).toBe(5);
+      expect(withGlow(g.ramps[k], 0)).toBe(terrain.ramps[under * 3 + k]);
     }
   });
 
@@ -247,8 +247,8 @@ describe('night glow by building density', () => {
     const ramps = m.ramps.slice();
     applyGlow(m.vertices, ramps, TILE, locate, levels);
     for (let v = 0; v < ramps.length; v++) {
-      expect(ramps[v] >> GLOW_SHIFT).toBe(3);
-      expect(ramps[v] & RAMP_MASK).toBe(m.ramps[v]);
+      expect(rampGlowLevel(ramps[v])).toBe(3);
+      expect(withGlow(ramps[v], 0)).toBe(m.ramps[v]);
     }
     const dark = m.ramps.slice();
     applyGlow(m.vertices, dark, TILE, locate, new Uint8Array(tin.tris.length));

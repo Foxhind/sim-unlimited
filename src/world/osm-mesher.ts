@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { RAMP } from '../engine/palette';
+import { RAMP, snowy } from '../engine/palette';
 import { latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
@@ -32,6 +32,9 @@ interface AreaStyle {
   water: boolean;
 }
 
+/** open ground (fields, parks, beaches...): snow covers it in winter */
+const ground = (ramp: number, bias: number): AreaStyle => ({ ramp: snowy(ramp), bias, water: false });
+
 function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
   const natural = tags.natural;
   const landuse = tags.landuse;
@@ -45,15 +48,15 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
     return { ramp: RAMP.ASPHALT, bias: 1.0, water: false };
   }
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
-  if (natural === 'scrub') return { ramp: RAMP.FOREST, bias: 0.6, water: false };
-  if (natural === 'beach') return { ramp: RAMP.SAND, bias: 0.6, water: false };
-  if (natural === 'bare_rock' || natural === 'scree') return { ramp: RAMP.ROCK, bias: 0.6, water: false };
-  if (landuse === 'farmland') return { ramp: RAMP.FIELD, bias: 0.6, water: false };
+  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6);
+  if (natural === 'beach') return ground(RAMP.SAND, 0.6);
+  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6);
+  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6);
   if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course' || leisure === 'pitch') {
-    return { ramp: RAMP.GRASS, bias: 0.6, water: false };
+    return ground(RAMP.GRASS, 0.6);
   }
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
-  if (natural === 'wetland') return { ramp: RAMP.GRASS, bias: 0.5, water: false };
+  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5);
   return undefined;
 }
 

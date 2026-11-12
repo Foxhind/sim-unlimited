@@ -18,7 +18,7 @@ import { loadLandsatTerrain } from '../world/landsat-process';
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 13;
+export const OSM_MESH_SCHEMA = 15;
 
 export interface OsmRequest {
   type: 'osm';

@@ -17,6 +17,11 @@ export const RAMP = {
   EMISSIVE: 13,
   HUD_GREEN: 14,
   HUD_AMBER: 15,
+  /**
+   * Seas and oceans (terrain at or below sea level), apart from inland water (WATER): it freezes
+   * to another colour. Lives in the unused black filler slot 248 of the VGA ramps.
+   */
+  SEA: 16 + 248,
 } as const;
 
 export const RAMP_COUNT = 16;
@@ -60,8 +65,33 @@ const GLOW_MUL_MAX = 0.425;
 const GLOW_TINT: RGB = [1.0, 0.86, 0.66];
 
 export function withGlow(ramp: number, level: number): number {
-  return (ramp & RAMP_MASK) | (Math.max(0, Math.min(GLOW_LEVELS, level)) << GLOW_SHIFT);
+  return (ramp & (RAMP_MASK | SNOW_FLAG)) | (Math.max(0, Math.min(GLOW_LEVELS, level)) << GLOW_SHIFT);
 }
+
+/**
+ * Winter: a face that snow can lie on (open ground, trees, flat roofs) carries SNOW_FLAG in the
+ * top bit of its ramp (above the glow level); with snow on, the shader draws it in RAMP.SNOW.
+ */
+export const SNOW_FLAG = 1 << 15;
+export const GLOW_LEVEL_MASK = (1 << (15 - GLOW_SHIFT)) - 1;
+
+export function snowy(ramp: number): number {
+  return ramp | SNOW_FLAG;
+}
+
+/** the night glow level of a packed mesh ramp (the snow flag above it ignored) */
+export function rampGlowLevel(packed: number): number {
+  return (packed >> GLOW_SHIFT) & GLOW_LEVEL_MASK;
+}
+
+/** what the weather does to the ground (weather.ts) */
+export interface Surface {
+  /** snow on open ground, trees and flat roofs */
+  snow: boolean;
+  /** frozen inland water (light grey ice), steel-grey seas */
+  ice: boolean;
+}
+export const NO_WINTER: Surface = { snow: false, ice: false };
 
 interface MaterialRamp {
   dark: RGB;
@@ -82,6 +112,12 @@ const MATERIALS: MaterialRamp[] = [
   { dark: [20, 24, 28], light: [88, 96, 104] }, // hull dark
   { dark: [72, 64, 24], light: [164, 148, 72] }, // field
 ];
+
+/** frozen inland water: light grey ice */
+const ICE: MaterialRamp = { dark: [92, 96, 104], light: [200, 204, 210] };
+/** a sea in hard frost: steel grey instead of blue */
+const SEA_STEEL: MaterialRamp = { dark: [36, 44, 54], light: [104, 118, 132] };
+const WATER_INDEX = 2;
 
 const EMISSIVE: MaterialRamp = { dark: [0, 0, 0], light: [255, 252, 216] };
 const HUD_GREEN: MaterialRamp = { dark: [0, 40, 0], light: [64, 255, 64] };
@@ -254,10 +290,10 @@ function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
  * Material ramps: steps 0..11 dark→light (lighting), 12..15 light→haze (fog).
  * The haze end equals the sky horizon color so fogged geometry meets the sky.
  */
-export function buildLUT(p: PaletteParams): Uint8Array {
+export function buildLUT(p: PaletteParams, surface: Surface = NO_WINTER): Uint8Array {
   const lut = new Uint8Array(LUT_ENTRIES * 4);
-  buildPlainLUT(lut, p);
-  for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k));
+  buildPlainLUT(lut, p, surface);
+  for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k), surface);
   for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
   // overlay row: row 0 as it is (sky-coloured panels, HUD), material ramps (map colours) by day
   const overlay = lut.subarray(OVERLAY_LUT_BASE * 4);
@@ -275,19 +311,22 @@ export function glowParams(p: PaletteParams, k: number): PaletteParams {
   return { ...p, lightMul: mul, tint: lerpRGB(GLOW_TINT, p.tint, p.lightMul / mul) };
 }
 
-function buildPlainLUT(lut: Uint8Array, p: PaletteParams): void {
+function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_WINTER): void {
   const haze = p.horizon;
-
-  for (let r = 0; r < MATERIALS.length; r++) {
-    const dark = scaleRGB(MATERIALS[r].dark, p);
-    const light = scaleRGB(MATERIALS[r].light, p);
+  const writeMaterial = (ramp: number, m: MaterialRamp): void => {
+    const dark = scaleRGB(m.dark, p);
+    const light = scaleRGB(m.light, p);
     for (let s = 0; s < RAMP_STEPS; s++) {
       const c =
         s < LIT_STEPS
           ? lerpRGB(dark, light, s / (LIT_STEPS - 1))
           : lerpRGB(light, haze, (s - LIT_STEPS + 1) / (RAMP_STEPS - LIT_STEPS));
-      writeEntry(lut, r * RAMP_STEPS + s, c);
+      writeEntry(lut, ramp * RAMP_STEPS + s, c);
     }
+  };
+
+  for (let r = 0; r < MATERIALS.length; r++) {
+    writeMaterial(r, surface.ice && r === WATER_INDEX ? ICE : MATERIALS[r]);
   }
 
   for (let s = 0; s < RAMP_STEPS; s++) {
@@ -312,6 +351,8 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams): void {
       writeEntry(lut, base + s, c);
     }
   }
+  // after the VGA ramps: the sea ramp sits in a filler slot of them
+  writeMaterial(RAMP.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX]);
 }
 
 /**
@@ -325,8 +366,11 @@ export const LIGHT = {
   /** sun disc and its halo: white by day, yellow when low (applySunColors) */
   SUN_HALO: RAMP.SKY * RAMP_STEPS + 13,
   SUN: RAMP.SKY * RAMP_STEPS + 14,
+  /** blue taxiway edge lights (kept apart from the water ramp, which turns to ice in frost) */
+  TAXI_BLUE: RAMP.SKY * RAMP_STEPS + 9,
 } as const;
 const LIGHT_COLORS: [number, RGB][] = [
+  [LIGHT.TAXI_BLUE, [64, 128, 255]],
   [LIGHT.WINDOW_YELLOW, [255, 204, 72]],
   [LIGHT.WINDOW_WHITE, [236, 240, 255]],
   [LIGHT.RED, [255, 24, 16]],

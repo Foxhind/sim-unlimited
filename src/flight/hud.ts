@@ -1,6 +1,7 @@
 import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE } from '../engine/font';
 import { VectorRenderer } from '../engine/vector';
 import type { Units } from '../ui/settings';
+import { cloudCode, compassPoint, type Weather } from '../world/weather';
 import type { CameraMode } from './cameras';
 import type { FlightModel, FlightControls } from './model';
 
@@ -61,6 +62,41 @@ export interface HudState {
   soundOn: boolean;
   /** engaged autopilot targets, or null when off */
   autopilot?: { altitude: number; speed: number; heading: number; mode?: string } | null;
+  /** live weather (world/weather.ts), shown top right; tempC may be overridden */
+  weather?: { data?: Weather; tempC?: number };
+}
+
+/** wind speed in the HUD: m/s (Russian practice) in metric, knots otherwise */
+function windValue(ms: number, units: Units): number {
+  return units === 'metric' ? ms : ms * 1.94384;
+}
+
+/**
+ * Weather lines for the top-right corner: temperature, wind (from, speed, gusts), cloud cover.
+ * Before the first response: one "loading" line.
+ */
+export function weatherLines(data: Weather | undefined, tempC: number | undefined, units: Units, lang: 'ru' | 'en'): string[] {
+  const ru = lang === 'ru';
+  if (tempC === undefined) return [ru ? 'ПОГОДА...' : 'WEATHER...'];
+  const t = `${ru ? 'ТЕМП' : 'TEMP'} ${tempC > 0 ? '+' : ''}${Math.round(tempC)}\u00B0C`;
+  if (!data) return [t];
+  const unit = units === 'metric' ? (ru ? 'М/С' : 'M/S') : 'KT';
+  const spd = Math.round(windValue(data.windMs, units));
+  const gust = Math.round(windValue(data.gustMs, units));
+  const dir = String(Math.round(data.windFromDeg) % 360).padStart(3, '0');
+  const wind = spd === 0
+    ? `${ru ? 'ВЕТЕР' : 'WIND'} ${ru ? 'ШТИЛЬ' : 'CALM'}`
+    : `${ru ? 'ВЕТЕР' : 'WIND'} ${dir}\u00B0 ${compassPoint(data.windFromDeg, lang)} ${spd}${gust > spd + 2 ? `G${gust}` : ''} ${unit}`;
+  const cloud = `${ru ? 'ОБЛ' : 'CLD'} ${cloudCode(data.cloudPct)} ${Math.round(data.cloudPct)}%`;
+  return [t, wind, cloud];
+}
+
+/** right-aligned weather block from y down */
+function drawWeather(font: FontRenderer, w: number, y: number, u: number, st: HudState, lang: 'ru' | 'en'): void {
+  if (!st.weather) return;
+  weatherLines(st.weather.data, st.weather.tempC, st.units, lang).forEach((line, i) => {
+    font.text(line, w - font.measure(line, u) - 8 * u, y + i * 18 * u, u, HUD_GREEN);
+  });
 }
 
 export function drawHud(
@@ -90,6 +126,7 @@ export function drawHud(
     if (model.stall && Math.floor(now * 3) % 2 === 0) {
       font.text(L.stall, (w - font.measure(L.stall, u * 2)) / 2, h * 0.2, u * 2, amber);
     }
+    drawWeather(font, w, 8 * u, u, st, cfg.hudLang);
     return;
   }
 
@@ -238,6 +275,7 @@ export function drawHud(
     font.text(ap, (w - font.measure(ap, u)) / 2, 8 * u, u, amber);
   }
   font.text(st.soundOn ? 'M SOUND ON' : 'M SOUND OFF', w - font.measure('M SOUND OFF', u) - 8 * u, 8 * u, u, green);
+  drawWeather(font, w, 8 * u + 18 * u, u, st, cfg.hudLang);
 
   // warnings
   if (model.stall && Math.floor(now * 3) % 2 === 0) {
