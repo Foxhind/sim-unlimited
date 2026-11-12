@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildLUT, LUT_SIZE, LUT_TOTAL, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { buildLUT, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, OVERLAY_LUT_BASE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { RESOLVE_FS } from '../src/engine/shaders';
 
 const VALID_6BIT = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
 
@@ -26,8 +27,9 @@ describe('buildLUT', () => {
 
   it('covers every entry (materials + VGA terrain ramps, plain and per glow level) with 6-bit channels', () => {
     expect(LUT_TOTAL % LUT_SIZE).toBe(0);
-    expect(lut.length).toBe(LUT_TOTAL * 4);
-    for (let i = 0; i < LUT_TOTAL; i++) {
+    expect(LUT_ENTRIES % 256).toBe(0);
+    expect(lut.length).toBe(LUT_ENTRIES * 4);
+    for (let i = 0; i < LUT_ENTRIES; i++) {
       const [r, g, b] = entry(lut, i);
       expect(VALID_6BIT.has(r)).toBe(true);
       expect(VALID_6BIT.has(g)).toBe(true);
@@ -124,5 +126,21 @@ describe('green and water VGA colours', () => {
     expect(isWaterVga(1)).toBe(true); // EGA blue
     expect(isWaterVga(247)).toBe(false); // bluish grey
     expect(isWaterVga(24)).toBe(false); // grey
+  });
+});
+
+describe('overlay LUT row', () => {
+  it('maps keep their daytime colours at night; HUD and sky-coloured panels follow row 0', () => {
+    const day = buildLUT(paletteAt(45));
+    const night = buildLUT(paletteAt(-20));
+    // the colours the minimap uses (water, grass, forest, rock, snow)
+    for (const i of [rampIndex(RAMP.WATER, 7), rampIndex(RAMP.WATER, 11), rampIndex(RAMP.GRASS, 7), rampIndex(RAMP.FOREST, 8), rampIndex(RAMP.ROCK, 6), rampIndex(RAMP.SNOW, 10)]) {
+      expect(entry(night, OVERLAY_LUT_BASE + i)).toEqual(entry(day, i));
+      expect(luminance(entry(night, i))).toBeLessThan(luminance(entry(day, i))); // the world itself does darken
+    }
+    for (const i of [rampIndex(RAMP.HUD_GREEN, 13), rampIndex(RAMP.SKY, 2), rampIndex(RAMP.EMISSIVE, 13)]) {
+      expect(entry(night, OVERLAY_LUT_BASE + i)).toEqual(entry(night, i));
+    }
+    expect(RESOLVE_FS).toContain(`ivec2(int(o), ${OVERLAY_LUT_BASE / 256})`);
   });
 });

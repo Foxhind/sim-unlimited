@@ -1,6 +1,6 @@
 import { mat4, vec3 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
-import { LUT_TOTAL } from './palette';
+import { LUT_ENTRIES } from './palette';
 import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -70,7 +70,7 @@ export class Renderer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, LUT_TOTAL / 256, 0, format, type, null);
+      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, LUT_ENTRIES / 256, 0, format, type, null);
     }
 
     this.triVao = must(gl.createVertexArray(), 'fullscreen VAO');
@@ -160,7 +160,7 @@ export class Renderer {
   beginFrame(lut: Uint8Array): void {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_TOTAL / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_ENTRIES / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
 
     const s = this.msaa ? 2 : 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);

@@ -18,12 +18,17 @@ export type OsmSourceMode = 'auto' | 'overpass' | 'osm-api';
 const OVERPASS_DOWN_MS = 60000;
 
 async function fetchOverpass(tile: Tile, detail: OsmDetail): Promise<string> {
+  return fetchOverpassQuery(overpassQuery(tile, detail));
+}
+
+/** one Overpass query; unreachable, 429 and 5xx fail as retryable */
+export async function fetchOverpassQuery(query: string): Promise<string> {
   let res: Response;
   try {
     res = await fetch(ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ data: overpassQuery(tile, detail) }),
+      body: new URLSearchParams({ data: query }),
       signal: AbortSignal.timeout(30000),
     });
   } catch (err) {

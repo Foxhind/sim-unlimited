@@ -224,6 +224,7 @@ export class Menu {
     const af = AIRFIELDS.find((a) => a.icao === cfg.location);
     const center = af ?? cfg.customPoint ?? { lat: 47.2603, lon: 11.3439 };
     this.minimap.setView(center, 500000);
+    this.minimap.lang = this.settings.lang;
     this.minimap.draw(this.vec, this.font, mx, my, size, u, cfg.customPoint ?? undefined);
     if (click) {
       const p = this.minimap.pick(click[0], click[1], mx, my, size);
@@ -293,6 +294,7 @@ export class Menu {
     const size = Math.min(w * 0.4, h * 0.5);
     const mx = w / 2 - size / 2, my = h * 0.16;
     if (marker) this.minimap.setView(marker, 120000);
+    this.minimap.lang = this.settings.lang;
     this.minimap.draw(this.vec, this.font, mx, my, size, u, marker);
 
     let y = my + size + 16 * u;

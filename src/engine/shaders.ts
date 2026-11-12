@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, RAMP_MASK } from './palette';
+import { GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP_MASK } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -224,7 +224,7 @@ void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   uint o = texelFetch(uOverlayTex, p, 0).r;
   if (o > 0u) {
-    oColor = vec4(texelFetch(uLut, ivec2(int(o), 0), 0).rgb, 1.0); // overlay: first row only
+    oColor = vec4(texelFetch(uLut, ivec2(int(o), ${OVERLAY_LUT_BASE / 256}), 0).rgb, 1.0); // overlay: its own row (palette.ts)
   } else if (uMsaa == 1) {
     oColor = vec4(texelFetch(uColorTex, p, 0).rgb, 1.0);
   } else {

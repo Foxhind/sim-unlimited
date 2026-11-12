@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { LUT_TOTAL, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
+import { LUT_ENTRIES, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -102,7 +102,7 @@ const moonDir = vec3.clone(moon.dir);
 const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg));
 applySunColors(lut, sun.elevationDeg);
-const flashLut = new Uint8Array(LUT_TOTAL * 4).fill(255);
+const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
 let previewKey = '';
 let sunLoc: LatLon = start.latLon;
@@ -453,6 +453,7 @@ function frame(now: number): void {
     const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
     const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
     const own = enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], 0);
+    flightMap.lang = settings.lang;
     flightMap.follow(own, FLIGHT_MAP_SPAN_M);
     flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
     font.text(`N  ${FLIGHT_MAP_SPAN_M / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);

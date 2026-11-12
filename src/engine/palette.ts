@@ -39,8 +39,15 @@ export const LIT_STEPS = 12; // steps 0..11: lighting range, 12..15: fog range t
 export const GLOW_LEVELS = 7;
 export const GLOW_SHIFT = 12;
 export const RAMP_MASK = (1 << GLOW_SHIFT) - 1;
-/** entries in the LUT texture: the plain palette and one copy per glow level */
+/** entries of the world palettes: the plain palette and one copy per glow level */
 export const LUT_TOTAL = LUT_SIZE * (GLOW_LEVELS + 1);
+/**
+ * The 2D overlay (HUD, menu, maps) is an 8-bit index image looked up in one LUT row of its own
+ * after the world palettes: row 0 with the material ramps in daylight, so maps stay readable at night.
+ */
+export const OVERLAY_LUT_BASE = LUT_TOTAL;
+/** entries in the LUT texture (256 per row) */
+export const LUT_ENTRIES = LUT_TOTAL + 256;
 /** a glowing face is shaded at least at lighting step GLOW_STEP_BASE + level (sun from below the horizon gives ~3) */
 export const GLOW_STEP_BASE = 4;
 /**
@@ -248,10 +255,16 @@ function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
  * The haze end equals the sky horizon color so fogged geometry meets the sky.
  */
 export function buildLUT(p: PaletteParams): Uint8Array {
-  const lut = new Uint8Array(LUT_TOTAL * 4);
+  const lut = new Uint8Array(LUT_ENTRIES * 4);
   buildPlainLUT(lut, p);
   for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k));
   for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
+  // overlay row: row 0 as it is (sky-coloured panels, HUD), material ramps (map colours) by day
+  const overlay = lut.subarray(OVERLAY_LUT_BASE * 4);
+  overlay.set(lut.subarray(0, 256 * 4));
+  const day = new Uint8Array(LUT_SIZE * 4);
+  buildPlainLUT(day, DAY);
+  overlay.set(day.subarray(0, MATERIALS.length * RAMP_STEPS * 4));
   return lut;
 }
 

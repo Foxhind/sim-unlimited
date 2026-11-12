@@ -3,6 +3,11 @@ import { VectorRenderer } from '../engine/vector';
 import { RAMP, rampIndex } from '../engine/palette';
 import { tileForLatLon, type LatLon, type Tile } from '../world/geodesy';
 import { decodePngToSampler, fetchTerrariumPng, type HeightSampler } from '../world/terrain-source';
+import {
+  featureName, featureTiles, KIND_PRIORITY, mapLevelForSpan, MapFeatureSource, type MapFeature, type MapLevel,
+} from '../world/map-features';
+import { fetchOverpassQuery } from '../world/osm-source';
+import { getOsmRaw, putOsmRaw } from '../world/tile-cache';
 
 /** Q22: fixed reference airfields until the M6 global index. */
 export const AIRFIELDS = [
@@ -11,12 +16,38 @@ export const AIRFIELDS = [
 ] as const;
 
 const N = 96; // map cells per side
+
+/** settlements and airfields for every map, cached with the raw OSM in IndexedDB */
+let sharedFeatures: MapFeatureSource | undefined;
+function defaultFeatureSource(): MapFeatureSource {
+  sharedFeatures ??= new MapFeatureSource(
+    {
+      get: async (key) => (await getOsmRaw(key))?.json,
+      put: (key, json) => putOsmRaw({ key, ts: Date.now(), json }),
+    },
+    fetchOverpassQuery,
+  );
+  return sharedFeatures;
+}
+
+/** dark halo behind labels so they read over any terrain colour (overlay row: daylight HULL_DARK) */
+const LABEL_SHADOW = rampIndex(RAMP.HULL_DARK, 0);
+const MAX_LABEL_CHARS = 12;
+/** a name is cut to fit, but not below this many characters (a shorter one is never cut) */
+const MIN_LABEL_CHARS = 5;
+
+interface Label {
+  text: string;
+  x: number;
+  y: number;
+  index: number;
+}
 const MAX_SAMPLERS = 24;
 const MISSING = -99999;
 
 /**
- * Q32: minimap from our own data only — Terrarium z3–z8 heights quantized to
- * the terrain palette, coastline from the DEM water mask, airfield dots.
+ * Q32: minimap — Terrarium z3–z8 heights quantized to the terrain palette, coastline from the
+ * DEM water mask, settlements and airfields from OSM (map-features.ts), the reference airfields.
  */
 export class Minimap {
   center: LatLon = { lat: 47.2603, lon: 11.3439 };
@@ -30,6 +61,12 @@ export class Minimap {
   private zoom = 5;
   private tiles: Tile[] = [];
   private dirty = true;
+  private featureLevel: MapLevel = 'region';
+  private featureTiles: Tile[] = [];
+  /** UI language for place names */
+  lang = 'en';
+
+  constructor(private readonly features: MapFeatureSource = defaultFeatureSource()) {}
 
   setView(center: LatLon, spanM: number): void {
     if (Math.abs(center.lat - this.center.lat) < 1e-6 && Math.abs(center.lon - this.center.lon) < 1e-6 && spanM === this.spanM) return;
@@ -53,6 +90,8 @@ export class Minimap {
     this.heights.fill(MISSING);
     this.sampledVersion = -1;
     for (const t of this.tiles) void this.load(t);
+    this.featureLevel = mapLevelForSpan(this.spanM);
+    this.featureTiles = featureTiles(this.center, halfLat, halfLon, this.featureLevel);
     this.dirty = false;
   }
 
@@ -134,12 +173,7 @@ export class Minimap {
       }
     }
     vec.rect(x, y, size, size, Math.max(1, u), HUD_GREEN);
-    for (const af of AIRFIELDS) {
-      const p = this.project(af, x, y, size);
-      if (!p) continue;
-      vec.fillRect(p[0] - 2 * u, p[1] - 2 * u, 4 * u, 4 * u, HUD_AMBER);
-      font.text(af.icao, p[0] + 5 * u, p[1] - 6 * u, u, HUD_AMBER);
-    }
+    this.drawFeatures(vec, font, x, y, size, u);
     if (marker) {
       const p = this.project(marker, x, y, size);
       if (p) {
@@ -150,6 +184,115 @@ export class Minimap {
         vec.polyline([pt(6 * u, 0), pt(-4 * u, 4 * u), pt(-4 * u, -4 * u)], Math.max(1, u), markerHdgDeg === undefined ? HUD_GREEN : HUD_WHITE, true);
       }
     }
+  }
+
+  /**
+   * Settlements (white: city a big square, town a small one, village a dot) and airfields (amber:
+   * airport a ring with a runway, airfield a ring, heliport an H), plus the reference airfields.
+   * Labels go right of the symbol (left near the edge), most important first, never overlapping.
+   */
+  private drawFeatures(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number): void {
+    const feats: MapFeature[] = this.features.features(this.featureTiles, this.featureLevel)
+      .slice()
+      .sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]);
+    const refCodes = new Set<string>(AIRFIELDS.map((a) => a.icao));
+    /** occupied boxes: labels block every later label, a symbol only labels no more important than it */
+    const taken: Array<{ box: [number, number, number, number]; prio: number }> = [];
+    const labels: Label[] = [];
+    const glyph = 8 * u, lineH = 16 * u;
+    const place = (text: string, px: number, py: number, r: number, index: number, prio: number): void => {
+      if (!text) return;
+      const ty = Math.round(py - lineH / 2);
+      if (ty < y + u || ty + lineH > y + size - u) return;
+      // right of the symbol, else left of it; a long name is cut to the room on that side
+      const right = px + r + 2 * u, left = px - r - 2 * u;
+      for (const side of ['right', 'left'] as const) {
+        const room = side === 'right' ? x + size - u - right : left - (x + u);
+        const n = Math.min(text.length, MAX_LABEL_CHARS, Math.floor(room / glyph));
+        if (n < Math.min(text.length, MIN_LABEL_CHARS)) continue;
+        const t = n < text.length ? text.slice(0, n - 1) + '.' : text;
+        const w = t.length * glyph;
+        const lx = side === 'right' ? right : left - w;
+        const box: [number, number, number, number] = [lx - u, ty, lx + w + u, ty + lineH];
+        if (taken.some((o) => o.prio <= prio && box[0] < o.box[2] && box[2] > o.box[0] && box[1] < o.box[3] && box[3] > o.box[1])) continue;
+        taken.push({ box, prio: -1 });
+        labels.push({ text: t, x: lx, y: ty, index });
+        return;
+      }
+    };
+
+    // symbols first; each reserves its own box so labels do not cover other symbols
+    const marks: Array<{ p: [number, number]; r: number; label: string; index: number; prio: number }> = [];
+    for (const af of AIRFIELDS) {
+      const p = this.project(af, x, y, size);
+      if (!p) continue;
+      vec.fillRect(p[0] - 2 * u, p[1] - 2 * u, 4 * u, 4 * u, HUD_AMBER);
+      taken.push({ box: [p[0] - 2 * u, p[1] - 2 * u, p[0] + 2 * u, p[1] + 2 * u], prio: KIND_PRIORITY.airport });
+      marks.push({ p, r: 2 * u, label: af.icao, index: HUD_AMBER, prio: KIND_PRIORITY.airport });
+    }
+    const seen = new Set<string>();
+    for (const f of feats) {
+      if (f.code && refCodes.has(f.code)) continue;
+      // an airfield crossing a tile border comes with both tiles
+      const id = `${f.kind}|${f.code ?? f.names.name ?? ''}|${f.lat.toFixed(3)}|${f.lon.toFixed(3)}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const p = this.project(f, x, y, size);
+      if (!p) continue;
+      const [px, py] = p;
+      let r = u;
+      let index = HUD_WHITE;
+      let label = featureName(f, this.lang).toUpperCase();
+      switch (f.kind) {
+        case 'city':
+          r = 3 * u;
+          vec.fillRect(px - r, py - r, 2 * r, 2 * r, HUD_WHITE);
+          break;
+        case 'town':
+          r = 2 * u;
+          vec.fillRect(px - r, py - r, 2 * r, 2 * r, HUD_WHITE);
+          break;
+        case 'village':
+          r = u;
+          vec.fillRect(px - u, py - u, 2 * u, 2 * u, HUD_WHITE);
+          break;
+        case 'airport':
+          r = 4 * u;
+          index = HUD_AMBER;
+          vec.circle(px, py, r, Math.max(1, u), HUD_AMBER, 12);
+          vec.line(px - r, py + r * 0.5, px + r, py - r * 0.5, Math.max(1, u), HUD_AMBER);
+          label = f.code ?? label;
+          break;
+        case 'airfield':
+          r = 3 * u;
+          index = HUD_AMBER;
+          vec.circle(px, py, r, Math.max(1, u), HUD_AMBER, 10);
+          label = f.code ?? label;
+          break;
+        case 'heliport':
+          r = 2 * u;
+          index = HUD_AMBER;
+          vec.line(px - r, py - r, px - r, py + r, Math.max(1, u), HUD_AMBER);
+          vec.line(px + r, py - r, px + r, py + r, Math.max(1, u), HUD_AMBER);
+          vec.line(px - r, py, px + r, py, Math.max(1, u), HUD_AMBER);
+          label = '';
+          break;
+      }
+      const prio = KIND_PRIORITY[f.kind];
+      taken.push({ box: [px - r, py - r, px + r, py + r], prio });
+      marks.push({ p, r, label, index, prio });
+    }
+    for (const m of marks) place(m.label, m.p[0], m.p[1], m.r, m.index, m.prio);
+
+    // the map and symbols must be under the labels: flush them, then halo, then text by colour
+    vec.flush();
+    for (const l of labels) {
+      for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) font.text(l.text, l.x + dx * u, l.y + dy * u, u, LABEL_SHADOW);
+    }
+    for (const index of [HUD_WHITE, HUD_AMBER]) {
+      for (const l of labels) if (l.index === index) font.text(l.text, l.x, l.y, u, index);
+    }
+    font.flush();
   }
 
   private project(ll: LatLon, x: number, y: number, size: number): [number, number] | null {
