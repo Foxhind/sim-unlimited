@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { applySunColors, buildLUT, LIGHT, paletteAt, sunColors } from '../src/engine/palette';
-import { POINTS_FS, SKY_FS } from '../src/engine/shaders';
-import { buildingNightLights, TALL_BUILDING_M } from '../src/world/building-mesher';
-import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import {
+  applySunColors, buildLUT, GLOW_LEVELS, GLOW_SHIFT, LIGHT, LUT_SIZE, paletteAt, RAMP, RAMP_MASK, rampIndex, sunColors, withGlow,
+} from '../src/engine/palette';
+import { POINTS_FS, SKY_FS, TREE_VS, WORLD_VS } from '../src/engine/shaders';
+import { buildBuildingMesh, buildingNightLights, TALL_BUILDING_M } from '../src/world/building-mesher';
+import { latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
+import {
+  applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
+} from '../src/world/night-glow';
+import { farLightSize } from '../src/world/osm-manager';
+import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/world/terrain-mesher';
+import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
@@ -143,5 +151,111 @@ describe('antenna masts', () => {
   it('ignores other point objects', () => {
     const m = buildMasts([{ at: mast.at, tags: { aeroway: 'helipad' } }], TILE, flat);
     expect(m.vertices.length + m.lines.length + m.beacons.length).toBe(0);
+  });
+});
+
+describe('far building lights', () => {
+  it('are thin: one device pixel at night instead of the fat day dot', () => {
+    expect(farLightSize(3)).toBe(1); // pointSize = 3 device px at devicePixelRatio 1
+    expect(farLightSize(6)).toBe(2); // one CSS pixel on a 2x screen
+  });
+});
+
+describe('night glow by building density', () => {
+  // flat lattice: the TIN is the tile square split into two triangles
+  const grid = 4;
+  const heights = new Float32Array((grid + 1) ** 2).fill(GROUND);
+  const tin = buildTerrainTin(TILE, grid, heights);
+  const locate = tinLocator(tin, TILE);
+  const triArea = (i: number) => {
+    const t = tin.tris[i], { vx, vy } = tin;
+    const cell = tileSizeMeters(TILE) / grid;
+    return (Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2) * cell * cell;
+  };
+  // off the tile diagonals (the TIN edges of a flat tile), well inside one triangle
+  const b = tileBounds(TILE);
+  const at = { lon: b.west + (b.east - b.west) * 0.75, lat: b.south + (b.north - b.south) * 0.625 };
+  const box = (w: number, h: number): [number, number][] =>
+    [[at.lon - w, at.lat - h], [at.lon + w, at.lat - h], [at.lon + w, at.lat + h], [at.lon - w, at.lat + h], [at.lon - w, at.lat - h]];
+  const house: OsmBuilding = { rings: [box(0.0004, 0.0003)], tags: { building: 'apartments' } };
+  const part: OsmBuilding = { rings: [box(0.0004, 0.0003)], tags: { 'building:part': 'yes' } };
+  const under = locate(at.lon, at.lat)!.tri;
+
+  it('coverage = footprint area / triangle area, for the triangle under the building only', () => {
+    const cov = buildingCoverage(tin, TILE, [house, part], locate);
+    const footprint = (2 * 0.0004 * 111320 * Math.cos((at.lat * Math.PI) / 180)) * (2 * 0.0003 * 111320);
+    expect(cov[under] / (footprint / triArea(under))).toBeCloseTo(1, 2);
+    for (let i = 0; i < cov.length; i++) if (i !== under) expect(cov[i]).toBe(0);
+  });
+
+  it('the level grows with the built-up share, dark below the threshold, brightest for a dense centre', () => {
+    expect(glowLevel(0)).toBe(0);
+    expect(glowLevel(GLOW_MIN_COVERAGE / 2)).toBe(0);
+    expect(glowLevel(GLOW_MIN_COVERAGE)).toBe(1);
+    expect(glowLevel(GLOW_FULL_COVERAGE)).toBe(GLOW_LEVELS);
+    expect(glowLevel(0.9)).toBe(GLOW_LEVELS);
+    let prev = 0;
+    for (let c = 0.005; c <= 0.35; c += 0.01) {
+      expect(glowLevel(c)).toBeGreaterThanOrEqual(prev);
+      prev = glowLevel(c);
+    }
+  });
+
+  it('street-lit LUT copies: brighter than the night sky and brighter with the level, unchanged by day', () => {
+    const night = buildLUT(paletteAt(-20));
+    const lum = (lut: Uint8Array, i: number) => entry(lut, i).reduce((a, b) => a + b, 0);
+    const i = rampIndex(RAMP.CONCRETE, 8);
+    const plain = lum(night, i);
+    let prev = plain;
+    for (let k = 1; k <= GLOW_LEVELS; k++) {
+      const l = lum(night, k * LUT_SIZE + i);
+      expect(l).toBeGreaterThanOrEqual(prev);
+      prev = l;
+    }
+    expect(prev).toBeGreaterThan(plain);
+    // the top level is a moderate street light: about a third of the day colour (warm tint takes some blue), not near-daylight
+    const dayLut = buildLUT(paletteAt(45));
+    const top = lum(night, GLOW_LEVELS * LUT_SIZE + rampIndex(RAMP.CONCRETE, 11));
+    expect(top / lum(dayLut, rampIndex(RAMP.CONCRETE, 11))).toBeGreaterThan(0.3);
+    expect(top / lum(dayLut, rampIndex(RAMP.CONCRETE, 11))).toBeLessThan(0.5);
+    const day = buildLUT(paletteAt(45));
+    expect(entry(day, GLOW_LEVELS * LUT_SIZE + i)).toEqual(entry(day, i));
+    expect(WORLD_VS).toContain(`lvl * ${LUT_SIZE}u`);
+    expect(TREE_VS).toContain('glowIndex(uint(aInstSR.y)');
+  });
+
+  it('the lit ground copies the built-up terrain face, raised a little, its ramp carrying the level', () => {
+    const levels = new Uint8Array(tin.tris.length);
+    levels[under] = 5;
+    const g = buildGlowGround(TILE, tin, levels);
+    expect(g.ramps.length).toBe(3);
+    const terrain = buildTerrainMesh({ tile: TILE, grid, heights });
+    for (let k = 0; k < 3; k++) {
+      const o = (under * 3 + k) * 6;
+      expect(g.vertices[k * 6]).toBe(terrain.vertices[o]);
+      expect(g.vertices[k * 6 + 2]).toBe(terrain.vertices[o + 2]);
+      expect(g.vertices[k * 6 + 1]).toBeCloseTo(terrain.vertices[o + 1] + GLOW_GROUND_LIFT_M, 5);
+      expect(g.ramps[k] >> GLOW_SHIFT).toBe(5);
+      expect(g.ramps[k] & RAMP_MASK).toBe(terrain.ramps[under * 3 + k]);
+    }
+  });
+
+  it('roads, buildings and trees on a lit triangle take its level; elsewhere they stay plain', () => {
+    const levels = new Uint8Array(tin.tris.length);
+    levels[under] = 3;
+    const m = buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat });
+    const ramps = m.ramps.slice();
+    applyGlow(m.vertices, ramps, TILE, locate, levels);
+    for (let v = 0; v < ramps.length; v++) {
+      expect(ramps[v] >> GLOW_SHIFT).toBe(3);
+      expect(ramps[v] & RAMP_MASK).toBe(m.ramps[v]);
+    }
+    const dark = m.ramps.slice();
+    applyGlow(m.vertices, dark, TILE, locate, new Uint8Array(tin.tris.length));
+    expect(dark).toEqual(m.ramps);
+    const [e, n] = latLonToEnu(tileCenter(TILE), at.lat, at.lon, 0);
+    const trees = new Float32Array([e, GROUND, -n, 10, RAMP.FOREST]);
+    applyGlowToTrees(trees, TILE, locate, levels);
+    expect(trees[4]).toBe(withGlow(RAMP.FOREST, 3));
   });
 });

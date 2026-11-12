@@ -30,6 +30,32 @@ export const TERRAIN_RAMP_BASE = RAMP_COUNT;
 export const LUT_SIZE = (RAMP_COUNT + 256) * RAMP_STEPS;
 export const LIT_STEPS = 12; // steps 0..11: lighting range, 12..15: fog range toward haze
 
+/**
+ * Night glow: artificial light on the ground and on everything standing on it, in levels 1..7 by
+ * how densely built the terrain triangle is (night-glow.ts). The level rides in the high bits of a
+ * mesh ramp (ramp | level << GLOW_SHIFT); the LUT holds one full copy of all ramps per level,
+ * lit by warm street light instead of the night sky, after the plain one (level 0).
+ */
+export const GLOW_LEVELS = 7;
+export const GLOW_SHIFT = 12;
+export const RAMP_MASK = (1 << GLOW_SHIFT) - 1;
+/** entries in the LUT texture: the plain palette and one copy per glow level */
+export const LUT_TOTAL = LUT_SIZE * (GLOW_LEVELS + 1);
+/** a glowing face is shaded at least at lighting step GLOW_STEP_BASE + level (sun from below the horizon gives ~3) */
+export const GLOW_STEP_BASE = 4;
+/**
+ * brightness of artificial light at level 1 and at the top level (the night sky is 0.22, day 1.0);
+ * the lowest levels fall under the sky and keep its palette, lit only by the step boost
+ */
+const GLOW_MUL_MIN = 0.17;
+const GLOW_MUL_MAX = 0.425;
+/** warm sodium / LED mix */
+const GLOW_TINT: RGB = [1.0, 0.86, 0.66];
+
+export function withGlow(ramp: number, level: number): number {
+  return (ramp & RAMP_MASK) | (Math.max(0, Math.min(GLOW_LEVELS, level)) << GLOW_SHIFT);
+}
+
 interface MaterialRamp {
   dark: RGB;
   light: RGB;
@@ -217,12 +243,26 @@ function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
 }
 
 /**
- * Builds the 256-entry RGBA LUT.
+ * Builds the RGBA LUT: the plain palette (LUT_SIZE entries), then one street-lit copy per glow level.
  * Material ramps: steps 0..11 dark→light (lighting), 12..15 light→haze (fog).
  * The haze end equals the sky horizon color so fogged geometry meets the sky.
  */
 export function buildLUT(p: PaletteParams): Uint8Array {
-  const lut = new Uint8Array(LUT_SIZE * 4);
+  const lut = new Uint8Array(LUT_TOTAL * 4);
+  buildPlainLUT(lut, p);
+  for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k));
+  for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
+  return lut;
+}
+
+/** palette of glow level k: the scene under street light, never darker than the sky gives */
+export function glowParams(p: PaletteParams, k: number): PaletteParams {
+  const mul = GLOW_MUL_MIN + ((GLOW_MUL_MAX - GLOW_MUL_MIN) * (k - 1)) / (GLOW_LEVELS - 1);
+  if (p.lightMul >= mul) return p;
+  return { ...p, lightMul: mul, tint: lerpRGB(GLOW_TINT, p.tint, p.lightMul / mul) };
+}
+
+function buildPlainLUT(lut: Uint8Array, p: PaletteParams): void {
   const haze = p.horizon;
 
   for (let r = 0; r < MATERIALS.length; r++) {
@@ -249,7 +289,6 @@ export function buildLUT(p: PaletteParams): Uint8Array {
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
-  for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
   for (let v = 0; v < 256; v++) {
     const base = (TERRAIN_RAMP_BASE + v) * RAMP_STEPS;
     const light = scaleRGB(vgaShade(VGA_PALETTE[v], LIT_STEPS - 1), p);
@@ -260,7 +299,6 @@ export function buildLUT(p: PaletteParams): Uint8Array {
       writeEntry(lut, base + s, c);
     }
   }
-  return lut;
 }
 
 /**

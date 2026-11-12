@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { LUT_SIZE, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
+import { LUT_TOTAL, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -102,7 +102,7 @@ const moonDir = vec3.clone(moon.dir);
 const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg));
 applySunColors(lut, sun.elevationDeg);
-const flashLut = new Uint8Array(LUT_SIZE * 4).fill(255);
+const flashLut = new Uint8Array(LUT_TOTAL * 4).fill(255);
 let lastSunUpdate = 0;
 let previewKey = '';
 let sunLoc: LatLon = start.latLon;
@@ -430,8 +430,10 @@ function frame(now: number): void {
   applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut);
   renderer.drawSky(view, proj, camPos, sunDir, moonDir);
+  const lightsOn = sun.elevationDeg < 2;
+  renderer.nightGlow = lightsOn;
   chunks.draw(renderer, view, proj, camPos, lightDir, 15000, 55000);
-  osm.draw(renderer, view, proj, camPos, lightDir, 15000, 55000, sun.elevationDeg < 2, 3 * u);
+  osm.draw(renderer, view, proj, camPos, lightDir, 15000, 55000, lightsOn, 3 * u);
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }

@@ -1,6 +1,6 @@
 import { mat4, vec3 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
-import { LUT_SIZE } from './palette';
+import { LUT_TOTAL } from './palette';
 import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -38,6 +38,8 @@ export class Renderer {
   private resolveU: Uniforms;
 
   private invViewProj = mat4.create();
+  /** night: faces whose ramp carries a glow level are drawn street-lit (palette.ts GLOW_*) */
+  nightGlow = false;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -68,7 +70,7 @@ export class Renderer {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, LUT_SIZE / 256, 0, format, type, null);
+      if (tex === this.lutTex) gl.texImage2D(gl.TEXTURE_2D, 0, internal, 256, LUT_TOTAL / 256, 0, format, type, null);
     }
 
     this.triVao = must(gl.createVertexArray(), 'fullscreen VAO');
@@ -82,11 +84,11 @@ export class Renderer {
 
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -158,7 +160,7 @@ export class Renderer {
   beginFrame(lut: Uint8Array): void {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_SIZE / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_TOTAL / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
 
     const s = this.msaa ? 2 : 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -206,6 +208,7 @@ export class Renderer {
     gl.uniform3fv(this.worldU.uSunDir, sunDir);
     gl.uniform1f(this.worldU.uFogStart, fogStart);
     gl.uniform1f(this.worldU.uFogEnd, fogEnd);
+    gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
   }
@@ -233,6 +236,7 @@ export class Renderer {
     gl.uniform3fv(this.treeU.uSunDir, sunDir);
     gl.uniform1f(this.treeU.uFogStart, fogStart);
     gl.uniform1f(this.treeU.uFogEnd, fogEnd);
+    gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, count);
   }

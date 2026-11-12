@@ -34,6 +34,8 @@ interface OsmChunk {
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
   mastLines?: PropSet;
+  /** night: street-lit copy of the built-up terrain faces */
+  glow?: Mesh;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   offset: vec3;
@@ -55,6 +57,8 @@ interface MeshPayload {
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
+  glowVertices: ArrayBuffer;
+  glowRamps: ArrayBuffer;
   runways: number;
 }
 
@@ -62,6 +66,11 @@ interface WorkerSlot {
   worker: Worker;
   nextId: number;
   waiting: Map<number, { resolve: (m: MeshPayload) => void; reject: (e: unknown) => void }>;
+}
+
+/** far building lights at night: one device pixel (pointSize is 3 device pixels) */
+export function farLightSize(pointSize: number): number {
+  return Math.max(1, Math.round(pointSize / 3));
 }
 
 /**
@@ -102,7 +111,8 @@ export class OsmManager {
             bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), dots: buf(msg.dots),
             trees: buf(msg.trees), lights: buf(msg.lights),
             windows: buf(msg.windows), nightDots: buf(msg.nightDots),
-            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), runways: msg.runways ?? 0,
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
+            glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps), runways: msg.runways ?? 0,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -125,7 +135,7 @@ export class OsmManager {
     }
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0) +
-        (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0);
+        (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -272,6 +282,7 @@ export class OsmManager {
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
+    chunk.glow = this.worldMesh(chunk, data.glowVertices, data.glowRamps);
     if (data.trees.byteLength > 0) {
       const count = data.trees.byteLength / 20;
       const vao = must(gl.createVertexArray(), 'tree VAO');
@@ -311,6 +322,7 @@ export class OsmManager {
     chunk.mesh = chunk.bmesh = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.windows = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
+    chunk.glow = undefined;
   }
 
   draw(
@@ -328,6 +340,8 @@ export class OsmManager {
       const dx = camPos[0] - c.centerEnu[0];
       const dz = camPos[2] - c.centerEnu[2];
       const slant = Math.hypot(dx, dz, camPos[1]);
+      // the ground of built-up terrain faces, street-lit (renderer.nightGlow), just above the terrain
+      if (c.glow && lightsOn) renderer.drawWorld(c.glow, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       if (slant < HOUSE_RADIUS_M) {
         if (c.bmesh) renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
@@ -335,9 +349,9 @@ export class OsmManager {
           renderer.drawLights(c.windows.vao, c.windows.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
       } else {
-        // far buildings: fat dots at their centroids, roof-coloured by day, yellow/white lights by night
+        // far buildings: fat roof-coloured dots at their centroids by day, thin (1 px) yellow/white lights by night
         const dots = lightsOn ? c.nightDots : c.dots;
-        if (dots) renderer.drawLights(dots.vao, dots.count, c.offset, view, proj, camPos, pointSize * (lightsOn ? 1 : 1.5), true);
+        if (dots) renderer.drawLights(dots.vao, dots.count, c.offset, view, proj, camPos, lightsOn ? farLightSize(pointSize) : pointSize * 1.5, true);
         if (c.mastLines) {
           renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildLUT, LUT_SIZE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { buildLUT, LUT_SIZE, LUT_TOTAL, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
 
 const VALID_6BIT = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
 
@@ -24,9 +24,10 @@ describe('quantize6bit', () => {
 describe('buildLUT', () => {
   const lut = buildLUT(paletteAt(45));
 
-  it('covers every entry (materials + VGA terrain ramps) with 6-bit channels', () => {
-    expect(lut.length).toBe(LUT_SIZE * 4);
-    for (let i = 0; i < LUT_SIZE; i++) {
+  it('covers every entry (materials + VGA terrain ramps, plain and per glow level) with 6-bit channels', () => {
+    expect(LUT_TOTAL % LUT_SIZE).toBe(0);
+    expect(lut.length).toBe(LUT_TOTAL * 4);
+    for (let i = 0; i < LUT_TOTAL; i++) {
       const [r, g, b] = entry(lut, i);
       expect(VALID_6BIT.has(r)).toBe(true);
       expect(VALID_6BIT.has(g)).toBe(true);

@@ -5,9 +5,24 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { LIGHT } from './palette';
+import { GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, RAMP_MASK } from './palette';
 
 export const DEPTH_FAR = 200000;
+/**
+ * Night glow (palette.ts): ramp | level << GLOW_SHIFT. With uGlow on, a glowing face is shaded at
+ * least at step GLOW_STEP_BASE + level and looked up in that level's street-lit copy of the LUT.
+ */
+const GLOW_VS = `
+uniform int uGlow;
+uint glowIndex(uint packedRamp, float litStep, float fog) {
+  uint ramp = packedRamp & ${RAMP_MASK}u;
+  uint lvl = uGlow == 1 ? packedRamp >> ${GLOW_SHIFT}u : 0u;
+  if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
+  float idx = mix(litStep, 15.0, fog);
+  return lvl * ${LUT_SIZE}u + ramp * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
+}
+`;
+
 const LOG_DEPTH_FS = `
 in float vLogW;
 void writeLogDepth() { gl_FragDepth = log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0); }
@@ -27,6 +42,7 @@ uniform float uFogStart;
 uniform float uFogEnd;
 flat out uint vIndex;
 out float vLogW;
+${GLOW_VS}
 void main() {
   vec3 wp = aPos + uOffset;
   vec3 rel = wp - uCamPos;
@@ -37,8 +53,7 @@ void main() {
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  float idx = mix(litStep, 15.0, fog);
-  vIndex = aRamp * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
+  vIndex = glowIndex(aRamp, litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = 1.0 + max(gl_Position.w, 0.0);
 }
@@ -70,6 +85,7 @@ uniform float uFogStart;
 uniform float uFogEnd;
 flat out uint vIndex;
 out float vLogW;
+${GLOW_VS}
 void main() {
   vec3 wp = aPos * aInstSR.x + aInstPos + uOffset;
   vec3 rel = wp - uCamPos;
@@ -80,8 +96,7 @@ void main() {
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  float idx = mix(litStep, 15.0, fog);
-  vIndex = uint(aInstSR.y) * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
+  vIndex = glowIndex(uint(aInstSR.y), litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = 1.0 + max(gl_Position.w, 0.0);
 }

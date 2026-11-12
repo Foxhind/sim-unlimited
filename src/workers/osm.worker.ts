@@ -15,8 +15,10 @@ import { greenVga, RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { loadLandsatTerrain } from '../world/landsat-process';
+import { buildGlowGround } from '../world/terrain-mesher';
+import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 12;
+export const OSM_MESH_SCHEMA = 13;
 
 export interface OsmRequest {
   type: 'osm';
@@ -43,6 +45,9 @@ export interface OsmMeshResponse {
   beacons: ArrayBuffer;
   /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
   mastLines: ArrayBuffer;
+  /** night: street-lit copy of the built-up terrain faces (pos+normal, Uint16 ramps with glow level) */
+  glowVertices: ArrayBuffer;
+  glowRamps: ArrayBuffer;
   runways: number;
 }
 
@@ -91,7 +96,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights,
-      res.windows, res.nightDots, res.beacons, res.mastLines,
+      res.windows, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -104,6 +109,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         windows: cached.windows ?? empty(), nightDots: cached.nightDots ?? empty(),
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
+        glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
         runways: detail === 'full' ? await runwayCount(tile) : 0,
       });
       return;
@@ -143,12 +149,19 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const dotData = buildingDots(own, tile, drape);
     const night = buildingNightLights(own, tile, drape);
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
+    // night glow: each terrain triangle lit by how densely it is built up, and everything on it too
+    const levels = glowLevels(buildingCoverage(tin, tile, own, locate));
+    const glow = buildGlowGround(tile, tin, levels, ls.faceColor);
+    applyGlow(mesh.vertices, mesh.ramps, tile, locate, levels);
+    applyGlow(bmesh.vertices, bmesh.ramps, tile, locate, levels);
+    applyGlowToTrees(props.trees, tile, locate, levels);
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, dots: dotData.slice().buffer,
       trees: props.trees.slice().buffer, lights: props.lights.slice().buffer,
       windows: night.windows.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
+      glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
     };
     await putCachedMesh({ key, ts: Date.now(), ...out });
     send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
