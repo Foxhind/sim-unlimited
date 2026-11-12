@@ -8,11 +8,14 @@ export class Input {
   /** absolute click position in CSS px relative to target, null when consumed */
   click: [number, number] | null = null;
   lastKey: string | null = null;
+  /** codes pressed since the last consumePresses(); OS auto-repeat is ignored, sub-frame taps are kept */
+  private presses = new Set<string>();
   private dragging = false;
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
       this.keys.add(e.code);
+      if (!e.repeat) this.presses.add(e.code);
       this.lastKey = e.code;
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
         e.preventDefault();
@@ -44,6 +47,13 @@ export class Input {
 
   down(code: string): boolean {
     return this.keys.has(code);
+  }
+
+  /** Discrete key presses since the previous call (one entry per physical press). */
+  consumePresses(): Set<string> {
+    const p = this.presses;
+    this.presses = new Set();
+    return p;
   }
 
   consumeMouse(): [number, number] {

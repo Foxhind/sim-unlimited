@@ -1,4 +1,4 @@
-import { FontRenderer, HUD_AMBER, HUD_GREEN } from '../engine/font';
+import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE } from '../engine/font';
 import { VectorRenderer } from '../engine/vector';
 import { RAMP, rampIndex } from '../engine/palette';
 import { tileForLatLon, type LatLon, type Tile } from '../world/geodesy';
@@ -121,7 +121,7 @@ export class Minimap {
   }
 
   /** Returns the map rect so callers can hit-test clicks. */
-  draw(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number, marker?: LatLon): void {
+  draw(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number, marker?: LatLon, markerHdgDeg?: number): void {
     if (this.dirty) this.layout();
     if (this.sampledVersion !== this.dataVersion) {
       this.sample();
@@ -143,7 +143,11 @@ export class Minimap {
     if (marker) {
       const p = this.project(marker, x, y, size);
       if (p) {
-        vec.polyline([[p[0], p[1] - 5 * u], [p[0] + 4 * u, p[1] + 4 * u], [p[0] - 4 * u, p[1] + 4 * u]], Math.max(1, u), HUD_GREEN, true);
+        // north-up map: the triangle's nose points along the heading when one is given
+        const a = ((markerHdgDeg ?? 0) * Math.PI) / 180;
+        const pt = (fwd: number, side: number): [number, number] =>
+          [p[0] + Math.sin(a) * fwd + Math.cos(a) * side, p[1] - Math.cos(a) * fwd + Math.sin(a) * side];
+        vec.polyline([pt(6 * u, 0), pt(-4 * u, 4 * u), pt(-4 * u, -4 * u)], Math.max(1, u), markerHdgDeg === undefined ? HUD_GREEN : HUD_WHITE, true);
       }
     }
   }
@@ -156,6 +160,14 @@ export class Minimap {
     const fy = ((this.center.lat + halfLat) - ll.lat) / (halfLat * 2);
     if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
     return [x + fx * size, y + fy * size];
+  }
+
+  /** In-flight use: keep the view still until the aircraft drifts off-centre, so tiles aren't resampled every frame. */
+  follow(pos: LatLon, spanM: number): void {
+    const latRad = (this.center.lat * Math.PI) / 180;
+    const dN = (pos.lat - this.center.lat) * 111320;
+    const dE = (pos.lon - this.center.lon) * 111320 * Math.cos(latRad);
+    if (spanM !== this.spanM || Math.hypot(dN, dE) > spanM * 0.2) this.setView(pos, spanM);
   }
 
   /** Q29: click the map to pick an arbitrary start point. */

@@ -1,4 +1,3 @@
-import type { Input } from '../engine/input';
 import type { FlightControls } from './model';
 import type { Settings } from '../ui/settings';
 
@@ -38,13 +37,28 @@ export const DEFAULT_BINDINGS: Record<Action, string> = {
 
 const clamp1 = (v: number): number => Math.max(-1, Math.min(1, v));
 
+/** Gear/flaps ignore repeat toggles inside this window: switch bounce and double taps. */
+export const TOGGLE_LOCKOUT_S = 0.35;
+/** Gamepad button hysteresis: analog triggers/worn buttons hovering near 0.5 must not chatter. */
+const PAD_PRESS = 0.6;
+const PAD_RELEASE = 0.3;
+
+/** Minimal input surface Controls needs; the real Input implements it. */
+export interface ControlInput {
+  readonly mouseX: number;
+  readonly mouseY: number;
+  down(code: string): boolean;
+  consumePresses(): Set<string>;
+}
+
 export class Controls {
   throttle = 0;
   gearDown = true;
   flaps = false;
   private edges = new Set<Action>();
-  private prevKeys = new Set<string>();
-  private prevButtons: boolean[] = [];
+  private padHeld: boolean[] = [];
+  private clock = 0;
+  private lastToggle: Partial<Record<'gear' | 'flaps', number>> = {};
   private axes = { pitch: 0, roll: 0, yaw: 0 };
 
   binding(action: Action, settings: Settings): string {
@@ -55,15 +69,27 @@ export class Controls {
     return this.edges.has(action);
   }
 
-  update(dt: number, input: Input, settings: Settings, canvasW: number, canvasH: number): FlightControls {
+  /** The autopilot sets gear/flaps itself; adopt its state so disengaging doesn't snap back to a stale one. */
+  syncSystems(gearDown: boolean, flaps: boolean): void {
+    this.gearDown = gearDown;
+    this.flaps = flaps;
+  }
+
+  private toggleAllowed(a: 'gear' | 'flaps'): boolean {
+    const last = this.lastToggle[a];
+    if (last !== undefined && this.clock - last < TOGGLE_LOCKOUT_S) return false;
+    this.lastToggle[a] = this.clock;
+    return true;
+  }
+
+  update(dt: number, input: ControlInput, settings: Settings, canvasW: number, canvasH: number): FlightControls {
     this.edges.clear();
+    this.clock += dt;
     const down = (a: Action): boolean => input.down(this.binding(a, settings));
-    const edge = (a: Action): boolean => {
-      const code = this.binding(a, settings);
-      const now = input.down(code);
-      const was = this.prevKeys.has(code);
-      if (now && !was) this.edges.add(a);
-      return now;
+    // edges come from keydown events, not from polling: a tap shorter than a frame still counts once
+    const presses = input.consumePresses();
+    const edge = (a: Action): void => {
+      if (presses.has(this.binding(a, settings))) this.edges.add(a);
     };
 
     // gamepad: stick pitch/roll, bumpers yaw, A/B throttle, X gear, Y flaps, Start pause
@@ -76,14 +102,19 @@ export class Controls {
       padPitch = -dz(pad.axes[1] ?? 0);
       padYaw = (pad.buttons[5]?.pressed ? 1 : 0) - (pad.buttons[4]?.pressed ? 1 : 0);
       padThr = (pad.buttons[0]?.pressed ? 1 : 0) - (pad.buttons[1]?.pressed ? 1 : 0);
-      const btn = (i: number): boolean => pad.buttons[i]?.pressed ?? false;
-      const was = (i: number): boolean => this.prevButtons[i] ?? false;
-      if (btn(2) && !was(2)) this.edges.add('gear');
-      if (btn(3) && !was(3)) this.edges.add('flaps');
-      if (btn(9) && !was(9)) this.edges.add('pause');
-      if (btn(12) && !was(12)) this.edges.add('camChase');
-      if (btn(13) && !was(13)) this.edges.add('camCockpit');
-      this.prevButtons = pad.buttons.map((b) => b.pressed);
+      const held = pad.buttons.map((b, i) => {
+        const v = b.value || (b.pressed ? 1 : 0);
+        return this.padHeld[i] ? v > PAD_RELEASE : v > PAD_PRESS;
+      });
+      const rose = (i: number): boolean => (held[i] ?? false) && !(this.padHeld[i] ?? false);
+      if (rose(2)) this.edges.add('gear');
+      if (rose(3)) this.edges.add('flaps');
+      if (rose(9)) this.edges.add('pause');
+      if (rose(12)) this.edges.add('camChase');
+      if (rose(13)) this.edges.add('camCockpit');
+      this.padHeld = held;
+    } else {
+      this.padHeld = [];
     }
 
     let pitch = (down('pitchUp') ? 1 : 0) - (down('pitchDown') ? 1 : 0) + padPitch;
@@ -102,13 +133,14 @@ export class Controls {
     this.axes.yaw += (clamp1(yaw) - this.axes.yaw) * k;
 
     this.throttle = Math.max(0, Math.min(1, this.throttle + ((down('throttleUp') ? 1 : 0) - (down('throttleDown') ? 1 : 0) + padThr) * 0.55 * dt));
-    if (edge('gear')) this.gearDown = !this.gearDown;
-    if (edge('flaps')) this.flaps = !this.flaps;
+    edge('gear');
+    edge('flaps');
+    if (this.edges.has('gear') && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
+    if (this.edges.has('flaps') && this.toggleAllowed('flaps')) this.flaps = !this.flaps;
     for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake'] as Action[]) {
       edge(a);
     }
 
-    this.prevKeys = new Set(input.keys);
     return {
       pitch: this.axes.pitch,
       roll: this.axes.roll,

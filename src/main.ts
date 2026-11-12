@@ -24,7 +24,7 @@ import { FlightAudio } from './flight/audio';
 import { drawHud } from './flight/hud';
 import { loadSettings, saveSettings } from './ui/settings';
 import { Menu } from './ui/menu';
-import { AIRFIELDS } from './ui/minimap';
+import { AIRFIELDS, Minimap } from './ui/minimap';
 import { Telemetry, loadConsent, saveConsent } from './ui/telemetry';
 import { t } from './ui/i18n';
 
@@ -236,6 +236,8 @@ autopilot.groundAt = (x, z) => {
   return Math.max(0, ground.heightAt(ll.lon, ll.lat) ?? 0);
 };
 let apOn = false;
+const flightMap = new Minimap();
+const FLIGHT_MAP_SPAN_M = 40000;
 let landingField: (typeof AIRFIELDS)[number] | null = null;
 let fpsAvg = 60;
 let lastUrlUpdate = 0;
@@ -296,7 +298,10 @@ function frame(now: number): void {
     apOn = false;
     autopilot.stopLanding();
   }
-  if (apOn) flight = autopilot.update(dt, model, flight);
+  if (apOn) {
+    flight = autopilot.update(dt, model, flight);
+    controls.syncSystems(flight.gearDown, flight.flaps);
+  }
   if (menu.screen === 'none') {
     input.consumeClick(); // flight drags must not fire menu buttons later
     input.consumeKey();
@@ -444,6 +449,13 @@ function frame(now: number): void {
     drawHud(font, vectors, renderer.width, renderer.height, u, {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound, autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined } : null,
     });
+    // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
+    const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
+    const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
+    const own = enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], 0);
+    flightMap.follow(own, FLIGHT_MAP_SPAN_M);
+    flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
+    font.text(`N  ${FLIGHT_MAP_SPAN_M / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
   }
   if (!spawned && state === 'loading') {
     const msg = t(settings.lang, 'loading');
