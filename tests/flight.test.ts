@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { quat, vec3 } from 'gl-matrix';
 import { atmosphere, G0 } from '../src/flight/atmosphere';
-import { AIRCRAFT, F117, SU27, aircraftMesh, alphaForCl, tableLookup } from '../src/flight/aircraft';
+import { AIRCRAFT, F117, SU27, aircraftMesh, tableLookup } from '../src/flight/aircraft';
 import { FlightModel, PHYSICS_STEP, attitudeQuat, type FlightControls } from '../src/flight/model';
 
 const idle: FlightControls = {
@@ -30,18 +30,14 @@ describe('aircraft configs', () => {
     expect(SU27.thrustAfterburner / (SU27.mass * G0)).toBeGreaterThan(1);
     expect(F117.thrustAfterburner).toBe(F117.thrustDry);
     expect(F117.maxSpeed).toBeLessThan(340);
-    expect(F117.controlPower[2]).toBeLessThan(SU27.controlPower[2] / 2);
+    expect(F117.fbw.rollRate).toBeLessThan(SU27.fbw.rollRate / 2);
     expect(AIRCRAFT.su27).toBe(SU27);
   });
-  it('CL tables interpolate and clamp', () => {
-    expect(tableLookup(SU27.cl, 2)).toBeCloseTo((0.22 + 0.52) / 2, 5);
-    expect(tableLookup(SU27.cl, -50)).toBe(SU27.cl[0][1]);
-    expect(tableLookup(SU27.cl, 99)).toBe(SU27.cl[SU27.cl.length - 1][1]);
-  });
-  it('alphaForCl inverts the pre-stall branch', () => {
-    const a = alphaForCl(SU27, 0.52);
-    expect(a).toBeCloseTo(4, 1);
-    expect(alphaForCl(SU27, 99)).toBeLessThan(SU27.stallAlpha);
+  it('tables interpolate and clamp', () => {
+    expect(tableLookup(SU27.waveDrag, 0.4)).toBe(1);
+    expect(tableLookup(SU27.waveDrag, 1.0)).toBeCloseTo((1.5 + 2.7) / 2, 5);
+    expect(tableLookup(SU27.waveDrag, -5)).toBe(SU27.waveDrag[0][1]);
+    expect(tableLookup(SU27.waveDrag, 99)).toBe(SU27.waveDrag[SU27.waveDrag.length - 1][1]);
   });
   it('meshes are low-poly, finite, and non-empty', () => {
     for (const id of ['su27', 'f117'] as const) {

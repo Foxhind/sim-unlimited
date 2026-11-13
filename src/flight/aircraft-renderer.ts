@@ -16,6 +16,9 @@ export class AircraftRenderer {
   private base: Float32Array;
   private live: Float32Array;
   private rot = mat3.create();
+  private parts: Uint8Array = new Uint8Array(0);
+  /** per part tag: centroid of its vertices in mesh space (the point a broken-off piece tumbles about) */
+  private pivots: vec3[] = [];
   private cfgId = '';
   private fMesh: Mesh;
   private fvbo: WebGLBuffer;
@@ -63,7 +66,17 @@ export class AircraftRenderer {
     this.cfgId = cfg.id;
     const src = aircraftMesh(cfg.id);
     this.base = src.vertices;
+    this.parts = src.parts;
     this.live = new Float32Array(src.vertices.length);
+    const sums: { p: vec3; n: number }[] = [];
+    for (let v = 0; v < src.parts.length; v++) {
+      const e = (sums[src.parts[v]] ??= { p: vec3.create(), n: 0 });
+      e.p[0] += src.vertices[v * 6];
+      e.p[1] += src.vertices[v * 6 + 1];
+      e.p[2] += src.vertices[v * 6 + 2];
+      e.n++;
+    }
+    this.pivots = sums.map((e) => vec3.scale(e.p, e.p, 1 / Math.max(1, e.n)));
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferData(gl.ARRAY_BUFFER, this.live.byteLength, gl.DYNAMIC_DRAW);
@@ -76,13 +89,38 @@ export class AircraftRenderer {
     if (model.crashed) return;
     this.ensureMesh(model.cfg);
     mat3.fromQuat(this.rot, model.quat);
+    const cg = model.cfg.cg;
     const p = vec3.create();
     const n = vec3.create();
-    for (let i = 0; i < this.base.length; i += 6) {
-      vec3.set(p, this.base[i], this.base[i + 1], this.base[i + 2]);
-      vec3.transformMat3(p, p, this.rot);
+    // a separated part is drawn as debris while it lasts (its own attitude and offset), then not at all
+    const state: (0 | 1 | { rot: mat3; rel: vec3; pivot: vec3 })[] = [0];
+    for (let i = 0; i < model.lost.length; i++) {
+      if (!model.lost[i]) {
+        state[i + 1] = 0;
+        continue;
+      }
+      const d = model.debris.find((x) => x.part === i);
+      state[i + 1] = d && this.pivots[i + 1] ? { rot: mat3.fromQuat(mat3.create(), d.quat), rel: d.rel, pivot: this.pivots[i + 1] } : 1;
+    }
+    for (let i = 0, v = 0; i < this.base.length; i += 6, v++) {
+      const st = state[this.parts[v]];
+      if (st === 1) {
+        // gone: collapse the triangle
+        this.live[i] = this.live[i + 1] = this.live[i + 2] = 0;
+        continue;
+      }
       vec3.set(n, this.base[i + 3], this.base[i + 4], this.base[i + 5]);
-      vec3.transformMat3(n, n, this.rot);
+      if (st === 0) {
+        // the physics turns the aircraft about its centre of gravity, so the mesh does too
+        vec3.set(p, this.base[i] - cg[0], this.base[i + 1] - cg[1], this.base[i + 2] - cg[2]);
+        vec3.transformMat3(p, p, this.rot);
+        vec3.transformMat3(n, n, this.rot);
+      } else {
+        vec3.set(p, this.base[i] - st.pivot[0], this.base[i + 1] - st.pivot[1], this.base[i + 2] - st.pivot[2]);
+        vec3.transformMat3(p, p, st.rot);
+        vec3.add(p, p, st.rel);
+        vec3.transformMat3(n, n, st.rot);
+      }
       this.live[i] = p[0];
       this.live[i + 1] = p[1];
       this.live[i + 2] = p[2];
@@ -103,9 +141,10 @@ export class AircraftRenderer {
     const src = flameMesh(model.cfg, throttle, time);
     if (src.ramps.length === 0) return;
     const out = new Float32Array(src.vertices.length);
+    const cg = model.cfg.cg;
     const p = vec3.create();
     for (let i = 0; i < out.length; i += 6) {
-      vec3.set(p, src.vertices[i], src.vertices[i + 1], src.vertices[i + 2]);
+      vec3.set(p, src.vertices[i] - cg[0], src.vertices[i + 1] - cg[1], src.vertices[i + 2] - cg[2]);
       vec3.transformMat3(p, p, this.rot);
       out[i] = p[0]; out[i + 1] = p[1]; out[i + 2] = p[2];
       // self-lit: normal faces the sun so the brightest ramp step is always used

@@ -25,11 +25,18 @@ describe('winter thresholds', () => {
 });
 
 describe('Open-Meteo', () => {
-  it('asks only for current temperature, clouds and wind in m/s', () => {
+  it('asks only for current conditions: surface temperature, clouds, wind in m/s, pressure, and the air aloft', () => {
     const u = new URL(weatherUrl(AT));
     expect(u.origin).toBe('https://api.open-meteo.com');
     expect(u.searchParams.get('latitude')).toBe('55.750');
-    expect(u.searchParams.get('current')).toBe('temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m');
+    const fields = u.searchParams.get('current')!.split(',');
+    expect(fields.slice(0, 6)).toEqual(['temperature_2m', 'cloud_cover', 'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'surface_pressure']);
+    // five pressure levels, four values each: temperature, wind speed and direction, height
+    expect(fields).toHaveLength(6 + 5 * 4);
+    for (const p of [850, 700, 500, 300, 200]) {
+      for (const k of ['temperature', 'wind_speed', 'wind_direction', 'geopotential_height']) expect(fields).toContain(`${k}_${p}hPa`);
+    }
+    expect(u.searchParams.has('hourly')).toBe(false);
     expect(u.searchParams.get('wind_speed_unit')).toBe('ms');
     expect(u.searchParams.has('apikey')).toBe(false);
   });

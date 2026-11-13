@@ -93,7 +93,7 @@ export class Autopilot {
     const cross = (m.pos[0] - x) * Math.cos(H) + (m.pos[2] - z) * Math.sin(H);
     const along = (m.pos[0] - x) * Math.sin(H) - (m.pos[2] - z) * Math.cos(H);
     this.interStage = 0;
-    this.patternScale = clamp((2.9 / m.cfg.controlPower[2]) ** 0.6, 1, 2.5);
+    this.patternScale = clamp((2.2 / m.cfg.fbw.rollRate) ** 0.6, 1, 2.5);
     this.holdAlt = Math.min(m.pos[1], this.groundAt(x, z) + 450);
     // far out and roughly on the approach side: go straight to the final-approach law
     // (needs the aircraft to be able to reach the centreline at <= ~35 deg intercept before the threshold)
@@ -125,6 +125,8 @@ export class Autopilot {
     const cross = rel[0] * rx + rel[1] * rz;
     const V = Math.max(30, m.speed);
     const vApp = m.cfg.cruiseSpeed * 0.42;
+    // speed is held through the air (what the wing feels); the path over the ground uses ground velocity
+    const tas = Math.max(30, m.airspeed);
     const gt = this.groundAt(th.x, th.z);
     const GLIDE = (3 * Math.PI) / 180;
     const out: FlightControls = { ...base };
@@ -179,12 +181,14 @@ export class Autopilot {
       // first-order cross-track law: close the lateral error at k*cross m/s, capped to a 30 deg intercept
       // PD lead: steer on the cross-track error predicted XTRK_LEAD seconds ahead, which stops the
       // overshoot that the sluggish heading response would otherwise cause when capturing the centreline
-      const crossRate = m.speed * Math.sin(((m.headingDeg - th.hdg) * Math.PI) / 180);
+      // ground velocity across the runway: with a crosswind the nose is not where the aircraft is going
+      const crossRate = m.vel[0] * rx + m.vel[2] * rz;
       const hdgT = th.hdg - clamp((cross + XTRK_LEAD * crossRate) * KP_XTRK, -40, 40);
-      const hErr = ((hdgT - m.headingDeg + 540) % 360) - 180;
+      // steer the track, not the heading, onto it: the crab angle into the wind then comes by itself
+      const hErr = ((hdgT - m.trackDeg + 540) % 360) - 180;
       const bankLim = clamp(h / 4, 4, 40); // shallow bank near the ground: no wingtip strikes
       const bankT = clamp(hErr * 0.8, -bankLim, bankLim);
-      const rollStick = this.roll.step(bankT, m.bankDeg, dt) - 0.004 * (m.omega[2] * R2D);
+      const rollStick = (this.roll.step(bankT, m.bankDeg, dt) - 0.004 * (m.omega[2] * R2D)) * this.rollScale(m);
       // vertical: glide-slope error biases the flight-path angle; flare below 14 m
       this.vsF += (m.vel[1] - this.vsF) * Math.min(1, dt / 0.25);
       let gammaT = glideAlt < this.holdAlt ? -GLIDE + clamp((glideAlt - m.pos[1]) * 0.0006, -0.04, 0.04) : clamp((glideAlt - m.pos[1]) * 0.004, -0.06, 0.06);
@@ -196,7 +200,7 @@ export class Autopilot {
       const settle = h < SETTLE_H && this.vsF > -0.6 ? SETTLE_GAIN * (-0.9 - this.vsF) : 0;
       const stick = (this.gamma.step(gammaT, gammaM, dt) - 0.35 * m.omega[0]) * (flare ? 2.5 : 1) + settle;
       const vTarget = dAim > 10000 ? vApp + 35 : vApp;
-      const thrT = h < 9 ? 0 : this.speedPid.step(vTarget, m.speed, dt);
+      const thrT = h < 9 ? 0 : this.speedPid.step(vTarget, tas, dt);
       this.throttle += (thrT - this.throttle) * Math.min(1, dt / (h < 9 ? 0.3 : 1.5));
       out.pitch = clamp(stick, -1, 1);
       out.roll = clamp(rollStick, -1, 1);
@@ -206,7 +210,7 @@ export class Autopilot {
       this.targets.speed = vApp;
       this.targets.heading = hdgT;
       // not stable on the centreline close to the ground: go around and fly the pattern again
-      const hdgOff = Math.abs(((m.headingDeg - th.hdg + 540) % 360) - 180);
+      const hdgOff = Math.abs(((m.trackDeg - th.hdg + 540) % 360) - 180);
       if (h < 80 && h > 3 && (Math.abs(cross) > 90 || hdgOff > 15)) {
         this.landing = 'intercept';
         this.interStage = 0;
@@ -233,9 +237,14 @@ export class Autopilot {
     return out;
   }
 
+  /** the roll loop is tuned for ~0.75 rad/s of roll per unit stick; scale the stick for snappier airframes */
+  private rollScale(m: FlightModel): number {
+    return Math.min(1, 0.75 / m.cfg.fbw.rollRate);
+  }
+
   engage(m: FlightModel): void {
     this.targets.altitude = Math.round(m.pos[1]);
-    this.targets.speed = Math.round(m.speed);
+    this.targets.speed = Math.round(m.airspeed);
     this.targets.heading = Math.round(m.headingDeg);
     this.gamma.reset();
     this.speedPid.reset();
@@ -257,13 +266,13 @@ export class Autopilot {
     const stick = this.gamma.step(gammaT, gammaM, dt) - 0.35 * m.omega[0];
 
     // speed -> throttle, smoothed so the engine never jumps
-    const thrT = this.speedPid.step(this.targets.speed, m.speed, dt);
+    const thrT = this.speedPid.step(this.targets.speed, m.airspeed, dt);
     this.throttle += (thrT - this.throttle) * Math.min(1, dt / 1.5);
 
     // heading -> bank -> roll stick with roll-rate damping
     const hErr = ((this.targets.heading - m.headingDeg + 540) % 360) - 180;
     const bankT = this.bank.step(hErr / 30, 0, dt) * (this.landing === 'intercept' ? 40 : 25); // deg
-    const rollStick = this.roll.step(bankT, m.bankDeg, dt) - 0.04 * (m.omega[2] * R2D) * 0.1;
+    const rollStick = (this.roll.step(bankT, m.bankDeg, dt) - 0.04 * (m.omega[2] * R2D) * 0.1) * this.rollScale(m);
 
     return {
       ...base,

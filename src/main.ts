@@ -14,10 +14,11 @@ import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geode
 import { GroundProbe, towerAnchor } from './world/ground';
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
-import { WEATHER_ATTRIBUTION, WeatherService } from './world/weather';
+import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
 import { AIRCRAFT } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
+import { Air } from './flight/air';
 import { Controls, type Action } from './flight/controls';
 import { CameraRig, type CameraMode } from './flight/cameras';
 import { AircraftRenderer } from './flight/aircraft-renderer';
@@ -100,6 +101,35 @@ const weather = new WeatherService();
   const forced = new URLSearchParams(window.location.search).get('temp');
   if (forced !== null && forced.trim() !== '' && Number.isFinite(Number(forced))) weather.tempOverride = Number(forced);
 }
+/** ?wind=270,12,18 forces the surface wind: from (deg true), speed and optional gust in m/s */
+const windOverride = ((): { from: number; ms: number; gust: number } | undefined => {
+  const raw = new URLSearchParams(window.location.search).get('wind');
+  if (!raw) return undefined;
+  const [from, ms, gust] = raw.split(',').map(Number);
+  if (!Number.isFinite(from) || !Number.isFinite(ms) || ms < 0) return undefined;
+  return { from, ms, gust: Number.isFinite(gust) ? Math.max(ms, gust) : ms };
+})();
+/** the weather in force: live data with the URL overrides applied (shown on the HUD, flown through) */
+let inForceFor: Weather | undefined | null = null;
+let inForce: Weather | undefined;
+function weatherInForce(): Weather | undefined {
+  const w = weather.current;
+  if (!windOverride) return w;
+  if (w !== inForceFor) {
+    inForceFor = w;
+    inForce = {
+      tempC: w?.tempC ?? weather.tempOverride ?? 15, cloudPct: w?.cloudPct ?? 0, elevation: w?.elevation, pressureHpa: w?.pressureHpa,
+      at: w?.at ?? start.latLon, time: w?.time ?? Date.now(),
+      // a forced wind replaces the whole column: the measured winds aloft no longer belong to it
+      windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
+    };
+  }
+  return inForce;
+}
+/** the air the flight model flies through: wind, temperature and pressure by height from the weather */
+const air = new Air();
+let airSource: Weather | undefined;
+let airForced = false;
 
 let simTime = start.time ?? new Date();
 let sun = sunPosition(simTime, start.latLon);
@@ -226,7 +256,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather,
+    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
     get state() { return state; },
     get simTime() { return simTime; },
     get consent() { return consent; },
@@ -344,7 +374,24 @@ function frame(now: number): void {
   }
 
   if (state === 'flying' && spawned) {
-    model.update(dt, flight, (p) => ground.probe(p));
+    // feed the air model whenever new weather arrives; until then it is the calm standard atmosphere
+    const wNow = weatherInForce();
+    if (wNow !== airSource && (wNow !== undefined || !airForced)) {
+      if (wNow) {
+        airSource = wNow;
+        air.set(airConditions(wNow, weather.tempOverride, Math.max(0, ground.heightAt(wNow.at.lon, wNow.at.lat) ?? 0)));
+      } else if (weather.tempOverride !== undefined) {
+        // no data yet but a forced temperature: still air at that temperature
+        airForced = true;
+        const elevation = Math.max(0, ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat) ?? 0);
+        air.set({ elevation, tempC: weather.tempOverride, windFromDeg: 0, windMs: 0, gustMs: 0 });
+      }
+    }
+    const damageBefore = model.damage.length;
+    model.update(dt, flight, (p) => ground.probe(p), air);
+    if (model.damage.length > damageBefore) {
+      audio.touchdown(true); // the bang of a part letting go
+    }
     simTime = new Date(simTime.getTime() + dt * 1000 * menu.config.timeAccel);
     if (flight.gearDown !== prevGear || flight.flaps !== prevFlaps) audio.gear();
     prevGear = flight.gearDown;
@@ -463,7 +510,7 @@ function frame(now: number): void {
   if (spawned && state === 'flying') {
     drawHud(font, vectors, renderer.width, renderer.height, u, {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound, autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined } : null,
-      weather: { data: weather.current, tempC: weather.tempC },
+      weather: { data: weatherInForce(), tempC: weather.tempC },
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
     const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);

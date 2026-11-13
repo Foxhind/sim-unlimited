@@ -5,9 +5,21 @@
  */
 import type { Surface } from '../engine/palette';
 import type { LatLon } from './geodesy';
+import type { AirConditions } from '../flight/air';
 
 export const WEATHER_ATTRIBUTION = 'Weather: Open-Meteo.com';
 const ENDPOINT = 'https://api.open-meteo.com/v1/forecast';
+/** pressure levels asked for the air aloft: roughly 1.5, 3, 5.5, 9 and 12 km */
+export const WEATHER_LEVELS_HPA = [850, 700, 500, 300, 200];
+
+/** wind and temperature on one pressure level */
+export interface WeatherLevel {
+  /** geopotential height of the level, m MSL */
+  alt: number;
+  tempC: number;
+  windFromDeg: number;
+  windMs: number;
+}
 
 export interface Weather {
   /** air temperature at 2 m, °C */
@@ -18,6 +30,12 @@ export interface Weather {
   windFromDeg: number;
   windMs: number;
   gustMs: number;
+  /** terrain height of the forecast cell, m MSL (surface values are relative to it) */
+  elevation?: number;
+  /** pressure at the ground, hPa */
+  pressureHpa?: number;
+  /** wind and temperature aloft, lowest first (empty when the service gave none) */
+  levels?: WeatherLevel[];
   /** where and when the data is for */
   at: LatLon;
   /** observation time, ms since epoch (UTC) */
@@ -38,7 +56,10 @@ export function weatherUrl(at: LatLon): string {
   const q = new URLSearchParams({
     latitude: at.lat.toFixed(3),
     longitude: at.lon.toFixed(3),
-    current: 'temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m',
+    current: [
+      'temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure',
+      ...WEATHER_LEVELS_HPA.map((p) => `temperature_${p}hPa,wind_speed_${p}hPa,wind_direction_${p}hPa,geopotential_height_${p}hPa`),
+    ].join(','),
     wind_speed_unit: 'ms',
     timezone: 'GMT',
   });
@@ -57,7 +78,20 @@ export function parseWeather(json: unknown, at: LatLon): Weather | undefined {
   if (tempC === undefined) return undefined;
   const windMs = num('wind_speed_10m') ?? 0;
   const t = typeof cur.time === 'string' ? Date.parse(`${cur.time}Z`) : NaN;
+  const levels: WeatherLevel[] = [];
+  for (const p of WEATHER_LEVELS_HPA) {
+    const alt = num(`geopotential_height_${p}hPa`);
+    const temp = num(`temperature_${p}hPa`);
+    const speed = num(`wind_speed_${p}hPa`);
+    if (alt === undefined || temp === undefined || speed === undefined) continue;
+    levels.push({ alt, tempC: temp, windFromDeg: num(`wind_direction_${p}hPa`) ?? 0, windMs: speed });
+  }
+  levels.sort((a, b) => a.alt - b.alt);
+  const elevation = (json as { elevation?: unknown }).elevation;
   return {
+    elevation: typeof elevation === 'number' && Number.isFinite(elevation) ? elevation : undefined,
+    pressureHpa: num('surface_pressure'),
+    levels,
     tempC,
     cloudPct: num('cloud_cover') ?? 0,
     windFromDeg: num('wind_direction_10m') ?? 0,
@@ -65,6 +99,30 @@ export function parseWeather(json: unknown, at: LatLon): Weather | undefined {
     gustMs: Math.max(windMs, num('wind_gusts_10m') ?? windMs),
     at,
     time: Number.isFinite(t) ? t : Date.now(),
+  };
+}
+
+/**
+ * The weather as the flight model's air: surface values at the forecast cell's elevation plus the
+ * levels aloft. `tempOverride` (URL ?temp=) replaces the surface temperature and drops the measured
+ * temperatures aloft, so the forced value shapes the whole column. `groundElevation` stands in when
+ * the service did not say how high its cell is.
+ */
+export function airConditions(w: Weather, tempOverride?: number, groundElevation = 0): AirConditions {
+  const forced = tempOverride !== undefined;
+  return {
+    elevation: w.elevation ?? groundElevation,
+    tempC: tempOverride ?? w.tempC,
+    pressureHpa: w.pressureHpa,
+    windFromDeg: w.windFromDeg,
+    windMs: w.windMs,
+    gustMs: w.gustMs,
+    levels: (w.levels ?? []).map((l, i, all) => ({
+      ...l,
+      // keep the measured lapse between levels but hang it on the forced surface temperature
+      tempC: forced ? l.tempC + (tempOverride - w.tempC) * Math.max(0, 1 - i / all.length) : l.tempC,
+    })),
+    lat: w.at.lat,
   };
 }
 

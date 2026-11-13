@@ -8,6 +8,10 @@ import { FlightModel, PHYSICS_STEP, type FlightControls } from '../src/flight/mo
 
 const BANK = Number(process.env.BANK ?? 45);
 const BASE_TURN_E = Number(process.env.BASE_E ?? 3100);
+/** roll stick per degree of bank error: the stick commands roll rate, so a human-like pilot is gentle with it */
+const ROLL_GAIN = 0.03;
+/** pitch stick per m/s of climb-rate error: the stick commands load factor (full aft = the g limit) */
+const VS_GAIN = 0.012;
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v));
 const angDiff = (target: number, cur: number): number => ((target - cur + 540) % 360) - 180;
 
@@ -38,20 +42,17 @@ function flyCircuit(cfg: AircraftConfig, k = 1): Result {
   let maxAlt = 0;
   let t = 0;
   let touchSink = 0;
-  let trim = 0;
   const bearingTo = (e: number, n: number, we: number, wn: number): number =>
     ((Math.atan2(we - e, wn - n) * 180) / Math.PI + 360) % 360;
   const holdHeading = (hdg: number): void => {
     const bankT = clamp(angDiff(hdg, m.headingDeg) * 0.8, -BANK, BANK);
-    controls.roll = clamp((bankT - m.bankDeg) * 0.08, -1, 1);
+    controls.roll = clamp((bankT - m.bankDeg) * ROLL_GAIN, -1, 1);
     controls.yaw = 0;
   };
   const holdAlt = (alt: number, climbMax: number): void => {
     const vsT = clamp((alt - m.pos[1]) * 0.15, -6, climbMax);
-    const pitchT = clamp((vsT - m.verticalSpeed) * 1.2, -8, 14);
-    // integral trim removes the steady-state offset caused by the pitch-stability term
-    trim = clamp(trim + (vsT - m.verticalSpeed) * 0.004 * PHYSICS_STEP * 60, -0.5, 0.5);
-    controls.pitch = clamp((pitchT - m.pitchDeg) * 0.12 + trim, -0.8, 0.8);
+    // the stick commands load factor around 1 g, so climb-rate error maps straight to stick, damped by pitch rate
+    controls.pitch = clamp((vsT - m.verticalSpeed) * VS_GAIN - m.omega[0] * 0.3, -0.5, 0.5);
   };
   const holdSpeed = (v: number, base = 0.5): void => {
     controls.throttle = clamp(base + (v - m.speed) * 0.08, 0, 1);
@@ -102,12 +103,12 @@ function flyCircuit(cfg: AircraftConfig, k = 1): Result {
         holdSpeed(vApp, Number(process.env.FINAL_THR ?? 0.1));
         const hdgT = clamp(-east * 0.03, -35, 35);
         const lateral = clamp(angDiff(hdgT, m.headingDeg) * 0.8, -40, 40);
-        controls.roll = clamp((lateral - m.bankDeg) * 0.08, -1, 1);
+        controls.roll = clamp((lateral - m.bankDeg) * ROLL_GAIN, -1, 1);
         if (alt > 12) holdAlt(glideAlt, 4);
         else {
           controls.throttle = 0;
           const vsT = clamp(-0.6 - (12 - alt) * 0.05, -2, 0);
-          controls.pitch = clamp((vsT - m.verticalSpeed) * 0.15 + 0.05, -0.3, 0.5);
+          controls.pitch = clamp((vsT - m.verticalSpeed) * VS_GAIN * 2 - m.omega[0] * 0.3, -0.3, 0.5);
         }
         if (m.onGround) {
           touchSink = m.touchdownSink;

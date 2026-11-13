@@ -3,6 +3,7 @@ import { VectorRenderer } from '../engine/vector';
 import type { Units } from '../ui/settings';
 import { cloudCode, compassPoint, type Weather } from '../world/weather';
 import type { CameraMode } from './cameras';
+import type { PartId } from './aircraft';
 import type { FlightModel, FlightControls } from './model';
 
 const D2R = Math.PI / 180;
@@ -25,6 +26,9 @@ export function altUnit(units: Units): string {
 
 interface Labels {
   stall: string;
+  spin: string;
+  lost: string;
+  parts: Record<PartId, string>;
   touchdown: string;
   gear: string;
   flaps: string;
@@ -37,11 +41,18 @@ interface Labels {
 }
 
 const RU: Labels = {
-  stall: 'СВАЛИВАНИЕ', touchdown: 'КАСАНИЕ', gear: 'ШАССИ', flaps: 'ЗАКРЫЛКИ',
+  stall: 'СВАЛИВАНИЕ', spin: 'ШТОПОР', lost: 'ПОТЕРЯНО',
+  parts: {
+    wingL: 'ЛЕВОЕ КРЫЛО', wingR: 'ПРАВОЕ КРЫЛО', stabL: 'ЛЕВЫЙ СТАБИЛИЗАТОР', stabR: 'ПРАВЫЙ СТАБИЛИЗАТОР',
+    finL: 'ЛЕВЫЙ КИЛЬ', finR: 'ПРАВЫЙ КИЛЬ',
+  },
+  touchdown: 'КАСАНИЕ', gear: 'ШАССИ', flaps: 'ЗАКРЫЛКИ',
   brakes: 'ТОРМОЗ', speedbrake: 'ЩИТКИ', ab: 'ФОРСАЖ', hdg: 'КУРС', vs: 'ВЕРТ', thr: 'ТЯГА',
 };
 const EN: Labels = {
-  stall: 'STALL', touchdown: 'TOUCHDOWN', gear: 'GEAR', flaps: 'FLAPS',
+  stall: 'STALL', spin: 'SPIN', lost: 'LOST',
+  parts: { wingL: 'LEFT WING', wingR: 'RIGHT WING', stabL: 'LEFT STAB', stabR: 'RIGHT STAB', finL: 'LEFT FIN', finR: 'RIGHT FIN' },
+  touchdown: 'TOUCHDOWN', gear: 'GEAR', flaps: 'FLAPS',
   brakes: 'BRAKE', speedbrake: 'SPD BRK', ab: 'AFTERBURNER', hdg: 'HDG', vs: 'V/S', thr: 'THR',
 };
 
@@ -91,6 +102,24 @@ export function weatherLines(data: Weather | undefined, tempC: number | undefine
   return [t, wind, cloud];
 }
 
+/** "LOST: LEFT WING, RIGHT FIN" for the parts that have separated, in the order they went; '' when intact */
+export function damageLine(model: FlightModel, lang: 'ru' | 'en'): string {
+  if (model.damage.length === 0) return '';
+  const L = lang === 'ru' ? RU : EN;
+  return `${L.lost}: ${model.damage.map((d) => L.parts[d.part]).join(', ')}`;
+}
+
+/** flashing stall / spin alert at y, with the standing list of lost parts under it */
+function drawAlerts(font: FontRenderer, w: number, y: number, u: number, st: HudState, L: Labels): void {
+  const { model, now } = st;
+  if (model.stall && Math.floor(now * 3) % 2 === 0) {
+    const text = model.spin ? L.spin : L.stall;
+    font.text(text, (w - font.measure(text, u * 2)) / 2, y, u * 2, HUD_AMBER);
+  }
+  const lost = damageLine(model, model.cfg.hudLang);
+  if (lost) font.text(lost, (w - font.measure(lost, u)) / 2, y + 38 * u, u, HUD_AMBER);
+}
+
 /** right-aligned weather block from y down */
 function drawWeather(font: FontRenderer, w: number, y: number, u: number, st: HudState, lang: 'ru' | 'en'): void {
   if (!st.weather) return;
@@ -107,7 +136,7 @@ export function drawHud(
   u: number,
   st: HudState,
 ): void {
-  const { model, controls, camera, units, now } = st;
+  const { model, controls, camera, units } = st;
   const cfg = model.cfg;
   const L = cfg.hudLang === 'ru' ? RU : EN;
   const green = HUD_GREEN;
@@ -117,15 +146,13 @@ export function drawHud(
   // Q28: external cameras carry only a minimal data line
   if (camera !== 'cockpit') {
     const line =
-      `V ${Math.round(speedValue(model.speed, units))} ${speedUnit(units)}   ` +
+      `V ${Math.round(speedValue(model.airspeed, units))} ${speedUnit(units)}   ` +
       `H ${Math.round(altValue(model.pos[1], units))} ${altUnit(units)}   ` +
       `${L.hdg} ${String(Math.round(model.headingDeg) % 360).padStart(3, '0')}`;
     font.text(line, (w - font.measure(line, u)) / 2, 8 * u, u, green);
     const name = `${cfg.name}  [${camera.toUpperCase()}]`;
     font.text(name, 8 * u, 8 * u, u, amber);
-    if (model.stall && Math.floor(now * 3) % 2 === 0) {
-      font.text(L.stall, (w - font.measure(L.stall, u * 2)) / 2, h * 0.2, u * 2, amber);
-    }
+    drawAlerts(font, w, h * 0.2, u, st, L);
     drawWeather(font, w, 8 * u, u, st, cfg.hudLang);
     return;
   }
@@ -220,7 +247,7 @@ export function drawHud(
   const tapeH = 40 * u;
   const leftX = cx - Math.min(w, h) * 0.34 - tapeW;
   const rightX = cx + Math.min(w, h) * 0.34;
-  const spd = Math.round(speedValue(model.speed, units));
+  const spd = Math.round(speedValue(model.airspeed, units));
   const alt = Math.round(altValue(model.pos[1], units));
   vec.rect(leftX, tapeY, tapeW, tapeH, lw, green);
   vec.rect(rightX, tapeY, tapeW, tapeH, lw, green);
@@ -278,9 +305,7 @@ export function drawHud(
   drawWeather(font, w, 8 * u + 18 * u, u, st, cfg.hudLang);
 
   // warnings
-  if (model.stall && Math.floor(now * 3) % 2 === 0) {
-    font.text(L.stall, (w - font.measure(L.stall, u * 2)) / 2, h * 0.16, u * 2, amber);
-  }
+  drawAlerts(font, w, h * 0.16, u, st, L);
   if (model.touchdownTimer > 0) {
     font.text(L.touchdown, (w - font.measure(L.touchdown, u)) / 2, h * 0.3, u, HUD_WHITE);
   }
