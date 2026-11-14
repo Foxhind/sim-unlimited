@@ -13,6 +13,7 @@ import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/wo
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
+import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, LAMP_SPACING_M, LIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
 
@@ -257,5 +258,67 @@ describe('night glow by building density', () => {
     const trees = new Float32Array([e, GROUND, -n, 10, RAMP.FOREST]);
     applyGlowToTrees(trees, TILE, locate, levels);
     expect(trees[4]).toBe(withGlow(RAMP.FOREST, 3));
+  });
+
+  it('a face already glowing brighter (a lit street) keeps its own level', () => {
+    const levels = new Uint8Array(tin.tris.length);
+    levels[under] = 3;
+    const m = buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat });
+    const bright = Uint16Array.from(m.ramps, (r) => withGlow(r, 6));
+    applyGlow(m.vertices, bright, TILE, locate, levels);
+    for (const r of bright) expect(rampGlowLevel(r)).toBe(6);
+  });
+});
+
+describe('street lighting', () => {
+  const b = tileBounds(TILE);
+  const c = tileCenter(TILE);
+  const flatGround = () => GROUND;
+  const road = (tags: Record<string, string>) =>
+    buildOsmMesh({
+      tile: TILE, detail: 'full', sampleHeight: flatGround, maxEdgeMeters: 60,
+      data: { areas: [], lines: [{ points: [[b.west + (b.east - b.west) * 0.2, c.lat], [b.west + (b.east - b.west) * 0.8, c.lat]], tags }], points: [], buildings: [] },
+    });
+
+  it('lit roads: residential, motorway/trunk/primary/secondary, and lit=yes', () => {
+    for (const hw of ['residential', 'motorway', 'trunk', 'primary', 'secondary']) expect(isLitRoad({ highway: hw })).toBe(true);
+    for (const hw of ['tertiary', 'service', 'track', 'unclassified', 'footway']) expect(isLitRoad({ highway: hw })).toBe(false);
+    expect(isLitRoad({ highway: 'tertiary', lit: 'yes' })).toBe(true);
+    expect(isLitRoad({ highway: 'service', lit: 'no' })).toBe(false);
+    expect(isLitRoad({ railway: 'rail', lit: 'yes' })).toBe(false);
+  });
+
+  it('a lit road glows and has lamps and glowing far lines; an unlit one has none', () => {
+    const lit = road({ highway: 'residential' });
+    const asphalt = lit.roads.ramps.filter((r) => withGlow(r, 0) === RAMP.ASPHALT);
+    expect(asphalt.length).toBeGreaterThan(0);
+    for (const r of asphalt) expect(rampGlowLevel(r)).toBe(LIT_ROAD_GLOW);
+    expect(lit.litRoadLines.length).toBe(lit.roadLines.length);
+    for (let k = 3; k < lit.litRoadLines.length; k += 4) expect(lit.litRoadLines[k]).toBe(LIGHT.STREET);
+    expect(lit.lamps.length).toBeGreaterThan(0);
+
+    const dark = road({ highway: 'tertiary' });
+    for (const r of dark.roads.ramps) expect(rampGlowLevel(r)).toBe(0);
+    expect(dark.litRoadLines.length).toBe(0);
+    expect(dark.lamps.length).toBe(0);
+    expect(dark.roads.vertexCount).toBeGreaterThan(0);
+  });
+
+  it('lamps every LAMP_SPACING_M, sides alternating, heads over the road at lamp height', () => {
+    const m = road({ highway: 'primary' }); // 14 m wide, runs west to east
+    const n = m.lamps.length / 4;
+    const [ax] = latLonToEnu(c, c.lat, b.west + (b.east - b.west) * 0.2, 0);
+    const [bx] = latLonToEnu(c, c.lat, b.west + (b.east - b.west) * 0.8, 0);
+    expect(n).toBe(Math.floor((bx - ax - LAMP_SPACING_M / 2) / LAMP_SPACING_M) + 1);
+    for (let i = 0; i < n; i++) {
+      const [x, y, z, idx] = m.lamps.subarray(i * 4, i * 4 + 4);
+      expect(idx).toBe(LIGHT.STREET);
+      if (i > 0) expect(x - m.lamps[(i - 1) * 4]).toBeCloseTo(LAMP_SPACING_M, 1);
+      expect(y).toBeGreaterThan(GROUND + LAMP_HEIGHT_M - 1);
+      expect(y).toBeLessThan(GROUND + LAMP_HEIGHT_M);
+      // pole 1 m beyond the 7 m half-width, arm 2 m back: the head 6 m from the axis
+      expect(Math.abs(z)).toBeCloseTo(6, 0);
+      if (i > 0) expect(Math.sign(z)).toBe(-Math.sign(m.lamps[(i - 1) * 4 + 2]));
+    }
   });
 });

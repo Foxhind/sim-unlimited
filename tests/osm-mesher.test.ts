@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, snowy } from '../src/engine/palette';
+import { RAMP, snowy, withGlow } from '../src/engine/palette';
 import { enuToLatLon, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
@@ -76,12 +76,12 @@ describe('buildOsmMesh', () => {
     const m = all.roads;
     expect(m.vertexCount).toBeGreaterThan(0);
     expect(all.roadLines.length).toBeGreaterThan(0);
-    for (let i = 0; i < m.vertexCount; i++) {
-      expect(m.ramps[i]).toBe(RAMP.ASPHALT);
-      expect(m.vertices[i * 6 + 1]).toBeCloseTo(101.4, 3);
-    }
+    // the ribbon (a primary road is street-lit: its ramps carry a glow level, its lamp poles share the mesh)
+    const ribbon = [...Array(m.vertexCount).keys()].filter((i) => withGlow(m.ramps[i], 0) === RAMP.ASPHALT);
+    expect(ribbon.length).toBeGreaterThan(0);
+    for (const i of ribbon) expect(m.vertices[i * 6 + 1]).toBeCloseTo(101.4, 3);
     let minZ = Infinity, maxZ = -Infinity;
-    for (let i = 0; i < m.vertexCount; i++) {
+    for (const i of ribbon) {
       const z = m.vertices[i * 6 + 2];
       minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
     }
@@ -171,7 +171,7 @@ describe('areas on the terrain faces', () => {
     areas: [],
     lines: [{
       points: [[b.west + (b.east - b.west) * 0.1, b.south + (b.north - b.south) * 0.3], [b.west + (b.east - b.west) * 0.9, b.south + (b.north - b.south) * 0.7]],
-      tags: { highway: 'secondary' },
+      tags: { highway: 'tertiary' }, // unlit: no lamp poles in the mesh
     }],
     points: [], buildings: [],
   };

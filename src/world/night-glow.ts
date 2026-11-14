@@ -1,4 +1,4 @@
-import { GLOW_LEVELS, withGlow } from '../engine/palette';
+import { GLOW_LEVELS, rampGlowLevel, withGlow } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmBuilding } from './osm-types';
 import type { TerrainTin } from './terrain-tin';
@@ -73,7 +73,8 @@ export function glowLevels(coverage: Float32Array): Uint8Array {
 /**
  * Stamps the glow level of the terrain triangle beneath onto a triangle mesh (stride-6 pos+normal,
  * one ramp per vertex, tile-centre ENU): each triangle takes the level under its centroid, so roads,
- * areas, buildings and masts are lit as the ground they stand on.
+ * areas, buildings and masts are lit as the ground they stand on. A face that already glows brighter
+ * (a street-lit road) keeps its own level.
  */
 export function applyGlow(vertices: Float32Array, ramps: Uint16Array, tile: Tile, locate: TriLocator, levels: Uint8Array): void {
   const center = tileCenter(tile);
@@ -85,7 +86,7 @@ export function applyGlow(vertices: Float32Array, ramps: Uint16Array, tile: Tile
     const hit = locate(ll.lon, ll.lat);
     const lvl = hit ? levels[hit.tri] : 0;
     if (lvl === 0) continue;
-    for (let k = 0; k < 3; k++) ramps[v + k] = withGlow(ramps[v + k], lvl);
+    for (let k = 0; k < 3; k++) if (lvl > rampGlowLevel(ramps[v + k])) ramps[v + k] = withGlow(ramps[v + k], lvl);
   }
 }
 

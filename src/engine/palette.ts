@@ -432,12 +432,15 @@ export const LIGHT = {
   SUN: RAMP.SKY * RAMP_STEPS + 14,
   /** blue taxiway edge lights (kept apart from the water ramp, which turns to ice in frost) */
   TAXI_BLUE: RAMP.SKY * RAMP_STEPS + 9,
+  /** street lighting: lamp heads and far lit roads at night (sodium orange); a free step of the HUD amber ramp (3, 11, 13 are used) */
+  STREET: RAMP.HUD_AMBER * RAMP_STEPS + 14,
 } as const;
 const LIGHT_COLORS: [number, RGB][] = [
   [LIGHT.TAXI_BLUE, [64, 128, 255]],
   [LIGHT.WINDOW_YELLOW, [255, 204, 72]],
   [LIGHT.WINDOW_WHITE, [236, 240, 255]],
   [LIGHT.RED, [255, 24, 16]],
+  [LIGHT.STREET, [255, 176, 80]],
 ];
 
 const SUN_DAY: RGB = [255, 255, 255];

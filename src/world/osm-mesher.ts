@@ -1,6 +1,6 @@
 import earcut from 'earcut';
-import { RAMP, rampIndex, snowy } from '../engine/palette';
-import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
+import { LIGHT, RAMP, rampIndex, snowy, withGlow } from '../engine/palette';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
@@ -29,11 +29,36 @@ type P2 = [number, number];
 /** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
 
+/**
+ * A street-lit road: every residential street and motorway / trunk / primary / secondary road,
+ * and any road tagged lit=yes.
+ */
+export function isLitRoad(tags: Record<string, string>): boolean {
+  const hw = tags.highway;
+  if (!hw) return false;
+  return tags.lit === 'yes' || hw === 'residential' || hw === 'motorway' || hw === 'trunk' || hw === 'primary' || hw === 'secondary';
+}
+
+/** glow level of a street-lit road surface at night (the brightest built-up ground is GLOW_LEVELS) */
+export const LIT_ROAD_GLOW = 6;
+/** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating */
+export const LAMP_SPACING_M = 35;
+export const LAMP_HEIGHT_M = 8;
+/** pole foot this far beyond the road edge; the arm reaches back over the road */
+const LAMP_SETBACK_M = 1;
+const LAMP_ARM_M = 2;
+const LAMP_POLE_HALF_M = 0.12;
+const LAMP_RAMP = RAMP.HULL_DARK;
+
 export interface OsmMeshData extends TerrainMeshData {
-  /** road ribbons (highway=*), drawn only near like the buildings */
+  /** road ribbons (highway=*) and street lamp poles, drawn only near like the buildings */
   roads: TerrainMeshData;
   /** far stand-in for the roads: GL line vertex pairs (x, y, z, palette index) on the terrain */
   roadLines: Float32Array;
+  /** night, far: the street-lit roads as glowing lines (same layout, LIGHT.STREET) */
+  litRoadLines: Float32Array;
+  /** night, near: lamp heads at the ends of the lamp arms (x, y, z, palette index) */
+  lamps: Float32Array;
 }
 
 /** part [t0, t1] of segment p→q inside triangle `c` (lattice coordinates), or undefined */
@@ -153,6 +178,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const main: Out = { verts: [], ramps: [] };
   const roads: Out = { verts: [], ramps: [] };
   const roadLines: number[] = [];
+  const litRoadLines: number[] = [];
+  const lamps: number[] = [];
   const { verts, ramps } = main;
 
   const enu = (lon: number, lat: number): [number, number] => {
@@ -333,6 +360,58 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     }
   };
 
+  /** an axis-aligned box with outward normals into the road mesh (lamp poles and arms) */
+  const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void => {
+    const quad = (a: number[], b: number[], c: number[], d: number[], n: number[]): void => {
+      for (const q of [a, b, c, a, c, d]) {
+        roads.verts.push(q[0], q[1], q[2], n[0], n[1], n[2]);
+        roads.ramps.push(LAMP_RAMP);
+      }
+    };
+    quad([x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [0, 0, -1]);
+    quad([x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1], [0, 0, 1]);
+    quad([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], [-1, 0, 0]);
+    quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [1, 0, 0]);
+    quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0]);
+  };
+  /** street lamps along a road: pole beside it, arm over it, a light at the arm's end */
+  const placeLamps = (points: LonLat[], half: number): void => {
+    const p = points.map(([lon, lat]) => enu(lon, lat));
+    let next = LAMP_SPACING_M / 2;
+    let walked = 0;
+    let side = 1;
+    for (let i = 0; i + 1 < p.length; i++) {
+      const [ax, az] = p[i], [bx, bz] = p[i + 1];
+      const len = Math.hypot(bx - ax, bz - az);
+      if (len < 1e-6) continue;
+      const dx = (bx - ax) / len, dz = (bz - az) / len;
+      while (next <= walked + len) {
+        const t = next - walked;
+        const nx = -dz * side, nz = dx * side; // towards this lamp's side
+        const fx = ax + dx * t + nx * (half + LAMP_SETBACK_M);
+        const fz = az + dz * t + nz * (half + LAMP_SETBACK_M);
+        const ll = enuToLatLon(center, fx, -fz, 0);
+        const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
+        const top = y0 + LAMP_HEIGHT_M;
+        const r = LAMP_POLE_HALF_M;
+        box(fx - r, y0, fz - r, fx + r, top, fz + r);
+        // the arm back over the road, as a box along whichever axis it runs closer to
+        const tx = fx - nx * LAMP_ARM_M, tz = fz - nz * LAMP_ARM_M;
+        box(Math.min(fx, tx) - r, top - 2 * r, Math.min(fz, tz) - r, Math.max(fx, tx) + r, top, Math.max(fz, tz) + r);
+        lamps.push(tx, top - 2 * r - 0.1, tz, LIGHT.STREET);
+        side = -side;
+        next += LAMP_SPACING_M;
+      }
+      walked += len;
+    }
+  };
+  /** the far line pairs added since `from`, again with the street-light colour */
+  const copyLit = (from: number): void => {
+    for (let k = from; k < roadLines.length; k += 4) {
+      litRoadLines.push(roadLines[k], roadLines[k + 1], roadLines[k + 2], LIGHT.STREET);
+    }
+  };
+
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
 
@@ -342,7 +421,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const bias = 1.4;
     const half = style.width / 2;
     const road = !!line.tags.highway;
+    const lit = road && isLitRoad(line.tags);
     const out = road ? roads : main;
+    // a street-lit surface glows at night (the shader shows the level only then)
+    const ramp = lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp;
+    const linesFrom = roadLines.length;
+    if (lit) placeLamps(line.points, half);
 
     if (tin) {
       // the ribbon in lattice coordinates, each triangle cut by the terrain faces under it: every
@@ -360,10 +444,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         right.push([c[i][0] + dy * h, c[i][1] - dx * h]);
       }
       for (let i = 0; i < c.length - 1; i++) {
-        onFaces([left[i], right[i], left[i + 1]], style.ramp, bias, out);
-        onFaces([right[i], right[i + 1], left[i + 1]], style.ramp, bias, out);
+        onFaces([left[i], right[i], left[i + 1]], ramp, bias, out);
+        onFaces([right[i], right[i + 1], left[i + 1]], ramp, bias, out);
         if (road) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
       }
+      if (lit) copyLit(linesFrom);
       return;
     }
 
@@ -406,13 +491,14 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       right.push({ lon: c.lon, lat: c.lat, x: c.x - px, z: c.z - pz, y: c.y });
     }
     for (let i = 0; i < centers.length - 1; i++) {
-      emitTri(left[i], right[i], left[i + 1], style.ramp, out);
-      emitTri(right[i], right[i + 1], left[i + 1], style.ramp, out);
+      emitTri(left[i], right[i], left[i + 1], ramp, out);
+      emitTri(right[i], right[i + 1], left[i + 1], ramp, out);
       if (road) {
         const a = centers[i], b = centers[i + 1];
         roadLines.push(a.x, a.y, a.z, ROAD_LINE_INDEX, b.x, b.y, b.z, ROAD_LINE_INDEX);
       }
     }
+    if (lit) copyLit(linesFrom);
   };
 
   const buildPoint = (p: OsmPoint): void => {
@@ -445,5 +531,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     vertexCount: ramps.length,
     roads: { vertices: new Float32Array(roads.verts), ramps: new Uint16Array(roads.ramps), vertexCount: roads.ramps.length },
     roadLines: new Float32Array(roadLines),
+    litRoadLines: new Float32Array(litRoadLines),
+    lamps: new Float32Array(lamps),
   };
 }

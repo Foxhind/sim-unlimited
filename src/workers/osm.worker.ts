@@ -18,7 +18,7 @@ import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } f
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 17;
+export const OSM_MESH_SCHEMA = 18;
 
 export interface OsmRequest {
   type: 'osm';
@@ -54,6 +54,9 @@ export interface OsmMeshResponse {
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
+  /** night: street-lit roads as far lines, lamp heads near (x, y, z, palette index) */
+  litRoadLines: ArrayBuffer;
+  lamps: ArrayBuffer;
   runways: number;
 }
 
@@ -106,7 +109,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights,
       res.windows, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
-      res.rVertices, res.rRamps, res.roadLines,
+      res.rVertices, res.rRamps, res.roadLines, res.litRoadLines, res.lamps,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -121,6 +124,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), roadLines: cached.roadLines ?? empty(),
+        litRoadLines: cached.litRoadLines ?? empty(), lamps: cached.lamps ?? empty(),
         runways: detail === 'full' ? await runwayCount(tile) : 0,
       });
       return;
@@ -176,6 +180,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer,
       roadLines: mesh.roadLines.slice().buffer,
+      litRoadLines: mesh.litRoadLines.slice().buffer, lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
     send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
