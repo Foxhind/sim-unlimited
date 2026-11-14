@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { BORDER_TOL_M, COAST_LEVEL, buildTerrainTin, simplifyBorder } from '../src/world/terrain-tin';
+import { BORDER_TOL_M, COAST_LEVEL, buildTerrainTin, isSeaFace, simplifyBorder } from '../src/world/terrain-tin';
+import { buildTerrainMesh } from '../src/world/terrain-mesher';
+import { RAMP } from '../src/engine/palette';
 import type { Tile } from '../src/world/geodesy';
 
 describe('border profile over the sea', () => {
@@ -56,5 +58,30 @@ describe('border profile over the sea', () => {
       for (const v of ids) expect(tin.vh[v]).toBe(0);
     }
     expect(seaFaces).toBeGreaterThan(0);
+  });
+
+  it('an island lower than the first belt is land, though all its vertices are at 0 m', () => {
+    const tile: Tile = { z: 14, x: 9516, y: 6397 };
+    const grid = 48, side = grid + 1;
+    // a 15 m island in open sea, astride the north border like Şövalye Island in Fethiye bay
+    const heights = Float32Array.from({ length: side * side }, (_, k) => {
+      const i = k % side, j = Math.floor(k / side);
+      return Math.max(0, 15 - 1.5 * Math.hypot((i - 24) / 2, j));
+    });
+    const tin = buildTerrainTin(tile, grid, heights);
+    let island = 0, sea = 0;
+    tin.tris.forEach((t, ti) => {
+      const cx = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, cy = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
+      const d = Math.hypot((cx - 24) / 2, cy);
+      if (d < 7) { island++; expect(isSeaFace(tin, ti)).toBe(false); }
+      if (d > 12) { sea++; expect(isSeaFace(tin, ti)).toBe(true); }
+    });
+    expect(island).toBeGreaterThan(0);
+    expect(sea).toBeGreaterThan(0);
+    // and the mesh colours it as land
+    const mesh = buildTerrainMesh({ tile, grid, heights, skirtDepth: 0 });
+    let landVerts = 0;
+    for (let v = 0; v < mesh.vertexCount; v++) if ((mesh.ramps[v] & 0xfff) !== RAMP.SEA) landVerts++;
+    expect(landVerts).toBeGreaterThan(0);
   });
 });

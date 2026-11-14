@@ -1,7 +1,7 @@
 import { RAMP, snowy, withGlow } from '../engine/palette';
 import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
-import { buildTerrainTin, type TerrainTin, type TinOptions } from './terrain-tin';
+import { buildTerrainTin, isSeaFace, type TerrainTin, type TinOptions } from './terrain-tin';
 import type { Tri } from './contours';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
@@ -96,9 +96,10 @@ function faceNormal(wx: number[], wy: number[], wz: number[], t: Tri): [number, 
 }
 
 /** colour of a TIN face: sea, imagery colour, or height/slope rules; land (not water) takes snow */
-function terrainFaceRamp(tin: TerrainTin, t: Tri, ny: number, faceColor?: FaceColor): number {
+function terrainFaceRamp(tin: TerrainTin, ti: number, ny: number, faceColor?: FaceColor): number {
   const { vx, vy, vh } = tin;
-  if (vh[t.a] <= 0 && vh[t.b] <= 0 && vh[t.c] <= 0) return RAMP.SEA;
+  const t = tin.tris[ti];
+  if (isSeaFace(tin, ti)) return RAMP.SEA;
   const ramp = faceColor
     ? faceColor(vx[t.a], vy[t.a], vx[t.b], vy[t.b], vx[t.c], vy[t.c])
     : faceRamp((vh[t.a] + vh[t.b] + vh[t.c]) / 3, ny);
@@ -129,7 +130,7 @@ export function buildGlowGround(
   tris.forEach((t, i) => {
     if (levels[i] === 0) return;
     const n = faceNormal(wx, wy, wz, t);
-    const ramp = withGlow(terrainFaceRamp(tin, t, n[1], faceColor), levels[i]);
+    const ramp = withGlow(terrainFaceRamp(tin, i, n[1], faceColor), levels[i]);
     for (const k of [t.a, t.b, t.c]) {
       vertices.set([wx[k], wy[k] + lift, wz[k], n[0], n[1], n[2]], fi);
       fi += 6;
@@ -150,7 +151,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris, coarse } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines });
+  const { vx, vy, vh, tris, coarse, sea } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines });
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);
   const vyH = vh.map((h) => Math.max(h, 0));
@@ -193,11 +194,12 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
 
   const edgeInfo = new Map<number, { n: [number, number, number]; ramp: number }>();
   const ekey = (u: number, v: number) => (u < v ? u * vx.length + v : v * vx.length + u);
-  const tin = { vx, vy, vh, tris, grid };
-  for (const t of tris) {
+  const tin = { vx, vy, vh, tris, grid, sea };
+  for (let ti = 0; ti < tris.length; ti++) {
+    const t = tris[ti];
     const idx = [t.a, t.b, t.c];
     const [ax, ay, az] = faceNormal(wx, vyH, wz, t);
-    const ramp = terrainFaceRamp(tin, t, ay, opts.faceColor);
+    const ramp = terrainFaceRamp(tin, ti, ay, opts.faceColor);
     const info = { n: [ax, ay, az] as [number, number, number], ramp };
     edgeInfo.set(ekey(t.a, t.b), info);
     edgeInfo.set(ekey(t.b, t.c), info);

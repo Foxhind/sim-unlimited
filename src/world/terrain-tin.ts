@@ -49,6 +49,13 @@ export interface TerrainTin {
   vh: number[];
   tris: Tri[];
   /**
+   * Per face: 1 sea, 0 land. Decided per region of faces between coastline edges, by the DEM
+   * under them; heights alone cannot tell, an island lower than the first belt level is ringed
+   * by coastline vertices at 0 m and has no other vertex (see seaFaces). Absent: the face is sea
+   * when all three corners are at or below 0 m (isSeaFace).
+   */
+  sea?: Uint8Array;
+  /**
    * Stitching to a coarser neighbour, per vertex (present when the borders carry `coarse`):
    * `edges` — bits of the edges the vertex lies on that are also the parent's boundary
    * (1 n, 2 s, 4 w, 8 e); `dh` — metres from the vertex to the parent's border line there (both
@@ -415,6 +422,8 @@ function insertColourLines(
   stats: { verts: number; crossings: number },
   /** an end of a boundary that is already a vertex of the fixed edges (on the tile border): kept */
   isEnd: (p: Pt) => boolean = () => false,
+  /** fixed edge `ci` was split at a crossing; its second half is the new edge `added` */
+  onSplit: (ci: number, added: number) => void = () => {},
 ): void {
   const SNAP = 1e-3; // lattice cells
   const P = (k: number): Pt => ({ x: vx[k], y: vy[k] });
@@ -459,6 +468,7 @@ function insertColourLines(
             w = vid(q, vh[u] + (vh[v] - vh[u]) * h.s);
             constraints[h.ci] = [u, w];
             constraints.push([w, v]);
+            onSplit(h.ci, constraints.length - 1);
             stats.crossings++;
           }
           if (w !== from) constraints.push([from, w]);
@@ -648,6 +658,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     untangle(chains, borderSegs);
 
     const constraints: Array<[number, number]> = [];
+    /** constraint index → it is a piece of the coastline */
+    const coast: boolean[] = [];
     for (const l of borderChains) for (let k = 1; k < l.length; k++) constraints.push([vid(l[k - 1], 0), vid(l[k], 0)]);
     for (const c of chains) {
       let prev = -1;
@@ -655,7 +667,10 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         if (!c.keep[k]) continue;
         const p = c.pts[k];
         const id = vid(p, c.level === COAST_LEVEL ? 0 : edgeOf(p) >= 0 ? borderHeight(p) : lineHeight(c.level));
-        if (prev >= 0 && prev !== id) constraints.push([prev, id]);
+        if (prev >= 0 && prev !== id) {
+          if (c.level === COAST_LEVEL) coast[constraints.length] = true;
+          constraints.push([prev, id]);
+        }
         prev = id;
       }
     }
@@ -666,7 +681,9 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       // at sea level like the coastline: a boundary vertex in the sea must not lift a water face
       const h = colourHeight(p);
       return h < COAST_LEVEL ? 0 : h;
-    }, stats, (p) => edgeOf(p) >= 0);
+    }, stats, (p) => edgeOf(p) >= 0, (ci, added) => { if (coast[ci]) coast[added] = true; });
+    const coastEdges = new Set<number>();
+    constraints.forEach(([u, v], ci) => { if (coast[ci]) coastEdges.add(edgeKey(u, v)); });
 
     // a triangle is flat when all three corners sit at one height (one isoline): it lies on a belt
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.
@@ -687,7 +704,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       },
     );
     lastColourFlips = colourFlips;
-    return { vx, vy, vh, tris, constraints, missing, borderVerts };
+    return { vx, vy, vh, tris, constraints, missing, borderVerts, coastEdges };
   };
 
   let lastColourFlips = 0;
@@ -767,13 +784,14 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   }
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
+  const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid);
   if (opts.debug) {
     Object.assign(opts.debug, {
       step, eps, raw: lines, constraints, missing, borderVerts, refined: added, colourFlips: lastColourFlips,
       colourVerts: stats.verts, colourCrossings: stats.crossings,
     });
   }
-  if (!coarseLines.some((l) => l)) return { grid, vx, vy, vh, tris };
+  if (!coarseLines.some((l) => l)) return { grid, vx, vy, vh, tris, sea };
   const dh = vx.map(() => 0), edges = vx.map(() => 0);
   for (let k = 0; k < vx.length; k++) {
     const on = [vy[k] === 0, vy[k] === grid, vx[k] === 0, vx[k] === grid];
@@ -784,7 +802,62 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       dh[k] = Math.max(0, lineAt(line, (e < 2 ? vx[k] : vy[k]) / grid)) - Math.max(0, vh[k]);
     }
   }
-  return { grid, vx, vy, vh, tris, coarse: { dh, edges } };
+  return { grid, vx, vy, vh, tris, sea, coarse: { dh, edges } };
+}
+
+/** an undirected edge as one number (vertex ids stay far below 2^20) */
+const edgeKey = (u: number, v: number): number => (u < v ? u * 1048576 + v : v * 1048576 + u);
+
+/**
+ * Sea or land per face. The coastline is a fixed edge, so no face crosses it: faces joined by
+ * any other edge lie on one side of it. Each such region is sea when most of its area (face
+ * centroids on the lattice, weighted by face area) is below COAST_LEVEL. Vertex heights cannot
+ * decide it: coastline vertices are at 0 m, and an island lower than the first belt level has no
+ * other vertex — all-zero corners made it sea.
+ */
+export function seaFaces(vx: number[], vy: number[], tris: Tri[], coastEdges: Set<number>, heights: Float32Array, grid: number): Uint8Array {
+  const byEdge = new Map<number, number[]>();
+  tris.forEach((t, i) => {
+    for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
+      const k = edgeKey(u, v);
+      const l = byEdge.get(k);
+      if (l) l.push(i);
+      else byEdge.set(k, [i]);
+    }
+  });
+  const region = new Int32Array(tris.length).fill(-1);
+  const sea = new Uint8Array(tris.length);
+  for (let start = 0; start < tris.length; start++) {
+    if (region[start] >= 0) continue;
+    const members: number[] = [start];
+    region[start] = start;
+    let vote = 0;
+    for (let q = 0; q < members.length; q++) {
+      const t = tris[members[q]];
+      const area = Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2;
+      const c = { x: (vx[t.a] + vx[t.b] + vx[t.c]) / 3, y: (vy[t.a] + vy[t.b] + vy[t.c]) / 3 };
+      vote += latticeHeight(heights, grid, c) < COAST_LEVEL ? area : -area;
+      for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
+        const k = edgeKey(u, v);
+        if (coastEdges.has(k)) continue;
+        for (const n of byEdge.get(k)!) {
+          if (region[n] < 0) {
+            region[n] = start;
+            members.push(n);
+          }
+        }
+      }
+    }
+    if (vote > 0) for (const m of members) sea[m] = 1;
+  }
+  return sea;
+}
+
+/** a face of the TIN is sea (water at 0 m), by its region when labelled, else by its corners */
+export function isSeaFace(tin: Pick<TerrainTin, 'vh' | 'tris' | 'sea'>, ti: number): boolean {
+  if (tin.sea) return tin.sea[ti] === 1;
+  const t = tin.tris[ti];
+  return tin.vh[t.a] <= 0 && tin.vh[t.b] <= 0 && tin.vh[t.c] <= 0;
 }
 
 /**

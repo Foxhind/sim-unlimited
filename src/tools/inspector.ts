@@ -7,7 +7,7 @@ import { gridForZoom, MAX_Z, MIN_Z } from '../world/chunks';
 import { decodeTerrarium, gridLatLon, tileCenter, tileForLatLon, tileSizeMeters, type Tile } from '../world/geodesy';
 import { PRESETS, SOURCE } from './presets';
 import { loadTileDem, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
-import { beltStepForZoom, buildTerrainTin, EPS_START, type TerrainTin, type TinDebug } from '../world/terrain-tin';
+import { beltStepForZoom, buildTerrainTin, EPS_START, isSeaFace, type TerrainTin, type TinDebug } from '../world/terrain-tin';
 import { parseMapLink } from '../ui/map-links';
 import { LAND_PALETTE, LAND_RAMP_BASE } from '../engine/palette';
 import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
@@ -817,7 +817,7 @@ function colourFaces(): void {
   const f = faceColorByMode(lsProc.quantized, lsProc.quantized.image.width, grid);
   lsFace = new Int16Array(tin.tris.length);
   tin.tris.forEach((t, ti) => {
-    lsFace![ti] = [t.a, t.b, t.c].every((k) => tin.vh[k] <= 0)
+    lsFace![ti] = isSeaFace(tin, ti)
       ? -1
       : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]) - LAND_RAMP_BASE;
   });
