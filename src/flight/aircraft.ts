@@ -1,4 +1,6 @@
-import { RAMP } from '../engine/palette';
+import { RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
+import f117Model from './models/f117.json';
+import su27Model from './models/su27.json';
 
 /** [x, y] rows — linear interpolation, clamped outside. */
 export type AeroTable = [number, number][];
@@ -129,41 +131,65 @@ function pair(def: Omit<SurfaceDef, 'part'>, right: PartId, left: PartId): Surfa
   ];
 }
 
-export const SU27: AircraftConfig = {
+/**
+ * The configs below give every position (surfaces, part tips, nose and tail) in the model's own
+ * coordinates, as measured on assets/models/<id>.blend; this moves them to the centre of gravity,
+ * which is what the flight model works in. Moving `cg` then shifts the balance without moving the airframe.
+ */
+function fromModel(cfg: AircraftConfig): AircraftConfig {
+  const rel = (p: V3): V3 => [p[0] - cfg.cg[0], p[1] - cfg.cg[1], p[2] - cfg.cg[2]];
+  return {
+    ...cfg,
+    surfaces: cfg.surfaces.map((s) => ({ ...s, pos: rel(s.pos) })),
+    parts: cfg.parts.map((p) => ({ ...p, tip: rel(p.tip) })),
+    nose: rel(cfg.nose),
+    tail: rel(cfg.tail),
+  };
+}
+
+export const SU27: AircraftConfig = fromModel({
   id: 'su27',
   name: 'SU-27 FLANKER',
   hudLang: 'ru',
   mass: 18000,
-  inertia: [280000, 320000, 55000],
+  // the real aircraft's inertias, scaled from its 21.9 x 14.7 m to the model's 21.2 x 14.0 m
+  inertia: [263000, 300000, 50000],
+  // surface areas keep the model's proportions, scaled so the total lift matches the real 62 m2 wing
   wingArea: 62,
-  wingSpan: 14.7,
-  cg: [0, 0, 3.4],
+  wingSpan: 14.0,
+  // the wing panels straddle the CG as on the real aircraft (inner ~0.5 m ahead, outer ~0.5 m aft): that is
+  // what pitches the nose up at the stall; the neutral point stays 0.52 m behind it, as before
+  cg: [0, 0, 1.4],
   surfaces: [
-    // lifting body + leading-edge extensions: low aspect ratio, vortex lift that holds on to 30+ deg
-    { pos: [0, 0, -1.9], normal: UP, area: 20, cla: 3.0, alpha0: 2.9, stall: 30, k: 0.115 },
+    // lifting body + leading-edge extensions: low aspect ratio, vortex lift that holds on to 30+ deg.
+    // Its lift centre is set from the model's wing as on the real aircraft (1.4 m ahead of the inner panel):
+    // the model's fuselage silhouette says little about where the vortex lift acts
+    { pos: [0, 0, -0.47], normal: UP, area: 21, cla: 3.0, alpha0: 2.9, stall: 30, k: 0.115 },
     // wing panels: the swept outer part stalls first and sits aft, hence the pitch-up and wing drop
-    ...pair({ pos: [2.8, 0, -0.5], normal: UP, area: 9, cla: 4.8, alpha0: 2.9, stall: 22, k: 0.115, flap: true }, 'wingR', 'wingL'),
-    ...pair({ pos: [5.3, 0.1, 0.5], normal: UP, area: 12, cla: 4.8, alpha0: 2.9, stall: 19, k: 0.115, flap: true, roll: 20, tau: 0.45 }, 'wingR', 'wingL'),
+    ...pair({ pos: [3.41, 0, 0.93], normal: UP, area: 9.9, cla: 4.8, alpha0: 2.9, stall: 22, k: 0.115, flap: true }, 'wingR', 'wingL'),
+    ...pair({ pos: [5.34, 0, 1.93], normal: UP, area: 13.1, cla: 4.8, alpha0: 2.9, stall: 19, k: 0.115, flap: true, roll: 20, tau: 0.45 }, 'wingR', 'wingL'),
     // all-moving stabilators: pitch together, roll differentially. Deep in a stall their differential tilt is
-    // what still yaws the aircraft: stick into the spin is the way out
-    ...pair({ pos: [2.9, 0, 5.6], normal: UP, area: 7, cla: 3.3, stall: 20, k: 0.13, pitch: 25, roll: 12, tau: 1 }, 'stabR', 'stabL'),
+    // what still yaws the aircraft: stick into the spin is the way out. Placed as modelled; the model's
+    // stabilators are drawn small, so the area keeps the real aircraft's tail volume (area x arm) instead
+    ...pair({ pos: [3.75, -0.15, 8.04], normal: UP, area: 5.9, cla: 3.3, stall: 20, k: 0.13, pitch: 25, roll: 12, tau: 1 }, 'stabR', 'stabL'),
     // twin fins with rudders, blanketed by the wing wake at high angle of attack
-    ...pair({ pos: [1.75, 1.9, 4.6], normal: SIDE, area: 7.7, cla: 2.6, stall: 18, k: 0.2, yaw: 25, tau: 0.5, shield: 0.75 }, 'finR', 'finL'),
+    ...pair({ pos: [2.1, 1.6, 6.41], normal: SIDE, area: 5.1, cla: 2.6, stall: 18, k: 0.2, yaw: 25, tau: 0.5, shield: 0.75 }, 'finR', 'finL'),
     // forebody side area: destabilising in yaw, as on the real aircraft
-    { pos: [0, 0.2, -6.5], normal: SIDE, area: 5, cla: 0.6, stall: 12, k: 0.5 },
+    { pos: [0, -0.08, -3.0], normal: SIDE, area: 3.5, cla: 0.6, stall: 12, k: 0.5 },
   ],
   parts: [
-    // wings: 9 g limit x 1.5 = 13.5 g ultimate, of which a panel carries ~38%
-    { id: 'wingR', tip: [7.35, 0.45, 3.4], maxLoad: 920e3 },
-    { id: 'wingL', tip: [-7.35, 0.45, 3.4], maxLoad: 920e3 },
+    // wings: 9 g limit x 1.5 = 13.5 g ultimate, of which a panel carries ~40%
+    { id: 'wingR', tip: [7.0, 0, 6.1], maxLoad: 960e3 },
+    { id: 'wingL', tip: [-7.0, 0, 6.1], maxLoad: 960e3 },
     // tails: full attached lift at ~60% of the limit dynamic pressure
-    { id: 'stabR', tip: [4.5, 0.15, 6.5], maxLoad: 390e3 },
-    { id: 'stabL', tip: [-4.5, 0.15, 6.5], maxLoad: 390e3 },
-    { id: 'finR', tip: [2.25, 3.4, 5.4], maxLoad: 430e3 },
-    { id: 'finL', tip: [-2.25, 3.4, 5.4], maxLoad: 430e3 },
+    { id: 'stabR', tip: [4.95, -0.1, 9.2], maxLoad: 330e3 },
+    { id: 'stabL', tip: [-4.95, -0.1, 9.2], maxLoad: 330e3 },
+    { id: 'finR', tip: [2.1, 3.4, 7.3], maxLoad: 290e3 },
+    { id: 'finL', tip: [-2.1, 3.4, 7.3], maxLoad: 290e3 },
   ],
-  nose: [0, 0.1, -14.4],
-  tail: [0, 0, 8.8],
+  nose: [0, -0.55, -10.6],
+  tail: [0, 0, 10.6],
+  // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model
   bodySide: 34,
   fbw: { gMax: 9, gMin: -3, alphaLimit: 17, alphaOverride: 45, rollRate: 2.2 },
   cd0: 0.022,
@@ -184,38 +210,41 @@ export const SU27: AircraftConfig = {
   speedbrakeCd: 0.05,
   brakeDecel: 4.5,
   stallAlpha: 20,
-  nozzles: [{ pos: [0.95, -0.5, 10.8], r: 0.5 }, { pos: [-0.95, -0.5, 10.8], r: 0.5 }],
-};
+  nozzles: [{ pos: [1.18, -0.25, 9.0], r: 0.46 }, { pos: [-1.18, -0.25, 9.0], r: 0.46 }],
+});
 
-export const F117: AircraftConfig = {
+export const F117: AircraftConfig = fromModel({
   id: 'f117',
   name: 'F-117A NIGHTHAWK',
   hudLang: 'en',
   mass: 15000,
   inertia: [220000, 260000, 60000],
+  // surface areas keep the model's proportions, scaled so the total lift matches the real 70 m2 wing
   wingArea: 70,
   wingSpan: 13.2,
-  cg: [0, 0, 2.6],
+  // the model's belly is flat at y = 0: the CG sits 0.9 m above it; static margin kept at ~7% of the mean chord
+  cg: [0, 0.9, 0.55],
   surfaces: [
     // faceted lifting body
-    { pos: [0, 0, -1.3], normal: UP, area: 26, cla: 2.6, alpha0: 2.7, stall: 18, k: 0.16 },
+    { pos: [0, 0.3, 0.44], normal: UP, area: 24.9, cla: 2.6, alpha0: 2.7, stall: 18, k: 0.16 },
     // 67-degree swept wing: the tips are far aft and carry the elevons (pitch and roll); no tailplane
-    ...pair({ pos: [2.8, 0, 0.3], normal: UP, area: 12, cla: 3.6, alpha0: 2.7, stall: 15, k: 0.16, flap: true }, 'wingR', 'wingL'),
-    ...pair({ pos: [5.2, 0.1, 2.6], normal: UP, area: 10, cla: 3.6, alpha0: 2.7, stall: 14, k: 0.16, pitch: 25, roll: 18, tau: 0.5 }, 'wingR', 'wingL'),
-    // all-moving butterfly tail: yaw and pitch; small, so directional stability is weak
-    { part: 'finR', pos: [1.9, 1.3, 5.8], normal: [0.707, -0.707, 0], area: 5, cla: 2.5, stall: 18, k: 0.2, yaw: 20, pitch: 20, tau: 1, shield: 0.5 },
-    { part: 'finL', pos: [-1.9, 1.3, 5.8], normal: [0.707, 0.707, 0], area: 5, cla: 2.5, stall: 18, k: 0.2, yaw: 20, pitch: 20, tau: 1, shield: 0.5 },
-    { pos: [0, 0.2, -5.5], normal: SIDE, area: 4, cla: 0.5, stall: 12, k: 0.5 },
+    ...pair({ pos: [2.59, 0.3, 0.47], normal: UP, area: 12.2, cla: 3.6, alpha0: 2.7, stall: 15, k: 0.16, flap: true }, 'wingR', 'wingL'),
+    ...pair({ pos: [5.12, 0.4, 2.77], normal: UP, area: 10.2, cla: 3.6, alpha0: 2.7, stall: 14, k: 0.16, pitch: 25, roll: 18, tau: 0.5 }, 'wingR', 'wingL'),
+    // all-moving butterfly tail, canted 28 deg from the vertical: yaw and pitch; small, so directional stability is weak
+    { part: 'finR', pos: [0.91, 1.59, 6.87], normal: [0.883, -0.469, 0], area: 4.6, cla: 2.5, stall: 18, k: 0.2, yaw: 20, pitch: 20, tau: 1, shield: 0.5 },
+    { part: 'finL', pos: [-0.91, 1.59, 6.87], normal: [0.883, 0.469, 0], area: 4.6, cla: 2.5, stall: 18, k: 0.2, yaw: 20, pitch: 20, tau: 1, shield: 0.5 },
+    { pos: [0, 1.04, -2.9], normal: SIDE, area: 1.75, cla: 0.5, stall: 12, k: 0.5 },
   ],
   parts: [
-    // 6 g limit x 1.5 = 9 g ultimate, a panel carries ~35%
-    { id: 'wingR', tip: [6.6, 0.3, 4.25], maxLoad: 465e3 },
-    { id: 'wingL', tip: [-6.6, 0.3, 4.25], maxLoad: 465e3 },
-    { id: 'finR', tip: [3.0, 2.5, 6.9], maxLoad: 150e3 },
-    { id: 'finL', tip: [-3.0, 2.5, 6.9], maxLoad: 150e3 },
+    // 6 g limit x 1.5 = 9 g ultimate, a panel carries ~37%
+    { id: 'wingR', tip: [6.6, 0.3, 7.2], maxLoad: 490e3 },
+    { id: 'wingL', tip: [-6.6, 0.3, 7.2], maxLoad: 490e3 },
+    { id: 'finR', tip: [1.5, 2.7, 10.09], maxLoad: 140e3 },
+    { id: 'finL', tip: [-1.5, 2.7, 10.09], maxLoad: 140e3 },
   ],
-  nose: [0, 0, -12.6],
-  tail: [0, 0, 6.9],
+  nose: [0, 0.3, -10],
+  tail: [0, 0.3, 7.2],
+  // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model
   bodySide: 34,
   // the real aircraft is flown entirely by its computers: the limiter cannot be pulled through
   fbw: { gMax: 6, gMin: -2, alphaLimit: 12, alphaOverride: 12, rollRate: 1.0 },
@@ -237,8 +266,8 @@ export const F117: AircraftConfig = {
   speedbrakeCd: 0.06,
   brakeDecel: 4.0,
   stallAlpha: 15,
-  nozzles: [{ pos: [0.68, -0.02, 10.2], r: 0.28 }, { pos: [-0.68, -0.02, 10.2], r: 0.28 }],
-};
+  nozzles: [{ pos: [0.4, 0.25, 7.1], r: 0.22 }, { pos: [-0.4, 0.25, 7.1], r: 0.22 }],
+});
 
 export const AIRCRAFT: Record<string, AircraftConfig> = { su27: SU27, f117: F117 };
 
@@ -256,7 +285,8 @@ export function tableLookup(table: AeroTable, x: number): number {
 
 export interface AircraftMesh {
   vertices: Float32Array; // pos.xyz + normal.xyz per vertex
-  ramps: Uint8Array;
+  /** per vertex: palette ramp (a material ramp or TERRAIN_RAMP_BASE + VGA index) */
+  ramps: Uint16Array;
   /** per vertex: 0 = fuselage, otherwise index into PART_IDS + 1 */
   parts: Uint8Array;
 }
@@ -314,172 +344,32 @@ class MeshBuilder {
   }
 
   build(): AircraftMesh {
-    return { vertices: new Float32Array(this.verts), ramps: new Uint8Array(this.ramps), parts: new Uint8Array(this.parts) };
+    return { vertices: new Float32Array(this.verts), ramps: new Uint16Array(this.ramps), parts: new Uint8Array(this.parts) };
   }
 }
 
-const mirror = (p: V3): V3 => [-p[0], p[1], p[2]];
-
-/** Su-27: blended wing body, twin fins, twin nozzles. Nose at -Z, ~200 tris. */
-function buildSu27(): AircraftMesh {
-  const m = new MeshBuilder();
-  const HULL = RAMP.HULL_LIGHT;
-  const DARK = RAMP.HULL_DARK;
-  // fuselage rings: diamond-ish sections from nose (z=-11) to tail (z=+10.5)
-  const ring = (z: number, w: number, top: number, bot: number): V3[] => [
-    [0, top, z], [w, (top + bot) / 2 + 0.15, z], [0, bot, z], [-w, (top + bot) / 2 + 0.15, z],
-  ];
-  const nose = ring(-9.2, 0.55, 0.55, -0.45);
-  m.loft([[[0, 0.1, -11]], nose], DARK, false, false); // radome
-  m.loft([
-    nose,
-    ring(-6.5, 0.95, 0.95, -0.7),
-    ring(-3.0, 1.25, 1.15, -0.8),
-    ring(1.0, 1.5, 1.2, -0.85),
-    ring(5.0, 1.6, 1.05, -0.8),
-    ring(9.0, 1.5, 0.85, -0.65),
-    ring(10.5, 1.35, 0.7, -0.55),
-  ], HULL, false, true);
-  // canopy
-  m.poly([[0, 0.95, -6.5], [0.5, 1.35, -5.2], [0, 1.5, -3.6], [-0.5, 1.35, -5.2]], DARK);
-  m.poly([[0.5, 1.35, -5.2], [0.7, 1.0, -3.2], [0, 1.5, -3.6]], DARK);
-  m.poly([[-0.5, 1.35, -5.2], [0, 1.5, -3.6], [-0.7, 1.0, -3.2]], DARK);
-  // wing glove + main wing (right, mirrored)
-  const [wA, wB, wC, wD, wE, wF, wG]: V3[] = [
-    [0.8, 0.2, -2.7], [1.4, 0.15, -2.5], [1.6, 0.1, 2.0], [7.35, 0.45, 6.2], [7.35, 0.45, 7.4], [2.0, 0.05, 5.5], [0.8, 0.1, 5.5],
-  ];
-  // explicit triangles (the planform is concave); every triangle gets an upward normal on both wings
-  const upTri = (p: V3, q: V3, r: V3): void => {
-    const ny = (q[2] - p[2]) * (r[0] - p[0]) - (q[0] - p[0]) * (r[2] - p[2]);
-    if (ny >= 0) m.tri(p, q, r, HULL);
-    else m.tri(p, r, q, HULL);
-  };
-  // the glove stays with the fuselage; the panel outboard of it is the separable wing
-  for (const t of [[wA, wB, wC], [wA, wC, wG], [wG, wC, wF]] as V3[][]) {
-    upTri(t[0], t[1], t[2]);
-    upTri(mirror(t[0]), mirror(t[1]), mirror(t[2]));
-  }
-  for (const t of [[wC, wD, wE], [wC, wE, wF]] as V3[][]) {
-    m.part('wingR', () => upTri(t[0], t[1], t[2]));
-    m.part('wingL', () => upTri(mirror(t[0]), mirror(t[1]), mirror(t[2])));
-  }
-  // LERX strakes
-  m.poly([[0.9, 0.4, -6.0], [1.4, 0.15, -2.5], [1.25, 0.3, -3.0]], HULL);
-  m.poly([[-0.9, 0.4, -6.0], [-1.25, 0.3, -3.0], [-1.4, 0.15, -2.5]], HULL);
-  // twin engine nacelles
-  for (const s of [1, -1]) {
-    const x = s * 0.95;
-    m.loft([
-      [[x, -0.2, 1.5], [x + s * 0.55, -0.5, 1.5], [x, -1.0, 1.5], [x - s * 0.55, -0.5, 1.5]],
-      [[x, -0.15, 9.5], [x + s * 0.6, -0.5, 9.5], [x, -0.95, 9.5], [x - s * 0.6, -0.5, 9.5]],
-      [[x, -0.2, 10.8], [x + s * 0.5, -0.5, 10.8], [x, -0.85, 10.8], [x - s * 0.5, -0.5, 10.8]],
-    ], DARK, true, true);
-  }
-  // stabilators
-  const stab: V3[] = [[1.0, 0.0, 6.5], [1.0, 0.0, 9.8], [4.6, 0.15, 10.6], [4.4, 0.15, 9.2]];
-  m.part('stabR', () => m.poly(stab, HULL));
-  m.part('stabL', () => m.poly([...stab].reverse().map(mirror), HULL));
-  // twin canted fins
-  for (const s of [1, -1]) {
-    const fin: V3[] = [
-      [s * 1.2, 0.25, 5.2], [s * 1.25, 0.25, 9.6],
-      [s * 2.3, 3.4, 9.9], [s * 2.2, 3.4, 7.6],
-    ];
-    m.part(s > 0 ? 'finR' : 'finL', () => {
-      m.poly(fin, HULL);
-      m.poly([...fin].reverse(), HULL);
-    });
-  }
-  // ventral fins
-  for (const s of [1, -1]) {
-    m.poly([[s * 0.9, -0.8, 7.0], [s * 1.0, -0.8, 9.8], [s * 1.3, -1.7, 9.6]], DARK);
-  }
-  // intake ramps under the LERX, flowing into the nacelles
-  for (const s of [1, -1]) {
-    const x = s * 0.95;
-    m.loft([
-      [[x, -0.3, -3.2], [x + s * 0.5, -0.55, -3.2], [x, -0.95, -3.2], [x - s * 0.5, -0.55, -3.2]],
-      [[x, -0.2, 1.5], [x + s * 0.55, -0.5, 1.5], [x, -1.0, 1.5], [x - s * 0.55, -0.5, 1.5]],
-    ], DARK, true, false);
-  }
-  // tailcone between nozzles
-  m.loft([
-    [[0, 0.3, 9.0], [0.5, 0.0, 9.0], [0, -0.4, 9.0], [-0.5, 0.0, 9.0]],
-    [[0, 0.15, 12.2], [0.2, 0.0, 12.2], [0, -0.15, 12.2], [-0.2, 0.0, 12.2]],
-  ], HULL, false, true);
-  // wingtip launch rails
-  for (const s of [1, -1]) m.part(s > 0 ? 'wingR' : 'wingL', () => {
-    m.poly([[s * 7.25, 0.45, 6.0], [s * 7.45, 0.45, 6.0], [s * 7.45, 0.45, 7.8], [s * 7.25, 0.45, 7.8]], DARK);
-    m.poly([[s * 7.25, 0.6, 6.0], [s * 7.25, 0.6, 7.8], [s * 7.45, 0.6, 7.8], [s * 7.45, 0.6, 6.0]], DARK);
-    m.poly([[s * 7.25, 0.45, 6.0], [s * 7.25, 0.45, 7.8], [s * 7.25, 0.6, 7.8], [s * 7.25, 0.6, 6.0]], DARK);
-    m.poly([[s * 7.45, 0.45, 6.0], [s * 7.45, 0.6, 6.0], [s * 7.45, 0.6, 7.8], [s * 7.45, 0.45, 7.8]], DARK);
-    m.poly([[s * 7.25, 0.45, 6.0], [s * 7.25, 0.6, 6.0], [s * 7.45, 0.6, 6.0], [s * 7.45, 0.45, 6.0]], DARK);
-    m.poly([[s * 7.25, 0.45, 7.8], [s * 7.45, 0.45, 7.8], [s * 7.45, 0.6, 7.8], [s * 7.25, 0.6, 7.8]], DARK);
-  });
-  return m.build();
+/** what tools/export-aircraft.py writes from assets/models/<id>.blend */
+interface ModelJson {
+  /** 9 numbers per triangle, mesh space (x right, y up, z aft) */
+  positions: number[];
+  /** VGA palette index of each triangle */
+  vga: number[];
+  /** separable part of each triangle: 0 = fuselage, otherwise index into PART_IDS + 1 */
+  parts: number[];
 }
 
-/** F-117A: faceted diamond fuselage, sharply swept wing, V-tail. Nose at -Z. */
-function buildF117(): AircraftMesh {
+const MODELS: Record<AircraftConfig['id'], ModelJson> = { su27: su27Model, f117: f117Model };
+
+/** Flat-shaded mesh of an exported model; each face keeps its VGA colour (lit through its terrain ramp). */
+function loadModel(json: ModelJson): AircraftMesh {
   const m = new MeshBuilder();
-  const HULL = RAMP.HULL_DARK;
-  const GLASS = RAMP.HULL_LIGHT;
-  // diamond cross-sections: top ridge, chines, keel
-  const ring = (z: number, w: number, top: number, chine: number, keel: number): V3[] => [
-    [0, top, z], [w, chine, z], [0, keel, z], [-w, chine, z],
-  ];
-  m.loft([
-    [[0, 0.0, -10.0]],
-    ring(-8.6, 0.45, 0.3, -0.05, -0.35),
-    ring(-8.0, 0.7, 0.45, -0.05, -0.5),
-    ring(-6.5, 0.95, 0.7, -0.02, -0.65),
-    ring(-5.0, 1.2, 1.0, 0.0, -0.8),
-    ring(-3.2, 1.4, 1.15, 0.03, -0.85),
-    ring(-1.5, 1.55, 1.25, 0.05, -0.9),
-    ring(0.5, 1.6, 1.2, 0.05, -0.88),
-    ring(2.5, 1.6, 1.1, 0.05, -0.85),
-    ring(4.5, 1.5, 0.95, 0.02, -0.75),
-    ring(6.5, 1.35, 0.8, 0.0, -0.65),
-    ring(8.0, 1.2, 0.65, -0.02, -0.55),
-    ring(9.5, 1.05, 0.5, -0.05, -0.45),
-  ], HULL, false, true);
-  // faceted canopy
-  m.poly([[0, 1.0, -5.0], [0.55, 1.35, -3.9], [0, 1.55, -2.6], [-0.55, 1.35, -3.9]], GLASS);
-  m.poly([[0.55, 1.35, -3.9], [0.6, 1.15, -2.2], [0, 1.55, -2.6]], GLASS);
-  m.poly([[-0.55, 1.35, -3.9], [0, 1.55, -2.6], [-0.6, 1.15, -2.2]], GLASS);
-  // highly swept wing with clipped delta planform
-  const wing: V3[] = [
-    [1.5, 0.05, -2.0], [6.6, 0.3, 6.4], [6.6, 0.3, 7.3], [1.6, 0.0, 5.8],
-  ];
-  m.part('wingR', () => m.poly(wing, HULL));
-  m.part('wingL', () => m.poly([...wing].reverse().map(mirror), HULL));
-  // wing underside facets (visible from below)
-  const under: V3[] = [
-    [1.5, -0.35, -1.5], [6.6, 0.1, 6.4], [6.6, 0.1, 7.3], [1.6, -0.4, 5.8],
-  ];
-  m.part('wingR', () => m.poly([...under].reverse(), HULL));
-  m.part('wingL', () => m.poly(under.map(mirror), HULL));
-  // V-tail (butterfly), canted 40°
-  for (const s of [1, -1]) {
-    const tail: V3[] = [
-      [s * 0.9, 0.35, 6.8], [s * 1.0, 0.3, 9.6],
-      [s * 3.1, 2.5, 10.4], [s * 2.9, 2.45, 8.6],
-    ];
-    m.part(s > 0 ? 'finR' : 'finL', () => {
-      m.poly(tail, HULL);
-      m.poly([...tail].reverse(), HULL);
-    });
-  }
-  // flat exhaust slots
-  for (const s of [1, -1]) {
-    m.poly([
-      [s * 0.35, 0.1, 9.5], [s * 1.0, 0.05, 9.5], [s * 1.0, -0.15, 10.2], [s * 0.35, -0.1, 10.2],
-    ], RAMP.ASPHALT);
-  }
-  // sawtooth intake grilles on the upper chines
-  for (const s of [1, -1]) {
-    m.poly([[s * 1.25, 0.55, -3.0], [s * 1.5, 0.35, -1.6], [s * 1.45, 0.4, -0.2], [s * 1.2, 0.6, -1.4]], RAMP.ASPHALT);
-    m.poly([[s * 1.25, 0.55, -3.0], [s * 1.2, 0.6, -1.4], [s * 1.05, 0.75, -2.2]], HULL);
+  const P = json.positions;
+  for (let t = 0; t < json.vga.length; t++) {
+    const v = (k: number): V3 => [P[t * 9 + k * 3], P[t * 9 + k * 3 + 1], P[t * 9 + k * 3 + 2]];
+    const tag = json.parts[t];
+    const add = (): void => m.tri(v(0), v(1), v(2), TERRAIN_RAMP_BASE + json.vga[t]);
+    if (tag) m.part(PART_IDS[tag - 1], add);
+    else add();
   }
   return m.build();
 }
@@ -489,7 +379,7 @@ const meshCache = new Map<string, AircraftMesh>();
 export function aircraftMesh(id: 'su27' | 'f117'): AircraftMesh {
   let mesh = meshCache.get(id);
   if (!mesh) {
-    mesh = id === 'su27' ? buildSu27() : buildF117();
+    mesh = loadModel(MODELS[id]);
     meshCache.set(id, mesh);
   }
   return mesh;

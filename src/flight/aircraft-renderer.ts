@@ -5,7 +5,7 @@ import { aircraftMesh, flameMesh, type AircraftConfig } from './aircraft';
 import type { FlightModel } from './model';
 
 /**
- * The world shader takes only an offset uniform, so the ~350-vertex airframe
+ * The world shader takes only an offset uniform, so the airframe (a few hundred triangles)
  * is rotated on the CPU each frame and re-uploaded (a few KB, negligible).
  */
 export class AircraftRenderer {
@@ -41,7 +41,7 @@ export class AircraftRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.rbo);
     gl.bufferData(gl.ARRAY_BUFFER, 0, gl.DYNAMIC_DRAW);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0);
     gl.bindVertexArray(null);
     this.mesh = { vao, vertexCount: 0 };
 
@@ -56,7 +56,7 @@ export class AircraftRenderer {
     this.frbo = must(gl.createBuffer(), 'flame ramps');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.frbo);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_BYTE, 1, 0);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0);
     gl.bindVertexArray(null);
     this.fMesh = { vao: fvao, vertexCount: 0 };
   }

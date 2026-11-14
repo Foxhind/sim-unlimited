@@ -44,7 +44,7 @@ describe('aircraft configs', () => {
       const m = aircraftMesh(id);
       const tris = m.ramps.length / 3;
       expect(tris).toBeGreaterThan(100);
-      expect(tris).toBeLessThan(400);
+      expect(tris).toBeLessThan(600);
       expect(m.vertices.length).toBe(m.ramps.length * 6);
       expect(m.vertices.every(Number.isFinite)).toBe(true);
       expect(aircraftMesh(id)).toBe(m); // cached
