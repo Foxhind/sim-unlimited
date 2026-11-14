@@ -77,6 +77,15 @@
       <label><input type="checkbox" id="labels" checked /> подписи тайлов</label>
       <label><input type="checkbox" id="coarse" checked /> <span class="tag" style="background:#ff4d6d"></span>края, сшитые с грубым соседом</label>
 
+      <h2>Цветокоррекция Landsat</h2>
+      <div class="hint">Применяется к снимку до размытия и квантования; изменение пересобирает тайлы рельефа и OSM. С коррекцией меши не кэшируются.</div>
+      <div class="row"><span>яркость (−1…1)</span><input id="lsBright" type="number" min="-1" max="1" step="0.05" /></div>
+      <div class="row"><span>контраст ×</span><input id="lsContrast" type="number" min="0" max="4" step="0.1" /></div>
+      <div class="row"><span>гамма</span><input id="lsGamma" type="number" min="0.2" max="5" step="0.1" title="больше 1 — светлее тени" /></div>
+      <div class="row"><span>насыщенность ×</span><input id="lsSat" type="number" min="0" max="4" step="0.1" title="0 — оттенки серого" /></div>
+      <div class="row"><button id="lsReset">Сбросить коррекцию</button></div>
+      <div id="gradeMsg" class="hint"></div>
+
       <h2>Солнце</h2>
       <div class="row"><span>азимут, °</span><input id="sunAz" type="number" min="0" max="360" step="15" /></div>
       <div class="row"><span>высота, °</span><input id="sunEl" type="number" min="-10" max="90" step="5" /></div>

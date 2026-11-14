@@ -2,6 +2,7 @@ import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
+import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import {
   enuToLatLon,
   frameYaw,
@@ -205,6 +206,8 @@ export class ChunkManager {
   renderList: Chunk[] = [];
   /** stitch the edges of tiles to coarser neighbours (off in the overview tool to see the raw seams) */
   stitch = true;
+  /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
+  grade: ColourGrade = NEUTRAL_GRADE;
   /** z14 leaves wanted this frame: the detailed tiles whose OSM must load */
   detailTiles: Tile[] = [];
   /** z14 tiles drawn this frame (terrain and OSM both ready): only these show their OSM */
@@ -373,7 +376,7 @@ export class ChunkManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'tile', id, tile: chunk.tile, grid: chunk.grid });
+      slot.worker.postMessage({ type: 'tile', id, tile: chunk.tile, grid: chunk.grid, grade: this.grade });
     });
   }
 

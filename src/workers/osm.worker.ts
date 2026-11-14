@@ -14,7 +14,7 @@ import { buildTerrainTin, tinLocator, tinSampler } from '../world/terrain-tin';
 import { greenVga, RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
-import { loadLandsatTerrain } from '../world/landsat-process';
+import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
@@ -25,6 +25,8 @@ export interface OsmRequest {
   id: number;
   tile: Tile;
   detail: OsmDetail;
+  /** Landsat colour correction (relief inspector); a graded mesh is neither read from nor written to the cache */
+  grade?: ColourGrade;
 }
 
 export interface OsmMeshResponse {
@@ -91,6 +93,8 @@ function concatU16(a: Uint16Array, b: Uint16Array): Uint16Array {
 
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
+  const grade = e.data.grade ?? NEUTRAL_GRADE;
+  const useCache = isNeutralGrade(grade);
   // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on
   const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
@@ -102,7 +106,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   };
   const empty = () => new ArrayBuffer(0);
   try {
-    const cached = await getCachedMesh(key);
+    const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
@@ -124,7 +128,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
     // the same TIN as the terrain mesh, Landsat colour boundaries included; a tile is shown only
     // with all its data, so without imagery fail as retryable like the terrain worker
-    const ls = await loadLandsatTerrain(tile, grid);
+    const ls = await loadLandsatTerrain(tile, grid, grade);
     if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
     const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts } });
     const drape = tinSampler(tin, tile);
@@ -164,7 +168,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
       glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
     };
-    await putCachedMesh({ key, ts: Date.now(), ...out });
+    if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
     send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
   } catch (err) {
     const res: OsmErrorResponse = {

@@ -11,6 +11,7 @@ import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
 import { OsmManager } from '../world/osm-manager';
+import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { deleteCachedMeshes, isTileMeshKey } from '../world/tile-cache';
 import { PRESETS, SOURCE } from './presets';
 
@@ -29,6 +30,8 @@ const SPAN_MAX_M = 180000;
 const POINT_SIZE = 3;
 const EDGE_NAMES = ['север', 'юг', 'запад', 'восток'];
 /** tile outline by zoom, coarse to fine */
+/** the colour correction is kept between visits (this browser only) */
+const GRADE_STORAGE = 'relief.landsatGrade';
 const ZOOM_COLOURS = ['#7d8794', '#7d8794', '#8f7fd6', '#5b8def', '#4fc3d9', '#5fd38d', '#f0b54a'];
 
 interface State {
@@ -44,6 +47,8 @@ interface State {
   pinned: LatLon;
   sunAz: number;
   sunEl: number;
+  /** Landsat colour correction */
+  grade: ColourGrade;
 }
 
 function parseHash(): Partial<State> {
@@ -73,6 +78,7 @@ const state: State = {
   pinned: { lat: PRESETS[0][1], lon: PRESETS[0][2] },
   sunAz: 150,
   sunEl: 30,
+  grade: NEUTRAL_GRADE,
   ...parseHash(),
 };
 state.span = Math.max(SPAN_MIN_M, Math.min(SPAN_MAX_M, state.span));
@@ -353,6 +359,41 @@ async function dropCache(tiles?: Tile[]): Promise<void> {
   }
 }
 
+function loadGrade(): ColourGrade {
+  try {
+    const g = JSON.parse(localStorage.getItem(GRADE_STORAGE) ?? 'null') as Partial<ColourGrade> | null;
+    const out = { ...NEUTRAL_GRADE };
+    for (const k of Object.keys(out) as Array<keyof ColourGrade>) if (Number.isFinite(g?.[k])) out[k] = g![k]!;
+    // the same ranges as the inputs
+    out.brightness = Math.max(-1, Math.min(1, out.brightness));
+    out.contrast = Math.max(0, Math.min(4, out.contrast));
+    out.gamma = Math.max(0.2, Math.min(5, out.gamma));
+    out.saturation = Math.max(0, Math.min(4, out.saturation));
+    return out;
+  } catch {
+    return { ...NEUTRAL_GRADE };
+  }
+}
+
+/** set the Landsat colour correction and rebuild every tile with it */
+function setGrade(g: ColourGrade, note = 'тайлы пересобираются с новой коррекцией'): void {
+  const same = (Object.keys(g) as Array<keyof ColourGrade>).every((k) => g[k] === chunks.grade[k]);
+  state.grade = g;
+  if (same) return;
+  chunks.grade = g;
+  osm.grade = g;
+  chunks.invalidate();
+  osm.invalidate();
+  try {
+    localStorage.setItem(GRADE_STORAGE, JSON.stringify(g));
+  } catch {
+    // storage unavailable: the correction lasts for this page only
+  }
+  const el = $('gradeMsg');
+  el.textContent = isNeutralGrade(g) ? 'без коррекции; тайлы пересобираются' : note;
+  el.className = 'hint';
+}
+
 function pasteMsg(text: string, error = false): void {
   const el = $('pasteMsg');
   el.textContent = text;
@@ -400,6 +441,10 @@ function syncInputs(): void {
   set('exag', state.exag);
   set('sunAz', state.sunAz);
   set('sunEl', state.sunEl);
+  set('lsBright', state.grade.brightness);
+  set('lsContrast', state.grade.contrast);
+  set('lsGamma', state.grade.gamma);
+  set('lsSat', state.grade.saturation);
   $<HTMLInputElement>('follow').checked = state.follow;
 }
 
@@ -432,6 +477,14 @@ function init(): void {
   num('sunAz', 0, 360, (v) => { state.sunAz = v; setSun(); });
   num('sunEl', -10, 90, (v) => { state.sunEl = v; setSun(); });
   for (const id of ['snow', 'ice']) $(id).addEventListener('change', setSun);
+  num('lsBright', -1, 1, (v) => setGrade({ ...state.grade, brightness: v }));
+  num('lsContrast', 0, 4, (v) => setGrade({ ...state.grade, contrast: v }));
+  num('lsGamma', 0.2, 5, (v) => setGrade({ ...state.grade, gamma: v }));
+  num('lsSat', 0, 4, (v) => setGrade({ ...state.grade, saturation: v }));
+  $('lsReset').onclick = () => {
+    setGrade({ ...NEUTRAL_GRADE });
+    syncInputs();
+  };
 
   $('go').onclick = () => {
     const lat = parseFloat($<HTMLInputElement>('lat').value), lon = parseFloat($<HTMLInputElement>('lon').value);
@@ -540,6 +593,8 @@ function init(): void {
     syncInputs();
   });
 
+  const grade = loadGrade();
+  if (!isNeutralGrade(grade)) setGrade(grade, 'восстановлена сохранённая коррекция');
   syncInputs();
   setSun();
   requestAnimationFrame(frame);

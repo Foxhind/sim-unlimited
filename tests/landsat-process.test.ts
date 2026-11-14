@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { nearestVga, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
 import type { RgbaImage } from '../src/world/landsat';
 import {
-  crop, faceColorByMode, FULL_VGA, gaussianBlur, LS_PX, medianCut, neighbourTiles, processLandsat, quantize, stitch3x3,
+  crop, faceColorByMode, FULL_VGA, gaussianBlur, gradeImage, isNeutralGrade, LS_PX, NEUTRAL_GRADE, medianCut, neighbourTiles, processLandsat, quantize, stitch3x3,
 } from '../src/world/landsat-process';
 
 const solid = (c: [number, number, number], w = LS_PX, h = LS_PX): RgbaImage => {
@@ -158,5 +158,32 @@ describe('one water colour', () => {
       expect(k).toBeGreaterThanOrEqual(0);
       expect(tin.vh[k] === 0 || tin.vh[k] >= 0.5).toBe(true);
     }
+  });
+});
+const px = (r: number, g: number, b: number) => ({ data: new Uint8ClampedArray([r, g, b, 255]), width: 1, height: 1 });
+
+describe('gradeImage', () => {
+  it('leaves the image untouched when neutral', () => {
+    const img = px(10, 120, 200);
+    expect(isNeutralGrade(NEUTRAL_GRADE)).toBe(true);
+    expect(gradeImage(img, NEUTRAL_GRADE)).toBe(img);
+  });
+  it('brightness adds to every channel', () => {
+    const out = gradeImage(px(100, 100, 100), { ...NEUTRAL_GRADE, brightness: 0.1 });
+    expect([...out.data.slice(0, 3)]).toEqual([126, 126, 126]);
+  });
+  it('contrast pivots about mid-grey', () => {
+    const out = gradeImage(px(64, 128, 191), { ...NEUTRAL_GRADE, contrast: 2 });
+    expect(out.data[0]).toBeLessThan(10);
+    expect(Math.abs(out.data[1] - 128)).toBeLessThanOrEqual(1);
+    expect(out.data[2]).toBeGreaterThan(245);
+  });
+  it('gamma above 1 lightens the shadows', () => {
+    expect(gradeImage(px(64, 64, 64), { ...NEUTRAL_GRADE, gamma: 2 }).data[0]).toBeGreaterThan(100);
+  });
+  it('zero saturation gives grey', () => {
+    const d = gradeImage(px(200, 50, 50), { ...NEUTRAL_GRADE, saturation: 0 }).data;
+    expect(d[0]).toBe(d[1]);
+    expect(d[1]).toBe(d[2]);
   });
 });

@@ -5,6 +5,7 @@ import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { CONE_VERTICES } from './props-mesher';
+import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
 /** within this slant distance a detailed tile draws its buildings; beyond, roof-coloured dots */
 export const HOUSE_RADIUS_M = 3500;
@@ -83,6 +84,8 @@ export class OsmManager {
   renderList: OsmChunk[] = [];
   /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
   onTileReady?: (tile: Tile, runways: number) => void;
+  /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
+  grade: ColourGrade = NEUTRAL_GRADE;
   private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
@@ -224,7 +227,7 @@ export class OsmManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full' });
+      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full', grade: this.grade });
     });
   }
 

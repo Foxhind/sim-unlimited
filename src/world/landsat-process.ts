@@ -33,6 +33,48 @@ export const LANDSAT_TUNING = {
   flips: false,
 } as const;
 
+/**
+ * Colour correction of the imagery before blur and quantization, tuned in the relief inspector.
+ * Per channel (0..1): gamma, then contrast about mid-grey, then brightness; then saturation
+ * about the Rec. 601 luma. NEUTRAL_GRADE leaves the imagery as it is.
+ */
+export interface ColourGrade {
+  /** added to every channel, −1..1 */
+  brightness: number;
+  /** slope about 0.5, 1 = unchanged */
+  contrast: number;
+  /** out = in^(1/gamma), 1 = unchanged; > 1 lightens the shadows */
+  gamma: number;
+  /** 0 = grey, 1 = unchanged */
+  saturation: number;
+}
+
+export const NEUTRAL_GRADE: ColourGrade = { brightness: 0, contrast: 1, gamma: 1, saturation: 1 };
+
+export function isNeutralGrade(g: ColourGrade): boolean {
+  return g.brightness === 0 && g.contrast === 1 && g.gamma === 1 && g.saturation === 1;
+}
+
+/** a graded copy of `img` (the same image when the grade is neutral) */
+export function gradeImage(img: RgbaImage, g: ColourGrade): RgbaImage {
+  if (isNeutralGrade(g)) return img;
+  const lut = new Float32Array(256);
+  const inv = 1 / Math.max(0.05, g.gamma);
+  for (let v = 0; v < 256; v++) lut[v] = (((v / 255) ** inv - 0.5) * g.contrast + 0.5 + g.brightness) * 255;
+  const n = img.width * img.height;
+  const data = new Uint8ClampedArray(n * 4);
+  const s = g.saturation;
+  for (let i = 0; i < n * 4; i += 4) {
+    const r = lut[img.data[i]], gr = lut[img.data[i + 1]], b = lut[img.data[i + 2]];
+    const y = 0.299 * r + 0.587 * gr + 0.114 * b;
+    data[i] = y + (r - y) * s;
+    data[i + 1] = y + (gr - y) * s;
+    data[i + 2] = y + (b - y) * s;
+    data[i + 3] = 255;
+  }
+  return { data, width: img.width, height: img.height };
+}
+
 /** image tiles are 256 px */
 export const LS_PX = 256;
 
@@ -472,8 +514,10 @@ export async function fetchLandsatMosaic(t: Tile): Promise<RgbaImage> {
 }
 
 /** imagery → colour boundaries and face colours for a terrain tile, with the inspector-tuned settings */
-export function landsatTerrain(mosaic: RgbaImage, tile: Tile, grid: number, tuning: typeof LANDSAT_TUNING = LANDSAT_TUNING): LandsatTerrain {
-  const p = processLandsat(mosaic, tile, { blurM: tuning.blurM, colours: tuning.colours });
+export function landsatTerrain(
+  mosaic: RgbaImage, tile: Tile, grid: number, tuning: typeof LANDSAT_TUNING = LANDSAT_TUNING, grade: ColourGrade = NEUTRAL_GRADE,
+): LandsatTerrain {
+  const p = processLandsat(gradeImage(mosaic, grade), tile, { blurM: tuning.blurM, colours: tuning.colours });
   const size = p.quantized.image.width;
   const lines = tuning.edges
     ? colourBoundaries(cleanLabels(p.quantized.index, size, tuning.minAreaCells * (size / grid) ** 2), size, grid, tuning.eps, tuning.borderMarginCells)
@@ -486,9 +530,9 @@ export function landsatTerrain(mosaic: RgbaImage, tile: Tile, grid: number, tuni
  * build the plain TIN and must not cache the result, so the tile is rebuilt with imagery later.
  * Shared by the terrain mesh, the OSM drape and the collision probe, which must see one surface.
  */
-export async function loadLandsatTerrain(tile: Tile, grid: number): Promise<LandsatTerrain | null> {
+export async function loadLandsatTerrain(tile: Tile, grid: number, grade: ColourGrade = NEUTRAL_GRADE): Promise<LandsatTerrain | null> {
   try {
-    return landsatTerrain(await fetchLandsatMosaic(tile), tile, grid);
+    return landsatTerrain(await fetchLandsatMosaic(tile), tile, grid, LANDSAT_TUNING, grade);
   } catch (err) {
     console.warn(`[landsat] ${tile.z}/${tile.x}/${tile.y}: ${err instanceof Error ? err.message : err}`);
     return null;
