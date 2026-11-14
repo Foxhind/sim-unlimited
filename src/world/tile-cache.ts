@@ -28,14 +28,19 @@ export interface CachedMesh {
   glowRamps?: ArrayBuffer;
   mastLines?: ArrayBuffer;
   beacons?: ArrayBuffer;
+  /** OSM tiles: road ribbons (near) and their far 1 px lines */
+  rVertices?: ArrayBuffer;
+  rRamps?: ArrayBuffer;
+  roadLines?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps';
+type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps' | 'rVertices' | 'rRamps' | 'roadLines';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength + (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
     (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
     (m.windows?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
-    (m.glowVertices?.byteLength ?? 0) + (m.glowRamps?.byteLength ?? 0);
+    (m.glowVertices?.byteLength ?? 0) + (m.glowRamps?.byteLength ?? 0) +
+    (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0);
 }
 
 export interface CacheEntryMeta {

@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { RAMP, snowy } from '../engine/palette';
+import { RAMP, rampIndex, snowy } from '../engine/palette';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
@@ -25,6 +25,33 @@ export interface OsmMeshOptions {
 }
 
 type P2 = [number, number];
+
+/** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
+const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
+
+export interface OsmMeshData extends TerrainMeshData {
+  /** road ribbons (highway=*), drawn only near like the buildings */
+  roads: TerrainMeshData;
+  /** far stand-in for the roads: GL line vertex pairs (x, y, z, palette index) on the terrain */
+  roadLines: Float32Array;
+}
+
+/** part [t0, t1] of segment p→q inside triangle `c` (lattice coordinates), or undefined */
+function segmentInTriangle(p: P2, q: P2, c: [P2, P2, P2]): [number, number] | undefined {
+  const turn = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[1][1] - c[0][1]) * (c[2][0] - c[0][0]);
+  if (turn === 0) return undefined;
+  const sign = turn > 0 ? 1 : -1;
+  let t0 = 0, t1 = 1;
+  for (let e = 0; e < 3; e++) {
+    const a = c[e], b = c[(e + 1) % 3];
+    const side = (x: number, y: number) => sign * ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]));
+    const sp = side(p[0], p[1]), sq = side(q[0], q[1]);
+    if (sp < 0 && sq < 0) return undefined;
+    if (sp < 0) t0 = Math.max(t0, sp / (sp - sq));
+    else if (sq < 0) t1 = Math.min(t1, sp / (sp - sq));
+  }
+  return t1 > t0 + 1e-9 ? [t0, t1] : undefined;
+}
 
 /** convex polygon `subject` cut to the triangle `clip` (Sutherland–Hodgman); lattice coordinates */
 function clipToTriangle(subject: P2[], clip: [P2, P2, P2]): P2[] {
@@ -114,7 +141,7 @@ function classifyLine(tags: Record<string, string>): LineStyle | undefined {
   return undefined;
 }
 
-export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
+export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const { tile, sampleHeight } = opts;
   // only this tile's share: the drape knows no terrain beyond the tile border
   const data = clipTileData(opts.data, tile);
@@ -122,8 +149,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
   const maxEdge = opts.maxEdgeMeters ?? Math.max(120, Math.min(500, tileSizeMeters(tile) / 12));
   // far 'large' layer sits slightly lower so the near 'full' layer wins depth where they overlap
   const biasScale = opts.detail === 'large' ? 0.4 : 1;
-  const verts: number[] = [];
-  const ramps: number[] = [];
+  interface Out { verts: number[]; ramps: number[] }
+  const main: Out = { verts: [], ramps: [] };
+  const roads: Out = { verts: [], ramps: [] };
+  const roadLines: number[] = [];
+  const { verts, ramps } = main;
 
   const enu = (lon: number, lat: number): [number, number] => {
     const [e, n] = latLonToEnu(center, lat, lon, 0);
@@ -135,7 +165,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     return { lon, lat, x, z, y };
   };
 
-  const emitTri = (a: Pt, b: Pt, c: Pt, ramp: number): void => {
+  const emitTri = (a: Pt, b: Pt, c: Pt, ramp: number, out: Out = main): void => {
     const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
     const e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
     let nx = e1y * e2z - e1z * e2y;
@@ -146,8 +176,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     nx /= len; ny /= len; nz /= len;
     if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
     for (const p of [a, b, c]) {
-      verts.push(p.x, p.y, p.z, nx, ny, nz);
-      ramps.push(ramp);
+      out.verts.push(p.x, p.y, p.z, nx, ny, nz);
+      out.ramps.push(ramp);
     }
   };
 
@@ -189,6 +219,39 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
         };
       }).filter((f) => f.det !== 0)
     : [];
+  // faces by lattice cell, so a small piece looks at the few faces around it
+  const g = tin?.grid ?? 1;
+  const buckets: number[][] = Array.from({ length: g * g }, () => []);
+  const cell = (v: number) => Math.max(0, Math.min(g - 1, Math.floor(v)));
+  faces.forEach((f, fi) => {
+    for (let j = cell(f.y0); j <= cell(f.y1); j++) for (let i = cell(f.x0); i <= cell(f.x1); i++) buckets[j * g + i].push(fi);
+  });
+  const seen = new Uint32Array(faces.length);
+  let stamp = 0;
+  /** faces whose bounding box overlaps the box, each once */
+  const facesNear = (x0: number, y0: number, x1: number, y1: number): typeof faces => {
+    stamp++;
+    const found: typeof faces = [];
+    for (let j = cell(y0); j <= cell(y1); j++) {
+      for (let i = cell(x0); i <= cell(x1); i++) {
+        for (const fi of buckets[j * g + i]) {
+          if (seen[fi] === stamp) continue;
+          seen[fi] = stamp;
+          const f = faces[fi];
+          if (f.x1 <= x0 || f.x0 >= x1 || f.y1 <= y0 || f.y0 >= y1) continue;
+          found.push(f);
+        }
+      }
+    }
+    return found;
+  };
+  /** a lattice point on face f, `bias` metres above it */
+  const onFace = (f: (typeof faces)[number], x: number, y: number, bias: number): Pt => {
+    const w1 = ((x - f.c[0][0]) * (f.c[2][1] - f.c[0][1]) - (f.c[2][0] - f.c[0][0]) * (y - f.c[0][1])) / f.det;
+    const w2 = ((f.c[1][0] - f.c[0][0]) * (y - f.c[0][1]) - (x - f.c[0][0]) * (f.c[1][1] - f.c[0][1])) / f.det;
+    const ll = gridLatLon(tile, x, y, tin!.grid);
+    return makePt(ll.lon, ll.lat, f.h[0] * (1 - w1 - w2) + f.h[1] * w1 + f.h[2] * w2 + bias * biasScale);
+  };
   const toLattice = ([lon, lat]: LonLat): P2 => {
     const n = 2 ** tile.z, g = tin!.grid;
     const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
@@ -196,20 +259,28 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     return [(((lon + 180) / 360) * n - tile.x) * g, (merc * n - tile.y) * g];
   };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number): void => {
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
-    for (const f of faces) {
-      if (f.x1 <= x0 || f.x0 >= x1 || f.y1 <= y0 || f.y0 >= y1) continue;
+    for (const f of facesNear(x0, y0, x1, y1)) {
       const piece = clipToTriangle(tri, f.c);
       if (piece.length < 3) continue;
-      const pts = piece.map(([x, y]) => {
-        const w1 = ((x - f.c[0][0]) * (f.c[2][1] - f.c[0][1]) - (f.c[2][0] - f.c[0][0]) * (y - f.c[0][1])) / f.det;
-        const w2 = ((f.c[1][0] - f.c[0][0]) * (y - f.c[0][1]) - (x - f.c[0][0]) * (f.c[1][1] - f.c[0][1])) / f.det;
-        const ll = gridLatLon(tile, x, y, tin!.grid);
-        return makePt(ll.lon, ll.lat, f.h[0] * (1 - w1 - w2) + f.h[1] * w1 + f.h[2] * w2 + bias * biasScale);
-      });
-      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], ramp);
+      const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
+      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], ramp, out);
+    }
+  };
+  /** a segment cut by the terrain faces it crosses: GL line pairs lying on them */
+  const lineOnFaces = (p: P2, q: P2, bias: number, out: number[], index: number): void => {
+    const x0 = Math.min(p[0], q[0]), x1 = Math.max(p[0], q[0]);
+    const y0 = Math.min(p[1], q[1]), y1 = Math.max(p[1], q[1]);
+    // a box of zero width finds no face: widen it a hair
+    for (const f of facesNear(x0 - 1e-6, y0 - 1e-6, x1 + 1e-6, y1 + 1e-6)) {
+      const t = segmentInTriangle(p, q, f.c);
+      if (!t) continue;
+      for (const s of t) {
+        const v = onFace(f, p[0] + (q[0] - p[0]) * s, p[1] + (q[1] - p[1]) * s, bias);
+        out.push(v.x, v.y, v.z, index);
+      }
     }
   };
 
@@ -262,11 +333,40 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     }
   };
 
+  /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
+  const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
+
   const buildLine = (line: OsmLine): void => {
     const style = classifyLine(line.tags);
     if (!style || line.points.length < 2) return;
     const bias = 1.4;
     const half = style.width / 2;
+    const road = !!line.tags.highway;
+    const out = road ? roads : main;
+
+    if (tin) {
+      // the ribbon in lattice coordinates, each triangle cut by the terrain faces under it: every
+      // piece lies on its face, so the relief cannot cut through the road between its points
+      const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
+      if (c.length < 2) return;
+      const h = half * latticePerMetre;
+      const left: P2[] = [], right: P2[] = [];
+      for (let i = 0; i < c.length; i++) {
+        const prev = c[Math.max(0, i - 1)], next = c[Math.min(c.length - 1, i + 1)];
+        let dx = next[0] - prev[0], dy = next[1] - prev[1];
+        const dl = Math.hypot(dx, dy) || 1;
+        dx /= dl; dy /= dl;
+        left.push([c[i][0] - dy * h, c[i][1] + dx * h]);
+        right.push([c[i][0] + dy * h, c[i][1] - dx * h]);
+      }
+      for (let i = 0; i < c.length - 1; i++) {
+        onFaces([left[i], right[i], left[i + 1]], style.ramp, bias, out);
+        onFaces([right[i], right[i + 1], left[i + 1]], style.ramp, bias, out);
+        if (road) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
+      }
+      return;
+    }
+
     // densify long segments so the ribbon follows terrain
     const path: LonLat[] = [];
     for (let i = 0; i < line.points.length - 1; i++) {
@@ -306,8 +406,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
       right.push({ lon: c.lon, lat: c.lat, x: c.x - px, z: c.z - pz, y: c.y });
     }
     for (let i = 0; i < centers.length - 1; i++) {
-      emitTri(left[i], right[i], left[i + 1], style.ramp);
-      emitTri(right[i], right[i + 1], left[i + 1], style.ramp);
+      emitTri(left[i], right[i], left[i + 1], style.ramp, out);
+      emitTri(right[i], right[i + 1], left[i + 1], style.ramp, out);
+      if (road) {
+        const a = centers[i], b = centers[i + 1];
+        roadLines.push(a.x, a.y, a.z, ROAD_LINE_INDEX, b.x, b.y, b.z, ROAD_LINE_INDEX);
+      }
     }
   };
 
@@ -335,10 +439,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);
   }
 
-  const vertexCount = ramps.length;
   return {
     vertices: new Float32Array(verts),
     ramps: new Uint16Array(ramps), // VGA ramps (building colours) go past 255
-    vertexCount,
+    vertexCount: ramps.length,
+    roads: { vertices: new Float32Array(roads.verts), ramps: new Uint16Array(roads.ramps), vertexCount: roads.ramps.length },
+    roadLines: new Float32Array(roadLines),
   };
 }

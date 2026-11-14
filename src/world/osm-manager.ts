@@ -7,7 +7,7 @@ import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Ti
 import { CONE_VERTICES } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
-/** within this slant distance a detailed tile draws its buildings; beyond, roof-coloured dots */
+/** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, roof-coloured dots and 1 px road lines */
 export const HOUSE_RADIUS_M = 3500;
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
@@ -24,6 +24,9 @@ interface OsmChunk {
   status: 'pending' | 'ready' | 'error';
   /** drape: areas, roads, points */
   mesh?: Mesh;
+  /** road ribbons (near) and their far 1 px lines */
+  rmesh?: Mesh;
+  roadLines?: PropSet;
   /** buildings, and their far stand-in dots */
   bmesh?: Mesh;
   dots?: PropSet;
@@ -61,6 +64,9 @@ interface MeshPayload {
   mastLines: ArrayBuffer;
   glowVertices: ArrayBuffer;
   glowRamps: ArrayBuffer;
+  rVertices: ArrayBuffer;
+  rRamps: ArrayBuffer;
+  roadLines: ArrayBuffer;
   runways: number;
 }
 
@@ -116,7 +122,8 @@ export class OsmManager {
             trees: buf(msg.trees), lights: buf(msg.lights),
             windows: buf(msg.windows), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
-            glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps), runways: msg.runways ?? 0,
+            glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
+            rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), roadLines: buf(msg.roadLines), runways: msg.runways ?? 0,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -138,7 +145,7 @@ export class OsmManager {
       if (c.status === 'error') errors++;
     }
     for (const c of this.renderList) {
-      draws += (c.mesh ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0) +
+      draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0) +
         (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
@@ -287,6 +294,8 @@ export class OsmManager {
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
     chunk.glow = this.worldMesh(chunk, data.glowVertices, data.glowRamps);
+    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps);
+    chunk.roadLines = this.points(chunk, data.roadLines);
     if (data.trees.byteLength > 0) {
       const count = data.trees.byteLength / 20;
       const vao = must(gl.createVertexArray(), 'tree VAO');
@@ -326,7 +335,8 @@ export class OsmManager {
     chunk.mesh = chunk.bmesh = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.windows = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
-    chunk.glow = undefined;
+    chunk.glow = chunk.rmesh = undefined;
+    chunk.roadLines = undefined;
   }
 
   draw(
@@ -348,6 +358,7 @@ export class OsmManager {
       if (c.glow && lightsOn) renderer.drawWorld(c.glow, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       if (slant < HOUSE_RADIUS_M) {
+        if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         if (c.bmesh) renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         if (c.windows && lightsOn) {
           renderer.drawLights(c.windows.vao, c.windows.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
@@ -356,6 +367,10 @@ export class OsmManager {
         // far buildings: fat roof-coloured dots at their centroids by day, thin (1 px) yellow/white lights by night
         const dots = lightsOn ? c.nightDots : c.dots;
         if (dots) renderer.drawLights(dots.vao, dots.count, c.offset, view, proj, camPos, lightsOn ? farLightSize(pointSize) : pointSize * 1.5, true);
+        // far roads: 1 px asphalt lines on the terrain (by day: unlit, they would glare at night)
+        if (c.roadLines && !lightsOn) {
+          renderer.drawLights(c.roadLines.vao, c.roadLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
+        }
         if (c.mastLines) {
           renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }

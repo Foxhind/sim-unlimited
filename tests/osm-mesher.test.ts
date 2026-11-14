@@ -71,8 +71,11 @@ describe('buildOsmMesh', () => {
       lines: [{ points: [[b.west + (b.east - b.west) * 0.2, c.lat], [b.west + (b.east - b.west) * 0.8, c.lat]], tags: { highway: 'primary' } }],
       points: [], buildings: [],
     };
-    const m = mesh(data, flat, 40);
+    const all = mesh(data, flat, 40);
+    expect(all.vertexCount).toBe(0); // roads are a mesh of their own (drawn near only)
+    const m = all.roads;
     expect(m.vertexCount).toBeGreaterThan(0);
+    expect(all.roadLines.length).toBeGreaterThan(0);
     for (let i = 0; i < m.vertexCount; i++) {
       expect(m.ramps[i]).toBe(RAMP.ASPHALT);
       expect(m.vertices[i * 6 + 1]).toBeCloseTo(101.4, 3);
@@ -124,14 +127,14 @@ describe('areas on the terrain faces', () => {
   const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { landuse: 'farmland' } }], lines: [], points: [], buildings: [] };
   const center = tileCenter(TILE);
   /** largest distance from a mesh to the terrain surface plus the bias, over vertices and face centres */
-  const offSurface = (m: ReturnType<typeof buildOsmMesh>): number => {
+  const offSurface = (m: { vertices: Float32Array; vertexCount: number }, bias = 0.6): number => {
     let worst = 0;
     for (let v = 0; v < m.vertexCount; v += 3) {
       const p = [0, 1, 2].map((k) => [m.vertices[(v + k) * 6], m.vertices[(v + k) * 6 + 1], m.vertices[(v + k) * 6 + 2]]);
       const probes = [...p, [0, 1, 2].map((c) => (p[0][c] + p[1][c] + p[2][c]) / 3)];
       for (const [x, y, z] of probes) {
         const ll = enuToLatLon(center, x, -z, 0);
-        worst = Math.max(worst, Math.abs(y - 0.6 - surface(ll.lon, ll.lat)));
+        worst = Math.max(worst, Math.abs(y - bias - surface(ll.lon, ll.lat)));
       }
     }
     return worst;
@@ -161,5 +164,48 @@ describe('areas on the terrain faces', () => {
     }
     expect(area / want).toBeGreaterThan(0.999);
     expect(area / want).toBeLessThan(1.001);
+  });
+
+  const b = tileBounds(TILE);
+  const road: OsmTileData = {
+    areas: [],
+    lines: [{
+      points: [[b.west + (b.east - b.west) * 0.1, b.south + (b.north - b.south) * 0.3], [b.west + (b.east - b.west) * 0.9, b.south + (b.north - b.south) * 0.7]],
+      tags: { highway: 'secondary' },
+    }],
+    points: [], buildings: [],
+  };
+
+  it('road ribbon cut by the faces lies on the terrain; draped, the terrain crosses it', () => {
+    const cut = buildOsmMesh({ tile: TILE, detail: 'full', data: road, sampleHeight: surface, tin });
+    expect(cut.roads.vertexCount).toBeGreaterThan(0);
+    expect(offSurface(cut.roads, 1.4)).toBeLessThan(0.5);
+    const draped = buildOsmMesh({ tile: TILE, detail: 'full', data: road, sampleHeight: surface });
+    expect(offSurface(draped.roads, 1.4)).toBeGreaterThan(5);
+  });
+
+  it('far road lines lie on the terrain and follow the whole road', () => {
+    const cut = buildOsmMesh({ tile: TILE, detail: 'full', data: road, sampleHeight: surface, tin });
+    const l = cut.roadLines;
+    expect(l.length % 8).toBe(0);
+    expect(l.length / 8).toBeGreaterThan(10); // split at every face edge it crosses
+    let worst = 0, length = 0;
+    for (let k = 0; k < l.length; k += 8) {
+      length += Math.hypot(l[k + 4] - l[k], l[k + 6] - l[k + 2]);
+      for (const o of [0, 4]) {
+        const p = [l[k + o], l[k + o + 1], l[k + o + 2]];
+        const mid = [0, 1, 2].map((c) => (l[k + c] + l[k + 4 + c]) / 2);
+        for (const [x, y, z] of [p, mid]) {
+          const ll = enuToLatLon(center, x, -z, 0);
+          worst = Math.max(worst, Math.abs(y - 1.4 - surface(ll.lon, ll.lat)));
+        }
+      }
+    }
+    expect(worst).toBeLessThan(0.5);
+    const flatLines = buildOsmMesh({ tile: TILE, detail: 'full', data: road, sampleHeight: flat }).roadLines;
+    let want = 0;
+    for (let k = 0; k < flatLines.length; k += 8) want += Math.hypot(flatLines[k + 4] - flatLines[k], flatLines[k + 6] - flatLines[k + 2]);
+    expect(length / want).toBeGreaterThan(0.999);
+    expect(length / want).toBeLessThan(1.001);
   });
 });
