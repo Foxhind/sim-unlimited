@@ -18,7 +18,7 @@ import { loadLandsatTerrain } from '../world/landsat-process';
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 15;
+export const OSM_MESH_SCHEMA = 16;
 
 export interface OsmRequest {
   type: 'osm';
@@ -137,7 +137,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
     };
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, buildings: false });
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
     const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });

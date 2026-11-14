@@ -1,11 +1,12 @@
 import earcut from 'earcut';
 import { RAMP, snowy } from '../engine/palette';
-import { latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
+import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
+import type { TerrainTin } from './terrain-tin';
 
 export interface OsmMeshOptions {
   tile: Tile;
@@ -16,6 +17,37 @@ export interface OsmMeshOptions {
   maxEdgeMeters?: number;
   /** include building geometry (default true); the game builds it as a separate mesh */
   buildings?: boolean;
+  /**
+   * The terrain the mesh lies on. With it, areas are cut by the terrain's faces and every piece
+   * lies on its face; without it they are draped on `sampleHeight` (subdivided to maxEdgeMeters).
+   */
+  tin?: TerrainTin;
+}
+
+type P2 = [number, number];
+
+/** convex polygon `subject` cut to the triangle `clip` (Sutherland–Hodgman); lattice coordinates */
+function clipToTriangle(subject: P2[], clip: [P2, P2, P2]): P2[] {
+  const turn = (clip[1][0] - clip[0][0]) * (clip[2][1] - clip[0][1]) - (clip[1][1] - clip[0][1]) * (clip[2][0] - clip[0][0]);
+  if (turn === 0) return [];
+  const sign = turn > 0 ? 1 : -1;
+  let out = subject;
+  for (let e = 0; e < 3 && out.length; e++) {
+    const a = clip[e], b = clip[(e + 1) % 3];
+    const side = (p: P2) => sign * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
+    const next: P2[] = [];
+    for (let k = 0; k < out.length; k++) {
+      const p = out[k], q = out[(k + 1) % out.length];
+      const sp = side(p), sq = side(q);
+      if (sp >= 0) next.push(p);
+      if ((sp > 0 && sq < 0) || (sp < 0 && sq > 0)) {
+        const t = sp / (sp - sq);
+        next.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]);
+      }
+    }
+    out = next;
+  }
+  return out;
 }
 
 interface Pt {
@@ -142,6 +174,45 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
     subdivide(ab, bc, ca, ramp, bias, depth + 1);
   };
 
+  // --- areas on the terrain's own faces ---
+  const tin = opts.tin;
+  const faces = tin
+    ? tin.tris.map((t) => {
+        const c: [P2, P2, P2] = [[tin.vx[t.a], tin.vy[t.a]], [tin.vx[t.b], tin.vy[t.b]], [tin.vx[t.c], tin.vy[t.c]]];
+        // the mesh draws water and anything below it at 0 m
+        const h = [Math.max(0, tin.vh[t.a]), Math.max(0, tin.vh[t.b]), Math.max(0, tin.vh[t.c])];
+        const det = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
+        return {
+          c, h, det,
+          x0: Math.min(c[0][0], c[1][0], c[2][0]), x1: Math.max(c[0][0], c[1][0], c[2][0]),
+          y0: Math.min(c[0][1], c[1][1], c[2][1]), y1: Math.max(c[0][1], c[1][1], c[2][1]),
+        };
+      }).filter((f) => f.det !== 0)
+    : [];
+  const toLattice = ([lon, lat]: LonLat): P2 => {
+    const n = 2 ** tile.z, g = tin!.grid;
+    const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
+    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    return [(((lon + 180) / 360) * n - tile.x) * g, (merc * n - tile.y) * g];
+  };
+  /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number): void => {
+    const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
+    const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
+    for (const f of faces) {
+      if (f.x1 <= x0 || f.x0 >= x1 || f.y1 <= y0 || f.y0 >= y1) continue;
+      const piece = clipToTriangle(tri, f.c);
+      if (piece.length < 3) continue;
+      const pts = piece.map(([x, y]) => {
+        const w1 = ((x - f.c[0][0]) * (f.c[2][1] - f.c[0][1]) - (f.c[2][0] - f.c[0][0]) * (y - f.c[0][1])) / f.det;
+        const w2 = ((f.c[1][0] - f.c[0][0]) * (y - f.c[0][1]) - (x - f.c[0][0]) * (f.c[1][1] - f.c[0][1])) / f.det;
+        const ll = gridLatLon(tile, x, y, tin!.grid);
+        return makePt(ll.lon, ll.lat, f.h[0] * (1 - w1 - w2) + f.h[1] * w1 + f.h[2] * w2 + bias * biasScale);
+      });
+      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], ramp);
+    }
+  };
+
   const buildArea = (area: OsmArea): void => {
     const style = classifyArea(area.tags);
     if (!style) return;
@@ -178,6 +249,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): TerrainMeshData {
       return;
     }
 
+    if (tin) {
+      // cut by the terrain's faces: a piece is coplanar with the face under it, so the terrain
+      // cannot show through (a draped triangle spans its creases and it did, in saw-teeth)
+      const lp = lls.map(toLattice);
+      for (let i = 0; i < tris.length; i += 3) onFaces([lp[tris[i]], lp[tris[i + 1]], lp[tris[i + 2]]], style.ramp, style.bias);
+      return;
+    }
     const pts = lls.map(([lon, lat]) => makePt(lon, lat, groundY(lon, lat, style.bias)));
     for (let i = 0; i < tris.length; i += 3) {
       subdivide(pts[tris[i]], pts[tris[i + 1]], pts[tris[i + 2]], style.ramp, style.bias, 0);

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, snowy } from '../src/engine/palette';
-import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { enuToLatLon, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
+import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -107,5 +108,58 @@ describe('buildOsmMesh', () => {
     const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { boundary: 'administrative' } }], lines: [], points: [], buildings: [] };
     const m = mesh(data, flat);
     expect(m.vertexCount).toBe(0);
+  });
+});
+
+describe('areas on the terrain faces', () => {
+  // creased relief: belts of 250 m cross the area, so the terrain bends inside every draped triangle
+  const GRID = 32;
+  const side = GRID + 1;
+  const heights = Float32Array.from({ length: side * side }, (_, k) => {
+    const i = k % side, j = Math.floor(k / side);
+    return 600 + 500 * Math.sin(i / 5) * Math.cos(j / 4);
+  });
+  const tin = buildTerrainTin(TILE, GRID, heights);
+  const surface = tinSampler(tin, TILE);
+  const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { landuse: 'farmland' } }], lines: [], points: [], buildings: [] };
+  const center = tileCenter(TILE);
+  /** largest distance from a mesh to the terrain surface plus the bias, over vertices and face centres */
+  const offSurface = (m: ReturnType<typeof buildOsmMesh>): number => {
+    let worst = 0;
+    for (let v = 0; v < m.vertexCount; v += 3) {
+      const p = [0, 1, 2].map((k) => [m.vertices[(v + k) * 6], m.vertices[(v + k) * 6 + 1], m.vertices[(v + k) * 6 + 2]]);
+      const probes = [...p, [0, 1, 2].map((c) => (p[0][c] + p[1][c] + p[2][c]) / 3)];
+      for (const [x, y, z] of probes) {
+        const ll = enuToLatLon(center, x, -z, 0);
+        worst = Math.max(worst, Math.abs(y - 0.6 - surface(ll.lon, ll.lat)));
+      }
+    }
+    return worst;
+  };
+
+  it('cut by the faces, every piece lies on the terrain; draped, the terrain crosses it', () => {
+    const cut = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: surface, tin });
+    expect(cut.vertexCount).toBeGreaterThan(0);
+    // the probe goes back through lat/lon, which costs decimetres on these slopes
+    expect(offSurface(cut)).toBeLessThan(0.5);
+    const draped = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: surface });
+    expect(offSurface(draped)).toBeGreaterThan(5);
+  });
+
+  it('covers the same ground as the area', () => {
+    const cut = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: surface, tin });
+    let area = 0;
+    for (let v = 0; v < cut.vertexCount; v += 3) {
+      const [ax, az, bx, bz, cx, cz] = [0, 1, 2].flatMap((k) => [cut.vertices[(v + k) * 6], cut.vertices[(v + k) * 6 + 2]]);
+      area += Math.abs((bx - ax) * (cz - az) - (cx - ax) * (bz - az)) / 2;
+    }
+    const flatMesh = mesh(data, flat);
+    let want = 0;
+    for (let v = 0; v < flatMesh.vertexCount; v += 3) {
+      const [ax, az, bx, bz, cx, cz] = [0, 1, 2].flatMap((k) => [flatMesh.vertices[(v + k) * 6], flatMesh.vertices[(v + k) * 6 + 2]]);
+      want += Math.abs((bx - ax) * (cz - az) - (cx - ax) * (bz - az)) / 2;
+    }
+    expect(area / want).toBeGreaterThan(0.999);
+    expect(area / want).toBeLessThan(1.001);
   });
 });
