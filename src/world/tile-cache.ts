@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 19;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';
@@ -13,6 +13,8 @@ export interface CachedMesh {
   ts: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** terrain tiles: stitching to a coarser neighbour (TerrainMeshData.morph) */
+  morph?: ArrayBuffer;
   trees?: ArrayBuffer;
   lights?: ArrayBuffer;
   /** OSM tiles: building mesh (vertices, ramps) and far building dots */
@@ -28,9 +30,9 @@ export interface CachedMesh {
   beacons?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps';
+type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
-  return m.vertices.byteLength + m.ramps.byteLength + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
+  return m.vertices.byteLength + m.ramps.byteLength + (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
     (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
     (m.windows?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.glowVertices?.byteLength ?? 0) + (m.glowRamps?.byteLength ?? 0);
@@ -140,6 +142,28 @@ export async function putCachedMesh(mesh: CachedMesh): Promise<void> {
         }),
     );
   }
+}
+
+/** Drops the cached meshes whose key matches (tools: rebuild a tile from its sources); returns how many. */
+export async function deleteCachedMeshes(match: (key: string) => boolean): Promise<number> {
+  const keys = (await tx<IDBValidKey[]>('readonly', (s) => s.getAllKeys())).map(String).filter(match);
+  if (!keys.length) return 0;
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const t = db.transaction([STORE, META], 'readwrite');
+    for (const key of keys) {
+      t.objectStore(STORE).delete(key);
+      t.objectStore(META).delete(key);
+    }
+    t.oncomplete = () => resolve();
+    t.onerror = () => reject(t.error);
+  });
+  return keys.length;
+}
+
+/** every cached mesh of a tile: terrain (with and without runway flattening) and OSM */
+export function isTileMeshKey(key: string, t: { z: number; x: number; y: number }): boolean {
+  return key.startsWith(`dem/${t.z}/${t.x}/${t.y}/`) || key.startsWith(`osmmesh/${t.z}/${t.x}/${t.y}/`);
 }
 
 export interface CachedOsmRaw {

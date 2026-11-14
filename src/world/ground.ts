@@ -1,6 +1,6 @@
 import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
-import { decodePngToSampler, decodePngToTile, fetchTerrariumPng, type HeightSampler } from './terrain-source';
+import { decodePngToSampler, loadTileDem, fetchTerrariumPng, type HeightSampler } from './terrain-source';
 import { buildTerrainTin, tinSampler } from './terrain-tin';
 import { loadLandsatTerrain } from './landsat-process';
 import { flattenRunways } from './runway';
@@ -94,7 +94,7 @@ export class GroundProbe {
       }
       // the surface is the rendered one: same lattice (runway-flattened when OSM is cached) → same isoline TIN as the mesh
       const grid = gridForZoom(tile.z);
-      const { heights: lattice, borders } = await decodePngToTile(png, grid);
+      const { heights: lattice, borders } = await loadTileDem(tile, grid);
       if (data) {
         try {
           flattenRunways(lattice, tile, grid, data.lines, sampler);

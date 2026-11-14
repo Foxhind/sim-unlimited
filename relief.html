@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Relief inspector</title>
+    <style>
+      :root {
+        --bg: #101318; --panel: #171b22; --line: #2a303a; --text: #d6dbe2; --dim: #8a93a0;
+        --accent: #f0b54a; --border: #4fc3d9;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+      body { display: grid; grid-template-columns: 300px 1fr; }
+      aside { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+      h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); }
+      h2 { font-size: 11px; margin: 14px 0 6px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+      label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+      .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+      .row > * { flex: 1; min-width: 0; }
+      input[type=number], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 3px 5px; font: inherit; width: 100%; }
+      button { background: #222833; color: var(--text); border: 1px solid var(--line); padding: 4px 6px; font: inherit; cursor: pointer; }
+      button:hover:not(:disabled) { border-color: var(--accent); }
+      button:disabled { color: var(--dim); cursor: default; }
+      pre { margin: 0; white-space: pre-wrap; }
+      .hint { color: var(--dim); }
+      .err { color: #ff6b6b; }
+      main { min-width: 0; min-height: 0; }
+      .pane { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #marks { position: absolute; inset: 0; pointer-events: none; }
+      #screen { cursor: grab; }
+      .overlay { position: absolute; left: 8px; bottom: 8px; background: rgba(16,19,24,.85); padding: 6px 8px; border: 1px solid var(--line); pointer-events: none; }
+      .title { position: absolute; left: 8px; top: 6px; color: var(--dim); pointer-events: none; }
+      .tag { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+      @media (max-width: 900px) {
+        body { grid-template-columns: 1fr; grid-template-rows: auto 80vh; }
+        html, body { height: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Relief inspector</h1>
+      <div class="hint">Рельеф и OSM тем же кодом, что и в игре: те же тайлы, уровни детализации и шейдеры, в ортографической проекции.</div>
+
+      <h2>Место</h2>
+      <select id="preset"></select>
+      <div class="row">
+        <input id="lat" type="number" step="0.0001" title="широта" />
+        <input id="lon" type="number" step="0.0001" title="долгота" />
+      </div>
+      <div class="row"><span>ширина вида, км</span><input id="span" type="number" min="0.2" max="180" step="1" /></div>
+      <div class="row"><button id="go">Перейти</button></div>
+      <div id="pasteMsg" class="hint">⌘V / Ctrl+V — вставить ссылку Google Maps, Apple Maps, Яндекс Карт, OpenStreetMap или «широта, долгота».</div>
+
+      <h2>Камера симулятора</h2>
+      <div class="hint">От неё выбираются уровни детализации, как в полёте.</div>
+      <div class="row"><span>высота, м</span><input id="camAlt" type="number" min="0" max="20000" step="100" /></div>
+      <label><input type="checkbox" id="follow" checked /> следует за центром вида</label>
+      <div class="row"><button id="toSim">Открыть в симуляторе</button></div>
+
+      <h2>Вид</h2>
+      <div class="row"><span>камера над горизонтом, °</span><input id="elev" type="number" min="15" max="90" step="5" title="90 — вид сверху, не ниже 15" /></div>
+      <div class="row"><span>поворот, °</span><input id="yaw" type="number" min="-180" max="360" step="15" /></div>
+      <div class="row"><button data-turn="-15">↺ −15°</button><button data-turn="15">↻ +15°</button></div>
+      <div class="row"><span>превышение ×</span><input id="exag" type="number" min="1" max="20" step="1" /></div>
+      <div class="row"><button id="topDown">Сверху, на север</button></div>
+
+      <h2>Слои</h2>
+      <label><input type="checkbox" id="osm" checked /> OSM: дороги, здания, деревья</label>
+      <label><input type="checkbox" id="snow" /> снег</label>
+      <label><input type="checkbox" id="ice" /> лёд на воде</label>
+      <label><input type="checkbox" id="night" /> ночные огни</label>
+      <label><input type="checkbox" id="stitch" checked /> сшивка швов между уровнями</label>
+      <label><input type="checkbox" id="grid" checked /> <span class="tag" style="background:var(--border)"></span>границы тайлов</label>
+      <label><input type="checkbox" id="labels" checked /> подписи тайлов</label>
+      <label><input type="checkbox" id="coarse" checked /> <span class="tag" style="background:#ff4d6d"></span>края, сшитые с грубым соседом</label>
+
+      <h2>Солнце</h2>
+      <div class="row"><span>азимут, °</span><input id="sunAz" type="number" min="0" max="360" step="15" /></div>
+      <div class="row"><span>высота, °</span><input id="sunEl" type="number" min="-10" max="90" step="5" /></div>
+
+      <h2>Тайл</h2>
+      <pre id="tileInfo" class="hint">Щёлкните по тайлу на карте.</pre>
+      <div class="row"><button id="openTile" disabled>Инспектор тайла</button></div>
+      <div class="row"><button id="dropTile" disabled>Сбросить кэш тайла</button></div>
+      <div class="row"><button id="dropView">Сбросить кэш видимых</button><button id="dropAll">Сбросить весь кэш</button></div>
+      <div id="cacheMsg" class="hint"></div>
+
+      <h2>Статистика</h2>
+      <pre id="stats"></pre>
+
+      <h2>Управление</h2>
+      <div class="hint">Перетаскивание — сдвиг, колесо — масштаб, щелчок — выбрать тайл, двойной щелчок — инспектор тайла.<br />Правая кнопка или Alt+перетаскивание — поворот камеры и её высота над горизонтом (от вида сверху до 15°). Shift+щелчок — поставить камеру симулятора.</div>
+    </aside>
+    <main>
+      <div class="pane">
+        <canvas id="screen"></canvas><canvas id="marks"></canvas>
+        <div class="title">Ортографическая проекция</div><div id="hover" class="overlay"></div>
+      </div>
+    </main>
+    <script type="module" src="/src/tools/relief.ts"></script>
+  </body>
+</html>

@@ -4,7 +4,7 @@ import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine
 
 describe('logarithmic depth', () => {
   it('every world pass writes the same log depth, so drapes do not z-fight the terrain', () => {
-    for (const vs of [WORLD_VS, TREE_VS, POINTS_VS]) expect(vs).toContain('vLogW = 1.0 + max(gl_Position.w, 0.0);');
+    for (const vs of [WORLD_VS, TREE_VS, POINTS_VS]) expect(vs).toContain('vLogW = logW(gl_Position);');
     for (const fs of [WORLD_FS, POINTS_FS]) {
       expect(fs).toContain('gl_FragDepth = log2(vLogW) / log2(200000.0 + 1.0);');
       expect(fs).toMatch(/void main\(\) \{[\s\S]*writeLogDepth\(\);/);

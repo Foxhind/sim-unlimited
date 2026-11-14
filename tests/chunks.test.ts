@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mat4, vec3 } from 'gl-matrix';
 import {
+  coarseEdges,
   frustumPlanes,
   gridForZoom,
   MAX_Z,
@@ -127,5 +128,19 @@ describe('two tile variants', () => {
     expect(done.filter((o) => o.drawn).map((o) => key(o.tile)).sort()).toEqual(kids.map(key).sort());
     // nothing ready at all: nothing drawn
     expect(shownTiles(kids, () => false)).toEqual([]);
+  });
+});
+
+describe('coarseEdges', () => {
+  const drawn = (keys: string[]) => (k: string) => keys.includes(k);
+  it('flags the edges whose neighbour is drawn at a coarser zoom', () => {
+    // 14/8/8 is the north-west child of 13/4/4: its north and west edges are on the parent's boundary
+    expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['13/4/3']))).toBe(1);
+    expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['13/3/4', '12/2/1']))).toBe(4 | 1);
+    expect(coarseEdges({ z: 14, x: 9, y: 9 }, drawn(['13/5/4', '13/4/5']))).toBe(8 | 2);
+  });
+  it('ignores neighbours of the same zoom and edges inside the parent', () => {
+    expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['14/8/7', '14/7/8', '14/9/8', '14/8/9']))).toBe(0);
+    expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['13/4/4']))).toBe(0);
   });
 });

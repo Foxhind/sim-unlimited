@@ -1,4 +1,4 @@
-import { mat4, vec3 } from 'gl-matrix';
+import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { LUT_ENTRIES } from './palette';
 import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
@@ -42,6 +42,8 @@ export class Renderer {
   nightGlow = false;
   /** winter: faces flagged SNOW_FLAG are drawn in snow (palette.ts) */
   snow = false;
+  /** far plane of an orthographic projection (near 0); 0 = perspective (see ORTHO_VS) */
+  orthoFar = 0;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -86,15 +88,15 @@ export class Renderer {
 
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir']);
@@ -191,21 +193,26 @@ export class Renderer {
 
   drawWorld(
     mesh: Mesh,
-    offset: vec3,
+    /** xyz: position in the world; w: yaw of the mesh frame (0 when absent) */
+    offset: vec3 | vec4,
     view: mat4,
     proj: mat4,
     camPos: vec3,
     sunDir: vec3,
     fogStart: number,
     fogEnd: number,
+    /** terrain tiles: edges (bits 1 n, 2 s, 4 w, 8 e) stitched to a coarser neighbour */
+    coarse = 0,
   ): void {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
     gl.useProgram(this.worldProg);
+    gl.uniform1i(this.worldU.uCoarse, coarse);
+    gl.uniform1f(this.worldU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.worldU.uView, false, view);
     gl.uniformMatrix4fv(this.worldU.uProj, false, proj);
-    gl.uniform3fv(this.worldU.uOffset, offset);
+    setPlacement(gl, this.worldU.uOffset, offset);
     gl.uniform3fv(this.worldU.uCamPos, camPos);
     gl.uniform3fv(this.worldU.uSunDir, sunDir);
     gl.uniform1f(this.worldU.uFogStart, fogStart);
@@ -220,7 +227,8 @@ export class Renderer {
   drawTrees(
     vao: WebGLVertexArrayObject,
     count: number,
-    offset: vec3,
+    /** xyz: position in the world; w: yaw of the mesh frame (0 when absent) */
+    offset: vec3 | vec4,
     view: mat4,
     proj: mat4,
     camPos: vec3,
@@ -232,9 +240,10 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
     gl.useProgram(this.treeProg);
+    gl.uniform1f(this.treeU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.treeU.uView, false, view);
     gl.uniformMatrix4fv(this.treeU.uProj, false, proj);
-    gl.uniform3fv(this.treeU.uOffset, offset);
+    setPlacement(gl, this.treeU.uOffset, offset);
     gl.uniform3fv(this.treeU.uCamPos, camPos);
     gl.uniform3fv(this.treeU.uSunDir, sunDir);
     gl.uniform1f(this.treeU.uFogStart, fogStart);
@@ -249,7 +258,8 @@ export class Renderer {
   drawLights(
     vao: WebGLVertexArrayObject,
     count: number,
-    offset: vec3,
+    /** xyz: position in the world; w: yaw of the mesh frame (0 when absent) */
+    offset: vec3 | vec4,
     view: mat4,
     proj: mat4,
     camPos: vec3,
@@ -262,9 +272,10 @@ export class Renderer {
     gl.depthMask(false);
     gl.useProgram(this.pointsProg);
     gl.uniform1i(this.pointsU.uRound, mode === 'points' ? 1 : 0);
+    gl.uniform1f(this.pointsU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);
     gl.uniformMatrix4fv(this.pointsU.uProj, false, proj);
-    gl.uniform3fv(this.pointsU.uOffset, offset);
+    setPlacement(gl, this.pointsU.uOffset, offset);
     gl.uniform3fv(this.pointsU.uCamPos, camPos);
     gl.uniform1f(this.pointsU.uPointSize, pointSize);
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
@@ -319,4 +330,9 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
   }
+}
+
+/** uOffset (see PLACE_VS): a vec3 offset places a mesh without turning it */
+function setPlacement(gl: WebGL2RenderingContext, loc: WebGLUniformLocation | null, offset: vec3 | vec4): void {
+  gl.uniform4f(loc, offset[0], offset[1], offset[2], offset.length > 3 ? (offset as vec4)[3] : 0);
 }

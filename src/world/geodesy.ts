@@ -56,6 +56,14 @@ export function tileSizeMeters(t: Tile): number {
   return ((2 * Math.PI * EARTH_R) / 2 ** t.z) * Math.cos(tileCenter(t).lat * D2R);
 }
 
+/**
+ * Ground length of a tile's west–east extent at Mercator row `row` (t.y: north edge, t.y + 1:
+ * south edge). Unlike tileSizeMeters it is the same number for the two tiles that share the edge.
+ */
+export function tileRowMeters(z: number, row: number): number {
+  return ((2 * Math.PI * EARTH_R) / 2 ** z) * Math.cos(mercatorYToLat(row / 2 ** z) * D2R);
+}
+
 /** Sample i/j of a (grid+1)×(grid+1) vertex lattice, in lat/lon. */
 export function gridLatLon(t: Tile, i: number, j: number, grid: number): LatLon {
   const n = 2 ** t.z;
@@ -95,6 +103,20 @@ export function ecefToEnu(origin: LatLon, p: Vec3): Vec3 {
     -sl * co * dx - sl * so * dy + cl * dz,
     cl * co * dx + cl * so * dy + sl * dz,
   ];
+}
+
+/**
+ * Yaw of the ENU frame at `at` inside the ENU frame at `origin` (radians, from origin north toward
+ * east): the turn that brings a mesh built around `at` into the world of `origin`.
+ */
+export function frameYaw(origin: LatLon, at: LatLon): number {
+  const la = at.lat * D2R, lo = at.lon * D2R;
+  // local north of `at` in ECEF
+  const dx = -Math.sin(la) * Math.cos(lo), dy = -Math.sin(la) * Math.sin(lo), dz = Math.cos(la);
+  const ola = origin.lat * D2R, olo = origin.lon * D2R;
+  const e = -Math.sin(olo) * dx + Math.cos(olo) * dy;
+  const n = -Math.sin(ola) * Math.cos(olo) * dx - Math.sin(ola) * Math.sin(olo) * dy + Math.cos(ola) * dz;
+  return Math.atan2(e, n);
 }
 
 export function enuToLatLon(origin: LatLon, e: number, n: number, u: number): LatLon & { alt: number } {

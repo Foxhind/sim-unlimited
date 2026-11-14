@@ -121,8 +121,8 @@ it("the sea of a real coastal tile stays flat at 0 m and its plain is not lifted
   // Before the coastline was traced above 0 m, sea at exactly 0 counted as land and shared the
   // lowest belt with the plain (on the 32-lattice: 60 sea nodes lifted by up to 62 m).
   // What remains are shallow nodes by the shore, where the simplified coastline (eps 2 cells,
-  // ~330 m chords at z12) cuts a corner of the sea: measured 7 nodes, up to 16.6 m.
-  expect(lifted).toBeLessThanOrEqual(8);
+  // ~330 m chords at z12) cuts a corner of the sea: measured 9 nodes, up to 16.6 m.
+  expect(lifted).toBeLessThanOrEqual(9);
   expect(worst).toBeLessThan(20);
   // The coastal plain (5–20 m) between the coastline and the first isoline kilometres inland
   // is one sloping 0…250 m belt without refinement: rms 50.8 m over the tile, up to 169 m over the

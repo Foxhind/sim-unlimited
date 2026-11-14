@@ -1,13 +1,14 @@
 /**
  * Dev tool (inspector.html): one terrain tile from the source DEM to the rendered TIN.
- * Uses the game's own pipeline — fetchTerrariumPng → decodePngToTile(gridForZoom) →
+ * Uses the game's own pipeline — fetchTerrariumPng → loadTileDem(gridForZoom) →
  * buildTerrainTin(borders) — so what you see here is what the sim meshes.
  */
 import { gridForZoom, MAX_Z, MIN_Z } from '../world/chunks';
 import { decodeTerrarium, gridLatLon, tileCenter, tileForLatLon, tileSizeMeters, type Tile } from '../world/geodesy';
-import { decodePngToTile, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
+import { PRESETS, SOURCE } from './presets';
+import { loadTileDem, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
 import { beltStepForZoom, buildTerrainTin, EPS_START, type TerrainTin, type TinDebug } from '../world/terrain-tin';
-import { parseMapLink, type MapPoint } from '../ui/map-links';
+import { parseMapLink } from '../ui/map-links';
 import { VGA_PALETTE, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
 import { cleanLabels, colourBoundaries, faceColorByMode, LANDSAT_TUNING, neighbourTiles, processLandsat, stitch3x3, type ColourLine, type ProcessedLandsat } from '../world/landsat-process';
@@ -31,16 +32,6 @@ interface Built {
   locate: (u: number, v: number) => { tri: number; h: number } | null;
   flat: Uint8Array;
 }
-
-const PRESETS: Array<[string, number, number, number]> = [
-  ['Инсбрук, долина Инна', 47.26, 11.39, 12],
-  ['Маттерхорн', 45.976, 7.658, 13],
-  ['Гранд-Каньон', 36.1, -112.1, 12],
-  ['Монако, берег', 43.735, 7.42, 13],
-  ['Долина По (равнина)', 45.43, 9.5, 12],
-  ['Эльбрус', 43.35, 42.44, 11],
-  ['Килиманджаро', -3.07, 37.35, 10],
-];
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const num = (id: string) => {
@@ -98,11 +89,11 @@ async function decodeDem(png: ArrayBuffer): Promise<Dem> {
   return { w: width, h: height, elev, min, max };
 }
 
-/** DEM bilinear at lattice coords (same pixel mapping as decodePngToTile) */
+/** DEM bilinear at lattice coords (same pixel mapping as sampleDem, clamped to the tile) */
 function demAt(u: number, v: number): number {
   const d = dem!;
-  const fx = Math.max(0, Math.min(d.w - 1, (u / grid) * (d.w - 1)));
-  const fy = Math.max(0, Math.min(d.h - 1, (v / grid) * (d.h - 1)));
+  const fx = Math.max(0, Math.min(d.w - 1, (u / grid) * d.w - 0.5));
+  const fy = Math.max(0, Math.min(d.h - 1, (v / grid) * d.h - 0.5));
   const x0 = Math.min(d.w - 2, Math.floor(fx)), y0 = Math.min(d.h - 2, Math.floor(fy));
   const tx = fx - x0, ty = fy - y0;
   const e = (x: number, y: number) => d.elev[y * d.w + x];
@@ -746,7 +737,7 @@ async function loadTile(t: Tile): Promise<void> {
     applyGameDefaults(false);
     grid = num('grid') ?? gridForZoom(t.z);
     dem = await decodeDem(png);
-    const lt = await decodePngToTile(png, grid);
+    const lt = await loadTileDem(t, grid);
     lattice = lt.heights;
     borders = lt.borders;
     demImg = makeDemImage();
@@ -800,7 +791,7 @@ function processLs(): void {
   lsImgs = { 'ls-raw': toCanvas(lsProc.raw), 'ls-blur': toCanvas(lsProc.blurred), 'ls-quant': toCanvas(lsProc.quantized.image) };
   const size = lsProc.quantized.image.width;
   const minPx = (num('lsMinArea') ?? 0) * (size / grid) ** 2;
-  lsLines = colourBoundaries(cleanLabels(lsProc.quantized.index, size, minPx), size, grid, num('lsEps') ?? 1);
+  lsLines = colourBoundaries(cleanLabels(lsProc.quantized.index, size, minPx), size, grid, num('lsEps') ?? 1, LANDSAT_TUNING.borderMarginCells);
   if ($<HTMLInputElement>('lsMesh').checked || $<HTMLInputElement>('lsEdges').checked) build(); // the mesh follows the new colours
   else colourFaces();
   const p = lsProc, src = landsatSource(tile);
@@ -870,10 +861,9 @@ function applyGameDefaults(force: boolean): void {
 async function relattice(): Promise<void> {
   const g = num('grid') ?? gridForZoom(tile.z);
   if (g !== grid && dem) {
-    const png = await fetchTerrariumPng(tile);
     const old = grid;
     grid = Math.max(4, Math.round(g));
-    const lt = await decodePngToTile(png, grid);
+    const lt = await loadTileDem(tile, grid);
     lattice = lt.heights;
     borders = lt.borders;
     if (profileLine) profileLine = profileLine.map(([u, v]) => [(u / old) * grid, (v / old) * grid]) as typeof profileLine;
@@ -883,10 +873,6 @@ async function relattice(): Promise<void> {
 }
 
 // ---------- pasted map links ----------
-
-const SOURCE: Record<MapPoint['source'], string> = {
-  google: 'Google Maps', apple: 'Apple Maps', yandex: 'Яндекс Карты', osm: 'OpenStreetMap', geo: 'geo:', coords: 'координаты',
-};
 
 function pasteMsg(text: string, error = false): void {
   const el = $('pasteMsg');
@@ -939,6 +925,7 @@ function init(): void {
     profileLine = null;
     void loadTile(tileForLatLon(lat, lon, Math.round(z)));
   };
+  $('toRelief').onclick = () => window.open(`relief.html#${tile.z}/${tile.x}/${tile.y}`, '_blank');
   document.querySelectorAll<HTMLButtonElement>('[data-nav]').forEach((b) => {
     b.onclick = () => {
       const t = { ...tile };

@@ -133,6 +133,15 @@ describe('buildTerrainMesh (isoline belts)', () => {
     }
   });
 
+  it('skirt triangles end on a top-edge vertex (flat shading takes fog from it)', () => {
+    const h = heights((i) => 500 + i * 30);
+    const { skirts } = split(tris(buildTerrainMesh({ tile: TILE, grid: GRID, heights: h, skirtDepth: 50, step: 20 })));
+    for (const sk of skirts) {
+      const ys = [sk.pos[1], sk.pos[4], sk.pos[7]];
+      expect(ys[2] - Math.min(...ys)).toBeGreaterThan(25); // not on the bottom edge (skirtDepth 50)
+    }
+  });
+
   it('caps default skirt depth at 2000 m on coarse tiles', () => {
     const coarse: Tile = { z: 8, x: 133, y: 88 };
     const m = buildTerrainMesh({ tile: coarse, grid: GRID, heights: heights(() => 100) });

@@ -1,9 +1,10 @@
-import { mat4, vec3 } from 'gl-matrix';
+import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import {
   enuToLatLon,
+  frameYaw,
   latLonToEnu,
   tileBounds,
   tileCenter,
@@ -110,6 +111,28 @@ export function shownTiles(leaves: Tile[], ready: (t: Tile) => boolean): Array<{
   });
 }
 
+/**
+ * Edges of a drawn tile (bits 1 n, 2 s, 4 w, 8 e) whose neighbour is drawn coarser. Only an edge
+ * on the parent's boundary can be one: across the other two lies a sibling or its descendants.
+ */
+export function coarseEdges(t: Tile, drawn: (key: string) => boolean): number {
+  const n = 2 ** t.z;
+  let mask = 0;
+  [[0, -1], [0, 1], [-1, 0], [1, 0]].forEach(([dx, dy], e) => {
+    if (e < 2 ? (t.y % 2 === 0) !== (e === 0) : (t.x % 2 === 0) !== (e === 2)) return;
+    const y = t.y + dy;
+    if (y < 0 || y >= n) return;
+    const x = (t.x + dx + n) % n;
+    for (let z = t.z - 1; z >= MIN_Z; z--) {
+      if (drawn(`${z}/${x >> (t.z - z)}/${y >> (t.z - z)}`)) {
+        mask |= 1 << e;
+        return;
+      }
+    }
+  });
+  return mask;
+}
+
 /** Six frustum planes from a view-projection matrix (Gribble–Hartmann). */
 export function frustumPlanes(vp: mat4): Float32Array[] {
   const m = vp;
@@ -146,8 +169,11 @@ export interface Chunk {
   mesh?: Mesh;
   buffers: WebGLBuffer[];
   vao?: WebGLVertexArrayObject;
-  offset: vec3;
+  /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
+  offset: vec4;
   centerEnu: vec3;
+  /** edges stitched to a coarser neighbour this frame (see coarseEdges) */
+  coarse: number;
   radius: number;
   lastUsed: number;
   lastAttempt: number;
@@ -161,16 +187,24 @@ export interface CameraWorld {
   velocity: vec3;
 }
 
+interface TileBuffers {
+  vertices: ArrayBuffer;
+  ramps: ArrayBuffer;
+  morph?: ArrayBuffer;
+}
+
 interface WorkerSlot {
   worker: Worker;
   nextId: number;
-  waiting: Map<number, { resolve: (m: { vertices: ArrayBuffer; ramps: ArrayBuffer }) => void; reject: (e: unknown) => void }>;
+  waiting: Map<number, { resolve: (m: TileBuffers) => void; reject: (e: unknown) => void }>;
 }
 
 export class ChunkManager {
   readonly chunks = new Map<string, Chunk>();
   origin: LatLon;
   renderList: Chunk[] = [];
+  /** stitch the edges of tiles to coarser neighbours (off in the overview tool to see the raw seams) */
+  stitch = true;
   /** z14 leaves wanted this frame: the detailed tiles whose OSM must load */
   detailTiles: Tile[] = [];
   /** z14 tiles drawn this frame (terrain and OSM both ready): only these show their OSM */
@@ -187,11 +221,11 @@ export class ChunkManager {
       const worker = new Worker(new URL('../workers/terrain.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; morph?: ArrayBuffer; retryable?: boolean; message?: string };
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
-        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps! });
+        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, morph: msg.morph });
         else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
       };
@@ -228,7 +262,7 @@ export class ChunkManager {
     const center = tileCenter(c.tile);
     const [e, n] = latLonToEnu(this.origin, center.lat, center.lon, 0);
     vec3.set(c.centerEnu, e, 0, -n);
-    vec3.copy(c.offset, c.centerEnu);
+    vec4.set(c.offset, e, 0, -n, frameYaw(this.origin, center));
   }
 
   /**
@@ -277,8 +311,9 @@ export class ChunkManager {
           grid: gridForZoom(tile.z),
           status: 'pending',
           buffers: [],
-          offset: vec3.create(),
+          offset: vec4.create(),
           centerEnu: vec3.create(),
+          coarse: 0,
           radius: tileSizeMeters(tile),
           lastUsed: now,
           lastAttempt: now,
@@ -312,6 +347,8 @@ export class ChunkManager {
       c.lastUsed = now;
       if (drawn) list.push(c);
     }
+    const drawnKeys = new Set(list.map((c) => c.key));
+    for (const c of list) c.coarse = coarseEdges(c.tile, (k) => drawnKeys.has(k));
     this.shownDetail = new Set(list.filter((c) => c.tile.z === DETAIL_Z).map((c) => c.key));
 
     // planes come from proj*view where view is a full lookAt (translation included): they live in
@@ -331,7 +368,7 @@ export class ChunkManager {
     return enuToLatLon(this.origin, p[0], -p[2], p[1]);
   }
 
-  private buildInWorker(chunk: Chunk): Promise<{ vertices: ArrayBuffer; ramps: ArrayBuffer }> {
+  private buildInWorker(chunk: Chunk): Promise<TileBuffers> {
     const slot = this.workers[this.rr++ % this.workers.length];
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
@@ -340,8 +377,8 @@ export class ChunkManager {
     });
   }
 
-  private upload(chunk: Chunk, data: { vertices: ArrayBuffer; ramps: ArrayBuffer }): void {
-    if (!this.chunks.has(chunk.key)) return; // unloaded while in flight
+  private upload(chunk: Chunk, data: TileBuffers): void {
+    if (this.chunks.get(chunk.key) !== chunk) return; // unloaded (or replaced) while in flight
     const gl = this.gl;
     const vao = must(gl.createVertexArray(), 'chunk VAO');
     gl.bindVertexArray(vao);
@@ -357,9 +394,17 @@ export class ChunkManager {
     gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA terrain colours)
+    chunk.buffers = [vb, rb];
+    if (data.morph) {
+      const mb = must(gl.createBuffer(), 'chunk morph');
+      gl.bindBuffer(gl.ARRAY_BUFFER, mb);
+      gl.bufferData(gl.ARRAY_BUFFER, data.morph, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(5);
+      gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 8, 0);
+      chunk.buffers.push(mb);
+    }
     gl.bindVertexArray(null);
     chunk.vao = vao;
-    chunk.buffers = [vb, rb];
     chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 2 };
     chunk.status = 'ready';
   }
@@ -375,7 +420,7 @@ export class ChunkManager {
 
   draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, fogStart: number, fogEnd: number): void {
     for (const c of this.renderList) {
-      if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, this.stitch ? c.coarse : 0);
     }
   }
 
@@ -395,6 +440,16 @@ export class ChunkManager {
     for (const [key, c] of this.chunks) {
       if (c.tile.z < minZ) continue;
       if (horizontalDistance(center, tileCenter(c.tile)) > radiusM + tileSizeMeters(c.tile)) continue;
+      this.queue.cancel(key);
+      this.dispose(c);
+      this.chunks.delete(key);
+    }
+  }
+
+  /** Drop one tile (or all with no argument): it is requested again on the next update. */
+  invalidate(tile?: Tile): void {
+    for (const [key, c] of this.chunks) {
+      if (tile && key !== `${tile.z}/${tile.x}/${tile.y}`) continue;
       this.queue.cancel(key);
       this.dispose(c);
       this.chunks.delete(key);

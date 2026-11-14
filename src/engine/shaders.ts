@@ -31,14 +31,41 @@ in float vLogW;
 void writeLogDepth() { gl_FragDepth = log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0); }
 `;
 
+/**
+ * Tile placement: meshes are built in the ENU frame of their tile centre; uOffset.xyz is that
+ * centre in the world (origin ENU) and uOffset.w the yaw of the tile frame in it (meridian
+ * convergence, see frameYaw). Without the turn neighbouring tiles' edges drift apart.
+ */
+const PLACE_VS = `
+vec3 toWorldDir(vec3 p) {
+  float c = cos(uOffset.w), s = sin(uOffset.w);
+  return vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
+}
+vec3 toWorld(vec3 p) { return toWorldDir(p) + uOffset.xyz; }
+`;
+
+/**
+ * Orthographic views (terrain overview tool): w is 1 there, so the depth comes from clip z of a
+ * projection whose near plane is 0 and far plane uOrthoFar. 0 = perspective.
+ */
+const ORTHO_VS = `
+uniform float uOrthoFar;
+float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * uOrthoFar : max(clip.w, 0.0)); }
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in uint aRamp;
+// terrain tiles only (zero elsewhere): x metres up to the border line of a coarser neighbour,
+// y the tile edges (bits) it applies to; uCoarse: the edges whose neighbour is coarser now
+layout(location=5) in vec2 aMorph;
+uniform int uCoarse;
 uniform mat4 uView;
 uniform mat4 uProj;
-uniform vec3 uOffset;
+uniform vec4 uOffset;
+${PLACE_VS}${ORTHO_VS}
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
@@ -47,18 +74,19 @@ flat out uint vIndex;
 out float vLogW;
 ${GLOW_VS}
 void main() {
-  vec3 wp = aPos + uOffset;
+  vec3 wp = toWorld(aPos);
+  if ((int(aMorph.y) & uCoarse) != 0) wp.y += aMorph.x;
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  float diff = max(dot(normalize(aNormal), uSunDir), 0.0);
+  float diff = max(dot(normalize(toWorldDir(aNormal)), uSunDir), 0.0);
   float lit = 0.30 + 0.70 * diff;
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   vIndex = glowIndex(aRamp, litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
-  vLogW = 1.0 + max(gl_Position.w, 0.0);
+  vLogW = logW(gl_Position);
 }
 `;
 
@@ -81,7 +109,8 @@ layout(location=3) in vec3 aInstPos;
 layout(location=4) in vec2 aInstSR;
 uniform mat4 uView;
 uniform mat4 uProj;
-uniform vec3 uOffset;
+uniform vec4 uOffset;
+${PLACE_VS}${ORTHO_VS}
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
@@ -90,18 +119,18 @@ flat out uint vIndex;
 out float vLogW;
 ${GLOW_VS}
 void main() {
-  vec3 wp = aPos * aInstSR.x + aInstPos + uOffset;
+  vec3 wp = toWorld(aPos * aInstSR.x + aInstPos);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  float diff = max(dot(normalize(aNormal), uSunDir), 0.0);
+  float diff = max(dot(normalize(toWorldDir(aNormal)), uSunDir), 0.0);
   float lit = 0.30 + 0.70 * diff;
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   vIndex = glowIndex(uint(aInstSR.y), litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
-  vLogW = 1.0 + max(gl_Position.w, 0.0);
+  vLogW = logW(gl_Position);
 }
 `;
 
@@ -111,19 +140,20 @@ layout(location=0) in vec3 aPos;
 layout(location=1) in float aIndex;
 uniform mat4 uView;
 uniform mat4 uProj;
-uniform vec3 uOffset;
+uniform vec4 uOffset;
+${PLACE_VS}${ORTHO_VS}
 uniform vec3 uCamPos;
 uniform float uPointSize;
 flat out uint vIndex;
 out float vLogW;
 void main() {
-  vec3 wp = aPos + uOffset;
+  vec3 wp = toWorld(aPos);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
   vIndex = uint(aIndex);
   gl_Position = uProj * uView * vec4(wp, 1.0);
-  vLogW = 1.0 + max(gl_Position.w, 0.0);
+  vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
 }
 `;

@@ -1,5 +1,5 @@
 import { RetryableError } from '../engine/queue';
-import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
+import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
 import { buildBuildingMesh, buildingDots, buildingNightLights } from '../world/building-mesher';
@@ -9,7 +9,7 @@ import { buildProps } from '../world/props-mesher';
 import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
-import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
+import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
 import { buildTerrainTin, tinLocator, tinSampler } from '../world/terrain-tin';
 import { greenVga, RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
@@ -91,7 +91,8 @@ function concatU16(a: Uint16Array, b: Uint16Array): Uint16Array {
 
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
-  const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/${detail}`;
+  // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on
+  const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
@@ -119,7 +120,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const sampleHeight = await decodePngToSampler(png, tile);
     const grid = gridForZoom(tile.z);
     // Q40: one shared lattice surface (runway-flattened for 'full') → the same isoline TIN the terrain mesh renders
-    const { heights: lattice, borders } = await decodePngToTile(png, grid);
+    const { heights: lattice, borders } = await loadTileDem(tile, grid);
     if (detail === 'full') flattenRunways(lattice, tile, grid, data.lines, sampleHeight);
     // the same TIN as the terrain mesh, Landsat colour boundaries included; a tile is shown only
     // with all its data, so without imagery fail as retryable like the terrain worker

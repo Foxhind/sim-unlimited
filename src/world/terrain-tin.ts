@@ -7,7 +7,7 @@ import {
   type Pt,
   type Tri,
 } from './contours';
-import { tileSizeMeters, type Tile } from './geodesy';
+import { tileRowMeters, type Tile } from './geodesy';
 import type { HeightSampler, TileBorders } from './terrain-source';
 
 /** Vertical thickness of one belt, the same at every zoom (tuned in the terrain inspector). */
@@ -48,6 +48,13 @@ export interface TerrainTin {
   /** raw elevation per vertex (contour vertices sit exactly on their level) */
   vh: number[];
   tris: Tri[];
+  /**
+   * Stitching to a coarser neighbour, per vertex (present when the borders carry `coarse`):
+   * `edges` — bits of the edges the vertex lies on that are also the parent's boundary
+   * (1 n, 2 s, 4 w, 8 e); `dh` — metres from the vertex to the parent's border line there (both
+   * clamped to sea level). The renderer adds `dh` on the edges whose neighbour is coarser.
+   */
+  coarse?: { dh: number[]; edges: number[] };
 }
 
 /**
@@ -67,8 +74,10 @@ export interface TerrainTin {
 export interface TinOptions {
   step?: number;
   eps?: number;
-  /** full-resolution edge profiles; without them the lattice edge nodes are used */
+  /** shared edge profiles (see TileBorders); without them the lattice edge nodes are used */
   borders?: TileBorders;
+  /** vertical tolerance of the simplified tile border, metres (default BORDER_TOL_M) */
+  borderTol?: number;
   /** filled with intermediate results when given (inspector tool); does not change the output */
   debug?: TinDebug;
   /** colour labels over the tile: free edges are also flipped toward single-colour triangles */
@@ -76,6 +85,18 @@ export interface TinOptions {
   /** colour boundaries (lattice coordinates) forced in as fixed edges, longest first */
   colourLines?: { lines: Array<{ pts: Pt[]; closed: boolean }>; maxVerts?: number };
 }
+
+/**
+ * Vertical tolerance of the tile border. It has to be as loose as the interior: inside a tile the
+ * surface follows the relief only to REFINE_TOL of the belt step (~60 m), so a border held to
+ * 15 m kept every 15-20 m hillock on the seam and nowhere else — a row of small pyramids along
+ * each tile edge under a low sun. At 40 m the border vertices that stand 8 m clear of all their
+ * neighbours drop to the tile corners alone (27 -> 7 over 40 tiles of flat taiga, z13-z14).
+ * The tilted slivers that 40 m used to give next to the border came from elsewhere and stay
+ * fixed: the profile is low-passed (sampleDem) and colour boundaries keep 2.5 cells away, so the
+ * share of the border strip steeper than 8 deg is the same at 15 m and at 40 m (4 %).
+ */
+export const BORDER_TOL_M = 40;
 
 /** default cap on vertices taken from colour boundaries (crossings with isolines come on top) */
 export const MAX_COLOUR_VERTS = 80;
@@ -449,7 +470,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const baseStep = opts.step ?? beltStepForZoom(tile.z);
   // Tile borders must not depend on per-tile escalation: neighbours simplify the shared edge
   // with the same tolerance, so seams stay within it (skirts hide the rest).
-  const borderTol = baseStep / 6;
+  const borderTol = opts.borderTol ?? BORDER_TOL_M;
 
   let minH = Infinity, maxH = -Infinity;
   for (let k = 0; k < heights.length; k++) {
@@ -457,8 +478,9 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     maxH = Math.max(maxH, heights[k]);
   }
 
-  // Border: one shared profile per edge (DEM pixels when available), simplified with a fixed
-  // tolerance, so every LOD of every neighbour describes the same seam. Order: n, s, w, e.
+  // Border: one profile per edge, shared with the neighbour (TileBorders) and simplified with a
+  // fixed tolerance in a frame both tiles agree on (edge length at the edge's own latitude), so
+  // the two sides keep the same vertices. Order: n, s, w, e.
   const profiles: Float32Array[] = opts.borders
     ? [opts.borders.n, opts.borders.s, opts.borders.w, opts.borders.e]
     : [
@@ -469,21 +491,45 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       ];
   const place = (e: number, f: number): Pt =>
     e === 0 ? { x: f * grid, y: 0 } : e === 1 ? { x: f * grid, y: grid } : e === 2 ? { x: 0, y: f * grid } : { x: grid, y: f * grid };
-  const edgeLen = tileSizeMeters(tile);
-  const borderPts: Array<{ p: Pt; h: number }> = [];
-  profiles.forEach((prof, e) => {
+  /** simplified profile per edge: fraction along the edge and height */
+  const simplified = profiles.map((prof, e) => {
+    const edgeLen = tileRowMeters(tile.z, e === 0 ? tile.y : e === 1 ? tile.y + 1 : tile.y + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
-    for (const q of simplifyOpen(pts, borderTol)) borderPts.push({ p: place(e, q.x / edgeLen), h: q.y });
+    return simplifyOpen(pts, borderTol).map((q) => ({ f: q.x / edgeLen, h: q.y }));
+  });
+  const lineAt = (line: Array<{ f: number; h: number }>, f: number): number => {
+    let k = 1;
+    while (k < line.length - 1 && line[k].f < f) k++;
+    const a = line[k - 1], b = line[k];
+    return b.f > a.f ? a.h + (b.h - a.h) * Math.max(0, Math.min(1, (f - a.f) / (b.f - a.f))) : a.h;
+  };
+  const borderPts: Array<{ p: Pt; h: number }> = [];
+  simplified.forEach((line, e) => {
+    for (const q of line) borderPts.push({ p: place(e, q.f), h: q.h });
+  });
+  // The parent's border line over this tile's half of its edge, simplified exactly as the parent
+  // does it. Its vertices become border vertices here too (on this tile's own line, so nothing
+  // moves): pulled onto the parent's line, the edge then follows every bend of it.
+  const pz = tile.z - 1, py = tile.y >> 1;
+  const coarseLines = [opts.borders?.coarse?.n, opts.borders?.coarse?.s, opts.borders?.coarse?.w, opts.borders?.coarse?.e].map((prof, e) => {
+    if (!prof) return null;
+    const edgeLen = tileRowMeters(pz, e === 0 ? py : e === 1 ? py + 1 : py + 0.5);
+    const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
+    const off = ((e < 2 ? tile.x : tile.y) % 2) / 2;
+    const line = simplifyOpen(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
+    for (const q of line) if (q.f > 0 && q.f < 1) borderPts.push({ p: place(e, q.f), h: lineAt(simplified[e], q.f) });
+    return line;
   });
   /** border edge of a lattice point (0 n, 1 s, 2 w, 3 e; corners report the first), −1 inside */
   const edgeOf = (p: Pt) => (p.y === 0 ? 0 : p.y === grid ? 1 : p.x === 0 ? 2 : p.x === grid ? 3 : -1);
-  /** height of the shared border profile at a point on the border */
+  /**
+   * Height of the border at a point on it: on the simplified profile, not the raw one. An isoline
+   * that ends on the border adds a vertex there on this tile only, and it must lie on the edge the
+   * neighbour draws between its own border vertices.
+   */
   const borderHeight = (p: Pt): number => {
     const e = edgeOf(p);
-    const prof = profiles[e];
-    const q = ((e < 2 ? p.x : p.y) / grid) * (prof.length - 1);
-    const k = Math.min(prof.length - 2, Math.floor(q));
-    return prof[k] + (prof[k + 1] - prof[k]) * (q - k);
+    return lineAt(simplified[e], (e < 2 ? p.x : p.y) / grid);
   };
 
   // Over budget → first simplify harder (looser tolerance), and only when even the loosest
@@ -667,7 +713,18 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       colourVerts: stats.verts, colourCrossings: stats.crossings,
     });
   }
-  return { grid, vx, vy, vh, tris };
+  if (!coarseLines.some((l) => l)) return { grid, vx, vy, vh, tris };
+  const dh = vx.map(() => 0), edges = vx.map(() => 0);
+  for (let k = 0; k < vx.length; k++) {
+    const on = [vy[k] === 0, vy[k] === grid, vx[k] === 0, vx[k] === grid];
+    for (let e = 0; e < 4; e++) {
+      const line = coarseLines[e];
+      if (!line || !on[e]) continue;
+      edges[k] |= 1 << e;
+      dh[k] = Math.max(0, lineAt(line, (e < 2 ? vx[k] : vy[k]) / grid)) - Math.max(0, vh[k]);
+    }
+  }
+  return { grid, vx, vy, vh, tris, coarse: { dh, edges } };
 }
 
 /**

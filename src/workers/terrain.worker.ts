@@ -2,7 +2,7 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildTerrainMesh } from '../world/terrain-mesher';
-import { decodePngToSampler, decodePngToTile, fetchTerrariumPng } from '../world/terrain-source';
+import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { flattenRunways } from '../world/runway';
@@ -20,6 +20,7 @@ export interface MeshResponse {
   id: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  morph?: ArrayBuffer;
 }
 
 export interface ErrorResponse {
@@ -47,12 +48,12 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? '/o' : '');
     const cached = await getCachedMesh(key);
     if (cached) {
-      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps };
-      ctx.postMessage(res, [res.vertices, res.ramps]);
+      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph };
+      ctx.postMessage(res, [res.vertices, res.ramps, ...(res.morph ? [res.morph] : [])]);
       return;
     }
     const png = await fetchTerrariumPng(tile);
-    const { heights, borders } = await decodePngToTile(png, grid);
+    const { heights, borders } = await loadTileDem(tile, grid);
     if (osmRaw) {
       try {
         const lines = parseOverpass(JSON.parse(osmRaw.json)).lines;
@@ -72,9 +73,10 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
-    await putCachedMesh({ key, ts: Date.now(), vertices, ramps });
-    const res: MeshResponse = { type: 'mesh', id, vertices, ramps };
-    ctx.postMessage(res, [vertices, ramps]);
+    const morph = mesh.morph?.slice().buffer;
+    await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph });
+    const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph };
+    ctx.postMessage(res, [vertices, ramps, ...(morph ? [morph] : [])]);
   } catch (err) {
     const res: ErrorResponse = {
       type: 'error',

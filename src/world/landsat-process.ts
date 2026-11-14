@@ -22,6 +22,10 @@ export const LANDSAT_TUNING = {
   minAreaCells: 50,
   /** boundary simplification, lattice cells */
   eps: 1,
+  /** colour boundaries stop this many lattice cells short of the tile border: their vertices carry
+   * the lattice height, the border its simplified profile, and the strip between them tilts by the
+   * difference (at 0.5 cells the low sun drew every seam as a line) */
+  borderMarginCells: 2.5,
   /** vertices taken from colour boundaries */
   maxVerts: 80,
   /** colour boundaries as fixed TIN edges */
@@ -471,7 +475,7 @@ export function landsatTerrain(mosaic: RgbaImage, tile: Tile, grid: number, tuni
   const p = processLandsat(mosaic, tile, { blurM: tuning.blurM, colours: tuning.colours });
   const size = p.quantized.image.width;
   const lines = tuning.edges
-    ? colourBoundaries(cleanLabels(p.quantized.index, size, tuning.minAreaCells * (size / grid) ** 2), size, grid, tuning.eps)
+    ? colourBoundaries(cleanLabels(p.quantized.index, size, tuning.minAreaCells * (size / grid) ** 2), size, grid, tuning.eps, tuning.borderMarginCells)
     : [];
   return { lines, maxVerts: tuning.maxVerts, faceColor: faceColorByMode(p.quantized, size, grid) };
 }

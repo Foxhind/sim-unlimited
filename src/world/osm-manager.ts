@@ -1,9 +1,9 @@
-import { mat4, vec3 } from 'gl-matrix';
+import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
-import { latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
+import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { CONE_VERTICES } from './props-mesher';
 
 /** within this slant distance a detailed tile draws its buildings; beyond, roof-coloured dots */
@@ -38,7 +38,8 @@ interface OsmChunk {
   glow?: Mesh;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
-  offset: vec3;
+  /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
+  offset: vec4;
   centerEnu: vec3;
   radius: number;
   lastUsed: number;
@@ -149,7 +150,7 @@ export class OsmManager {
     const center = tileCenter(c.tile);
     const [e, n] = latLonToEnu(this.origin, center.lat, center.lon, 0);
     vec3.set(c.centerEnu, e, 0, -n);
-    vec3.copy(c.offset, c.centerEnu);
+    vec4.set(c.offset, e, 0, -n, frameYaw(this.origin, center));
   }
 
   /** `tiles`: the detailed tiles the terrain wants; `shown`: those it draws this frame */
@@ -172,7 +173,7 @@ export class OsmManager {
           status: 'pending',
           buffers: [],
           vaos: [],
-          offset: vec3.create(),
+          offset: vec4.create(),
           centerEnu: vec3.create(),
           radius: tileSizeMeters(tile),
           lastUsed: now,
@@ -271,7 +272,7 @@ export class OsmManager {
   }
 
   private upload(chunk: OsmChunk, data: MeshPayload): void {
-    if (!this.chunks.has(chunk.key)) return;
+    if (this.chunks.get(chunk.key) !== chunk) return; // unloaded (or replaced) while in flight
     this.dispose(chunk);
     const gl = this.gl;
     chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps);
@@ -365,6 +366,17 @@ export class OsmManager {
       if (c.lights && lightsOn) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
       }
+    }
+  }
+
+  /** Drop one tile (or all with no argument): it is requested again when the terrain wants it. */
+  invalidate(tile?: Tile): void {
+    for (const [key, c] of this.chunks) {
+      if (tile && key !== `${tile.z}/${tile.x}/${tile.y}`) continue;
+      this.queue.cancel(key);
+      this.dispose(c);
+      this.chunks.delete(key);
+      this.readyFired.delete(key);
     }
   }
 

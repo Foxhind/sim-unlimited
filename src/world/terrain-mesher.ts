@@ -10,6 +10,8 @@ export interface TerrainMeshData {
   /** ramp per vertex: Uint16, VGA ramps go past 255 */
   ramps: Uint16Array;
   vertexCount: number;
+  /** per vertex: metres to the coarser neighbour's border line, and the edge bits it applies to (TerrainTin.coarse) */
+  morph?: Float32Array;
 }
 
 export interface TerrainMeshOptions {
@@ -148,7 +150,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines });
+  const { vx, vy, vh, tris, coarse } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines });
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);
   const vyH = vh.map((h) => Math.max(h, 0));
@@ -171,9 +173,15 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const vertexCount = (landTris + skirtQuads * 2) * 3;
   const vertices = new Float32Array(vertexCount * 6);
   const ramps = new Uint16Array(vertexCount);
+  const morph = coarse ? new Float32Array(vertexCount * 2) : undefined;
   let fi = 0;
   let ri = 0;
-  const pushV = (x: number, y: number, z: number, n: [number, number, number], ramp: number) => {
+  /** `k`: the TIN vertex this one stands on (a skirt's bottom moves with its top) */
+  const pushV = (x: number, y: number, z: number, n: [number, number, number], ramp: number, k: number) => {
+    if (morph && coarse) {
+      morph[ri * 2] = coarse.dh[k];
+      morph[ri * 2 + 1] = coarse.edges[k];
+    }
     vertices[fi++] = x;
     vertices[fi++] = y;
     vertices[fi++] = z;
@@ -194,7 +202,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
     edgeInfo.set(ekey(t.a, t.b), info);
     edgeInfo.set(ekey(t.b, t.c), info);
     edgeInfo.set(ekey(t.c, t.a), info);
-    for (const k of idx) pushV(wx[k], vyH[k], wz[k], info.n, ramp);
+    for (const k of idx) pushV(wx[k], vyH[k], wz[k], info.n, ramp, k);
   }
 
   for (const line of borders) {
@@ -204,13 +212,15 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
       const ramp = info ? info.ramp : RAMP.GRASS;
       const n = info ? info.n : ([0, 1, 0] as [number, number, number]);
       const ya = vyH[a], yb = vyH[b];
-      const quad: Array<[number, number, number]> = [
-        [wx[a], ya, wz[a]], [wx[b], yb, wz[b]], [wx[b], yb - skirt, wz[b]],
-        [wx[a], ya, wz[a]], [wx[b], yb - skirt, wz[b]], [wx[a], ya - skirt, wz[a]],
+      // colours are flat from the provoking (last) vertex: keep it on the top edge, or the skirt
+      // takes the fog of a point `skirt` metres deeper and shows as a light line along the seam
+      const quad: Array<[number, number, number, number]> = [
+        [wx[b], yb - skirt, wz[b], b], [wx[a], ya, wz[a], a], [wx[b], yb, wz[b], b],
+        [wx[a], ya - skirt, wz[a], a], [wx[b], yb - skirt, wz[b], b], [wx[a], ya, wz[a], a],
       ];
-      for (const [x, y, z] of quad) pushV(x, y, z, n, ramp);
+      for (const [x, y, z, k] of quad) pushV(x, y, z, n, ramp, k);
     }
   }
 
-  return { vertices: vertices.subarray(0, fi), ramps: ramps.subarray(0, ri), vertexCount: ri };
+  return { vertices: vertices.subarray(0, fi), ramps: ramps.subarray(0, ri), vertexCount: ri, morph: morph?.subarray(0, ri * 2) };
 }

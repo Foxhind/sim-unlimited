@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeTerrarium,
   enuToLatLon,
+  frameYaw,
   gridLatLon,
   latLonToEnu,
   tileBounds,
@@ -99,5 +100,32 @@ describe('decodeTerrarium', () => {
   });
   it('decodes the fractional blue channel', () => {
     expect(decodeTerrarium(128, 0, 128)).toBeCloseTo(0.5, 6);
+  });
+});
+describe('frameYaw', () => {
+  /** a lattice point of tile `t` placed in the world of `origin`: tile-centre ENU turned by frameYaw, plus the offset */
+  const place = (origin: { lat: number; lon: number }, t: { z: number; x: number; y: number }, lat: number, lon: number) => {
+    const c = tileCenter(t);
+    const [e, n] = latLonToEnu(c, lat, lon, 0);
+    const yaw = frameYaw(origin, c);
+    const [oe, on] = latLonToEnu(origin, c.lat, c.lon, 0);
+    return [e * Math.cos(yaw) + n * Math.sin(yaw) + oe, -e * Math.sin(yaw) + n * Math.cos(yaw) + on];
+  };
+
+  it('is zero in the origin frame itself', () => {
+    expect(frameYaw({ lat: 61.7, lon: 50.8 }, { lat: 61.7, lon: 50.8 })).toBeCloseTo(0, 12);
+  });
+
+  it('turns tiles so neighbours share their edge far from the origin', () => {
+    const origin = { lat: 61.66157, lon: 50.84589 };
+    const a0 = tileForLatLon(origin.lat, origin.lon, 12);
+    const a = { ...a0, x: a0.x + 6, y: a0.y + 6 }; // ~10 km away: without the turn the seam opens ~40 m
+    for (const b of [{ ...a, x: a.x + 1 }, { ...a, y: a.y + 1 }]) {
+      for (let k = 0; k <= 48; k++) {
+        const ll = b.x !== a.x ? gridLatLon(b, 0, k, 48) : gridLatLon(b, k, 0, 48);
+        const pa = place(origin, a, ll.lat, ll.lon), pb = place(origin, b, ll.lat, ll.lon);
+        expect(Math.hypot(pa[0] - pb[0], pa[1] - pb[1])).toBeLessThan(0.5);
+      }
+    }
   });
 });
