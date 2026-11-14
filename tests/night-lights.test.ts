@@ -222,7 +222,8 @@ describe('night glow by building density', () => {
     const day = buildLUT(paletteAt(45));
     expect(entry(day, GLOW_LEVELS * LUT_SIZE + i)).toEqual(entry(day, i));
     expect(WORLD_VS).toContain(`lvl * ${LUT_SIZE}u`);
-    expect(TREE_VS).toContain('glowIndex(uint(aInstSR.y)');
+    expect(TREE_VS).toContain('uint packed = uint(aInstSR.y);');
+    expect(TREE_VS).toContain('glowIndex(packed');
   });
 
   it('the lit ground copies the built-up terrain face, raised a little, its ramp carrying the level', () => {
@@ -255,7 +256,7 @@ describe('night glow by building density', () => {
     applyGlow(m.vertices, dark, TILE, locate, new Uint8Array(tin.tris.length));
     expect(dark).toEqual(m.ramps);
     const [e, n] = latLonToEnu(tileCenter(TILE), at.lat, at.lon, 0);
-    const trees = new Float32Array([e, GROUND, -n, 10, RAMP.FOREST]);
+    const trees = new Float32Array([e, GROUND, -n, 10, RAMP.FOREST, 0]);
     applyGlowToTrees(trees, TILE, locate, levels);
     expect(trees[4]).toBe(withGlow(RAMP.FOREST, 3));
   });

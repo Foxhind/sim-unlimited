@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { clipPolyline, clipRing, clipTileData } from '../src/world/clip';
 import { tileBounds, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps } from '../src/world/props-mesher';
+import { buildProps, TREE_STRIDE } from '../src/world/props-mesher';
 import type { LonLat, OsmTileData } from '../src/world/osm-types';
 
 const B = { west: 0, south: 0, east: 1, north: 1 };
@@ -78,7 +78,7 @@ describe('drape stays on its own tile', () => {
     const props = buildProps({ tile, detail: 'full', data, sampleHeight });
     expect(props.trees.length).toBeGreaterThan(0);
     expect(props.lights.length).toBeGreaterThan(0);
-    for (let i = 0; i < props.trees.length; i += 5) expect(Math.abs(props.trees[i])).toBeLessThan(half * 1.02);
+    for (let i = 0; i < props.trees.length; i += TREE_STRIDE) expect(Math.abs(props.trees[i])).toBeLessThan(half * 1.02);
     for (let i = 0; i < props.lights.length; i += 4) expect(Math.abs(props.lights[i])).toBeLessThan(half * 1.02);
   });
 });

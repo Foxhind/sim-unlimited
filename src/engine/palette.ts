@@ -206,6 +206,9 @@ export function nearestVga(r: number, g: number, b: number): number {
   return best;
 }
 
+/** tree trunks: a bark brown from the default VGA colours (terrain ramps) */
+export const TREE_TRUNK_RAMP = TERRAIN_RAMP_BASE + nearestVga(96, 68, 44);
+
 /** the land palette in 8 bits per channel */
 export const LAND_PALETTE: RGB[] = LAND_PALETTE_6BIT.map(([r, g, b]) => [Math.round((r * 255) / 63), Math.round((g * 255) / 63), Math.round((b * 255) / 63)] as RGB);
 if (LAND_PALETTE.length !== LAND_PALETTE_SIZE) throw new Error(`land palette: ${LAND_PALETTE.length} colours, expected ${LAND_PALETTE_SIZE}`);

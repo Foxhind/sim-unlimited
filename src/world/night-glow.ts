@@ -2,6 +2,7 @@ import { GLOW_LEVELS, rampGlowLevel, withGlow } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmBuilding } from './osm-types';
 import type { TerrainTin } from './terrain-tin';
+import { TREE_STRIDE } from './props-mesher';
 
 /** a terrain triangle locator, as tinLocator returns */
 export type TriLocator = (lon: number, lat: number) => { tri: number } | null;
@@ -93,7 +94,7 @@ export function applyGlow(vertices: Float32Array, ramps: Uint16Array, tile: Tile
 /** the same for tree instances (x, y, z, scale, ramp): the level goes into the ramp float */
 export function applyGlowToTrees(trees: Float32Array, tile: Tile, locate: TriLocator, levels: Uint8Array): void {
   const center = tileCenter(tile);
-  for (let i = 0; i + 4 < trees.length; i += 5) {
+  for (let i = 0; i + TREE_STRIDE - 1 < trees.length; i += TREE_STRIDE) {
     const ll = enuToLatLon(center, trees[i], -trees[i + 2], 0);
     const hit = locate(ll.lon, ll.lat);
     const lvl = hit ? levels[hit.tri] : 0;

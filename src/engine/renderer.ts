@@ -223,10 +223,12 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
   }
 
-  /** Q36: instanced cone trees (18 verts per cone, count instances). */
+  /** Q36: instanced trees of one type: its `vertexCount` geometry vertices from `first`, `count` instances. */
   drawTrees(
     vao: WebGLVertexArrayObject,
     count: number,
+    first: number,
+    vertexCount: number,
     /** xyz: position in the world; w: yaw of the mesh frame (0 when absent) */
     offset: vec3 | vec4,
     view: mat4,
@@ -251,7 +253,7 @@ export class Renderer {
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.treeU.uSnow, this.snow ? 1 : 0);
     gl.bindVertexArray(vao);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 18, count);
+    gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
 
   /** Q7: fixed-screen-size emissive points (or 1 px GL lines: vertex pairs); depth-tested but no depth writes. */

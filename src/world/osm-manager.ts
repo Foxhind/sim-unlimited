@@ -4,7 +4,7 @@ import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
-import { CONE_VERTICES } from './props-mesher';
+import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
 /** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, roof-coloured dots and 1 px road lines */
@@ -16,6 +16,12 @@ interface PropSet {
   vao: WebGLVertexArrayObject;
   buffer: WebGLBuffer;
   count: number;
+}
+
+/** the instances of one tree type: their VAO and the type's slice of TREE_GEOMETRY */
+interface TreeSet extends PropSet {
+  first: number;
+  vertexCount: number;
 }
 
 interface OsmChunk {
@@ -33,7 +39,8 @@ interface OsmChunk {
   /** buildings, and their far stand-in dots */
   bmesh?: Mesh;
   dots?: PropSet;
-  trees?: PropSet;
+  /** one set per tree type present */
+  trees?: TreeSet[];
   lights?: PropSet;
   /** night: lit windows (near), building lights (far), mast beacons (any distance) */
   windows?: PropSet;
@@ -104,13 +111,13 @@ export class OsmManager {
   private rr = 0;
   private vp = mat4.create();
   private planes: Float32Array[] = [];
-  private coneBuffer: WebGLBuffer;
+  private treeGeometry: WebGLBuffer;
 
   constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = 2) {
     this.origin = origin;
-    this.coneBuffer = must(gl.createBuffer(), 'cone geometry');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.coneBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, CONE_VERTICES, gl.STATIC_DRAW);
+    this.treeGeometry = must(gl.createBuffer(), 'tree geometry');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.treeGeometry);
+    gl.bufferData(gl.ARRAY_BUFFER, TREE_GEOMETRY, gl.STATIC_DRAW);
     for (let i = 0; i < workerCount; i++) {
       const worker = new Worker(new URL('../workers/osm.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
@@ -151,7 +158,7 @@ export class OsmManager {
       if (c.status === 'error') errors++;
     }
     for (const c of this.renderList) {
-      draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines || c.litRoadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees ? 1 : 0) + (c.lights ? 1 : 0) +
+      draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines || c.litRoadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
         (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
@@ -305,27 +312,42 @@ export class OsmManager {
     chunk.litRoadLines = this.points(chunk, data.litRoadLines);
     chunk.lamps = this.points(chunk, data.lamps);
     if (data.trees.byteLength > 0) {
-      const count = data.trees.byteLength / 20;
-      const vao = must(gl.createVertexArray(), 'tree VAO');
-      gl.bindVertexArray(vao);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.coneBuffer);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+      // instances come sorted by type: one VAO per type, its instance attributes starting at the type's run
+      const inst = new Float32Array(data.trees);
+      const total = inst.length / TREE_STRIDE;
       const ib = must(gl.createBuffer(), 'tree instances');
       gl.bindBuffer(gl.ARRAY_BUFFER, ib);
-      gl.bufferData(gl.ARRAY_BUFFER, data.trees, gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(3);
-      gl.vertexAttribPointer(3, 3, gl.FLOAT, false, 20, 0);
-      gl.vertexAttribDivisor(3, 1);
-      gl.enableVertexAttribArray(4);
-      gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 20, 12);
-      gl.vertexAttribDivisor(4, 1);
-      gl.bindVertexArray(null);
+      gl.bufferData(gl.ARRAY_BUFFER, inst, gl.STATIC_DRAW);
       chunk.buffers.push(ib);
-      chunk.vaos.push(vao);
-      chunk.trees = { vao, buffer: ib, count };
+      const sets: TreeSet[] = [];
+      const vStride = TREE_VERTEX_FLOATS * 4, iStride = TREE_STRIDE * 4;
+      for (let start = 0; start < total;) {
+        const type = inst[start * TREE_STRIDE + 5];
+        let end = start + 1;
+        while (end < total && inst[end * TREE_STRIDE + 5] === type) end++;
+        const mesh = TREE_MESHES[Math.min(TREE_TYPES - 1, Math.max(0, type | 0))];
+        const vao = must(gl.createVertexArray(), 'tree VAO');
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.treeGeometry);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 3, gl.FLOAT, false, vStride, 0);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, vStride, 12);
+        gl.enableVertexAttribArray(2);
+        gl.vertexAttribPointer(2, 1, gl.FLOAT, false, vStride, 24);
+        gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+        gl.enableVertexAttribArray(3);
+        gl.vertexAttribPointer(3, 3, gl.FLOAT, false, iStride, start * iStride);
+        gl.vertexAttribDivisor(3, 1);
+        gl.enableVertexAttribArray(4);
+        gl.vertexAttribPointer(4, 2, gl.FLOAT, false, iStride, start * iStride + 12);
+        gl.vertexAttribDivisor(4, 1);
+        gl.bindVertexArray(null);
+        chunk.vaos.push(vao);
+        sets.push({ vao, buffer: ib, count: end - start, first: mesh.first, vertexCount: mesh.count });
+        start = end;
+      }
+      chunk.trees = sets;
     }
     chunk.status = 'ready';
     if (!this.readyFired.has(chunk.key)) {
@@ -389,7 +411,7 @@ export class OsmManager {
         renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
-        renderer.drawTrees(c.trees.vao, c.trees.count, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        for (const t of c.trees) renderer.drawTrees(t.vao, t.count, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       }
       if (c.lights && lightsOn) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);

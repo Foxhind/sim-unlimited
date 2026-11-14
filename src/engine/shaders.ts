@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_LEVEL_MASK, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP, RAMP_MASK, SNOW_FLAG } from './palette';
+import { GLOW_LEVEL_MASK, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP, RAMP_MASK, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -110,6 +110,8 @@ export const TREE_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
+// 0 crown (the instance's foliage ramp), 1 trunk (bark, keeping the instance's glow level)
+layout(location=2) in float aPart;
 layout(location=3) in vec3 aInstPos;
 layout(location=4) in vec2 aInstSR;
 uniform mat4 uView;
@@ -133,7 +135,9 @@ void main() {
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vIndex = glowIndex(uint(aInstSR.y), litStep, fog);
+  uint packed = uint(aInstSR.y);
+  if (aPart > 0.5) packed = (packed & ~${RAMP_MASK | SNOW_FLAG}u) | ${TREE_TRUNK_RAMP}u;
+  vIndex = glowIndex(packed, litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }

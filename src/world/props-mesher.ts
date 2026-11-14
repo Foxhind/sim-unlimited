@@ -14,7 +14,7 @@ export interface PropsOptions {
 }
 
 export interface PropsData {
-  /** per tree: x, y, z, height, ramp (instance stride 5) */
+  /** per tree: x, y, z, height, ramp, type (TREE_STRIDE), sorted by type */
   trees: Float32Array;
   /** per light: x, y, z, palette index (stride 4) */
   lights: Float32Array;
@@ -53,35 +53,158 @@ const LIGHT_CENTER = rampIndex(RAMP.EMISSIVE, 10);
 const LIGHT_THRESHOLD = rampIndex(RAMP.HUD_GREEN, 13);
 const LIGHT_TAXI = LIGHT.TAXI_BLUE;
 
-/** Unit pyramid (18 verts, flat normals): base half-width 0.3, apex at y=1. Scaled per instance. */
-export const CONE_VERTICES = (() => {
-  const T = [0, 1, 0];
-  const A = [-0.3, 0, -0.3];
-  const B = [0.3, 0, -0.3];
-  const C = [0.3, 0, 0.3];
-  const D = [-0.3, 0, 0.3];
-  const tris = [
-    [B, A, T], [C, B, T], [D, C, T], [A, D, T],
-    [A, B, C], [A, C, D],
-  ];
-  const out: number[] = [];
-  for (const [a, b, c] of tris) {
+/** tree silhouettes; the instance's type field picks one */
+export const TREE = { SPRUCE: 0, BROADLEAF: 1, PINE: 2, CYPRESS: 3, PALM: 4 } as const;
+export const TREE_TYPES = 5;
+/** floats per tree instance: x, y, z, height, ramp, type */
+export const TREE_STRIDE = 6;
+/** floats per tree geometry vertex: x, y, z, normal, part (0 crown, 1 trunk) */
+export const TREE_VERTEX_FLOATS = 7;
+
+type V3 = [number, number, number];
+
+/** flat-shaded triangles of one silhouette at unit height; normals point away from `centre` (or up) */
+class Shape {
+  out: number[] = [];
+  tri(a: V3, b: V3, c: V3, part: number, centre?: V3): void {
     const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-      e1[1] * e2[2] - e1[2] * e2[1],
-      e1[2] * e2[0] - e1[0] * e2[2],
-      e1[0] * e2[1] - e1[1] * e2[0],
-    ];
+    let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
     const len = Math.hypot(n[0], n[1], n[2]) || 1;
-    n = [n[0] / len, n[1] / len, n[2] / len];
-    if (n[1] < 0) n = [-n[0], -n[1], -n[2]];
-    for (const p of [a, b, c]) out.push(p[0], p[1], p[2], n[0], n[1], n[2]);
+    n = n.map((v) => v / len);
+    const away = centre
+      ? ((a[0] + b[0] + c[0]) / 3 - centre[0]) * n[0] + ((a[1] + b[1] + c[1]) / 3 - centre[1]) * n[1] + ((a[2] + b[2] + c[2]) / 3 - centre[2]) * n[2]
+      : n[1];
+    if (away < 0) n = n.map((v) => -v);
+    for (const p of [a, b, c]) this.out.push(p[0], p[1], p[2], n[0], n[1], n[2], part);
   }
-  return new Float32Array(out);
+  /** a lathe: `profile` is [radius, y] from bottom to top (radius 0 = apex), `sides` around the axis */
+  lathe(profile: [number, number][], sides: number, part: number, turn = 0): this {
+    const ring = (r: number, y: number, k: number): V3 => {
+      const t = turn + (k / sides) * Math.PI * 2;
+      return [r * Math.cos(t), y, r * Math.sin(t)];
+    };
+    for (let i = 0; i + 1 < profile.length; i++) {
+      const [r0, y0] = profile[i];
+      const [r1, y1] = profile[i + 1];
+      const centre: V3 = [0, (y0 + y1) / 2, 0];
+      for (let k = 0; k < sides; k++) {
+        const a0 = ring(r0, y0, k), b0 = ring(r0, y0, k + 1);
+        const a1 = ring(r1, y1, k), b1 = ring(r1, y1, k + 1);
+        if (r0 > 0) this.tri(a0, b0, a1, part, centre);
+        if (r1 > 0) this.tri(b0, b1, a1, part, centre);
+      }
+    }
+    return this;
+  }
+}
+
+const TRUNK = 1;
+const CROWN = 0;
+
+function palm(): Shape {
+  const s = new Shape().lathe([[0.035, 0], [0.025, 0.86]], 4, TRUNK);
+  const fronds = 7;
+  for (let k = 0; k < fronds; k++) {
+    const t = (k / fronds) * Math.PI * 2;
+    const c = Math.cos(t), sn = Math.sin(t);
+    const at = (d: number, y: number, side: number): V3 => [c * d - sn * side, y, sn * d + c * side];
+    const root = at(0, 0.88, 0), tip = at(0.5, 0.7, 0);
+    const l = at(0.25, 0.93, 0.07), r = at(0.25, 0.93, -0.07);
+    s.tri(root, l, r, CROWN);
+    s.tri(l, tip, r, CROWN);
+  }
+  return s;
+}
+
+const SHAPES: Shape[] = [
+  // spruce: the old pyramid, as a narrow four-sided cone
+  new Shape().lathe([[0.3 * Math.SQRT2, 0], [0, 1]], 4, CROWN, Math.PI / 4),
+  // broadleaf: short trunk, rounded hexagonal crown
+  new Shape().lathe([[0.05, 0], [0.05, 0.4]], 4, TRUNK).lathe([[0, 0.3], [0.34, 0.45], [0.42, 0.7], [0, 1]], 6, CROWN),
+  // umbrella (stone) pine: tall bare trunk, wide flat crown
+  new Shape().lathe([[0.04, 0], [0.03, 0.72]], 4, TRUNK).lathe([[0, 0.68], [0.5, 0.78], [0.36, 0.9], [0, 0.97]], 6, CROWN),
+  // cypress: a narrow dark column
+  new Shape().lathe([[0, 0], [0.11, 0.25], [0.1, 0.6], [0, 1]], 5, CROWN),
+  palm(),
+];
+
+/** all silhouettes in one buffer (TREE_VERTEX_FLOATS per vertex) */
+export const TREE_GEOMETRY = new Float32Array(SHAPES.flatMap((sh) => sh.out));
+/** per tree type: first vertex and vertex count in TREE_GEOMETRY */
+export const TREE_MESHES: { first: number; count: number }[] = (() => {
+  let first = 0;
+  return SHAPES.map((sh) => {
+    const count = sh.out.length / TREE_VERTEX_FLOATS;
+    const m = { first, count };
+    first += count;
+    return m;
+  });
 })();
 
-/** Q36 instanced cone trees + Q7 runway/taxiway light points, deterministic per tile. */
+/** height range (m) of each tree type */
+const TREE_HEIGHT: [number, number][] = [[10, 20], [8, 16], [8, 14], [10, 18], [8, 14]];
+
+/**
+ * Share of each tree type by "climate latitude": |latitude| plus elevation / 150 m (about 6.7 deg per
+ * km, the drop of the tree line). Weights are interpolated between the anchors: tropical palms and
+ * broadleaves, Mediterranean stone pines, cypresses and oaks, then temperate broadleaves, then spruce.
+ */
+const CLIMATE: [number, number[]][] = [
+  //    spruce broadleaf pine cypress palm
+  [12, [0, 0.65, 0, 0, 0.35]],
+  [26, [0, 0.5, 0.25, 0.05, 0.2]],
+  [36, [0.05, 0.35, 0.45, 0.15, 0]],
+  [44, [0.3, 0.6, 0.05, 0.05, 0]],
+  [52, [0.55, 0.45, 0, 0, 0]],
+  [62, [0.85, 0.15, 0, 0, 0]],
+];
+const NEEDLE = [TREE.SPRUCE, TREE.PINE, TREE.CYPRESS];
+const BROAD = [TREE.BROADLEAF, TREE.PALM];
+
+/** climate latitude of a point: |lat| + elevation / 150 m */
+export function climateLatitude(lat: number, elevation: number): number {
+  return Math.abs(lat) + Math.max(0, elevation) / 150;
+}
+
+/** OSM leaf type of a wood: leaf_type, else the old wood=coniferous/deciduous */
+function leafType(tags: Record<string, string>): 'needle' | 'broad' | undefined {
+  const lt = tags.leaf_type ?? { coniferous: 'needleleaved', deciduous: 'broadleaved' }[tags.wood ?? ''];
+  return lt === 'needleleaved' ? 'needle' : lt === 'broadleaved' ? 'broad' : undefined;
+}
+
+/** weights of the tree types at a climate latitude, narrowed to the wood's leaf type */
+export function treeWeights(climateLat: number, tags: Record<string, string> = {}): number[] {
+  let w: number[];
+  if (climateLat <= CLIMATE[0][0]) w = [...CLIMATE[0][1]];
+  else if (climateLat >= CLIMATE[CLIMATE.length - 1][0]) w = [...CLIMATE[CLIMATE.length - 1][1]];
+  else {
+    const i = CLIMATE.findIndex(([a]) => a > climateLat);
+    const [a0, w0] = CLIMATE[i - 1];
+    const [a1, w1] = CLIMATE[i];
+    const t = (climateLat - a0) / (a1 - a0);
+    w = w0.map((v, k) => v + (w1[k] - v) * t);
+  }
+  const leaf = leafType(tags);
+  if (leaf) {
+    const keep: readonly number[] = leaf === 'needle' ? NEEDLE : BROAD;
+    w = w.map((v, k) => (keep.includes(k) ? v : 0));
+    if (!w.some((v) => v > 0)) w[leaf === 'broad' ? TREE.BROADLEAF : climateLat < 44 ? TREE.PINE : TREE.SPRUCE] = 1;
+  }
+  return w;
+}
+
+function pickType(w: number[], r: number): number {
+  const sum = w.reduce((a, b) => a + b, 0);
+  let acc = 0;
+  for (let k = 0; k < w.length; k++) {
+    acc += w[k] / sum;
+    if (r < acc) return k;
+  }
+  return w.length - 1 - [...w].reverse().findIndex((v) => v > 0);
+}
+
+/** Q36 instanced trees of several types + Q7 runway/taxiway light points, deterministic per tile. */
 export function buildProps(opts: PropsOptions): PropsData {
   const { tile, data, sampleHeight } = opts;
   if (opts.detail !== 'full') return { trees: new Float32Array(0), lights: new Float32Array(0) };
@@ -97,7 +220,7 @@ export function buildProps(opts: PropsOptions): PropsData {
   };
   const rng = mulberry32((tile.z * 73856093) ^ (tile.x * 19349663) ^ (tile.y * 83492791));
 
-  const trees: number[] = [];
+  const byType: number[][] = Array.from({ length: TREE_TYPES }, () => []);
   for (const area of areas) {
     if (area.tags.landuse !== 'forest' && area.tags.natural !== 'wood') continue;
     const outer = area.rings[0];
@@ -117,7 +240,9 @@ export function buildProps(opts: PropsOptions): PropsData {
       const y = sampleHeight(lon, lat);
       if (y <= 0) continue;
       const [x, z] = enu(lon, lat);
-      trees.push(x, y, z, 8 + rng() * 8, snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST));
+      const type = pickType(treeWeights(climateLatitude(lat, y), area.tags), rng());
+      const [h0, h1] = TREE_HEIGHT[type];
+      byType[type].push(x, y, z, h0 + rng() * (h1 - h0), snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST), type);
       placed++;
     }
   }
@@ -185,5 +310,5 @@ export function buildProps(opts: PropsOptions): PropsData {
     }
   }
 
-  return { trees: new Float32Array(trees), lights: new Float32Array(lights) };
+  return { trees: new Float32Array(byType.flat()), lights: new Float32Array(lights) };
 }
