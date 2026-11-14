@@ -376,7 +376,8 @@ function latticeHeight(heights: Float32Array, grid: number, p: Pt): number {
  * Add colour boundaries to the fixed edges. A boundary segment crossing a fixed edge splits both
  * at the crossing (height interpolated along the fixed edge: its level for an isoline); a crossing
  * next to an end snaps to that end; a boundary point lying on a fixed edge is dropped (it would
- * split the edge without being a crossing). Deterministic: boundaries in the given order.
+ * split the edge without being a crossing), except an end on the tile border, which the caller
+ * has made a border vertex. Deterministic: boundaries in the given order.
  */
 function insertColourLines(
   lines: Pt[][],
@@ -385,6 +386,8 @@ function insertColourLines(
   vid: (p: Pt, h: number) => number,
   heightAt: (p: Pt) => number,
   stats: { verts: number; crossings: number },
+  /** an end of a boundary that is already a vertex of the fixed edges (on the tile border): kept */
+  isEnd: (p: Pt) => boolean = () => false,
 ): void {
   const SNAP = 1e-3; // lattice cells
   const P = (k: number): Pt => ({ x: vx[k], y: vy[k] });
@@ -392,7 +395,8 @@ function insertColourLines(
   stats.crossings = 0;
   for (const line of lines) {
     // drop points sitting on an existing fixed edge (or on a vertex of one)
-    const pts = line.filter((p) => !constraints.some(([a, b]) => distToSeg(p, P(a), P(b)) < SNAP));
+    const pts = line.filter((p, i) =>
+      ((i === 0 || i === line.length - 1) && isEnd(p)) || !constraints.some(([a, b]) => distToSeg(p, P(a), P(b)) < SNAP));
     if (pts.length < 2) continue;
     let prev = -1;
     for (let k = 0; k < pts.length; k++) {
@@ -588,6 +592,19 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         onBorder[e].push(p);
       }
     }
+    // a colour boundary runs up to the border and ends in a vertex on it (on the border line, like
+    // an isoline's end): stopped short of it, the strip in between was filled with fans from the
+    // few border vertices, each sliver in the colour of whatever lay under it
+    if (colourHeight) {
+      for (const line of colourPicked) {
+        for (const p of [line[0], line[line.length - 1]]) {
+          const e = edgeOf(p);
+          if (e < 0) continue;
+          vid(p, borderHeight(p));
+          onBorder[e].push(p);
+        }
+      }
+    }
     const borderVerts = vx.length;
     // corners belong to two edges
     for (const p of [place(0, 0), place(0, 1), place(1, 0), place(1, 1)]) {
@@ -622,7 +639,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       // at sea level like the coastline: a boundary vertex in the sea must not lift a water face
       const h = colourHeight(p);
       return h < COAST_LEVEL ? 0 : h;
-    }, stats);
+    }, stats, (p) => edgeOf(p) >= 0);
 
     // a triangle is flat when all three corners sit at one height (one isoline): it lies on a belt
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.

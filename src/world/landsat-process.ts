@@ -22,10 +22,9 @@ export const LANDSAT_TUNING = {
   minAreaCells: 50,
   /** boundary simplification, lattice cells */
   eps: 1,
-  /** colour boundaries stop this many lattice cells short of the tile border: their vertices carry
-   * the lattice height, the border its simplified profile, and the strip between them tilts by the
-   * difference (at 0.5 cells the low sun drew every seam as a line) */
-  borderMarginCells: 2.5,
+  /** colour boundaries stop this many lattice cells short of the tile border. 0: they run up to
+   * it and end in a border vertex (their vertices lie on the relief surface, so nothing tilts) */
+  borderMarginCells: 0,
   /** vertices taken from colour boundaries */
   maxVerts: 80,
   /** colour boundaries as fixed TIN edges */
@@ -402,8 +401,10 @@ export function colourBoundaries(lab: Uint8Array, size: number, grid: number, ep
         if (pp < 0) t0 = Math.max(t0, r); else t1 = Math.min(t1, r);
       }
       if (!ok || t0 >= t1) { flush(); continue; }
-      const s0 = t0 === 0 ? a : { x: a.x + dx * t0, y: a.y + dy * t0 };
-      const s1 = t1 === 1 ? b : { x: a.x + dx * t1, y: a.y + dy * t1 };
+      // a clipped end lies on the box exactly, not a rounding error off it
+      const snap = (v: number) => (Math.abs(v - lo) < 1e-9 ? lo : Math.abs(v - hi) < 1e-9 ? hi : v);
+      const s0 = t0 === 0 ? a : { x: snap(a.x + dx * t0), y: snap(a.y + dy * t0) };
+      const s1 = t1 === 1 ? b : { x: snap(a.x + dx * t1), y: snap(a.y + dy * t1) };
       if (t0 > 0) flush();
       if (!run.length) run.push(s0);
       run.push(s1);
