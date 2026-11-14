@@ -74,36 +74,77 @@ describe('colors', () => {
     expect(parseColor('nonsense')).toBeUndefined();
   });
 
+  const rgb = (ramp: number) => VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+  const sat = (ramp: number) => {
+    const c = rgb(ramp), mx = Math.max(...c), mn = Math.min(...c);
+    return mx ? (mx - mn) / mx : 0;
+  };
+
   it('snaps OSM wall colours, materials and type defaults to the nearest VGA colour', () => {
     expect(wallRamp({ 'building:colour': '#646464' })).toBe(vga(100, 100, 100));
-    expect(wallRamp({ 'building:colour': 'white', 'building:material': 'brick' })).toBe(vga(255, 255, 255));
-    expect(wallRamp({ 'building:part': 'yes', 'building:colour': 'beige' })).toBe(vga(245, 245, 220));
+    expect(wallRamp({ 'building:colour': '#ffffff', 'building:material': 'brick' })).toBe(vga(255, 255, 255));
     expect(wallRamp({ building: 'yes', 'building:material': 'brick' })).toBe(vga(156, 88, 64));
     expect(isVga(wallRamp({ building: 'garage' }))).toBe(true);
     expect(isVga(wallRamp({}))).toBe(true);
   });
 
   it('takes roof colour, then roof material, from OSM', () => {
-    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(TERRAIN_RAMP_BASE + 40);
-    expect(roofRamp({ 'roof:material': 'slate' })).toBe(vga(72, 76, 84));
-    expect(roofRamp({ 'roof:colour': 'red', 'roof:material': 'slate' })).toBe(vga(255, 0, 0));
+    const gabled = { 'roof:shape': 'gabled' };
+    expect(roofRamp({ ...gabled, 'roof:colour': '#ff0000' })).toBe(TERRAIN_RAMP_BASE + 40);
+    expect(roofRamp({ ...gabled, 'roof:material': 'slate' })).toBe(vga(72, 76, 84));
+    expect(roofRamp({ ...gabled, 'roof:colour': 'red', 'roof:material': 'slate' })).toBe(roofRamp({ ...gabled, 'roof:colour': 'red' }));
   });
 
-  it('picks an untagged roof deterministically: grey/dark grey, orange only on low-rise', () => {
-    const tall = { building: 'apartments', height: '40' };
-    const low = { building: 'house', height: '6' };
-    const tallSet = new Set<number>(), lowSet = new Set<number>();
+  it('mutes a CSS colour name but keeps its hue; an exact hex value stays as tagged', () => {
+    const hue = (ramp: number) => {
+      const [r, g, b] = rgb(ramp);
+      return r > g && r > b ? 'r' : g > r && g > b ? 'g' : b > r && b > g ? 'b' : r === g && g > b ? 'y' : '?';
+    };
+    for (const [name, h] of [['red', 'r'], ['green', 'g'], ['lime', 'g'], ['blue', 'b'], ['yellow', 'y'], ['maroon', 'r']] as const) {
+      for (const ramp of [roofRamp({ 'roof:colour': name }), wallRamp({ 'building:colour': name })]) {
+        expect(sat(ramp)).toBeLessThanOrEqual(0.45);
+        expect(hue(ramp)).toBe(h);
+      }
+    }
+    // no pure white or black from a name
+    expect(rgb(wallRamp({ 'building:colour': 'white' }))[0]).toBeLessThan(255);
+    expect(rgb(wallRamp({ 'building:colour': 'black' }))[0]).toBeGreaterThan(0);
+    expect(rgb(wallRamp({ 'building:colour': 'white' }))[0]).toBeGreaterThan(rgb(wallRamp({ 'building:colour': 'black' }))[0]);
+    // hex is exact, even a loud one
+    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(vga(255, 0, 0));
+    expect(sat(wallRamp({ 'building:colour': '#00ff00' }))).toBe(1);
+  });
+
+  const isGrey = (ramp: number) => {
+    const [r, g, b] = VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+    return r === g && g === b;
+  };
+
+  it('lets OSM colour a flat roof; only an untagged flat roof is forced grey', () => {
+    expect(isGrey(roofRamp({ 'roof:colour': '#ff0000' }))).toBe(false);
+    expect(isGrey(roofRamp({ 'roof:shape': 'flat', 'roof:colour': 'green' }))).toBe(false);
+    expect(roofRamp({ 'roof:shape': 'flat', 'roof:material': 'copper' })).toBe(vga(96, 160, 140));
+  });
+
+  it('picks an untagged roof deterministically: grey/dark grey, orange only on low-rise pitched roofs', () => {
+    const tall = { building: 'apartments', height: '40', 'roof:shape': 'gabled' };
+    const low = { building: 'house', height: '6', 'roof:shape': 'gabled' };
+    const lowFlat = { building: 'house', height: '6' };
+    const tallSet = new Set<number>(), lowSet = new Set<number>(), flatSet = new Set<number>();
     for (let i = 0; i < 200; i++) {
       const seed = i / 200;
       expect(roofRamp(low, seed)).toBe(roofRamp(low, seed));
       tallSet.add(roofRamp(tall, seed));
       lowSet.add(roofRamp(low, seed));
+      flatSet.add(roofRamp(lowFlat, seed));
     }
     const orange = (ramp: number) => {
       const [r, g, b] = VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
       return r > g + 40 && g > b;
     };
-    for (const r of tallSet) expect(orange(r)).toBe(false);
+    for (const r of tallSet) expect(isGrey(r)).toBe(true);
+    for (const r of flatSet) expect(isGrey(r)).toBe(true);
+    expect(flatSet.size).toBeGreaterThan(1);
     expect([...lowSet].some(orange)).toBe(true);
     expect([...lowSet].some((r) => !orange(r))).toBe(true);
   });
