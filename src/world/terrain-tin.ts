@@ -76,7 +76,7 @@ export interface TinOptions {
   eps?: number;
   /** shared edge profiles (see TileBorders); without them the lattice edge nodes are used */
   borders?: TileBorders;
-  /** vertical tolerance of the simplified tile border, metres (default: BORDER_TOL_CELLS of a cell) */
+  /** vertical tolerance of the simplified tile border, metres (default BORDER_TOL_M) */
   borderTol?: number;
   /** filled with intermediate results when given (inspector tool); does not change the output */
   debug?: TinDebug;
@@ -87,15 +87,14 @@ export interface TinOptions {
 }
 
 /**
- * Vertical tolerance of the tile border, as a share of the lattice cell (and its cap in metres).
- * The border is a simplified line; the nearest interior vertices (colour boundaries, 2.5 cells
- * in) sit on the lattice surface itself. Whatever the line is off by therefore tilts the strip
- * between them, and how much depends on the strip's width, not on metres: 20 m of error was a
- * 24 deg kink along the seam of a z14 tile (24 m cells) and nothing on a z10 one. A fifth of a
- * cell keeps that tilt under ~5 deg at every zoom: ~5 m at z14, ~25 m at z12, the cap from z11.
+ * Vertical tolerance of the tile border, metres. The border is as coarse as the interior: inside
+ * a tile nothing but isolines and errors beyond REFINE_TOL of the belt step shapes the relief, so
+ * a border that followed it more closely would put a ring of vertices around a tile with an
+ * empty interior (56 on one flat forest tile, fanned into 54 slivers across it instead of two
+ * triangles) and rows of small pyramids along seams. Nothing next to the border disagrees with
+ * it either: colour boundaries only subdivide the relief surface (see buildTerrainTin).
  */
-export const BORDER_TOL_CELLS = 0.2;
-export const BORDER_TOL_MAX_M = 40;
+export const BORDER_TOL_M = 40;
 
 /** default cap on vertices taken from colour boundaries (crossings with isolines come on top) */
 export const MAX_COLOUR_VERTS = 80;
@@ -469,8 +468,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const baseStep = opts.step ?? beltStepForZoom(tile.z);
   // Tile borders must not depend on per-tile escalation: neighbours simplify the shared edge
   // with the same tolerance, so seams stay within it (skirts hide the rest).
-  // from the length of the edge itself, so the two tiles of an edge get the same number
-  const borderTol = (edgeLen: number) => opts.borderTol ?? Math.min(BORDER_TOL_MAX_M, (BORDER_TOL_CELLS * edgeLen) / grid);
+  const borderTol = opts.borderTol ?? BORDER_TOL_M;
 
   let minH = Infinity, maxH = -Infinity;
   for (let k = 0; k < heights.length; k++) {
@@ -495,7 +493,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const simplified = profiles.map((prof, e) => {
     const edgeLen = tileRowMeters(tile.z, e === 0 ? tile.y : e === 1 ? tile.y + 1 : tile.y + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
-    return simplifyOpen(pts, borderTol(edgeLen)).map((q) => ({ f: q.x / edgeLen, h: q.y }));
+    return simplifyOpen(pts, borderTol).map((q) => ({ f: q.x / edgeLen, h: q.y }));
   });
   const lineAt = (line: Array<{ f: number; h: number }>, f: number): number => {
     let k = 1;
@@ -516,7 +514,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const edgeLen = tileRowMeters(pz, e === 0 ? py : e === 1 ? py + 1 : py + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
     const off = ((e < 2 ? tile.x : tile.y) % 2) / 2;
-    const line = simplifyOpen(pts, borderTol(edgeLen)).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
+    const line = simplifyOpen(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
     for (const q of line) if (q.f > 0 && q.f < 1) borderPts.push({ p: place(e, q.f), h: lineAt(simplified[e], q.f) });
     return line;
   });
@@ -558,7 +556,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   }
 
   /** chains → vertices, fixed edges and the constrained triangulation (chains get untangled) */
-  const triangulate = (chains: Chain[]) => {
+  /** `colourHeight`: insert the colour boundaries too, their vertices at this height */
+  const triangulate = (chains: Chain[], colourHeight?: (p: Pt) => number) => {
     // vertices: border (profile points and isoline ends), then the kept isoline points
     const vx: number[] = [];
     const vy: number[] = [];
@@ -618,10 +617,10 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     }
 
     // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
-    // level) or another boundary; their own vertices take the lattice height
-    if (colourPicked.length) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => {
+    // level) or another boundary
+    if (colourHeight) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => {
       // at sea level like the coastline: a boundary vertex in the sea must not lift a water face
-      const h = latticeHeight(heights, grid, p);
+      const h = colourHeight(p);
       return h < COAST_LEVEL ? 0 : h;
     }, stats);
 
@@ -706,6 +705,23 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     added = res.vx.length - baseVerts;
   }
 
+  // Colour boundaries last, and on the relief surface built so far: they cut it into faces of
+  // one colour without reshaping it. Their vertices used to take the lattice height instead, which
+  // made every one of them a sample of relief finer than the belts carry — bumps inside a tile,
+  // and next to the border a strip tilted against the coarser border line (a ridge or a groove
+  // along every seam). A tile of one belt stays two flat triangles however it is coloured.
+  if (colourPicked.length) {
+    const locate = latticeLocator(res, grid);
+    const relief = res.vh;
+    const tris = res.tris;
+    res = triangulate(chains, (p) => {
+      const r = locate(p.x, p.y);
+      if (!r) return latticeHeight(heights, grid, p);
+      const t = tris[r.tri];
+      return relief[t.a] * r.w[0] + relief[t.b] * r.w[1] + relief[t.c] * r.w[2];
+    });
+  }
+
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
   if (opts.debug) {
     Object.assign(opts.debug, {
@@ -742,10 +758,12 @@ export function tinSampler(tin: TerrainTin, tile: Tile): HeightSampler {
   };
 }
 
-/** the TIN triangle under a lon/lat (clamped into the tile) and its barycentric weights */
-export function tinLocator(tin: TerrainTin, tile: Tile): (lon: number, lat: number) => { tri: number; w: [number, number, number] } | null {
-  const { grid, vx, vy, tris } = tin;
-  const n = 2 ** tile.z;
+/** the triangle under a point in lattice coordinates (clamped into the tile) and its barycentric weights */
+function latticeLocator(
+  tin: { vx: number[]; vy: number[]; tris: Tri[] },
+  grid: number,
+): (x: number, y: number) => { tri: number; w: [number, number, number] } | null {
+  const { vx, vy, tris } = tin;
   const buckets: number[][] = Array.from({ length: grid * grid }, () => []);
   tris.forEach((t, ti) => {
     const xs = [vx[t.a], vx[t.b], vx[t.c]], ys = [vy[t.a], vy[t.b], vy[t.c]];
@@ -756,12 +774,9 @@ export function tinLocator(tin: TerrainTin, tile: Tile): (lon: number, lat: numb
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) buckets[j * grid + i].push(ti);
   });
 
-  return (lon, lat) => {
-    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
-    const sinLat = Math.sin((clamped * Math.PI) / 180);
-    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
-    const fx = Math.max(0, Math.min(grid, (((lon + 180) / 360) * n - tile.x) * grid));
-    const fy = Math.max(0, Math.min(grid, (merc * n - tile.y) * grid));
+  return (x, y) => {
+    const fx = Math.max(0, Math.min(grid, x));
+    const fy = Math.max(0, Math.min(grid, y));
     const cell = Math.min(grid - 1, Math.floor(fy)) * grid + Math.min(grid - 1, Math.floor(fx));
     let best = -1;
     let bestMin = -Infinity;
@@ -783,5 +798,17 @@ export function tinLocator(tin: TerrainTin, tile: Tile): (lon: number, lat: numb
       }
     }
     return best < 0 ? null : { tri: best, w: bw };
+  };
+}
+
+/** the TIN triangle under a lon/lat (clamped into the tile) and its barycentric weights */
+export function tinLocator(tin: TerrainTin, tile: Tile): (lon: number, lat: number) => { tri: number; w: [number, number, number] } | null {
+  const locate = latticeLocator(tin, tin.grid);
+  const n = 2 ** tile.z;
+  return (lon, lat) => {
+    const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+    const sinLat = Math.sin((clamped * Math.PI) / 180);
+    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    return locate((((lon + 180) / 360) * n - tile.x) * tin.grid, (merc * n - tile.y) * tin.grid);
   };
 }
