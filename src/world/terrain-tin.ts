@@ -96,6 +96,33 @@ export interface TinOptions {
  */
 export const BORDER_TOL_M = 40;
 
+/**
+ * A border profile (x along the edge in metres, y height) simplified for the tile edge. Sea —
+ * everything below COAST_LEVEL — is set to 0 m first, as the coastline does inside the tile, and
+ * the last sea point before land and the first after it are always kept: a simplified segment
+ * from the shore up a hill would otherwise lift the border over open water (0.5–20 m in a bay),
+ * and every face reaching that border vertex would leave the sea and take a land colour.
+ * Deterministic in the profile alone, so the two tiles sharing an edge still agree on it.
+ */
+export function simplifyBorder(pts: Pt[], tol: number): Pt[] {
+  const p = pts.map((q) => (q.y < COAST_LEVEL ? { x: q.x, y: 0 } : q));
+  const n = p.length;
+  if (n <= 2) return p;
+  const sea = (k: number) => p[k].y === 0;
+  const breaks = [0];
+  for (let k = 1; k < n - 1; k++) if (sea(k) && (!sea(k - 1) || !sea(k + 1))) breaks.push(k);
+  breaks.push(n - 1);
+  const out: Pt[] = [p[0]];
+  for (let b = 1; b < breaks.length; b++) {
+    const lo = breaks[b - 1], hi = breaks[b];
+    const run = p.slice(lo, hi + 1);
+    // all sea: a straight line at 0 m; otherwise the land in between simplified as before
+    const kept = run.every((q) => q.y === 0) ? [run[0], run[run.length - 1]] : simplifyOpen(run, tol);
+    for (let k = 1; k < kept.length; k++) out.push(kept[k]);
+  }
+  return out;
+}
+
 /** default cap on vertices taken from colour boundaries (crossings with isolines come on top) */
 export const MAX_COLOUR_VERTS = 80;
 
@@ -497,7 +524,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const simplified = profiles.map((prof, e) => {
     const edgeLen = tileRowMeters(tile.z, e === 0 ? tile.y : e === 1 ? tile.y + 1 : tile.y + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
-    return simplifyOpen(pts, borderTol).map((q) => ({ f: q.x / edgeLen, h: q.y }));
+    return simplifyBorder(pts, borderTol).map((q) => ({ f: q.x / edgeLen, h: q.y }));
   });
   const lineAt = (line: Array<{ f: number; h: number }>, f: number): number => {
     let k = 1;
@@ -518,7 +545,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const edgeLen = tileRowMeters(pz, e === 0 ? py : e === 1 ? py + 1 : py + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
     const off = ((e < 2 ? tile.x : tile.y) % 2) / 2;
-    const line = simplifyOpen(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
+    const line = simplifyBorder(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
     for (const q of line) if (q.f > 0 && q.f < 1) borderPts.push({ p: place(e, q.f), h: lineAt(simplified[e], q.f) });
     return line;
   });
