@@ -76,7 +76,7 @@ export interface TinOptions {
   eps?: number;
   /** shared edge profiles (see TileBorders); without them the lattice edge nodes are used */
   borders?: TileBorders;
-  /** vertical tolerance of the simplified tile border, metres (default BORDER_TOL_M) */
+  /** vertical tolerance of the simplified tile border, metres (default: BORDER_TOL_CELLS of a cell) */
   borderTol?: number;
   /** filled with intermediate results when given (inspector tool); does not change the output */
   debug?: TinDebug;
@@ -87,16 +87,15 @@ export interface TinOptions {
 }
 
 /**
- * Vertical tolerance of the tile border. It has to be as loose as the interior: inside a tile the
- * surface follows the relief only to REFINE_TOL of the belt step (~60 m), so a border held to
- * 15 m kept every 15-20 m hillock on the seam and nowhere else — a row of small pyramids along
- * each tile edge under a low sun. At 40 m the border vertices that stand 8 m clear of all their
- * neighbours drop to the tile corners alone (27 -> 7 over 40 tiles of flat taiga, z13-z14).
- * The tilted slivers that 40 m used to give next to the border came from elsewhere and stay
- * fixed: the profile is low-passed (sampleDem) and colour boundaries keep 2.5 cells away, so the
- * share of the border strip steeper than 8 deg is the same at 15 m and at 40 m (4 %).
+ * Vertical tolerance of the tile border, as a share of the lattice cell (and its cap in metres).
+ * The border is a simplified line; the nearest interior vertices (colour boundaries, 2.5 cells
+ * in) sit on the lattice surface itself. Whatever the line is off by therefore tilts the strip
+ * between them, and how much depends on the strip's width, not on metres: 20 m of error was a
+ * 24 deg kink along the seam of a z14 tile (24 m cells) and nothing on a z10 one. A fifth of a
+ * cell keeps that tilt under ~5 deg at every zoom: ~5 m at z14, ~25 m at z12, the cap from z11.
  */
-export const BORDER_TOL_M = 40;
+export const BORDER_TOL_CELLS = 0.2;
+export const BORDER_TOL_MAX_M = 40;
 
 /** default cap on vertices taken from colour boundaries (crossings with isolines come on top) */
 export const MAX_COLOUR_VERTS = 80;
@@ -470,7 +469,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const baseStep = opts.step ?? beltStepForZoom(tile.z);
   // Tile borders must not depend on per-tile escalation: neighbours simplify the shared edge
   // with the same tolerance, so seams stay within it (skirts hide the rest).
-  const borderTol = opts.borderTol ?? BORDER_TOL_M;
+  // from the length of the edge itself, so the two tiles of an edge get the same number
+  const borderTol = (edgeLen: number) => opts.borderTol ?? Math.min(BORDER_TOL_MAX_M, (BORDER_TOL_CELLS * edgeLen) / grid);
 
   let minH = Infinity, maxH = -Infinity;
   for (let k = 0; k < heights.length; k++) {
@@ -495,7 +495,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   const simplified = profiles.map((prof, e) => {
     const edgeLen = tileRowMeters(tile.z, e === 0 ? tile.y : e === 1 ? tile.y + 1 : tile.y + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
-    return simplifyOpen(pts, borderTol).map((q) => ({ f: q.x / edgeLen, h: q.y }));
+    return simplifyOpen(pts, borderTol(edgeLen)).map((q) => ({ f: q.x / edgeLen, h: q.y }));
   });
   const lineAt = (line: Array<{ f: number; h: number }>, f: number): number => {
     let k = 1;
@@ -516,7 +516,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const edgeLen = tileRowMeters(pz, e === 0 ? py : e === 1 ? py + 1 : py + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
     const off = ((e < 2 ? tile.x : tile.y) % 2) / 2;
-    const line = simplifyOpen(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
+    const line = simplifyOpen(pts, borderTol(edgeLen)).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
     for (const q of line) if (q.f > 0 && q.f < 1) borderPts.push({ p: place(e, q.f), h: lineAt(simplified[e], q.f) });
     return line;
   });

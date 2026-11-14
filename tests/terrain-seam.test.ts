@@ -79,18 +79,28 @@ describe('tile seams', () => {
 
   it('the four tiles of a corner agree on its height', () => {
     const diag = load({ ...A, x: A.x + 1, y: A.y + 1 });
-    const h = a.borders.e[SIZE];
-    expect(a.borders.s[SIZE]).toBe(h);
+    const h = a.borders.e[GRID];
+    expect(a.borders.s[GRID]).toBe(h);
     expect(east.borders.s[0]).toBe(h);
     expect(south.borders.e[0]).toBe(h);
     expect(diag.borders.n[0]).toBe(h);
     expect(diag.borders.w[0]).toBe(h);
   });
 
-  it('edge profiles are low-passed: pixel noise does not reach the border', () => {
-    let rough = 0;
-    for (let k = 1; k < SIZE; k++) rough = Math.max(rough, Math.abs(a.borders.e[k] - (a.borders.e[k - 1] + a.borders.e[k + 1]) / 2));
-    expect(rough).toBeLessThan(4); // raw pixels: up to ±15 m
+  it('the lattice is low-passed over a cell and the border is its own edge row', () => {
+    const side = GRID + 1;
+    // a tile of pure pixel noise around 100 m: ±15 m per pixel, a fraction of that per node
+    const noise = Float32Array.from({ length: SIZE * SIZE }, (_, k) => {
+      let x = Math.imul(k + 1, 0x9e3779b1);
+      x = Math.imul(x ^ (x >>> 15), 0x85ebca6b);
+      return 100 + (((x ^ (x >>> 13)) >>> 0) % 31) - 15;
+    });
+    const flat = sampleDem(padDem(SIZE, Array.from({ length: 9 }, () => noise)), GRID);
+    for (const h of flat.heights) expect(Math.abs(h - 100)).toBeLessThan(8);
+    for (let k = 0; k < side; k++) {
+      expect(a.borders.n[k]).toBe(a.heights[k]);
+      expect(a.borders.e[k]).toBe(a.heights[k * side + GRID]);
+    }
   });
 
   it('meshes of neighbours meet along the shared edge', () => {

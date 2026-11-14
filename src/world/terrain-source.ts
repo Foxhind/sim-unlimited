@@ -22,10 +22,10 @@ export async function fetchTerrariumPng(t: Tile): Promise<ArrayBuffer> {
 }
 
 /**
- * Heights of the four tile edges, one sample per DEM pixel corner (pixels + 1 samples, both tile
- * corners included). A sample is the mean of the DEM over about one lattice cell around the point,
- * taken across the seam from both tiles, so the two neighbours of an edge — and the four tiles of
- * a corner — get bit-identical profiles.
+ * Heights of the four tile edges, one sample per lattice node (both tile corners included): the
+ * edge rows of the lattice as sampleDem makes it, before anything edits the lattice (runway
+ * flattening). The two neighbours of an edge — and the four tiles of a corner — get bit-identical
+ * profiles.
  */
 export interface TileBorders {
   /** top edge, west→east */
@@ -78,44 +78,47 @@ export function padDem(size: number, around: ReadonlyArray<Float32Array | null>,
 }
 
 /**
- * Lattice heights and edge profiles of a tile. Pixel k covers [k, k+1] of the tile's `size` units,
- * so a lattice node on an edge lies between the edge pixels of two tiles and both of them compute
- * the same height for it; the same holds for the edge profiles (see TileBorders).
+ * Lattice heights and edge profiles of a tile. Pixel k covers [k, k+1] of the tile's `size` units.
+ * A node's height is the mean of the DEM over the lattice cell centred on it: the lattice cannot
+ * carry anything finer, and point samples would alias DEM pixel noise (±15 m on flat z14 tiles)
+ * into every vertex that takes its height from the lattice. The box of a node on an edge reaches
+ * into the neighbour tile, so both tiles compute the same height for it — summed in raster order
+ * with the same weights, bit for bit.
+ *
+ * The edge profiles are the lattice's own edge rows. The border of the mesh is therefore made of
+ * the same samples as the surface next to it (a separate, finer profile bent the strip along
+ * every seam: its heights and the lattice's differed by metres a few dozen metres apart).
  */
 export function sampleDem(dem: PaddedDem, grid: number): { heights: Float32Array; borders: TileBorders } {
   const { size, pad, elev } = dem;
   const w = size + 2 * pad;
   const at = (x: number, y: number) => elev[(y + pad) * w + x + pad];
+  /** half the side of the box, in pixels: half a lattice cell, within the margin */
+  const r = Math.min(pad, size / grid / 2);
+  /** length of pixel k inside [c - r, c + r] */
+  const cover = (k: number, c: number) => Math.max(0, Math.min(k + 1, c + r) - Math.max(k, c - r));
 
   const side = grid + 1;
   const heights = new Float32Array(side * side);
   for (let j = 0; j < side; j++) {
+    const cy = (j / grid) * size;
+    const y0 = Math.floor(cy - r), y1 = Math.ceil(cy + r);
     for (let i = 0; i < side; i++) {
-      const fx = (i / grid) * size - 0.5;
-      const fy = (j / grid) * size - 0.5;
-      const x0 = Math.floor(fx);
-      const y0 = Math.floor(fy);
-      const tx = fx - x0;
-      const ty = fy - y0;
-      heights[j * side + i] =
-        at(x0, y0) * (1 - tx) * (1 - ty) + at(x0 + 1, y0) * tx * (1 - ty) + at(x0, y0 + 1) * (1 - tx) * ty + at(x0 + 1, y0 + 1) * tx * ty;
+      const cx = (i / grid) * size;
+      const x0 = Math.floor(cx - r), x1 = Math.ceil(cx + r);
+      let sum = 0;
+      for (let y = y0; y < y1; y++) {
+        const wy = cover(y, cy);
+        for (let x = x0; x < x1; x++) sum += at(x, y) * (wy * cover(x, cx));
+      }
+      heights[j * side + i] = sum / (4 * r * r);
     }
   }
-
-  // Edge profiles: box mean over one lattice cell. The interior sees the relief only at lattice
-  // nodes, so DEM pixel noise kept on the border (±15 m on flat z14 tiles) would stand out as
-  // tilted slivers along the seam. Summed in raster order: the same for every tile that shares it.
-  const r = Math.max(1, Math.min(pad, Math.round(size / grid / 2)));
-  const mean = (cx: number, cy: number): number => {
-    let sum = 0;
-    for (let y = cy - r; y < cy + r; y++) for (let x = cx - r; x < cx + r; x++) sum += at(x, y);
-    return sum / (4 * r * r);
-  };
   const borders: TileBorders = {
-    n: Float32Array.from({ length: size + 1 }, (_, k) => mean(k, 0)),
-    s: Float32Array.from({ length: size + 1 }, (_, k) => mean(k, size)),
-    w: Float32Array.from({ length: size + 1 }, (_, k) => mean(0, k)),
-    e: Float32Array.from({ length: size + 1 }, (_, k) => mean(size, k)),
+    n: Float32Array.from({ length: side }, (_, k) => heights[k]),
+    s: Float32Array.from({ length: side }, (_, k) => heights[grid * side + k]),
+    w: Float32Array.from({ length: side }, (_, k) => heights[k * side]),
+    e: Float32Array.from({ length: side }, (_, k) => heights[k * side + grid]),
   };
   return { heights, borders };
 }
