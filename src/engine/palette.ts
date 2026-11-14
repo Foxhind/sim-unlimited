@@ -1,3 +1,5 @@
+import { LAND_PALETTE_6BIT } from './land-palette';
+
 export type RGB = readonly [number, number, number];
 
 export const RAMP = {
@@ -27,12 +29,20 @@ export const RAMP = {
 export const RAMP_COUNT = 16;
 export const RAMP_STEPS = 16;
 /**
- * Terrain colours: ramp TERRAIN_RAMP_BASE + i shades VGA palette entry i (0..255), so a face can
- * take any of the 256 default VGA colours and still get lighting, fog and night from the LUT.
+ * VGA colours: ramp TERRAIN_RAMP_BASE + i shades VGA palette entry i (0..255), so a face (a roof,
+ * an aircraft part) can take any of the 256 default VGA colours and still get lighting, fog and
+ * night from the LUT.
  */
 export const TERRAIN_RAMP_BASE = RAMP_COUNT;
-/** LUT entries: 16 material ramps + 256 VGA ramps, 16 steps each (a 256-wide texture, 17 rows) */
-export const LUT_SIZE = (RAMP_COUNT + 256) * RAMP_STEPS;
+/**
+ * Land colours: ramp LAND_RAMP_BASE + i shades LAND_PALETTE entry i, the palette of the
+ * Landsat-coloured terrain (land-palette.ts). 240 colours is the most the 16-bit index buffer
+ * holds: (16 + 256 + 240) ramps × 16 steps × 8 glow copies = 65536 indices.
+ */
+export const LAND_RAMP_BASE = TERRAIN_RAMP_BASE + 256;
+export const LAND_PALETTE_SIZE = 240;
+/** LUT entries: 16 material ramps + 256 VGA ramps + 240 land ramps, 16 steps each (256-wide rows) */
+export const LUT_SIZE = (RAMP_COUNT + 256 + LAND_PALETTE_SIZE) * RAMP_STEPS;
 export const LIT_STEPS = 12; // steps 0..11: lighting range, 12..15: fog range toward haze
 
 /**
@@ -196,6 +206,25 @@ export function nearestVga(r: number, g: number, b: number): number {
   return best;
 }
 
+/** the land palette in 8 bits per channel */
+export const LAND_PALETTE: RGB[] = LAND_PALETTE_6BIT.map(([r, g, b]) => [Math.round((r * 255) / 63), Math.round((g * 255) / 63), Math.round((b * 255) / 63)] as RGB);
+if (LAND_PALETTE.length !== LAND_PALETTE_SIZE) throw new Error(`land palette: ${LAND_PALETTE.length} colours, expected ${LAND_PALETTE_SIZE}`);
+
+/** nearest land palette entry */
+export function nearestLand(r: number, g: number, b: number): number {
+  let best = 0;
+  let bestD = Infinity;
+  for (let i = 0; i < LAND_PALETTE_SIZE; i++) {
+    const [pr, pg, pb] = LAND_PALETTE[i];
+    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 function hsv([r, g, b]: RGB): [number, number, number] {
   const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
   let h = 0;
@@ -203,10 +232,15 @@ function hsv([r, g, b]: RGB): [number, number, number] {
   return [(h * 60 + 360) % 360, mx ? d / mx : 0, mx / 255];
 }
 
-/** a VGA colour one would call green (hue 70°–170°, not grey, not black) */
-export function isGreenVga(i: number): boolean {
-  const [h, s, v] = hsv(VGA_PALETTE[i]);
+/** a colour one would call green (hue 70°–170°, not grey, not black) */
+function isGreen(c: RGB): boolean {
+  const [h, s, v] = hsv(c);
   return h >= 70 && h <= 170 && s >= 0.2 && v >= 0.12;
+}
+
+/** a VGA colour one would call green */
+export function isGreenVga(i: number): boolean {
+  return isGreen(VGA_PALETTE[i]);
 }
 const GREEN_VGA = Array.from({ length: 248 }, (_, i) => i).filter(isGreenVga);
 
@@ -223,10 +257,38 @@ export function greenVga(i: number): number {
   return best;
 }
 
-/** a VGA colour that reads as open water in the imagery (clearly blue, not a bluish grey) */
-export function isWaterVga(i: number): boolean {
-  const [r, g, b] = VGA_PALETTE[i];
+/** a colour that reads as open water in the imagery (clearly blue, not a bluish grey) */
+function isWater([r, g, b]: RGB): boolean {
   return b >= r + 40 && b >= g + 15;
+}
+
+/** a VGA colour that reads as open water */
+export function isWaterVga(i: number): boolean {
+  return isWater(VGA_PALETTE[i]);
+}
+
+/** a land palette colour that reads as open water */
+export function isWaterLand(i: number): boolean {
+  return isWater(LAND_PALETTE[i]);
+}
+
+/** a land palette colour one would call green */
+export function isGreenLand(i: number): boolean {
+  return isGreen(LAND_PALETTE[i]);
+}
+const GREEN_LAND = Array.from({ length: LAND_PALETTE_SIZE }, (_, i) => i).filter(isGreenLand);
+
+/** the land colour itself when green, else the nearest green land colour (foliage over that ground) */
+export function greenLand(i: number): number {
+  if (isGreenLand(i)) return i;
+  const [r, g, b] = LAND_PALETTE[i];
+  let best = GREEN_LAND[0], bd = Infinity;
+  for (const k of GREEN_LAND) {
+    const [pr, pg, pb] = LAND_PALETTE[k];
+    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    if (d < bd) { bd = d; best = k; }
+  }
+  return best;
 }
 
 /**
@@ -341,16 +403,18 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
-  for (let v = 0; v < 256; v++) {
-    const base = (TERRAIN_RAMP_BASE + v) * RAMP_STEPS;
-    const light = scaleRGB(vgaShade(VGA_PALETTE[v], LIT_STEPS - 1), p);
+  const writeImagery = (ramp: number, colour: RGB): void => {
+    const base = ramp * RAMP_STEPS;
+    const light = scaleRGB(vgaShade(colour, LIT_STEPS - 1), p);
     for (let s = 0; s < RAMP_STEPS; s++) {
       const c = s < LIT_STEPS
-        ? scaleRGB(vgaShade(VGA_PALETTE[v], s), p)
+        ? scaleRGB(vgaShade(colour, s), p)
         : lerpRGB(light, haze, (s - LIT_STEPS + 1) / (RAMP_STEPS - LIT_STEPS));
       writeEntry(lut, base + s, c);
     }
-  }
+  };
+  for (let v = 0; v < 256; v++) writeImagery(TERRAIN_RAMP_BASE + v, VGA_PALETTE[v]);
+  for (let v = 0; v < LAND_PALETTE_SIZE; v++) writeImagery(LAND_RAMP_BASE + v, LAND_PALETTE[v]);
   // after the VGA ramps: the sea ramp sits in a filler slot of them
   writeMaterial(RAMP.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX]);
 }

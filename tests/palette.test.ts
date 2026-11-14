@@ -188,3 +188,52 @@ describe('winter surface (weather)', () => {
     expect(nearestVga(0, 0, 0)).toBeLessThan(248);
   });
 });
+
+describe('land palette', () => {
+  it('has 240 distinct 6-bit colours whose ramps fill the 16-bit index buffer exactly', async () => {
+    const { LAND_PALETTE, LAND_PALETTE_SIZE, LAND_RAMP_BASE, LUT_TOTAL, RAMP_STEPS: STEPS } = await import('../src/engine/palette');
+    const { LAND_PALETTE_6BIT } = await import('../src/engine/land-palette');
+    expect(LAND_PALETTE).toHaveLength(LAND_PALETTE_SIZE);
+    expect(new Set(LAND_PALETTE_6BIT.map((c) => c.join(','))).size).toBe(LAND_PALETTE_SIZE);
+    for (const c of LAND_PALETTE_6BIT) for (const v of c) expect(v >= 0 && v <= 63 && Number.isInteger(v)).toBe(true);
+    expect(LUT_TOTAL).toBeLessThanOrEqual(65536);
+    expect((LAND_RAMP_BASE + LAND_PALETTE_SIZE) * STEPS).toBeLessThanOrEqual(LUT_TOTAL);
+  });
+
+  it('keeps muted warm colours that the VGA palette turns grey (Grand Canyon sand)', async () => {
+    const { LAND_PALETTE, nearestLand, nearestVga, VGA_PALETTE: VGA } = await import('../src/engine/palette');
+    const sat = ([r, g, b]: readonly number[]) => (Math.max(r, g, b) - Math.min(r, g, b)) / Math.max(r, g, b);
+    for (const sand of [[136, 119, 98], [151, 132, 109], [176, 157, 131]]) {
+      const [r, g, b] = sand;
+      expect(sat(VGA[nearestVga(r, g, b)])).toBe(0);
+      const c = LAND_PALETTE[nearestLand(r, g, b)];
+      expect(sat(c)).toBeGreaterThan(0.15);
+      expect(Math.hypot(c[0] - sand[0], c[1] - sand[1], c[2] - sand[2])).toBeLessThan(15);
+    }
+  });
+
+  it('land ramps are written into the LUT, and foliage over land is green', async () => {
+    const { buildLUT, greenLand, isGreenLand, LAND_PALETTE_SIZE, LAND_RAMP_BASE, paletteAt, rampIndex } = await import('../src/engine/palette');
+    const lut = buildLUT(paletteAt(45));
+    const i = rampIndex(LAND_RAMP_BASE + LAND_PALETTE_SIZE - 1, 9) * 4;
+    expect(lut[i + 3]).toBe(255);
+    for (let k = 0; k < LAND_PALETTE_SIZE; k++) expect(isGreenLand(greenLand(k))).toBe(true);
+  });
+});
+
+describe('land palette generator', () => {
+  it('builds distinct 6-bit colours: the greys plus the imagery colours', async () => {
+    const { addToHistogram, buildLandPalette } = await import('../src/tools/land-palette-gen');
+    const h = new Map<number, number>();
+    const px: number[] = [];
+    for (let i = 0; i < 400; i++) px.push(120 + (i % 40), 100 + (i % 30), 80 + (i % 20), 255); // sand
+    for (let i = 0; i < 100; i++) px.push(30 + (i % 10), 70 + (i % 20), 30, 255); // forest
+    addToHistogram(h, px);
+    const p = buildLandPalette(h, 40);
+    expect(p).toHaveLength(40);
+    expect(new Set(p.map((c) => c.join(','))).size).toBe(40);
+    expect(p.filter(([r, g, b]) => r === g && g === b).length).toBeGreaterThanOrEqual(16);
+    expect(p.some(([r, g, b]) => r > b + 5 && r >= g)).toBe(true); // a warm one
+    expect(p.some(([r, g, b]) => g > r + 5 && g > b + 5)).toBe(true); // a green one
+  });
+});

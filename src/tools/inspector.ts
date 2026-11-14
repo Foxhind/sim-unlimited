@@ -9,7 +9,7 @@ import { PRESETS, SOURCE } from './presets';
 import { loadTileDem, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
 import { beltStepForZoom, buildTerrainTin, EPS_START, type TerrainTin, type TinDebug } from '../world/terrain-tin';
 import { parseMapLink } from '../ui/map-links';
-import { VGA_PALETTE, TERRAIN_RAMP_BASE } from '../engine/palette';
+import { LAND_PALETTE, LAND_RAMP_BASE } from '../engine/palette';
 import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
 import { cleanLabels, colourBoundaries, faceColorByMode, LANDSAT_TUNING, neighbourTiles, processLandsat, stitch3x3, type ColourLine, type ProcessedLandsat } from '../world/landsat-process';
 
@@ -49,7 +49,7 @@ let demImg: HTMLCanvasElement | null = null;
 let errImg: HTMLCanvasElement | null = null;
 let profileLine: [[number, number], [number, number]] | null = null;
 let hover: [number, number] | null = null;
-/** Landsat: stitched 3×3 mosaic around the imagery tile, its processing, and per-face VGA colours */
+/** Landsat: stitched 3×3 mosaic around the imagery tile, its processing, and per-face land palette colours */
 let lsMosaic: RgbaImage | null = null;
 let lsProc: ProcessedLandsat | null = null;
 let lsImgs: Record<'ls-raw' | 'ls-blur' | 'ls-quant', HTMLCanvasElement> | null = null;
@@ -554,8 +554,8 @@ function lsHover(u: number, v: number, ti?: number): string {
   const o = (j * size + i) * 4;
   const px = (img: RgbaImage) => `${img.data[o]},${img.data[o + 1]},${img.data[o + 2]}`;
   const q = lsProc.quantized.index[j * size + i];
-  const face = ti !== undefined && lsFace ? (lsFace[ti] < 0 ? 'вода' : `VGA ${lsFace[ti]}`) : '—';
-  return `\nLandsat ${px(lsProc.raw)} → размыт ${px(lsProc.blurred)} → VGA ${q}; грань: ${face}`;
+  const face = ti !== undefined && lsFace ? (lsFace[ti] < 0 ? 'вода' : `цвет ${lsFace[ti]}`) : '—';
+  return `\nLandsat ${px(lsProc.raw)} → размыт ${px(lsProc.blurred)} → палитра ${q}; грань: ${face}`;
 }
 
 // ---------- profile ----------
@@ -804,12 +804,12 @@ function processLs(): void {
     `границ ${lsLines.length}, точек ${lsLines.reduce((s, l) => s + l.pts.length, 0)}` +
       (built?.dbg.colourVerts ? ` · в сетке вершин ${built.dbg.colourVerts} + пересечений ${built.dbg.colourCrossings}` : ''),
     missing ? `<span class="err">соседей без снимка: ${missing} (край продлён)</span>` : '',
-    `<div style="display:flex;flex-wrap:wrap;gap:2px;margin-top:4px">${p.quantized.used.map((v) => `<span class="tag" title="VGA ${v}" style="background:rgb(${VGA_PALETTE[v].join(',')})"></span>`).join('')}</div>`,
+    `<div style="display:flex;flex-wrap:wrap;gap:2px;margin-top:4px">${p.quantized.used.map((v) => `<span class="tag" title="цвет ${v}" style="background:rgb(${LAND_PALETTE[v].join(',')})"></span>`).join('')}</div>`,
   ].join('<br>');
   drawAll();
 }
 
-/** VGA colour per TIN face (−1: water by height) */
+/** land palette colour per TIN face (−1: water) */
 function colourFaces(): void {
   lsFace = null;
   if (!lsProc || !built) return;
@@ -819,7 +819,7 @@ function colourFaces(): void {
   tin.tris.forEach((t, ti) => {
     lsFace![ti] = [t.a, t.b, t.c].every((k) => tin.vh[k] <= 0)
       ? -1
-      : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]) - TERRAIN_RAMP_BASE;
+      : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]) - LAND_RAMP_BASE;
   });
 }
 
@@ -841,7 +841,7 @@ function lsPurity(): string {
 
 function faceRgb(ti: number, k = 1): string {
   const v = lsFace![ti];
-  return rgb(v < 0 ? [44, 79, 124] : (VGA_PALETTE[v] as [number, number, number]), k);
+  return rgb(v < 0 ? [44, 79, 124] : (LAND_PALETTE[v] as [number, number, number]), k);
 }
 
 /** grid/step/eps inputs show the game's values for this zoom unless the user typed their own */

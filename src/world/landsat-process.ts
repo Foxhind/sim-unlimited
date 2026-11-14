@@ -4,11 +4,11 @@
  *      imagery instead of an edge, and neighbouring tiles get the same colours at the seam;
  *   2. blur: separable Gaussian with sigma in metres (zoom-independent), on the tile plus a
  *      3-sigma margin;
- *   3. quantize: every pixel to the nearest colour of a palette, the default VGA palette or the
- *      k colours of a median cut of this tile (each snapped to VGA).
+ *   3. quantize: every pixel to the nearest colour of a palette, the whole land palette
+ *      (palette.ts, LAND_PALETTE) or the k colours of a median cut of this tile, each snapped to it.
  * A terrain face then takes the most frequent quantized colour under it.
  */
-import { isWaterVga, nearestVga, RAMP, TERRAIN_RAMP_BASE, VGA_PALETTE, type RGB } from '../engine/palette';
+import { isWaterLand, LAND_PALETTE, LAND_PALETTE_SIZE, LAND_RAMP_BASE, nearestLand, RAMP, type RGB } from '../engine/palette';
 import { tileSizeMeters, type Tile } from './geodesy';
 import { fetchLandsatTile, landsatSource, type FaceColor, type RgbaImage } from './landsat';
 
@@ -16,7 +16,7 @@ import { fetchLandsatTile, landsatSource, type FaceColor, type RgbaImage } from 
 export const LANDSAT_TUNING = {
   /** Gaussian sigma, metres */
   blurM: 360,
-  /** median-cut colours, each snapped to VGA */
+  /** median-cut colours, each snapped to the land palette */
   colours: 16,
   /** colour patches smaller than this (lattice cells²) merge into a neighbour */
   minAreaCells: 50,
@@ -207,15 +207,15 @@ export function medianCut(img: RgbaImage, k: number): RGB[] {
 }
 
 export interface Quantized {
-  /** VGA palette index per pixel */
+  /** land palette index per pixel */
   index: Uint8Array;
-  /** the quantized image (VGA colours) */
+  /** the quantized image (land palette colours) */
   image: RgbaImage;
-  /** distinct VGA indices used */
+  /** distinct land palette indices used */
   used: number[];
 }
 
-/** nearest of `palette` (VGA indices) for every pixel */
+/** nearest of `palette` (land palette indices) for every pixel */
 export function quantize(img: RgbaImage, palette: number[]): Quantized {
   const n = img.width * img.height;
   const index = new Uint8Array(n);
@@ -230,7 +230,7 @@ export function quantize(img: RgbaImage, palette: number[]): Quantized {
       let bd = Infinity;
       best = palette[0];
       for (const v of palette) {
-        const [pr, pg, pb] = VGA_PALETTE[v];
+        const [pr, pg, pb] = LAND_PALETTE[v];
         const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
         if (d < bd) { bd = d; best = v; }
       }
@@ -238,19 +238,19 @@ export function quantize(img: RgbaImage, palette: number[]): Quantized {
     }
     index[i] = best;
     used.add(best);
-    const c = VGA_PALETTE[best];
+    const c = LAND_PALETTE[best];
     data[i * 4] = c[0]; data[i * 4 + 1] = c[1]; data[i * 4 + 2] = c[2]; data[i * 4 + 3] = 255;
   }
   return { index, image: { data, width: img.width, height: img.height }, used: [...used].sort((a, b) => a - b) };
 }
 
-/** all usable VGA entries (the black filler 248..255 excluded) */
-export const FULL_VGA = Array.from({ length: 248 }, (_, i) => i);
+/** every land palette entry */
+export const FULL_LAND = Array.from({ length: LAND_PALETTE_SIZE }, (_, i) => i);
 
 export interface LandsatOptions {
   /** Gaussian sigma in metres on the ground (0 = no blur) */
   blurM: number;
-  /** 0: the full VGA palette; k > 0: a median cut to k colours, each snapped to VGA */
+  /** 0: the whole land palette; k > 0: a median cut to k colours, each snapped to it */
   colours: number;
 }
 
@@ -259,7 +259,7 @@ export interface ProcessedLandsat {
   raw: RgbaImage;
   blurred: RgbaImage;
   quantized: Quantized;
-  /** VGA indices the quantizer could choose */
+  /** land palette indices the quantizer could choose */
   palette: number[];
   sigmaPx: number;
 }
@@ -277,14 +277,14 @@ export function processLandsat(mosaic: RgbaImage, tile: Tile, opts: LandsatOptio
   const m = Math.min(LS_PX, Math.ceil(sigmaPx * 3));
   const blurredWide = gaussianBlur(crop(mosaic, x0 - m, y0 - m, size + 2 * m, size + 2 * m), sigmaPx);
   const blurred = crop(blurredWide, m, m, size, size);
-  let palette = FULL_VGA;
-  if (opts.colours > 0) palette = [...new Set(medianCut(blurred, opts.colours).map((c) => nearestVga(c[0], c[1], c[2])))];
+  let palette = FULL_LAND;
+  if (opts.colours > 0) palette = [...new Set(medianCut(blurred, opts.colours).map((c) => nearestLand(c[0], c[1], c[2])))];
   return { raw: crop(mosaic, x0, y0, size, size), blurred, quantized: quantize(blurred, palette), palette, sigmaPx };
 }
 
 /**
  * Face colour = the most frequent quantized colour among the pixels whose centres fall in the
- * face (the centroid pixel for a face thinner than a pixel); ties go to the lower VGA index.
+ * face (the centroid pixel for a face thinner than a pixel); ties go to the lower palette index.
  * Imagery water (a clearly blue colour) gets the one water ramp, like the sea and OSM water.
  */
 export function faceColorByMode(q: Quantized, size: number, grid: number): FaceColor {
@@ -313,11 +313,11 @@ export function faceColorByMode(q: Quantized, size: number, grid: number): FaceC
       const i = Math.max(0, Math.min(size - 1, Math.floor((x0 + x1 + x2) / 3)));
       const j = Math.max(0, Math.min(size - 1, Math.floor((y0 + y1 + y2) / 3)));
       const v = q.index[j * size + i];
-      return isWaterVga(v) ? RAMP.WATER : TERRAIN_RAMP_BASE + v;
+      return isWaterLand(v) ? RAMP.WATER : LAND_RAMP_BASE + v;
     }
     let best = 0;
     for (let v = 1; v < 256; v++) if (counts[v] > counts[best]) best = v;
-    return isWaterVga(best) ? RAMP.WATER : TERRAIN_RAMP_BASE + best;
+    return isWaterLand(best) ? RAMP.WATER : LAND_RAMP_BASE + best;
   };
 }
 

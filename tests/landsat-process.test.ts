@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { nearestVga, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { LAND_PALETTE, LAND_RAMP_BASE, nearestLand } from '../src/engine/palette';
 import type { RgbaImage } from '../src/world/landsat';
 import {
-  crop, faceColorByMode, FULL_VGA, gaussianBlur, gradeImage, isNeutralGrade, LS_PX, NEUTRAL_GRADE, medianCut, neighbourTiles, processLandsat, quantize, stitch3x3,
+  crop, faceColorByMode, FULL_LAND, gaussianBlur, gradeImage, isNeutralGrade, LS_PX, NEUTRAL_GRADE, medianCut, neighbourTiles, processLandsat, quantize, stitch3x3,
 } from '../src/world/landsat-process';
 
 const solid = (c: [number, number, number], w = LS_PX, h = LS_PX): RgbaImage => {
@@ -43,15 +43,15 @@ describe('blur', () => {
 });
 
 describe('quantize', () => {
-  it('maps to VGA, a limited palette uses at most k colours', () => {
+  it('maps to the land palette, a limited palette uses at most k colours', () => {
     const img = crop(stitch3x3(Array.from({ length: 9 }, (_, k) => solid([k * 25, 100 + k * 10, 40]))), 0, 0, 768, 768);
-    const all = quantize(img, FULL_VGA);
-    expect(all.index[0]).toBe(nearestVga(0, 100, 40));
+    const all = quantize(img, FULL_LAND);
+    expect(all.index[0]).toBe(nearestLand(0, 100, 40));
     const four = medianCut(img, 4);
     expect(four).toHaveLength(4);
-    const q = quantize(img, [...new Set(four.map((c) => nearestVga(...c)))]);
+    const q = quantize(img, [...new Set(four.map((c) => nearestLand(...c)))]);
     expect(q.used.length).toBeLessThanOrEqual(4);
-    expect(at(q.image, 0, 0)).toEqual([...VGA_PALETTE[q.index[0]]]);
+    expect(at(q.image, 0, 0)).toEqual([...LAND_PALETTE[q.index[0]]]);
   });
 });
 
@@ -77,7 +77,7 @@ describe('processLandsat', () => {
   it('a face takes the most frequent quantized colour under it', () => {
     const p = processLandsat(mosaic, { z: 12, x: 4, y: 4 }, { blurM: 0, colours: 0 });
     const f = faceColorByMode(p.quantized, p.raw.width, 48);
-    expect(f(1, 1, 40, 1, 1, 40)).toBe(TERRAIN_RAMP_BASE + nearestVga(...sand));
+    expect(f(1, 1, 40, 1, 1, 40)).toBe(LAND_RAMP_BASE + nearestLand(...sand));
   });
 });
 
@@ -141,9 +141,11 @@ describe('landsatTerrain (game)', () => {
 
 describe('one water colour', () => {
   it('imagery water becomes the water ramp; sea-level boundary vertices do not lift sea faces', async () => {
-    const { RAMP } = await import('../src/engine/palette');
+    const { RAMP, nearestLand, isWaterLand } = await import('../src/engine/palette');
     const { quantize, faceColorByMode } = await import('../src/world/landsat-process');
-    const q = quantize(solid([10, 30, 90], 8, 8), [1, 2]); // EGA blue / green
+    const blue = nearestLand(10, 30, 90), green = nearestLand(40, 90, 30);
+    expect(isWaterLand(blue)).toBe(true);
+    const q = quantize(solid([10, 30, 90], 8, 8), [blue, green]);
     expect(faceColorByMode(q, 8, 4)(0, 0, 4, 0, 0, 4)).toBe(RAMP.WATER);
     // a fixture with sea: boundaries drawn over the sea keep water faces at 0 m
     const { buildTerrainTin } = await import('../src/world/terrain-tin');

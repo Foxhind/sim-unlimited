@@ -11,7 +11,7 @@ import { parseOverpass } from '../world/overpass';
 import type { OsmDetail } from '../world/osm-types';
 import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
 import { buildTerrainTin, tinLocator, tinSampler } from '../world/terrain-tin';
-import { greenVga, RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
+import { greenLand, LAND_RAMP_BASE, RAMP } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -132,14 +132,14 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
     const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts } });
     const drape = tinSampler(tin, tile);
-    // foliage: the colour of the land face under the tree, pulled to the nearest green VGA colour
+    // foliage: the colour of the land face under the tree, pulled to the nearest green land colour
     const locate = tinLocator(tin, tile);
     const treeRamp = (lon: number, lat: number) => {
       const r = locate(lon, lat);
       if (!r) return RAMP.FOREST;
       const t = tin.tris[r.tri];
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
-      return ramp >= TERRAIN_RAMP_BASE ? TERRAIN_RAMP_BASE + greenVga(ramp - TERRAIN_RAMP_BASE) : RAMP.FOREST;
+      return ramp >= LAND_RAMP_BASE ? LAND_RAMP_BASE + greenLand(ramp - LAND_RAMP_BASE) : RAMP.FOREST;
     };
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false });
     const clipped = clipTileData(data, tile);
