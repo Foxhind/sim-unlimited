@@ -1,15 +1,23 @@
 /**
  * Coordinates out of a pasted map link (Google Maps, Apple Maps, Yandex Maps, OpenStreetMap),
- * a geo: URI or a bare "lat, lon" pair. Pure; no network. Only links that carry coordinates
- * themselves are supported; short links (maps.app.goo.gl, yandex.ru/maps/-/…) are not.
+ * a geo: URI, a bare "lat, lon" pair or a link of this project (simulator, relief inspector, tile
+ * inspector). Pure; no network. Only links that carry coordinates themselves are supported;
+ * short links (maps.app.goo.gl, yandex.ru/maps/-/…) are not.
  */
+import { tileCenter, type Tile } from '../world/geodesy';
 
 export interface MapPoint {
   lat: number;
   lon: number;
   /** web-map zoom level when the link has one */
   zoom?: number;
-  source: 'google' | 'apple' | 'yandex' | 'osm' | 'geo' | 'coords';
+  source: 'google' | 'apple' | 'yandex' | 'osm' | 'geo' | 'coords' | 'project';
+  /** project links: altitude of the aircraft (simulator) or of the simulator camera (relief inspector), metres */
+  alt?: number;
+  /** relief inspector links: ground width of the view, metres */
+  spanM?: number;
+  /** tile inspector links: the tile itself (lat/lon is its centre, zoom its z) */
+  tile?: Tile;
 }
 
 const NUM = String.raw`[-+]?\d+(?:\.\d+)?`;
@@ -113,7 +121,52 @@ const isOsm = (h: string) => /(^|\.)(openstreetmap\.(org|ru|de|fr)|osm\.org)$/.t
 /** human name of a link's source (inspector and game menu) */
 export const MAP_SOURCE_NAME: Record<MapPoint['source'], string> = {
   google: 'Google Maps', apple: 'Apple Maps', yandex: 'Yandex Maps', osm: 'OpenStreetMap', geo: 'geo:', coords: 'lat, lon',
+  project: 'sim-unlimited',
 };
+
+/** the relief inspector opens a tile with a view this many tiles wide (and a view maps back to that zoom) */
+export const RELIEF_TILES_ACROSS = 3;
+
+/**
+ * Links of this project, on whatever host it runs. The page is told by the path:
+ *   /            #lat,lon[,alt[,hdg[,aircraft[,time]]]]   simulator
+ *   /relief      #lat,lon[,span km[,camera alt]]  or  #z/x/y
+ *   /inspector   #z/x/y
+ * (with or without .html). Any other path is not ours.
+ */
+function project(url: URL): MapPoint | null {
+  const m = /(?:^|\/)(?:(relief|inspector)(?:\.html)?|(index\.html)?)$/.exec(url.pathname);
+  if (!m) return null;
+  const page = m[1] ?? 'sim';
+  const hash = url.hash.slice(1);
+  const t = /^(\d{1,2})\/(\d+)\/(\d+)$/.exec(hash);
+  if (t) {
+    if (page === 'sim') return null;
+    const tile = { z: +t[1], x: +t[2], y: +t[3] };
+    if (tile.z > 22 || tile.x >= 2 ** tile.z || tile.y >= 2 ** tile.z) return null;
+    const c = tileCenter(tile);
+    const p = point(c.lat, c.lon, 'project', tile.z);
+    return p && { ...p, tile };
+  }
+  if (page === 'inspector') return null;
+  const parts = hash.split(',');
+  if (parts.length < 2 || !new RegExp(`^${NUM}$`).test(parts[0]) || !new RegExp(`^${NUM}$`).test(parts[1])) return null;
+  const p = point(parseFloat(parts[0]), parseFloat(parts[1]), 'project');
+  if (!p) return null;
+  const num = (k: number) => (parts[k] !== undefined && new RegExp(`^${NUM}$`).test(parts[k]) ? parseFloat(parts[k]) : undefined);
+  if (page === 'relief') {
+    const spanKm = num(2), alt = num(3);
+    if (spanKm !== undefined && spanKm > 0) {
+      p.spanM = spanKm * 1000;
+      p.zoom = Math.log2((EARTH_CIRCUMFERENCE * Math.cos((p.lat * Math.PI) / 180) * RELIEF_TILES_ACROSS) / p.spanM);
+    }
+    if (alt !== undefined && alt >= 0) p.alt = alt;
+  } else {
+    const alt = num(2);
+    if (alt !== undefined && alt >= 0) p.alt = alt;
+  }
+  return p;
+}
 
 export function parseMapLink(text: string): MapPoint | null {
   const s = text.trim();
@@ -137,5 +190,7 @@ export function parseMapLink(text: string): MapPoint | null {
   if (isApple(h)) return apple(url);
   if (isYandex(h, p)) return yandex(url);
   if (isOsm(h)) return osm(url);
+  // only what was pasted as a link: a bare "host/…" guess is not enough to call a page ours
+  if (/^https?:\/\//i.test(s)) return project(url);
   return null;
 }

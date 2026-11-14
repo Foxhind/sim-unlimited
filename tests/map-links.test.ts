@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseMapLink } from '../src/ui/map-links';
+import { tileCenter } from '../src/world/geodesy';
 
 const near = (text: string, lat: number, lon: number, zoom?: number) => {
   const p = parseMapLink(text);
@@ -88,5 +89,41 @@ describe('hosts', () => {
     expect(parseMapLink('https://yandex.ru/maps/-/CDxQ5Z~a')).toBeNull();
     near('https://www.google.co.uk/maps/@51.5,-0.12,12z', 51.5, -0.12, 12);
     near('https://yandex.com.tr/maps/?ll=29,41&z=10', 41, 29, 10);
+  });
+});
+
+describe('links of the project', () => {
+  it('simulator: point and altitude, on any host', () => {
+    const p = near('http://localhost:5173/?temp=-20#61.75958,51.05216,845,93,su27,1794645339', 61.75958, 51.05216);
+    expect(p.source).toBe('project');
+    expect(p.alt).toBe(845);
+    expect(near('https://sim.example.org/index.html#47.26,11.39', 47.26, 11.39).alt).toBeUndefined();
+    // air start: the altitude is left out
+    expect(near('https://sim.example.org/#47.26,11.39,,180,f117', 47.26, 11.39).alt).toBeUndefined();
+  });
+  it('relief inspector: point, view width and camera altitude', () => {
+    for (const page of ['relief', 'relief.html']) {
+      const p = parseMapLink(`http://localhost:5173/${page}#47.26650,11.40138,14.27,1500`)!;
+      expect(p.lat).toBeCloseTo(47.2665, 4);
+      expect(p.spanM).toBeCloseTo(14270, 0);
+      expect(p.alt).toBe(1500);
+      // a view three tiles wide: the zoom of those tiles
+      expect(p.zoom).toBeCloseTo(Math.log2((40075016.686 * Math.cos((47.2665 * Math.PI) / 180) * 3) / 14270), 3);
+    }
+  });
+  it('tile links of both inspectors: the tile and its centre', () => {
+    for (const page of ['inspector.html', 'inspector', 'relief.html']) {
+      const tile = { z: 12, x: 2177, y: 1436 };
+      const c = tileCenter(tile);
+      const p = near(`http://localhost:5173/${page}#12/2177/1436`, c.lat, c.lon, 12);
+      expect(p.tile).toEqual(tile);
+    }
+    expect(parseMapLink('http://localhost:5173/inspector.html#12/5000/1436')).toBeNull(); // no such tile
+  });
+  it('is not fooled by other pages with a similar hash', () => {
+    expect(parseMapLink('https://example.org/docs/page#47.26,11.39')).toBeNull();
+    expect(parseMapLink('https://example.org/#section')).toBeNull();
+    expect(parseMapLink('http://localhost:5173/#12/2177/1436')).toBeNull();
+    expect(parseMapLink('localhost:5173/#47.26,11.39')).toBeNull(); // not pasted as a link
   });
 });

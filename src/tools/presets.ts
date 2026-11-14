@@ -14,4 +14,5 @@ export const PRESETS: Array<[string, number, number, number]> = [
 /** names of the map services a pasted link may come from */
 export const SOURCE: Record<MapPoint['source'], string> = {
   google: 'Google Maps', apple: 'Apple Maps', yandex: 'Яндекс Карты', osm: 'OpenStreetMap', geo: 'geo:', coords: 'координаты',
+  project: 'ссылка проекта',
 };

@@ -7,7 +7,7 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { buildLUT, paletteAt } from '../engine/palette';
 import { Renderer } from '../engine/renderer';
-import { parseMapLink } from '../ui/map-links';
+import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
 import { OsmManager } from '../world/osm-manager';
@@ -22,6 +22,7 @@ const EYE_DISTANCE_M = 90000;
 /** the camera looks down from 90° (plan view) to this many degrees above the horizon */
 const MIN_ELEVATION_DEG = 15;
 const MAX_TILT_DEG = 90 - MIN_ELEVATION_DEG;
+const CAM_ALT_MAX_M = 20000;
 const SPAN_MIN_M = 200;
 const SPAN_MAX_M = 180000;
 /** the lights' size in the simulator at its usual 1× HUD scale */
@@ -50,7 +51,7 @@ function parseHash(): Partial<State> {
   const tile = /^(\d+)\/(\d+)\/(\d+)$/.exec(h);
   if (tile) {
     const t = { z: +tile[1], x: +tile[2], y: +tile[3] };
-    return { centre: tileCenter(t), span: tileSizeMeters(t) * 3 };
+    return { centre: tileCenter(t), span: tileSizeMeters(t) * RELIEF_TILES_ACROSS };
   }
   const p = h.split(',').map(Number);
   if (p.length < 2 || !Number.isFinite(p[0]) || !Number.isFinite(p[1]) || Math.abs(p[0]) > 85 || Math.abs(p[1]) > 180) return {};
@@ -369,7 +370,22 @@ function onPaste(e: ClipboardEvent): void {
   }
   e.preventDefault();
   state.centre = { lat: p.lat, lon: p.lon };
-  pasteMsg(`${SOURCE[p.source]}: ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`);
+  const notes: string[] = [];
+  // links of the project carry more than a point: a tile, the width of a view, an altitude
+  if (p.tile) {
+    selected = p.tile;
+    state.span = tileSizeMeters(p.tile) * RELIEF_TILES_ACROSS;
+    notes.push(`тайл ${p.tile.z}/${p.tile.x}/${p.tile.y}`);
+    showTile();
+  } else if (p.spanM !== undefined) {
+    state.span = p.spanM;
+  }
+  state.span = Math.max(SPAN_MIN_M, Math.min(SPAN_MAX_M, state.span));
+  if (p.alt !== undefined) {
+    state.camAlt = Math.max(0, Math.min(CAM_ALT_MAX_M, p.alt));
+    notes.push(`высота камеры ${Math.round(state.camAlt)} м`);
+  }
+  pasteMsg([`${SOURCE[p.source]}: ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`, ...notes].join(', '));
   syncInputs();
 }
 
@@ -409,7 +425,7 @@ function init(): void {
     });
   };
   num('span', SPAN_MIN_M / 1000, SPAN_MAX_M / 1000, (v) => (state.span = v * 1000));
-  num('camAlt', 0, 20000, (v) => (state.camAlt = v));
+  num('camAlt', 0, CAM_ALT_MAX_M, (v) => (state.camAlt = v));
   num('elev', MIN_ELEVATION_DEG, 90, (v) => (state.tilt = 90 - v));
   num('yaw', -180, 360, (v) => (state.yaw = v));
   num('exag', 1, 20, (v) => (state.exag = v));

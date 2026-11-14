@@ -896,7 +896,7 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
   e.preventDefault();
   const z = p.zoom !== undefined ? Math.max(MIN_Z, Math.min(MAX_Z, Math.round(p.zoom))) : tile.z;
   pin = { lat: p.lat, lon: p.lon };
-  pasteMsg(`${SOURCE[p.source]}: ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` + (p.zoom !== undefined ? `, zoom ${p.zoom.toFixed(1)} → z${z}` : `, z${z} (текущий)`));
+  pasteMsg(`${SOURCE[p.source]}: ${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}` + (p.tile ? `, тайл z${z}` : p.zoom !== undefined ? `, zoom ${p.zoom.toFixed(1)} → z${z}` : `, z${z} (текущий)`));
   profileLine = null;
   await loadTile(tileForLatLon(p.lat, p.lon, z));
 }
