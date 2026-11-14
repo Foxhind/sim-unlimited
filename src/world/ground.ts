@@ -8,7 +8,7 @@ import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
 import { OSM_SCHEMA_VERSION } from './osm-source';
 import { parseOverpass } from './overpass';
-import { computeHeights } from './building-mesher';
+import { buildingHeights } from './building-mesher';
 import type { GroundContact } from '../flight/model';
 
 interface Prism {
@@ -123,7 +123,7 @@ export class GroundProbe {
             }
             lon /= outer.length;
             lat /= outer.length;
-            const h = computeHeights(b.tags);
+            const h = buildingHeights(b);
             const rings = b.rings.map((ring) =>
               ring.map(([lo, la]) => {
                 const [e, n] = latLonToEnu({ lat, lon }, la, lo, 0);

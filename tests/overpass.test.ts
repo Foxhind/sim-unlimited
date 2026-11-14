@@ -142,6 +142,49 @@ describe('parseOverpass buildings', () => {
     expect(d.buildings[0].tags['building:part']).toBe('yes');
   });
 
+  it('hides an outline whose parts lie inside it, without a relation (S3DB)', () => {
+    const d = parseOverpass({
+      elements: [
+        ...square,
+        { type: 'node', id: 5, lat: 0, lon: 0.5 },
+        { type: 'node', id: 6, lat: 1, lon: 0.5 },
+        { type: 'node', id: 20, lat: 2, lon: 2 },
+        { type: 'node', id: 21, lat: 2, lon: 3 },
+        { type: 'node', id: 22, lat: 3, lon: 3 },
+        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'church', height: '20' } },
+        { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'yes', height: '30' } },
+        { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes', height: '15' } },
+        // a building elsewhere keeps its outline
+        { type: 'way', id: 13, nodes: [20, 21, 22, 20], tags: { building: 'yes' } },
+      ],
+    });
+    expect(d.buildings.map((b) => b.tags.height ?? b.tags.building).sort()).toEqual(['15', '30', 'yes']);
+  });
+
+  it('type=building relation: multipolygon parts hide the outline; without parts the outline way keeps its tags', () => {
+    const withRelPart = parseOverpass({
+      elements: [
+        ...square,
+        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'yes' } },
+        { type: 'way', id: 11, nodes: [1, 2, 3, 1] },
+        { type: 'relation', id: 30, members: [{ type: 'way', ref: 11, role: 'outer' }], tags: { type: 'multipolygon', 'building:part': 'yes', height: '9' } },
+        { type: 'relation', id: 31, members: [{ type: 'way', ref: 10, role: 'outline' }, { type: 'relation', ref: 30, role: 'part' }], tags: { type: 'building' } },
+      ],
+    });
+    expect(withRelPart.buildings).toHaveLength(1);
+    expect(withRelPart.buildings[0].tags.height).toBe('9');
+    const outlineOnly = parseOverpass({
+      elements: [
+        ...square,
+        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'yes', height: '22', 'roof:shape': 'hipped' } },
+        { type: 'relation', id: 31, members: [{ type: 'way', ref: 10, role: 'outline' }], tags: { type: 'building', name: 'X' } },
+      ],
+    });
+    expect(outlineOnly.buildings).toHaveLength(1);
+    expect(outlineOnly.buildings[0].tags).toMatchObject({ height: '22', 'roof:shape': 'hipped', name: 'X' });
+    expect(outlineOnly.buildings[0].tags.type).toBeUndefined();
+  });
+
   it('skips underground and negative-layer buildings', () => {
     const d = parseOverpass({
       elements: [

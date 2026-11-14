@@ -4,6 +4,7 @@ import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
+import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofModel, type XZ } from './roof-shapes';
 
 export interface BuildingMeshOptions {
   tile: Tile;
@@ -11,7 +12,6 @@ export interface BuildingMeshOptions {
   sampleHeight: HeightSampler;
 }
 
-type XZ = [number, number];
 
 /** the CSS colour names OSM colour tags may use (the real CSS values: muting and snapping to VGA happen later) */
 const CSS_COLORS: Record<string, RGB> = Object.fromEntries(
@@ -40,10 +40,11 @@ export function parseColor(v: string | undefined): RGB | undefined {
   return undefined;
 }
 
-/** Parse OSM length values: "12", "12 m", "40 ft", "40'", '12\'6"'. Returns meters. */
+/** Parse OSM length values: "12", "12 m", "3,7", "40 ft", "40'", '12\'6"'. Returns meters. */
 export function parseLength(v: string | undefined): number | undefined {
   if (!v) return undefined;
-  const s = v.trim().toLowerCase();
+  // a decimal comma ("3,7") is common in European data
+  const s = v.trim().toLowerCase().replace(/^(\d+),(\d+)/, '$1.$2');
   const feetInch = s.match(/^(\d+(?:\.\d+)?)'\s*(\d+(?:\.\d+)?)?"?$/);
   if (feetInch) return parseFloat(feetInch[1]) * 0.3048 + (feetInch[2] ? parseFloat(feetInch[2]) * 0.0254 : 0);
   const m = s.match(/^(\d+(?:\.\d+)?)\s*(m|ft|'|")?$/);
@@ -62,29 +63,74 @@ const TYPE_HEIGHT: Record<string, number> = {
   roof: 3, shed: 3, hut: 3, cabin: 3, barn: 6, farm: 6,
 };
 
-export function computeHeights(tags: Record<string, string>): { min: number; wall: number; roof: number } {
+/** S3DB: a level without height tags is 3 m */
+export const LEVEL_M = 3;
+/** pitch of a ridged roof with no roof:height, roof:angle or roof:levels */
+const DEFAULT_PITCH_DEG = 30;
+
+/**
+ * S3DB heights of a building or part: min_height (else building:min_level), the facade, and the roof.
+ * `height` runs from the ground to the roof top; the facade is height − roof:height. The roof height is
+ * roof:height, else from roof:angle over `run` (the horizontal run of a slope: roofRun), else
+ * roof:levels × 3 m, else a default for the shape (30° pitch, a hemisphere for a dome). Without
+ * `height`: building:levels × 3 m plus that roof; without levels either, a default by building type.
+ */
+export function computeHeights(tags: Record<string, string>, run?: number): { min: number; wall: number; roof: number } {
   const type = tags['building:part'] || tags.building || 'yes';
+  const shape = roofShape(tags);
+
+  let roof = 0;
+  if (shape !== 'flat') {
+    const angle = parseFloat(tags['roof:angle']);
+    const roofLevels = parseLength(tags['roof:levels']);
+    roof = parseLength(tags['roof:height'])
+      ?? (Number.isFinite(angle) && angle > 0 && angle < 89 && run ? Math.tan((angle * Math.PI) / 180) * run : undefined)
+      ?? (roofLevels ? roofLevels * LEVEL_M : undefined)
+      ?? defaultRoofHeight(shape, run);
+  }
+
   let height = parseLength(tags.height);
   if (height === undefined) {
     const levels = parseLength(tags['building:levels']);
-    const roofLevels = parseLength(tags['roof:levels']) ?? 0;
-    if (levels !== undefined) height = levels * 3 + roofLevels * 3;
+    // roof levels under a flat roof are still storeys on top of the facade levels
+    const flatRoofLevels = shape === 'flat' ? (parseLength(tags['roof:levels']) ?? 0) * LEVEL_M : 0;
+    if (levels !== undefined) height = levels * LEVEL_M + roof + flatRoofLevels;
   }
   if (height === undefined) height = TYPE_HEIGHT[type] ?? 9;
 
   let min = parseLength(tags.min_height) ?? 0;
   const minLevel = parseLength(tags['building:min_level']);
-  if (min === 0 && minLevel !== undefined) min = minLevel * 3;
+  if (min === 0 && minLevel !== undefined) min = minLevel * LEVEL_M;
 
-  const shape = tags['roof:shape'] ?? 'flat';
-  let roof = 0;
-  if (shape !== 'flat') {
-    roof = parseLength(tags['roof:height']) ?? (parseLength(tags['roof:levels']) ?? 1) * 3;
-  }
   height = Math.max(height, min + 0.3);
   roof = Math.min(roof, Math.max(0, height - min));
   const wall = Math.max(0, height - roof - min);
   return { min, wall, roof };
+}
+
+function defaultRoofHeight(shape: string, run: number | undefined): number {
+  if (!run) return LEVEL_M;
+  if (shape === 'dome' || shape === 'round') return run;
+  if (shape === 'onion') return run * 2.4;
+  if (shape === 'cone') return run * 2;
+  if (shape === 'skillion') return Math.min(Math.max(Math.tan((15 * Math.PI) / 180) * run, 1), 6);
+  return Math.min(Math.max(Math.tan((DEFAULT_PITCH_DEG * Math.PI) / 180) * run, 1.5), 8);
+}
+
+/** a footprint in metres about its first vertex (x east, z south), for the roof frame outside a tile mesh */
+function localXZ(ring: LonLat[]): XZ[] {
+  const [lon0, lat0] = ring[0];
+  const k = 111320, c = Math.cos((lat0 * Math.PI) / 180);
+  return ring.map(([lo, la]) => [(lo - lon0) * k * c, -(la - lat0) * k]);
+}
+
+/** computeHeights with the roof run taken from the footprint (dots, collision, lit windows) */
+export function buildingHeights(b: OsmBuilding): { min: number; wall: number; roof: number } {
+  const ring = b.rings[0];
+  if (!ring || ring.length < 3 || roofShape(b.tags) === 'flat') return computeHeights(b.tags);
+  const outer = localXZ(ring);
+  const shape = roofShape(b.tags);
+  return computeHeights(b.tags, roofRun(shape, roofFrame(outer, b.tags)));
 }
 
 /** typical colour of an OSM material value (building:material / roof:material) */
@@ -205,7 +251,7 @@ export function buildingSeed(ring: LonLat[] | undefined): number {
 
 /** the roof is drawn flat: no roof:shape (or `flat`), or no height left for a shaped roof */
 export function isFlatRoof(tags: Record<string, string>): boolean {
-  return (tags['roof:shape'] ?? 'flat') === 'flat' || computeHeights(tags).roof < 0.01;
+  return roofShape(tags) === 'flat' || computeHeights(tags).roof < 0.01;
 }
 
 /** pure greys of the default VGA palette (r = g = b) */
@@ -241,6 +287,51 @@ export function roofRamp(tags: Record<string, string>, seed = 0.5): number {
   return greyRamp(pick(seed < grey ? ROOF_GREY : ROOF_DARK_GREY, t));
 }
 
+type V3 = [number, number, number];
+
+/** drop repeated vertices and the closing duplicate of an OSM ring */
+function dedupe(ring: XZ[]): XZ[] {
+  const out: XZ[] = [];
+  for (const p of ring) {
+    const q = out[out.length - 1];
+    if (!q || Math.hypot(p[0] - q[0], p[1] - q[1]) > 1e-4) out.push(p);
+  }
+  while (out.length > 1 && Math.hypot(out[0][0] - out[out.length - 1][0], out[0][1] - out[out.length - 1][1]) <= 1e-4) out.pop();
+  return out;
+}
+
+function bbox(ring: XZ[]): { minX: number; maxX: number; minZ: number; maxZ: number } {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [x, z] of ring) {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }
+  return { minX, maxX, minZ, maxZ };
+}
+
+/** area centroid of a ring (the vertex mean drifts toward densely noded curves) */
+function areaCentroid(ring: XZ[]): XZ {
+  let a = 0, cx = 0, cz = 0;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const f = ring[j][0] * ring[i][1] - ring[i][0] * ring[j][1];
+    a += f;
+    cx += (ring[j][0] + ring[i][0]) * f;
+    cz += (ring[j][1] + ring[i][1]) * f;
+  }
+  if (Math.abs(a) < 1e-9) return [ring.reduce((s, p) => s + p[0], 0) / ring.length, ring.reduce((s, p) => s + p[1], 0) / ring.length];
+  return [cx / (3 * a), cz / (3 * a)];
+}
+
+/** outward normal of the first edge of the ring as drawn in OSM: the low side of a skillion (OSM-4D) */
+function firstEdgeOutward(ring: XZ[]): XZ | undefined {
+  if (ring.length < 3) return undefined;
+  const [p, q] = ring;
+  const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+  if (len < 1e-9) return undefined;
+  const n: XZ = [(q[1] - p[1]) / len, -(q[0] - p[0]) / len];
+  // the interior lies on the side of positive signed area
+  return ringAreaXZ(ring) > 0 ? n : [-n[0], -n[1]];
+}
+
 function ringAreaXZ(ring: XZ[]): number {
   let a = 0;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -265,14 +356,14 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
     return [e, -n];
   };
-  const emitTri = (a: [number, number, number], b: [number, number, number], c: [number, number, number], ramp: number, up: boolean): void => {
+  const emitTri = (a: V3, b: V3, c: V3, ramp: number, up: boolean): void => {
     const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
     const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
     let nx = e1y * e2z - e1z * e2y;
     let ny = e1z * e2x - e1x * e2z;
     let nz = e1x * e2y - e1y * e2x;
     const len = Math.hypot(nx, ny, nz);
-    if (len < 1e-9) return;
+    if (len < 1e-6) return; // a sliver (twice the area in m²)
     nx /= len; ny /= len; nz /= len;
     if (up ? ny < 0 : ny > 0) { nx = -nx; ny = -ny; nz = -nz; }
     for (const p of [a, b, c]) {
@@ -285,9 +376,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     const tags = b.tags;
     if (!b.rings.length || !b.rings[0].length) continue;
     const outerLL = b.rings[0];
-    const outer = normalizeRing(outerLL.map(toXZ), true);
+    const rawOuter = dedupe(outerLL.map(toXZ));
+    const outer = normalizeRing(rawOuter, true);
     if (outer.length < 3) continue;
-    const holes = b.rings.slice(1).map((r) => normalizeRing(r.map(toXZ), false)).filter((r) => r.length >= 3);
+    const holes = b.rings.slice(1).map((r) => normalizeRing(dedupe(r.map(toXZ)), false)).filter((r) => r.length >= 3);
 
     // foundation sits on the lowest terrain under the footprint
     let minTerrain = Infinity;
@@ -296,73 +388,97 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
       minTerrain = Math.min(minTerrain, sampleHeight(ll.lon, ll.lat));
     }
     const base = Math.max(minTerrain, 0);
-    const h = computeHeights(tags);
+    const shape = roofShape(tags);
+    const frame = roofFrame(outer, tags);
+    const h = computeHeights(tags, roofRun(shape, frame));
     const wallBase = base + h.min;
     const wallTop = wallBase + h.wall;
-    const roofTop = wallTop + h.roof;
     const wRamp = wallRamp(tags);
     const rRamp = roofRamp(tags, buildingSeed(outerLL));
     const isCanopy = tags.building === 'roof';
-    const shape = tags['roof:shape'] ?? 'flat';
+    const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
+    const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
+    const centroid = areaCentroid(outer);
 
-    const centroid: XZ = [
-      outer.reduce((s, p) => s + p[0], 0) / outer.length,
-      outer.reduce((s, p) => s + p[1], 0) / outer.length,
-    ];
-
-    // walls (skipped for canopy roofs)
-    if (!isCanopy && h.wall > 0.01) {
-      const allRings = [outer, ...holes];
-      for (const ring of allRings) {
+    // walls up to the roof profile (gable ends close themselves); none under a canopy
+    if (!isCanopy) {
+      for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          const a = ring[i];
-          const c = ring[(i + 1) % ring.length];
-          const a0: [number, number, number] = [a[0], wallBase, a[1]];
-          const a1: [number, number, number] = [a[0], wallTop, a[1]];
-          const c0: [number, number, number] = [c[0], wallBase, c[1]];
-          const c1: [number, number, number] = [c[0], wallTop, c[1]];
-          emitWallQuad(a0, a1, c1, c0, wRamp, centroid);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid);
         }
       }
     }
 
-    // ceiling for elevated parts (arches) and canopies
-    if (h.min > 0.01 || isCanopy) {
-      capRing(outer, holes, wallBase, wRamp, false);
-    }
+    // ceiling under elevated parts (arches, bridges)
+    if (h.min > 0.01 && !isCanopy) capRing(outer, holes, wallBase, wRamp, false);
 
-    // roof (a flat one holds snow in winter)
-    if (isFlatRoof(tags)) {
+    if (roof.kind === 'flat') {
+      // a flat roof holds snow in winter
       capRing(outer, holes, wallTop, snowy(rRamp), true);
-    } else if (shape === 'pyramidal' || shape === 'cone' || shape === 'onion') {
-      const apex: [number, number, number] = [centroid[0], roofTop, centroid[1]];
+    } else if (roof.kind === 'fan') {
+      const apex: V3 = [centroid[0], wallTop + h.roof, centroid[1]];
       for (let i = 0; i < outer.length; i++) {
         const a = outer[i], c = outer[(i + 1) % outer.length];
         emitTri([a[0], wallTop, a[1]], [c[0], wallTop, c[1]], apex, rRamp, true);
       }
-    } else if (shape === 'dome') {
-      const midScale = 0.55;
-      const midY = wallTop + h.roof * 0.7;
-      const apex: [number, number, number] = [centroid[0], roofTop, centroid[1]];
-      const mid: XZ[] = outer.map((p) => [centroid[0] + (p[0] - centroid[0]) * midScale, centroid[1] + (p[1] - centroid[1]) * midScale]);
-      for (let i = 0; i < outer.length; i++) {
-        const j = (i + 1) % outer.length;
-        const a: [number, number, number] = [outer[i][0], wallTop, outer[i][1]];
-        const c: [number, number, number] = [outer[j][0], wallTop, outer[j][1]];
-        const m0: [number, number, number] = [mid[i][0], midY, mid[i][1]];
-        const m1: [number, number, number] = [mid[j][0], midY, mid[j][1]];
-        emitTri(a, c, m1, rRamp, true);
-        emitTri(a, m1, m0, rRamp, true);
-        emitTri(m0, m1, apex, rRamp, true);
-      }
+    } else if (roof.kind === 'radial') {
+      radialRoof(outer, centroid, wallTop, h.roof, roof.profile, rRamp);
     } else {
-      // gabled / skillion / hipped / half-hipped via a roof height field
-      const field = roofHeightField(outer, centroid, shape, tags);
-      roofFieldMesh(outer, holes, wallTop, h.roof, field, rRamp);
+      planarRoof(outer, holes, wallTop, roof.field, creases, rRamp);
     }
   }
 
-  function emitWallQuad(a0: [number, number, number], a1: [number, number, number], c1: [number, number, number], c0: [number, number, number], ramp: number, centroid: XZ): void {
+  function wallUnderRoof(p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ): void {
+    const field = roof.kind === 'planar' ? roof.field : () => 0;
+    const ts = [0, ...crossings(p, q, creases), 1];
+    for (let k = 0; k + 1 < ts.length; k++) {
+      const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
+      const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
+      const ya = yTop + field(a), yc = yTop + field(c);
+      if (ya - yBase < 0.01 && yc - yBase < 0.01) continue;
+      emitWallQuad([a[0], yBase, a[1]], [a[0], ya, a[1]], [c[0], yc, c[1]], [c[0], yBase, c[1]], ramp, centroid);
+    }
+  }
+
+  function planarRoof(outer: XZ[], holes: XZ[][], wallTop: number, field: (p: XZ) => number, creases: Plane[], ramp: number): void {
+    const flat: number[] = [];
+    const holeIdx: number[] = [];
+    const pts: XZ[] = [];
+    outer.forEach((p) => { flat.push(p[0], p[1]); pts.push(p); });
+    for (const hole of holes) {
+      holeIdx.push(pts.length);
+      for (const p of hole) { flat.push(p[0], p[1]); pts.push(p); }
+    }
+    const tris = earcut(flat, holeIdx.length ? holeIdx : undefined, 2);
+    for (let i = 0; i < tris.length; i += 3) {
+      // cut each footprint triangle along the creases: every piece is one roof plane
+      let cells: XZ[][] = [[pts[tris[i]], pts[tris[i + 1]], pts[tris[i + 2]]]];
+      for (const line of creases) cells = cells.flatMap((c) => splitConvex(c, line));
+      for (const cell of cells) {
+        const lifted = cell.map((p): V3 => [p[0], wallTop + field(p), p[1]]);
+        for (let k = 1; k + 1 < lifted.length; k++) emitTri(lifted[0], lifted[k], lifted[k + 1], ramp, true);
+      }
+    }
+  }
+
+  function radialRoof(outer: XZ[], c: XZ, wallTop: number, roofH: number, profile: [number, number][], ramp: number): void {
+    const ring = (s: number, f: number): V3[] => outer.map((p) => [c[0] + (p[0] - c[0]) * s, wallTop + roofH * f, c[1] + (p[1] - c[1]) * s]);
+    for (let k = 0; k + 1 < profile.length; k++) {
+      const lo = ring(...profile[k]);
+      const hi = ring(...profile[k + 1]);
+      const apex = profile[k + 1][0] === 0;
+      for (let i = 0; i < outer.length; i++) {
+        const j = (i + 1) % outer.length;
+        if (apex) emitTri(lo[i], lo[j], hi[i], ramp, true);
+        else {
+          emitTri(lo[i], lo[j], hi[j], ramp, true);
+          emitTri(lo[i], hi[j], hi[i], ramp, true);
+        }
+      }
+    }
+  }
+
+  function emitWallQuad(a0: V3, a1: V3, c1: V3, c0: V3, ramp: number, centroid: XZ): void {
     // outward horizontal normal from edge midpoint away from centroid
     const mx = (a0[0] + c0[0]) / 2 - centroid[0];
     const mz = (a0[2] + c0[2]) / 2 - centroid[1];
@@ -393,111 +509,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     }
   }
 
-  function roofFieldMesh(outer: XZ[], holes: XZ[][], wallTop: number, roofH: number, field: (p: XZ) => number, ramp: number): void {
-    const flat: number[] = [];
-    const holeIdx: number[] = [];
-    const pts: XZ[] = [];
-    outer.forEach((p) => { flat.push(p[0], p[1]); pts.push(p); });
-    for (const hole of holes) {
-      holeIdx.push(pts.length);
-      for (const p of hole) { flat.push(p[0], p[1]); pts.push(p); }
-    }
-    const tris = earcut(flat, holeIdx.length ? holeIdx : undefined, 2);
-    type V = { p: XZ; y: number };
-    const vert = (p: XZ): V => ({ p, y: wallTop + roofH * field(p) });
-    const split = (a: V, b: V, c: V, depth: number): void => {
-      const longest = Math.max(
-        Math.hypot(a.p[0] - b.p[0], a.p[1] - b.p[1]),
-        Math.hypot(b.p[0] - c.p[0], b.p[1] - c.p[1]),
-        Math.hypot(c.p[0] - a.p[0], c.p[1] - a.p[1]),
-      );
-      if (longest <= 4 || depth >= 4) {
-        emitTri([a.p[0], a.y, a.p[1]], [b.p[0], b.y, b.p[1]], [c.p[0], c.y, c.p[1]], ramp, true);
-        return;
-      }
-      const mid = (u: V, v: V): V => vert([(u.p[0] + v.p[0]) / 2, (u.p[1] + v.p[1]) / 2]);
-      const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
-      split(a, ab, ca, depth + 1);
-      split(ab, b, bc, depth + 1);
-      split(ca, bc, c, depth + 1);
-      split(ab, bc, ca, depth + 1);
-    };
-    for (let i = 0; i < tris.length; i += 3) {
-      split(vert(pts[tris[i]]), vert(pts[tris[i + 1]]), vert(pts[tris[i + 2]]), 0);
-    }
-  }
-
   const vertexCount = ramps.length;
   return { vertices: new Float32Array(verts), ramps: new Uint16Array(ramps), vertexCount };
 }
 
-/** Normalized roof height field in [0,1] for axis-based shapes. */
-export function roofHeightField(outer: XZ[], centroid: XZ, shape: string, tags: Record<string, string>): (p: XZ) => number {
-  // principal axis from covariance
-  let cxx = 0, czz = 0, cxz = 0;
-  for (const p of outer) {
-    const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-    cxx += dx * dx; czz += dz * dz; cxz += dx * dz;
-  }
-  const theta = 0.5 * Math.atan2(2 * cxz, cxx - czz);
-  let ux = Math.cos(theta), uz = Math.sin(theta);
-  if (tags['roof:orientation'] === 'across') { const t = ux; ux = -uz; uz = t; }
-  const vx = -uz, vz = ux;
-  let maxAlong = 0, maxAcross = 0;
-  for (const p of outer) {
-    const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-    maxAlong = Math.max(maxAlong, Math.abs(dx * ux + dz * uz));
-    maxAcross = Math.max(maxAcross, Math.abs(dx * vx + dz * vz));
-  }
-  maxAlong = maxAlong || 1;
-  maxAcross = maxAcross || 1;
-
-  if (shape === 'skillion') {
-    const dir = roofDirection(tags);
-    return (p) => {
-      const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-      const t = (dx * dir[0] + dz * dir[1]) / maxAcross;
-      return clamp01(0.5 - t * 0.5);
-    };
-  }
-  if (shape === 'gabled') {
-    return (p) => {
-      const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-      return clamp01(1 - Math.abs(dx * vx + dz * vz) / maxAcross);
-    };
-  }
-  if (shape === 'half-hipped') {
-    return (p) => {
-      const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-      const across = Math.abs(dx * vx + dz * vz) / maxAcross;
-      const along = Math.abs(dx * ux + dz * uz) / maxAlong;
-      return clamp01(1 - Math.max(across, along * 0.5));
-    };
-  }
-  // hipped (default for the field branch)
-  return (p) => {
-    const dx = p[0] - centroid[0], dz = p[1] - centroid[1];
-    const across = Math.abs(dx * vx + dz * vz) / maxAcross;
-    const along = Math.abs(dx * ux + dz * uz) / maxAlong;
-    return clamp01(1 - Math.max(across, along));
-  };
-}
-
-function roofDirection(tags: Record<string, string>): XZ {
-  const d = tags['roof:direction'];
-  if (!d) return [0, -1];
-  const deg = parseFloat(d);
-  if (Number.isFinite(deg)) {
-    const r = (deg * Math.PI) / 180;
-    return [Math.sin(r), -Math.cos(r)];
-  }
-  const map: Record<string, XZ> = { n: [0, -1], s: [0, 1], e: [1, 0], w: [-1, 0], ne: [0.7, -0.7], nw: [-0.7, -0.7], se: [0.7, 0.7], sw: [-0.7, 0.7] };
-  return map[d.toLowerCase()] ?? [0, -1];
-}
-
-function clamp01(v: number): number {
-  return Math.max(0, Math.min(1, v));
-}
 /**
  * Far stand-in for buildings: one point per building at its centroid, at roof-top height, in its
  * roof colour (lit step 9). Per point: x, y, z (tile-centre ENU like the meshes), palette index.
@@ -512,7 +527,7 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     for (const [lo, la] of ring) { lon += lo; lat += la; }
     lon /= ring.length;
     lat /= ring.length;
-    const h = computeHeights(b.tags);
+    const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     out.push(e, Math.max(0, sampleHeight(lon, lat)) + h.min + h.wall + h.roof, -n, rampIndex(roofRamp(b.tags, buildingSeed(ring)), 9));
   }
@@ -576,7 +591,7 @@ export function buildingNightLights(buildings: OsmBuilding[], tile: Tile, sample
     // drop the closing duplicate
     if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
     if (ring.length < 3) continue;
-    const h = computeHeights(b.tags);
+    const h = buildingHeights(b);
     let minTerrain = Infinity;
     for (const [x, z] of ring) {
       const ll = enuToLatLon(center, x, -z, 0);

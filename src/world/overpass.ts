@@ -127,42 +127,51 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   const buildings: OsmBuilding[] = [];
   const usedWays = new Set<number>();
 
-  const memberRings = (rel: RawRelation): { rings: LonLat[][][]; partWays: RawWay[] } => {
+  const relById = new Map(relations.map((r) => [r.id, r]));
+  const memberRings = (rel: RawRelation): { rings: LonLat[][][]; partWays: RawWay[]; partRelations: number; outlineTags?: Record<string, string> } => {
     const outer: LonLat[][] = [];
     const inner: LonLat[][] = [];
     const partWays: RawWay[] = [];
+    let partRelations = 0;
+    let outlineTags: Record<string, string> | undefined;
     for (const m of rel.members) {
+      if (m.type === 'relation' && m.role === 'part' && relById.has(m.ref)) partRelations++;
       if (m.type !== 'way') continue;
       const w = ways.get(m.ref);
       if (!w) continue;
       usedWays.add(w.id);
       if (m.role === 'part') partWays.push(w);
       else if (m.role === 'inner') inner.push(wayGeom(w));
-      else outer.push(wayGeom(w));
+      else {
+        if (m.role === 'outline' && w.tags) outlineTags ??= w.tags;
+        outer.push(wayGeom(w));
+      }
     }
     const outers = assembleRings(outer);
     const inners = assembleRings(inner);
     const rings = outers.map((o) => [o, ...inners.filter((h) => pointInRing(h[0], o))]);
-    return { rings, partWays };
+    return { rings, partWays, partRelations, outlineTags };
   };
 
   for (const rel of relations) {
     const tags = rel.tags ?? {};
     if (tags.type === 'building') {
       if (!buildingVisible(tags)) continue;
-      const { rings, partWays } = memberRings(rel);
-      if (partWays.length) {
-        // S3DB: when parts exist, the outline itself is not drawn
-        for (const p of partWays) {
-          const geom = wayGeom(p);
-          if (geom.length > 3 && buildingVisible(p.tags ?? {})) buildings.push({ rings: [geom], tags: p.tags ?? {} });
-        }
-      } else {
-        for (const r of rings) buildings.push({ rings: r, tags });
+      const { rings, partWays, partRelations, outlineTags } = memberRings(rel);
+      // S3DB: when parts exist, the outline itself is not drawn (part relations are drawn as multipolygons)
+      for (const p of partWays) {
+        const geom = wayGeom(p);
+        if (geom.length > 3 && buildingVisible(p.tags ?? {})) buildings.push({ rings: [geom], tags: p.tags ?? {} });
+      }
+      if (!partWays.length && !partRelations) {
+        // the heights and colours live on the outline way; the relation adds what the way lacks
+        const outline = { ...tags, ...(outlineTags ?? {}) };
+        delete outline.type;
+        if (buildingVisible(outline)) for (const r of rings) buildings.push({ rings: r, tags: outline });
       }
       continue;
     }
-    if (tags.type !== 'multipolygon' || !isAreaTags(tags)) continue;
+    if (tags.type !== 'multipolygon' || !isAreaTags(tags) && tags['building:part'] === undefined) continue;
     const { rings } = memberRings(rel);
     if (hasBuildingTags(tags)) {
       if (buildingVisible(tags)) for (const r of rings) buildings.push({ rings: r, tags });
@@ -188,7 +197,55 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     }
     if (isLineTags(tags)) lines.push({ points: geom, tags });
   }
-  return { areas, lines, points, buildings };
+  return { areas, lines, points, buildings: hideOutlinesWithParts(buildings) };
+}
+
+const isPart = (b: OsmBuilding) => b.tags['building:part'] !== undefined && b.tags['building:part'] !== 'no';
+
+/**
+ * S3DB: a building outline with building:part areas inside is drawn by its parts only. Parts of a
+ * type=building relation are handled with the relation; this catches the far more common untied case,
+ * where every part lying in the outline belongs to it. A part is in an outline when a point inside the
+ * part (its vertex mean, or a vertex nudged toward it) lies in the outline.
+ */
+export function hideOutlinesWithParts(buildings: OsmBuilding[]): OsmBuilding[] {
+  const parts = buildings.filter(isPart);
+  if (!parts.length) return buildings;
+  const CELL = 0.001;
+  const grid = new Map<string, LonLat[]>();
+  for (const p of parts) {
+    const ring = p.rings[0];
+    if (!ring?.length) continue;
+    const n = ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1] ? ring.length - 1 : ring.length;
+    let lon = 0, lat = 0;
+    for (let i = 0; i < n; i++) { lon += ring[i][0]; lat += ring[i][1]; }
+    let probe: LonLat = [lon / n, lat / n];
+    if (!pointInRing(probe, ring)) {
+      // concave part: a vertex pulled a little toward the mean usually lands inside
+      for (let i = 0; i < n; i++) {
+        const q: LonLat = [ring[i][0] + (probe[0] - ring[i][0]) * 0.02, ring[i][1] + (probe[1] - ring[i][1]) * 0.02];
+        if (pointInRing(q, ring)) { probe = q; break; }
+      }
+    }
+    const key = `${Math.floor(probe[0] / CELL)},${Math.floor(probe[1] / CELL)}`;
+    const list = grid.get(key);
+    if (list) list.push(probe);
+    else grid.set(key, [probe]);
+  }
+  return buildings.filter((b) => {
+    if (isPart(b) || !b.rings[0]?.length) return true;
+    const outer = b.rings[0];
+    let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+    for (const [lo, la] of outer) { w = Math.min(w, lo); e = Math.max(e, lo); s = Math.min(s, la); n = Math.max(n, la); }
+    for (let x = Math.floor(w / CELL); x <= Math.floor(e / CELL); x++) {
+      for (let y = Math.floor(s / CELL); y <= Math.floor(n / CELL); y++) {
+        for (const p of grid.get(`${x},${y}`) ?? []) {
+          if (pointInRing(p, outer) && !b.rings.slice(1).some((h) => pointInRing(p, h))) return false;
+        }
+      }
+    }
+    return true;
+  });
 }
 
 function pointInRing(p: LonLat, ring: LonLat[]): boolean {

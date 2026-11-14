@@ -34,6 +34,8 @@ describe('parseLength', () => {
   it('parses meters, feet and feet-inches', () => {
     expect(parseLength('12')).toBe(12);
     expect(parseLength('12 m')).toBe(12);
+    expect(parseLength('3,7')).toBeCloseTo(3.7, 6);
+    expect(parseLength('3,7 m')).toBeCloseTo(3.7, 6);
     expect(parseLength('40 ft')).toBeCloseTo(12.192, 3);
     expect(parseLength("40'")).toBeCloseTo(12.192, 3);
     expect(parseLength('12\'6"')).toBeCloseTo(12 * 0.3048 + 6 * 0.0254, 4);
