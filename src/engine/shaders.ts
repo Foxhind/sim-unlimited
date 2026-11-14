@@ -28,7 +28,12 @@ uint glowIndex(uint packedRamp, float litStep, float fog) {
 
 const LOG_DEPTH_FS = `
 in float vLogW;
-void writeLogDepth() { gl_FragDepth = log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0); }
+// orthographic views (see ORTHO_VS) are all far from the eye, where the logarithm is at its
+// coarsest (decimetres): their depth is linear between the planes instead
+uniform highp float uOrthoFar;
+void writeLogDepth() {
+  gl_FragDepth = uOrthoFar > 0.0 ? (vLogW - 1.0) / uOrthoFar : log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0);
+}
 `;
 
 /**
@@ -49,7 +54,7 @@ vec3 toWorld(vec3 p) { return toWorldDir(p) + uOffset.xyz; }
  * projection whose near plane is 0 and far plane uOrthoFar. 0 = perspective.
  */
 const ORTHO_VS = `
-uniform float uOrthoFar;
+uniform highp float uOrthoFar;
 float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * uOrthoFar : max(clip.w, 0.0)); }
 `;
 
