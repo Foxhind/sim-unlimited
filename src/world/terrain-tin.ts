@@ -95,8 +95,9 @@ export interface TinOptions {
 
 /**
  * Vertical tolerance of the tile border, metres. The border is as coarse as the interior: inside
- * a tile nothing but isolines and errors beyond REFINE_TOL of the belt step shapes the relief, so
- * a border that followed it more closely would put a ring of vertices around a tile with an
+ * a tile nothing but isolines and errors beyond REFINE_TOL of the belt step (REFINE_TOL_M at
+ * most) shapes the relief, so a border that followed it more closely would put a ring of
+ * vertices around a tile with an
  * empty interior (56 on one flat forest tile, fanned into 54 slivers across it instead of two
  * triangles) and rows of small pyramids along seams. Nothing next to the border disagrees with
  * it either: colour boundaries only subdivide the relief surface (see buildTerrainTin).
@@ -304,6 +305,13 @@ function untangle(chains: Chain[], border: Seg[]): void {
 
 /** refinement: error threshold as a fraction of the belt step, and its limits per tile */
 export const REFINE_TOL = 0.25;
+/**
+ * The same threshold in metres; the smaller of the two applies. A quarter of a 250 m belt let a
+ * tile with less relief than one belt stay a few border triangles: a hilltop on its edge tented
+ * 45 m over the slope below it (14/9518/6396). Refinement levels stay step/8 apart: finer ones
+ * spent the vertex budget sooner and left mountain tiles worse.
+ */
+export const REFINE_TOL_M = 30;
 const REFINE_ROUNDS = 4;
 const REFINE_PER_ROUND = 4;
 /** lattice cells between nodes refined in one round */
@@ -730,7 +738,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // the level nearest the node, at the node's height rounded to step/8. Every vertex still sits
   // on an equal-height line; only the belts there get thinner. Deterministic (worst node first,
   // ties by index), a few nodes per round so the triangulation is rebuilt only a few times.
-  const tol = step * REFINE_TOL;
+  const tol = Math.min(step * REFINE_TOL, REFINE_TOL_M);
   const quantum = step / 8;
   const tried = new Set<number>();
   let added = 0;

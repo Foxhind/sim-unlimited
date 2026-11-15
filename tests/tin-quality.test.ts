@@ -137,3 +137,29 @@ it("the sea of a real coastal tile stays flat at 0 m and its plain is not lifted
   expect(Math.sqrt(se / n)).toBeLessThan(25);
   expect(plain).toBeLessThan(45);
 });
+
+// 14/9518/6396: 15–89 m, less than one belt. With a quarter-belt threshold (62.5 m) it stayed six
+// border vertices, and the hilltop on its north edge tented 45 m over the slope below.
+it('a tile of less relief than one belt is refined to within 20 m (real DEM)', async () => {
+  const f = (await import('./fixtures/terrarium-14-9518-6396.json')).default;
+  const grid = f.grid as number, side = grid + 1;
+  const heights = Float32Array.from(f.heights);
+  const borders = { n: Float32Array.from(f.borders.n), s: Float32Array.from(f.borders.s), w: Float32Array.from(f.borders.w), e: Float32Array.from(f.borders.e) };
+  const tin = buildTerrainTin(f.tile, grid, heights, { borders });
+  let maxE = 0;
+  for (const t of tin.tris) {
+    const ax = tin.vx[t.a], ay = tin.vy[t.a], bx = tin.vx[t.b], by = tin.vy[t.b], cx = tin.vx[t.c], cy = tin.vy[t.c];
+    const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (!d) continue;
+    for (let j = Math.ceil(Math.min(ay, by, cy)); j <= Math.floor(Math.max(ay, by, cy)); j++)
+      for (let i = Math.ceil(Math.min(ax, bx, cx)); i <= Math.floor(Math.max(ax, bx, cx)); i++) {
+        const w1 = ((i - ax) * (cy - ay) - (cx - ax) * (j - ay)) / d;
+        const w2 = ((bx - ax) * (j - ay) - (i - ax) * (by - ay)) / d;
+        const w0 = 1 - w1 - w2;
+        if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+        maxE = Math.max(maxE, Math.abs(tin.vh[t.a] * w0 + tin.vh[t.b] * w1 + tin.vh[t.c] * w2 - heights[j * side + i]));
+      }
+  }
+  expect(maxE).toBeLessThan(20); // 16.4 m, against 44.6 m before
+  expect(tin.vx.length).toBeLessThan(30);
+});
