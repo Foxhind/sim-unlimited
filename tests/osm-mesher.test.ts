@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, snowy, withGlow } from '../src/engine/palette';
-import { enuToLatLon, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { enuToLatLon, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
@@ -224,5 +224,79 @@ describe('areas on the terrain faces', () => {
     for (let k = 0; k < flatLines.length; k += 8) want += Math.hypot(flatLines[k + 4] - flatLines[k], flatLines[k + 6] - flatLines[k + 2]);
     expect(length / want).toBeGreaterThan(0.999);
     expect(length / want).toBeLessThan(1.001);
+  });
+});
+
+describe('road ribbons where ways meet and across tile borders', () => {
+  const GRID = 16;
+  const flatLattice = new Float32Array((GRID + 1) * (GRID + 1)).fill(100);
+  const EAST: Tile = { z: TILE.z, x: TILE.x + 1, y: TILE.y };
+  const tiles = [TILE, EAST].map((t) => {
+    const tin = buildTerrainTin(t, GRID, flatLattice);
+    return { tile: t, tin, surface: tinSampler(tin, t), center: tileCenter(t) };
+  });
+  /** the road meshes' triangles in lon/lat (both tiles), for point-in-triangle probes */
+  const coverage = (data: OsmTileData, which = tiles) => {
+    const tris: Array<[number, number][]> = [];
+    for (const t of which) {
+      const m = buildOsmMesh({ tile: t.tile, detail: 'full', data, sampleHeight: t.surface, tin: t.tin }).roads;
+      for (let v = 0; v + 2 < m.vertexCount; v += 3) {
+        tris.push([0, 1, 2].map((k) => {
+          const ll = enuToLatLon(t.center, m.vertices[(v + k) * 6], -m.vertices[(v + k) * 6 + 2], 0);
+          return [ll.lon, ll.lat] as [number, number];
+        }));
+      }
+    }
+    return (lon: number, lat: number) => tris.some(([a, b, c]) => {
+      const s = (p: [number, number], q: [number, number]) => (q[0] - p[0]) * (lat - p[1]) - (q[1] - p[1]) * (lon - p[0]);
+      const d1 = s(a, b), d2 = s(b, c), d3 = s(c, a);
+      return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+    });
+  };
+  const b = tileBounds(TILE);
+  const lonPerM = (b.east - b.west) / tileSizeMeters(TILE);
+  const latPerM = lonPerM * Math.cos((tileCenter(TILE).lat * Math.PI) / 180);
+  const HALF = 4.5; // tertiary: 9 m wide
+
+  it('a road across a tile border is covered right up to the border from both sides', () => {
+    // slanting across the east border, so square ends cut at the border would leave notches
+    const mid = tileCenter(TILE).lat;
+    const a: [number, number] = [b.east - 300 * lonPerM, mid - 150 * latPerM];
+    const z: [number, number] = [b.east + 300 * lonPerM, mid + 150 * latPerM];
+    const data: OsmTileData = { areas: [], lines: [{ points: [a, z], tags: { highway: 'tertiary' } }], points: [], buildings: [] };
+    const covered = coverage(data);
+    const len = Math.hypot(600, 300);
+    const ux = 600 / len, uy = 300 / len;
+    let missed = 0, n = 0;
+    for (let along = -20; along <= 20; along += 1) {
+      for (let across = -0.9 * HALF; across <= 0.9 * HALF; across += 0.9) {
+        // metres from where the road crosses the border
+        const x = ux * along - uy * across, y = uy * along + ux * across;
+        n++;
+        if (!covered(b.east + x * lonPerM, mid + y * latPerM)) missed++;
+      }
+    }
+    expect(missed).toBe(0);
+    expect(n).toBeGreaterThan(300);
+  });
+
+  it('two ways meeting at a right angle leave no wedge open outside the bend', () => {
+    const c = tileCenter(TILE);
+    const node: [number, number] = [c.lon, c.lat];
+    const data: OsmTileData = {
+      areas: [],
+      lines: [
+        { points: [[c.lon - 200 * lonPerM, c.lat], node], tags: { highway: 'tertiary' } },
+        { points: [node, [c.lon, c.lat + 200 * latPerM]], tags: { highway: 'tertiary' } },
+      ],
+      points: [], buildings: [],
+    };
+    const covered = coverage(data, [tiles[0]]);
+    // the outer corner of the bend is south-east of the node
+    for (let deg = -90; deg <= 0; deg += 5) {
+      const r = 0.9 * HALF;
+      const x = Math.cos((deg * Math.PI) / 180) * r, y = Math.sin((deg * Math.PI) / 180) * r;
+      expect(covered(c.lon + x * lonPerM, c.lat + y * latPerM)).toBe(true);
+    }
   });
 });

@@ -425,38 +425,82 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
 
-  const buildLine = (line: OsmLine): void => {
+  const LINE_BIAS = 1.4;
+  /** how a line is drawn: undefined when it is not drawn at all */
+  const lineLook = (line: OsmLine) => {
     const style = classifyLine(line.tags);
-    if (!style || line.points.length < 2) return;
-    const bias = 1.4;
-    const half = style.width / 2;
+    if (!style || line.points.length < 2) return undefined;
     const road = !!line.tags.highway;
     const lit = road && isLitRoad(line.tags);
-    const out = road ? roads : style.ramp === RAMP.WATER ? water : main;
-    // a street-lit surface glows at night (the shader shows the level only then)
-    const ramp = lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp;
+    return {
+      half: style.width / 2,
+      road,
+      lit,
+      out: road ? roads : style.ramp === RAMP.WATER ? water : main,
+      // a street-lit surface glows at night (the shader shows the level only then)
+      ramp: lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp,
+    };
+  };
+  /** points of a round cap around an end of a ribbon (lattice units); 12 sides */
+  const CAP_SIDES = 12;
+
+  /**
+   * A line's ribbon on the TIN, from the whole way (not this tile's share of it): each triangle is
+   * cut by the terrain faces under it, so the relief cannot cut through it, and whatever lies past
+   * the tile border finds no face here and is dropped. The neighbour cuts the same ribbon at the
+   * same border, so the two halves meet exactly. Each end of the way gets a round cap: OSM splits
+   * roads and rivers into ways that meet at an angle, and square ends left a wedge open outside
+   * every such bend. Inside a way the sides are mitred, so a bend keeps the full width.
+   */
+  const buildRibbon = (line: OsmLine): void => {
+    const look = lineLook(line);
+    if (!look || !tin) return;
+    const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
+    if (c.length < 2) return;
+    // nothing of it reaches this tile: skip the work
+    const g = tin.grid, r = look.half * latticePerMetre;
+    if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > g + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > g + r)) return;
+    const { ramp, out } = look;
+    const left: P2[] = [], right: P2[] = [];
+    for (let i = 0; i < c.length; i++) {
+      const prev = c[Math.max(0, i - 1)], next = c[Math.min(c.length - 1, i + 1)];
+      let dx = next[0] - prev[0], dy = next[1] - prev[1];
+      const dl = Math.hypot(dx, dy) || 1;
+      dx /= dl; dy /= dl;
+      // mitre: the offset along the mean normal that keeps both segments `r` wide (at most 2r)
+      let m = r;
+      if (i > 0 && i < c.length - 1) {
+        const ix = c[i][0] - prev[0], iy = c[i][1] - prev[1], il = Math.hypot(ix, iy) || 1;
+        const cos = (ix / il) * dx + (iy / il) * dy;
+        m = r / Math.max(0.5, cos);
+      }
+      left.push([c[i][0] - dy * m, c[i][1] + dx * m]);
+      right.push([c[i][0] + dy * m, c[i][1] - dx * m]);
+    }
+    for (let i = 0; i < c.length - 1; i++) {
+      onFaces([left[i], right[i], left[i + 1]], ramp, LINE_BIAS, out);
+      onFaces([right[i], right[i + 1], left[i + 1]], ramp, LINE_BIAS, out);
+    }
+    for (const e of [c[0], c[c.length - 1]]) {
+      for (let k = 0; k < CAP_SIDES; k++) {
+        const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
+        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, LINE_BIAS, out);
+      }
+    }
+  };
+
+  /** this tile's share of a line: its lamps and far lines (the TIN ribbon is buildRibbon's) */
+  const buildLine = (line: OsmLine): void => {
+    const look = lineLook(line);
+    if (!look) return;
+    const bias = LINE_BIAS;
+    const { half, road, lit, out, ramp } = look;
     if (lit) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
-      // the ribbon in lattice coordinates, each triangle cut by the terrain faces under it: every
-      // piece lies on its face, so the relief cannot cut through the road between its points
+      if (!road) return;
       const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
-      if (c.length < 2) return;
-      const h = half * latticePerMetre;
-      const left: P2[] = [], right: P2[] = [];
-      for (let i = 0; i < c.length; i++) {
-        const prev = c[Math.max(0, i - 1)], next = c[Math.min(c.length - 1, i + 1)];
-        let dx = next[0] - prev[0], dy = next[1] - prev[1];
-        const dl = Math.hypot(dx, dy) || 1;
-        dx /= dl; dy /= dl;
-        left.push([c[i][0] - dy * h, c[i][1] + dx * h]);
-        right.push([c[i][0] + dy * h, c[i][1] - dx * h]);
-      }
-      for (let i = 0; i < c.length - 1; i++) {
-        onFaces([left[i], right[i], left[i + 1]], ramp, bias, out);
-        onFaces([right[i], right[i + 1], left[i + 1]], ramp, bias, out);
-        if (road) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
-      }
+      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
       return;
     }
 
@@ -524,6 +568,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
 
   for (const area of data.areas) buildArea(area);
   for (const line of data.lines) buildLine(line);
+  if (tin) for (const line of opts.data.lines) buildRibbon(line);
   for (const p of data.points) buildPoint(p);
 
   if (opts.buildings !== false && data.buildings.length) {
