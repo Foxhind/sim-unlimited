@@ -92,20 +92,23 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze',
+      'uLut', 'uLight', 'uHaze', 'uSat',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze',
+      'uLut', 'uLight', 'uHaze', 'uSat',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze',
+      'uLut', 'uLight', 'uHaze', 'uSat',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
-    this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut']);
+    this.skyU = uniformMap(gl, this.skyProg, [
+      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
+      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd',
+    ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, DOWNSAMPLE_FS);
     this.dsU = uniformMap(gl, this.dsProg, ['uWorldTex']);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
@@ -189,7 +192,12 @@ export class Renderer {
     gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([1]));
   }
 
-  drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, moonDir: vec3): void {
+  /**
+   * Sky, sun and moon, and below the horizon the base ground (SKY_FS): a plain surface of one face
+   * colour at height `ground.y`, shaded and fogged like terrain, so there is a horizon and a ground
+   * whether or not the tiles have loaded. Terrain drawn afterwards covers it.
+   */
+  drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, moonDir: vec3, ground: BaseGround): void {
     const gl = this.gl;
     mat4.multiply(this.invViewProj, proj, view);
     mat4.invert(this.invViewProj, this.invViewProj);
@@ -201,6 +209,14 @@ export class Renderer {
     gl.uniform3fv(this.skyU.uCamPos, camPos);
     gl.uniform3fv(this.skyU.uSunDir, sunDir);
     gl.uniform3fv(this.skyU.uMoonDir, moonDir);
+    gl.uniform1f(this.skyU.uGroundH, Math.max(1, camPos[1] - ground.y));
+    gl.uniform1ui(this.skyU.uGroundRamp, ground.ramp >>> 0);
+    gl.uniform3fv(this.skyU.uLightDir, ground.lightDir);
+    gl.uniform1f(this.skyU.uFogStart, ground.fogStart);
+    gl.uniform1f(this.skyU.uFogEnd, ground.fogEnd);
+    gl.uniform1i(this.skyU.uGlow, 0);
+    gl.uniform1i(this.skyU.uSnow, this.snow ? 1 : 0);
+    this.setLight(this.skyU);
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -352,7 +368,20 @@ export class Renderer {
     if (!this.light) return;
     this.gl.uniform3fv(u.uLight, this.light.levels);
     this.gl.uniform3fv(u.uHaze, this.light.haze);
+    this.gl.uniform1f(u.uSat, this.light.saturation);
   }
+}
+
+/** the base ground under the tiles (drawSky) */
+export interface BaseGround {
+  /** its height in world y (m above sea level) */
+  y: number;
+  /** face colour (palette.ts): sea, or land (with the snow flag) */
+  ramp: number;
+  /** direction the terrain is lit from */
+  lightDir: vec3;
+  fogStart: number;
+  fogEnd: number;
 }
 
 /** texture unit the LUT stays bound to */

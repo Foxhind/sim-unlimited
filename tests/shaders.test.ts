@@ -29,3 +29,30 @@ describe('winter snow', () => {
     }
   });
 });
+
+describe('base ground (horizon without tiles)', () => {
+  it('the sky pass draws a ground on the same curved Earth as the world shaders, fogged like terrain', async () => {
+    const { SKY_FS } = await import('../src/engine/shaders');
+    expect(WORLD_VS).toContain('wp.y -= (d * d) / (2.0 * 6371000.0);');
+    expect(SKY_FS).toContain('max(1.0 - dir.y * dir.y, 0.0) / 6371000.0');
+    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit * 11.0, fog)');
+    expect(SKY_FS).toContain('fog = floor(fog * 12.0) / 12.0;');
+  });
+
+  it('a ray hits the ground below the true horizon only (dip = sqrt(2h/R))', () => {
+    // mirror of SKY_FS: (a/2) t^2 + dir.y t + h = 0, a = (1 - dir.y^2) / R
+    const R = 6371000;
+    const hit = (dy: number, h: number) => {
+      const a = (1 - dy * dy) / R, disc = dy * dy - 2 * a * h;
+      if (dy >= 0 || disc < 0) return undefined;
+      return a > 1e-12 ? (-dy - Math.sqrt(disc)) / a : h / -dy;
+    };
+    const h = 6000, dip = Math.sqrt((2 * h) / R);
+    expect(hit(-dip * 1.01, h)).toBeDefined();
+    expect(hit(-dip * 0.99, h)).toBeUndefined();
+    // just below the horizon the ground lies near the horizon distance, ~277 km
+    expect(Math.abs(hit(-dip * 1.0001, h)! / Math.sqrt(2 * h * R) - 1)).toBeLessThan(0.05);
+    expect(hit(-1, h)!).toBeCloseTo(h); // straight down
+    expect(hit(0.1, h)).toBeUndefined();
+  });
+});

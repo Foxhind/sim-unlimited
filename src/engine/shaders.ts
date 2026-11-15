@@ -8,6 +8,8 @@
 import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
+/** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
+const EARTH_R = 6371000;
 /**
  * World colour (palette.ts): the world passes write RGB, not palette indices. A face colour is a
  * packed uint: an RGB colour, or (MATERIAL_FLAG) a material ramp looked up in the LUT; bits 24..26
@@ -22,9 +24,14 @@ const COLOUR_GLSL = `
 uniform sampler2D uLut;
 uniform vec3 uLight[${GLOW_LEVELS + 1}];
 uniform vec3 uHaze;
+uniform float uSat;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 vec3 rgbOf(uint p) { return vec3(float((p >> 16u) & 255u), float((p >> 8u) & 255u), float(p & 255u)) / 255.0; }
-vec3 imageryShade(vec3 c, float s, uint lvl) { return min(c * (0.4 + 0.8 * s / 11.0), 1.0) * uLight[lvl]; }
+vec3 vivid(vec3 c) {
+  float y = dot(c, vec3(0.299, 0.587, 0.114));
+  return clamp(vec3(y) + (c - vec3(y)) * uSat, 0.0, 1.0);
+}
+vec3 imageryShade(vec3 c, float s, uint lvl) { return vivid(min(c * (0.4 + 0.8 * s / 11.0), 1.0)) * uLight[lvl]; }
 vec3 shadeRgb(vec3 c, uint s, uint lvl) {
   if (s < 12u) return imageryShade(c, float(s), lvl);
   return mix(imageryShade(c, 11.0, lvl), uHaze, float(s - 11u) / 4.0);
@@ -229,11 +236,32 @@ uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
-uniform sampler2D uLut;
+// base ground (horizon): camera height above it in m, its face colour, the terrain's light and fog
+uniform float uGroundH;
+uniform uint uGroundRamp;
+uniform vec3 uLightDir;
+uniform float uFogStart;
+uniform float uFogEnd;
 out vec4 oColor;
+${GLOW_VS}
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uCamPos);
+  // Base ground: a flat face colour on the curved Earth below the camera (the world shader's
+  // d^2 / 2R drop), out to the true horizon. Drawn here, under every tile, so the horizon and the
+  // ground are there before (and between) the terrain tiles; loaded terrain simply covers it.
+  if (dir.y < 0.0) {
+    float a = max(1.0 - dir.y * dir.y, 0.0) / ${EARTH_R.toFixed(1)};
+    float disc = dir.y * dir.y - 2.0 * a * uGroundH;
+    if (disc >= 0.0) {
+      float t = a > 1e-12 ? (-dir.y - sqrt(disc)) / a : uGroundH / -dir.y;
+      float fog = clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+      fog = floor(fog * 12.0) / 12.0;
+      float lit = 0.30 + 0.70 * max(uLightDir.y, 0.0);
+      oColor = vec4(shadeColour(uGroundRamp, lit * 11.0, fog), 1.0);
+      return;
+    }
+  }
   float t = clamp(dir.y, 0.0, 1.0);
   float band = floor(pow(1.0 - t, 1.6) * 9.0);
   uint idx = 192u + uint(min(band, 8.0));
@@ -259,7 +287,7 @@ void main() {
   } else if (ang < 0.045) {
     idx = ${LIGHT.SUN_HALO}u;
   }
-  oColor = vec4(texelFetch(uLut, ivec2(int(idx & 255u), int(idx >> 8u)), 0).rgb, 1.0);
+  oColor = vec4(lutColor(idx), 1.0);
 }
 `;
 

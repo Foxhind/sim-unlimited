@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, LIGHT, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
-  material, OVERLAY_LUT_BASE, paletteAt, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
+  material, OVERLAY_LUT_BASE, paletteAt, saturate, sunniness, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
 } from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
 
@@ -74,6 +74,53 @@ describe('paletteAt', () => {
     const a = paletteAt(-0.001);
     const b = paletteAt(0.001);
     expect(Math.abs(a.horizon[0] - b.horizon[0])).toBeLessThan(1);
+  });
+});
+
+describe('sunny weather', () => {
+  const sat = (c: readonly number[]) => (Math.max(...c) - Math.min(...c)) / Math.max(...c);
+  const lum = (c: readonly number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+
+  it('sunniness: clear and few clouds are fully sunny, overcast not at all', () => {
+    expect(sunniness(0)).toBe(1);
+    expect(sunniness(30)).toBe(1);
+    expect(sunniness(60)).toBeCloseTo(0.5);
+    expect(sunniness(90)).toBe(0);
+    expect(sunniness(100)).toBe(0);
+    expect(sunniness(undefined)).toBe(1);
+  });
+
+  it('a sunny day: deeper blue sky, brighter warm light, livelier colours; a cloudy day as before', () => {
+    const cloudy = paletteAt(45, 0), sunny = paletteAt(45, 1);
+    expect(cloudy).toEqual(paletteAt(45));
+    expect(cloudy.saturation).toBe(1);
+    expect(sunny.saturation).toBeGreaterThan(1.2);
+    expect(sunny.lightMul).toBeGreaterThan(cloudy.lightMul);
+    expect(sat(sunny.zenith)).toBeGreaterThan(sat(cloudy.zenith));
+    expect(lum(sunny.horizon)).toBeGreaterThan(lum(cloudy.horizon));
+    const grass = [70, 110, 60] as const;
+    const a = shadeColour(grass, 9, cloudy), b = shadeColour(grass, 9, sunny);
+    expect(sat(b)).toBeGreaterThan(sat(a));
+    expect(lum(b)).toBeGreaterThan(lum(a));
+    // material ramps in the LUT get the same treatment
+    const l0 = buildLUT(cloudy), l1 = buildLUT(sunny);
+    expect(sat(entry(l1, rampIndex(RAMP.GRASS, 9)))).toBeGreaterThan(sat(entry(l0, rampIndex(RAMP.GRASS, 9))));
+    expect(lightUniforms(sunny).saturation).toBe(sunny.saturation);
+  });
+
+  it('nights stay as they are, sunsets get only their daylight share', () => {
+    expect(paletteAt(-30, 1)).toEqual(paletteAt(-30, 0));
+    expect(paletteAt(-4, 1)).toEqual(paletteAt(-4, 0));
+    const s = paletteAt(3, 1).saturation;
+    expect(s).toBeGreaterThan(1);
+    expect(s).toBeLessThan(paletteAt(45, 1).saturation);
+  });
+
+  it('saturate keeps greys and the luminance, clamps to 0..255', () => {
+    expect(saturate([100, 100, 100], 2)).toEqual([100, 100, 100]);
+    const c = saturate([200, 120, 60], 1.4);
+    expect(lum(c)).toBeCloseTo(lum([200, 120, 60]), 0);
+    expect(Math.max(...saturate([250, 20, 20], 3))).toBe(255);
   });
 });
 

@@ -1,12 +1,12 @@
 import { mat4, vec3 } from 'gl-matrix';
 import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
-import { Renderer } from './engine/renderer';
+import { Renderer, type BaseGround } from './engine/renderer';
 import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { FLASH_LIGHT, LUT_ENTRIES, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, snowy, sunniness } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -109,20 +109,29 @@ const windOverride = ((): { from: number; ms: number; gust: number } | undefined
   if (!Number.isFinite(from) || !Number.isFinite(ms) || ms < 0) return undefined;
   return { from, ms, gust: Number.isFinite(gust) ? Math.max(ms, gust) : ms };
 })();
+/** ?clouds=80 forces the total cloud cover in % (how sunny the day looks, palette.ts sunniness) */
+const cloudsOverride = ((): number | undefined => {
+  const raw = new URLSearchParams(window.location.search).get('clouds');
+  const v = raw === null || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : undefined;
+})();
 /** the weather in force: live data with the URL overrides applied (shown on the HUD, flown through) */
 let inForceFor: Weather | undefined | null = null;
 let inForce: Weather | undefined;
 function weatherInForce(): Weather | undefined {
   const w = weather.current;
-  if (!windOverride) return w;
+  if (!windOverride && cloudsOverride === undefined) return w;
   if (w !== inForceFor) {
     inForceFor = w;
-    inForce = {
-      tempC: w?.tempC ?? weather.tempOverride ?? 15, cloudPct: w?.cloudPct ?? 0, elevation: w?.elevation, pressureHpa: w?.pressureHpa,
-      at: w?.at ?? start.latLon, time: w?.time ?? Date.now(),
-      // a forced wind replaces the whole column: the measured winds aloft no longer belong to it
-      windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
-    };
+    const cloudPct = cloudsOverride ?? w?.cloudPct ?? 0;
+    inForce = !windOverride
+      ? (w ? { ...w, cloudPct } : undefined)
+      : {
+        tempC: w?.tempC ?? weather.tempOverride ?? 15, cloudPct, elevation: w?.elevation, pressureHpa: w?.pressureHpa,
+        at: w?.at ?? start.latLon, time: w?.time ?? Date.now(),
+        // a forced wind replaces the whole column: the measured winds aloft no longer belong to it
+        windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
+      };
   }
   return inForce;
 }
@@ -138,8 +147,29 @@ const sunDir = vec3.clone(sun.dir);
 const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
-let lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
-let light = lightUniforms(paletteAt(sun.elevationDeg));
+/** distance fog of every world pass, m */
+const FOG_START_M = 15000;
+const FOG_END_M = 55000;
+/** the base ground's height and kind from the last known DEM under the camera (land at 0 m until known) */
+let baseY = 0;
+let baseSea = false;
+/**
+ * The base ground under the tiles (renderer.drawSky): at the height of the ground beneath the
+ * camera, sea where that is at or below sea level, else land; it fills the view to the horizon
+ * before the tiles load and wherever one is missing.
+ */
+function baseGround(lightDir: vec3): BaseGround {
+  const h = ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat);
+  if (h !== undefined) {
+    baseY = Math.max(0, h);
+    baseSea = h <= 0;
+  }
+  return { y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), lightDir, fogStart: FOG_START_M, fogEnd: FOG_END_M };
+}
+/** day palette for the sun now and the weather in force: sunnier the clearer the sky */
+const dayPalette = () => paletteAt(sun.elevationDeg, sunniness(cloudsOverride ?? weatherInForce()?.cloudPct));
+let lut = buildLUT(dayPalette(), weather.surface);
+let light = lightUniforms(dayPalette());
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
@@ -166,8 +196,8 @@ function updateLight(): void {
     );
     vec3.normalize(lightDir, lightDir);
   }
-  lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
-  light = lightUniforms(paletteAt(sun.elevationDeg));
+  lut = buildLUT(dayPalette(), weather.surface);
+  light = lightUniforms(dayPalette());
   applySunColors(lut, sun.elevationDeg);
 }
 
@@ -499,12 +529,12 @@ function frame(now: number): void {
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
   applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
-  renderer.drawSky(view, proj, camPos, sunDir, moonDir);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
   renderer.snow = surface.snow;
-  chunks.draw(renderer, view, proj, camPos, lightDir, 15000, 55000);
-  osm.draw(renderer, view, proj, camPos, lightDir, 15000, 55000, lightsOn, 3 * u);
+  renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir));
+  chunks.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
+  osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }

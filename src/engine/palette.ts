@@ -184,6 +184,8 @@ export interface PaletteParams {
   horizon: RGB;
   lightMul: number;
   tint: RGB;
+  /** colour saturation of lit surfaces (1 = as they are), applied before the light */
+  saturation: number;
 }
 
 const NIGHT: PaletteParams = {
@@ -191,20 +193,51 @@ const NIGHT: PaletteParams = {
   horizon: [12, 18, 36],
   lightMul: 0.22,
   tint: [0.55, 0.65, 1.0],
+  saturation: 1,
 };
 const DUSK: PaletteParams = {
   zenith: [24, 28, 80],
   horizon: [224, 120, 64],
   lightMul: 0.55,
   tint: [1.0, 0.72, 0.55],
+  saturation: 1,
 };
+/** daylight under a cloudy sky: the plain, even light */
 const DAY: PaletteParams = {
   zenith: [32, 72, 192],
   horizon: [168, 200, 232],
   lightMul: 1.0,
   tint: [1, 1, 1],
+  saturation: 1,
+};
+/**
+ * daylight in good weather (sunniness 1): a deep blue zenith over a bright clear horizon, warm
+ * brighter sunlight and livelier colours on the ground
+ */
+const SUNNY_DAY: PaletteParams = {
+  zenith: [16, 88, 232],
+  horizon: [190, 222, 250],
+  lightMul: 1.12,
+  tint: [1.0, 0.97, 0.88],
+  saturation: 1.4,
 };
 
+/** total cloud cover up to this is fully sunny weather, from SUNNY_OVERCAST_PCT on none */
+const SUNNY_CLEAR_PCT = 30;
+const SUNNY_OVERCAST_PCT = 90;
+
+/**
+ * How sunny the weather is, 0..1, from the total cloud cover in % (weather.ts): clear and few
+ * clouds give 1, overcast 0. Unknown weather counts as clear (the same default the HUD shows).
+ */
+export function sunniness(cloudPct: number | undefined): number {
+  if (cloudPct === undefined || !Number.isFinite(cloudPct)) return 1;
+  return Math.max(0, Math.min(1, (SUNNY_OVERCAST_PCT - cloudPct) / (SUNNY_OVERCAST_PCT - SUNNY_CLEAR_PCT)));
+}
+
+
+/** the base ground's land (renderer drawSky): a muted green-olive, the common tone of Landsat land */
+export const BASE_LAND = colour(88, 100, 64);
 
 /** tree trunks: a bark brown */
 export const TREE_TRUNK_RAMP = colour(96, 68, 44);
@@ -303,19 +336,34 @@ function lerpParams(a: PaletteParams, b: PaletteParams, t: number): PaletteParam
     horizon: lerpRGB(a.horizon, b.horizon, t),
     lightMul: lerp(a.lightMul, b.lightMul, t),
     tint: lerpRGB(a.tint, b.tint, t),
+    saturation: lerp(a.saturation, b.saturation, t),
   };
 }
 
-/** Palette keyframe for a sun elevation in degrees (Q7: day/dusk/night blend). */
-export function paletteAt(sunElevationDeg: number): PaletteParams {
+/**
+ * Palette keyframe for a sun elevation in degrees (Q7: day/dusk/night blend). `sunny` (0..1,
+ * sunniness) moves the day keyframe from the plain cloudy daylight to SUNNY_DAY; it fades in with
+ * the sun through dusk like the rest of the day, so nights and sunsets keep their look.
+ */
+export function paletteAt(sunElevationDeg: number, sunny = 0): PaletteParams {
+  const day = sunny > 0 ? lerpParams(DAY, SUNNY_DAY, Math.min(1, sunny)) : DAY;
   if (sunElevationDeg <= -8) return NIGHT;
   if (sunElevationDeg < 0) return lerpParams(NIGHT, DUSK, (sunElevationDeg + 8) / 8);
-  if (sunElevationDeg < 12) return lerpParams(DUSK, DAY, sunElevationDeg / 12);
-  return DAY;
+  if (sunElevationDeg < 12) return lerpParams(DUSK, day, sunElevationDeg / 12);
+  return day;
+}
+
+/** saturation k about the colour's own luminance (k = 1: unchanged), clamped to 0..255 */
+export function saturate(c: RGB, k: number): RGB {
+  if (k === 1) return c;
+  const y = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+  const f = (v: number) => Math.max(0, Math.min(255, y + (v - y) * k));
+  return [f(c[0]), f(c[1]), f(c[2])];
 }
 
 function scaleRGB(c: RGB, p: PaletteParams): RGB {
-  return [c[0] * p.lightMul * p.tint[0], c[1] * p.lightMul * p.tint[1], c[2] * p.lightMul * p.tint[2]];
+  const s = saturate(c, p.saturation);
+  return [s[0] * p.lightMul * p.tint[0], s[1] * p.lightMul * p.tint[1], s[2] * p.lightMul * p.tint[2]];
 }
 
 function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
@@ -334,6 +382,8 @@ export interface LightUniforms {
   levels: Float32Array;
   /** rgb 0..1 */
   haze: Float32Array;
+  /** colour saturation of lit surfaces (PaletteParams.saturation) */
+  saturation: number;
 }
 
 export function lightUniforms(p: PaletteParams): LightUniforms {
@@ -342,13 +392,14 @@ export function lightUniforms(p: PaletteParams): LightUniforms {
     const q = k === 0 ? p : glowParams(p, k);
     for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
   }
-  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255) };
+  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation };
 }
 
 /** the crash flash: everything white */
 export const FLASH_LIGHT: LightUniforms = {
   levels: new Float32Array((GLOW_LEVELS + 1) * 3).fill(1000),
   haze: new Float32Array([1, 1, 1]),
+  saturation: 1,
 };
 
 /**
