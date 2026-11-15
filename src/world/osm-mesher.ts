@@ -164,19 +164,46 @@ interface LineStyle {
   width: number;
 }
 
+/**
+ * OSM `width` in metres: "5", "5.5 m", "3,5", "12'", "12 ft", "4'6\"". Undefined when absent,
+ * unreadable or outside 0.5–200 m (a typo, not a road).
+ */
+export function osmWidthM(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const v = value.trim().replace(',', '.');
+  const feet = /^(\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*(?:(\d+(?:\.\d+)?)\s*(?:"|in))?$/.exec(v);
+  const m = feet ? (Number(feet[1]) + Number(feet[2] ?? 0) / 12) * 0.3048 : /^(\d+(?:\.\d+)?)\s*(?:m|meters?|metres?)?$/.exec(v)?.[1];
+  const w = Number(m);
+  return Number.isFinite(w) && w >= 0.5 && w <= 200 ? w : undefined;
+}
+
+/** carriageway width per lane when a road has `lanes` but no `width` */
+const LANE_WIDTH_M = 3.5;
+/** width of a waterway line without a `width` tag, metres */
+const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
+
 function classifyLine(tags: Record<string, string>): LineStyle | undefined {
   const hw = tags.highway;
   if (hw) {
+    const lanes = Number(tags.lanes);
     const width =
-      hw === 'motorway' || hw === 'trunk' ? 20 :
-      hw === 'primary' ? 14 :
-      hw === 'secondary' ? 11 :
-      hw === 'tertiary' ? 9 :
-      7;
+      osmWidthM(tags.width) ??
+      (Number.isInteger(lanes) && lanes > 0 && lanes <= 16 ? lanes * LANE_WIDTH_M : undefined) ??
+      (hw === 'motorway' || hw === 'trunk' ? 20 :
+        hw === 'primary' ? 14 :
+        hw === 'secondary' ? 11 :
+        hw === 'tertiary' ? 9 :
+        7);
     return { ramp: RAMP.ASPHALT, width };
   }
   if (tags.railway === 'rail') return { ramp: RAMP.HULL_DARK, width: 6 };
-  if (tags.waterway === 'river' || tags.waterway === 'canal') return { ramp: RAMP.WATER, width: 18 };
+  const ww = tags.waterway;
+  if (ww && WATERWAY_WIDTH_M[ww] !== undefined) {
+    // piped under roads, fields and buildings: nothing to see
+    if (tags.tunnel && tags.tunnel !== 'no') return undefined;
+    if (tags.location === 'underground') return undefined;
+    return { ramp: RAMP.WATER, width: osmWidthM(tags.width) ?? WATERWAY_WIDTH_M[ww] };
+  }
   if (tags.aeroway === 'runway' || tags.aeroway === 'taxiway') return { ramp: RAMP.ASPHALT, width: 30 };
   return undefined;
 }
@@ -347,8 +374,16 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     if (lls.length < 3) return;
     const tris = earcut(flat, holes.length ? holes : undefined, 2);
 
+    if (style.water && tin) {
+      // on the terrain faces like any area. A flat plane at the shore's highest point hung metres
+      // over every water area that runs downhill — a canal mapped as an area beside its own line
+      // floated above the ribbon of that line, a second copy of it (14/9517/6398)
+      const lp = lls.map(toLattice);
+      for (let i = 0; i < tris.length; i += 3) onFaces([lp[tris[i]], lp[tris[i + 1]], lp[tris[i + 2]]], style.ramp, style.bias, water);
+      return;
+    }
     if (style.water) {
-      // flat water plane at the sampled boundary height
+      // no TIN to lie on: a flat water plane at the sampled boundary height
       let level = 0;
       const outer = area.rings[0];
       const probes = Math.min(outer.length, 8);

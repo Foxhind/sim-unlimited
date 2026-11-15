@@ -13,7 +13,7 @@ const FULL_FILTER = `
   way["aeroway"~"runway|taxiway|apron|helipad"]; node["aeroway"="helipad"];
   way["natural"~"water|wood|scrub|beach|bare_rock"]; relation["natural"="water"];
   way["landuse"="forest"]; relation["landuse"="forest"]; relation["natural"="wood"];
-  way["waterway"~"river|riverbank|canal"];
+  way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];

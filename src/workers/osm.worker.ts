@@ -18,7 +18,7 @@ import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } f
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 23;
+export const OSM_MESH_SCHEMA = 25;
 
 export interface OsmRequest {
   type: 'osm';

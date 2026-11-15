@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, snowy, withGlow } from '../src/engine/palette';
 import { enuToLatLon, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
-import { buildOsmMesh } from '../src/world/osm-mesher';
+import { buildOsmMesh, osmWidthM } from '../src/world/osm-mesher';
+import { parseFilter } from '../src/world/osm-api';
+import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 
@@ -166,6 +168,15 @@ describe('areas on the terrain faces', () => {
     expect(offSurface(draped)).toBeGreaterThan(5);
   });
 
+  it('a water area lies on the terrain faces, not on a plane at its highest shore point', () => {
+    const lake: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'water', water: 'canal' } }], lines: [], points: [], buildings: [] };
+    const cut = buildOsmMesh({ tile: TILE, detail: 'full', data: lake, sampleHeight: surface, tin });
+    expect(cut.vertexCount).toBe(0);
+    expect(cut.water.vertexCount).toBeGreaterThan(0);
+    for (let i = 0; i < cut.water.vertexCount; i++) expect(cut.water.ramps[i]).toBe(RAMP.WATER);
+    expect(offSurface(cut.water, 0.3)).toBeLessThan(0.5);
+  });
+
   it('covers the same ground as the area', () => {
     const cut = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: surface, tin });
     let area = 0;
@@ -298,5 +309,62 @@ describe('road ribbons where ways meet and across tile borders', () => {
       const x = Math.cos((deg * Math.PI) / 180) * r, y = Math.sin((deg * Math.PI) / 180) * r;
       expect(covered(c.lon + x * lonPerM, c.lat + y * latPerM)).toBe(true);
     }
+  });
+});
+
+describe('line widths from OSM', () => {
+  it('reads width in metres, feet and with units; ignores junk', () => {
+    expect(osmWidthM('5')).toBe(5);
+    expect(osmWidthM('5.5 m')).toBe(5.5);
+    expect(osmWidthM('3,5')).toBe(3.5);
+    expect(osmWidthM("12'")).toBeCloseTo(3.658, 3);
+    expect(osmWidthM('12 ft')).toBeCloseTo(3.658, 3);
+    expect(osmWidthM('4\'6"')).toBeCloseTo(1.372, 3);
+    for (const junk of [undefined, '', 'wide', '0', '1000', '-3']) expect(osmWidthM(junk)).toBeUndefined();
+  });
+
+  /** ribbon width of a single west→east line on flat ground: the spread of its vertices north–south */
+  const ribbonWidth = (tags: Record<string, string>) => {
+    const c = tileCenter(TILE);
+    const b = tileBounds(TILE);
+    const data: OsmTileData = {
+      areas: [], points: [], buildings: [],
+      lines: [{ points: [[b.west + (b.east - b.west) * 0.2, c.lat], [b.west + (b.east - b.west) * 0.8, c.lat]], tags }],
+    };
+    const m = mesh(data, flat, 40);
+    const out = tags.highway ? m.roads : m.water;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < out.vertexCount; i++) {
+      lo = Math.min(lo, out.vertices[i * 6 + 2]);
+      hi = Math.max(hi, out.vertices[i * 6 + 2]);
+    }
+    return out.vertexCount ? hi - lo : 0;
+  };
+
+  it('streams, brooks, ditches and drains are drawn as water, narrower than rivers', () => {
+    const river = ribbonWidth({ waterway: 'river' });
+    for (const ww of ['stream', 'brook', 'ditch', 'drain']) {
+      const w = ribbonWidth({ waterway: ww });
+      expect(w).toBeGreaterThan(1);
+      expect(w).toBeLessThan(river / 4);
+    }
+    expect(ribbonWidth({ waterway: 'stream', tunnel: 'culvert' })).toBe(0);
+  });
+
+  it('a width tag sets the ribbon width of waterways and roads; lanes when a road has none', () => {
+    expect(ribbonWidth({ waterway: 'stream', width: '6' })).toBeCloseTo(6, 1);
+    expect(ribbonWidth({ waterway: 'river', width: '40 m' })).toBeCloseTo(40, 1);
+    // unlit classes: a lit road's lamp poles stand beyond its edges in the same mesh
+    expect(ribbonWidth({ highway: 'tertiary', width: '4' })).toBeCloseTo(4, 1);
+    expect(ribbonWidth({ highway: 'tertiary', lanes: '4' })).toBeCloseTo(14, 1);
+    expect(ribbonWidth({ highway: 'tertiary' })).toBeCloseTo(9, 1);
+    expect(ribbonWidth({ highway: 'unclassified' })).toBeCloseTo(7, 1);
+  });
+
+  it('the full-detail query fetches the small waterways', () => {
+    const sel = parseFilter(osmFilter('full'));
+    const fetched = (v: string) => sel.some((s) => s.type === 'way' && s.clauses.some((c) => c.key === 'waterway' && c.re?.test(v)));
+    for (const ww of ['river', 'riverbank', 'canal', 'stream', 'brook', 'ditch', 'drain']) expect(fetched(ww)).toBe(true);
+    expect(fetched('dam')).toBe(false);
   });
 });
