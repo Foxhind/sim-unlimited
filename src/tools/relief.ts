@@ -88,9 +88,10 @@ const marks = $<HTMLCanvasElement>('marks');
 const renderer = new Renderer(canvas);
 const chunks = new ChunkManager(renderer.gl, state.centre);
 const osm = new OsmManager(renderer.gl, state.centre);
-osm.onTileReady = (tile, runways) => {
-  // as in the simulator: terrain under a runway is rebuilt flattened once its OSM is known
+osm.onTileReady = (tile, runways, coast) => {
+  // as in the simulator: terrain under a runway or by the coast is rebuilt once its OSM is known
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
+  else if (coast) chunks.invalidate(tile); // only this tile's shore changes
 };
 
 const view = mat4.create();

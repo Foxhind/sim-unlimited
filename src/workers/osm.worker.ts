@@ -8,14 +8,15 @@ import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
-import type { OsmDetail } from '../world/osm-types';
+import type { OsmDetail, OsmLine } from '../world/osm-types';
 import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
-import { buildTerrainTin, tinLocator, tinSampler } from '../world/terrain-tin';
+import { buildTerrainTin, COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { greenLand, LAND_RAMP_BASE, RAMP } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { buildGlowGround } from '../world/terrain-mesher';
+import { coastlineWays } from '../world/coast';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
 export const OSM_MESH_SCHEMA = 25;
@@ -60,6 +61,12 @@ export interface OsmMeshResponse {
   /** night: lamp heads (x, y, z, palette index); far, the street-lit roads' dotted line */
   lamps: ArrayBuffer;
   runways: number;
+  /**
+   * The tile's OSM, just downloaded, decides its shore (a coastline, or DEM sea without one): its
+   * terrain was built without it and is rebuilt (TinOptions.coast). From the cache it is false: the raw OSM was there when the
+   * terrain worker built the tile, so the terrain already has the coastline.
+   */
+  coast: boolean;
 }
 
 export interface OsmErrorResponse {
@@ -77,13 +84,22 @@ interface WorkerScope {
 const ctx = self as unknown as WorkerScope;
 const source = new OsmSource();
 
-async function runwayCount(tile: Tile): Promise<number> {
+/**
+ * What in a tile's OSM reshapes its terrain: runways (flattened) and the shore — a coastline, or
+ * DEM sea in a tile without one (it becomes all land or all sea; see TinOptions.coast).
+ */
+function terrainFlags(lines: OsmLine[], lattice?: Float32Array): { runways: number; coast: boolean } {
+  const demSea = lattice ? lattice.some((h) => h < COAST_LEVEL) : false;
+  return { runways: lines.filter((l) => l.tags.aeroway === 'runway').length, coast: coastlineWays(lines).length > 0 || demSea };
+}
+
+async function cachedTerrainFlags(tile: Tile): Promise<{ runways: number; coast: boolean }> {
   const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
-  if (!raw) return 0;
+  if (!raw) return { runways: 0, coast: false };
   try {
-    return parseOverpass(JSON.parse(raw.json)).lines.filter((l) => l.tags.aeroway === 'runway').length;
+    return { runways: terrainFlags(parseOverpass(JSON.parse(raw.json)).lines).runways, coast: false };
   } catch {
-    return 0;
+    return { runways: 0, coast: false };
   }
 }
 
@@ -128,7 +144,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), roadLines: cached.roadLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
         lamps: cached.lamps ?? empty(),
-        runways: detail === 'full' ? await runwayCount(tile) : 0,
+        ...(detail === 'full' ? await cachedTerrainFlags(tile) : { runways: 0, coast: false }),
       });
       return;
     }
@@ -143,7 +159,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // with all its data, so without imagery fail as retryable like the terrain worker
     const ls = await loadLandsatTerrain(tile, grid, grade);
     if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
-    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts } });
+    // the same TIN as the terrain worker builds from the same OSM: coastline included
+    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts }, coast: coastlineWays(data.lines) });
     const drape = tinSampler(tin, tile);
     // foliage: the colour of the land face under the tree, pulled to the nearest green land colour
     const locate = tinLocator(tin, tile);
@@ -188,7 +205,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
-    send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
+    send({ ...out, ...(detail === 'full' ? terrainFlags(data.lines, lattice) : { runways: 0, coast: false }) });
   } catch (err) {
     const res: OsmErrorResponse = {
       type: 'error',

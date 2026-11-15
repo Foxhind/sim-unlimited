@@ -7,7 +7,10 @@ import {
   type Pt,
   type Tri,
 } from './contours';
+import { clipPolyline } from './clip';
+import { coastSeaTest, joinLines, toLatticeLine } from './coast';
 import { tileRowMeters, type Tile } from './geodesy';
+import type { LonLat } from './osm-types';
 import type { HeightSampler, TileBorders } from './terrain-source';
 
 /** Vertical thickness of one belt, the same at every zoom (tuned in the terrain inspector). */
@@ -98,7 +101,28 @@ export interface TinOptions {
    * it both ways. false: plain Douglas–Peucker, the line kept as close to the raw one as it gets.
    */
   inscribed?: boolean;
+  /**
+   * OSM natural=coastline ways (lon/lat, whole, land on their left) when the tile's OSM is loaded.
+   * Fixed edges at 0 m where they cross the tile, and the side of the nearest one decides sea and
+   * land — for the faces, and for the lattice (sea nodes down to 0 m, land nodes up to LAND_MIN_M)
+   * — wherever it can tell and the DEM is low enough (COAST_SEA_MAX_M); elsewhere the DEM's
+   * shoreline still decides. An empty list means the tile's OSM is loaded and has no coastline:
+   * the tile is then all sea or all land (the DEM's majority). Undefined: OSM not loaded, the DEM
+   * decides alone. Every builder of a tile's TIN must pass the same.
+   */
+  coast?: ReadonlyArray<ReadonlyArray<LonLat>>;
 }
+
+/** land beside an OSM coastline is lifted to at least this height (the DEM has it at or below 0) */
+export const LAND_MIN_M = 1;
+/**
+ * The OSM coastline makes sea only where the DEM is below this: it fixes a shore the DEM blurs,
+ * it never floods relief. Coastline ways come with loose ends and gaps (what does not touch the
+ * tile is not downloaded), and a wrong side once laid whole mountains under the sea.
+ */
+export const COAST_SEA_MAX_M = 5;
+/** simplification of the OSM coastline inside a tile, lattice cells */
+const COAST_EPS = 0.25;
 
 /**
  * Vertical tolerance of the tile border, metres. The border is as coarse as the interior: inside
@@ -662,6 +686,55 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // with the same tolerance, so seams stay within it (skirts hide the rest).
   const borderTol = opts.borderTol ?? BORDER_TOL_M;
 
+  // OSM coastline: which side of it a lattice point lies on, and its pieces inside the tile
+  const coastAll = joinLines((opts.coast ?? []).map((w) => toLatticeLine(tile, grid, w)).filter((l) => l.length >= 2));
+  // OSM loaded and no coastline crosses the tile: no shore runs through it, so it is all sea or all
+  // land, whatever the DEM says — a depression below 0.5 m inland (14/9515/6394) is no sea. The
+  // DEM's majority decides which.
+  let wholeSea = false;
+  if (opts.coast && !coastAll.length) {
+    let below = 0;
+    for (let k = 0; k < heights.length; k++) if (heights[k] < COAST_LEVEL) below++;
+    wholeSea = below * 2 >= heights.length;
+  }
+  const coastSide = coastAll.length
+    ? coastSeaTest(coastAll, { x: grid / 2, y: grid / 2 })
+    : opts.coast ? () => wholeSea : undefined;
+  /**
+   * Sea or land at point p of DEM height h, by the coastline where it can tell and the DEM can
+   * agree: sea only below COAST_SEA_MAX_M; undefined leaves it to the DEM.
+   */
+  const coastVerdict = coastSide
+    ? (p: Pt, h: number): boolean | undefined => {
+        const sea = coastSide(p);
+        return sea === undefined ? undefined : sea && h < COAST_SEA_MAX_M;
+      }
+    : undefined;
+  const seaAt = coastVerdict
+    ? (p: Pt): boolean => coastVerdict(p, latticeHeight(heights, grid, p)) ?? latticeHeight(heights, grid, p) < COAST_LEVEL
+    : undefined;
+  const coastPieces: Pt[][] = [];
+  if (seaAt) {
+    const box = { west: 0, south: 0, east: grid, north: grid };
+    const snap = (v: number) => (Math.abs(v) < 1e-9 ? 0 : Math.abs(v - grid) < 1e-9 ? grid : v);
+    for (const l of coastAll) {
+      for (const piece of clipPolyline(l.map((p) => [p.x, p.y] as LonLat), box)) {
+        const pts = simplifyOpen(piece.map(([x, y]) => ({ x: snap(x), y: snap(y) })), COAST_EPS);
+        if (pts.length >= 2) coastPieces.push(pts);
+      }
+    }
+    // the lattice agrees with the coastline: no land below LAND_MIN_M, no sea above 0 m
+    const fixed = new Float32Array(heights);
+    for (let j = 0; j <= grid; j++) {
+      for (let i = 0; i <= grid; i++) {
+        const k = j * side + i;
+        const v = coastVerdict!({ x: i, y: j }, fixed[k]);
+        if (v !== undefined) fixed[k] = v ? Math.min(fixed[k], 0) : Math.max(fixed[k], LAND_MIN_M);
+      }
+    }
+    heights = fixed;
+  }
+
   let minH = Infinity, maxH = -Infinity;
   for (let k = 0; k < heights.length; k++) {
     minH = Math.min(minH, heights[k]);
@@ -681,6 +754,15 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       ];
   const place = (e: number, f: number): Pt =>
     e === 0 ? { x: f * grid, y: 0 } : e === 1 ? { x: f * grid, y: grid } : e === 2 ? { x: 0, y: f * grid } : { x: grid, y: f * grid };
+  // the border profiles follow the coastline like the lattice (a neighbour with the same OSM does the same)
+  if (seaAt) {
+    profiles.forEach((prof, e) => {
+      profiles[e] = Float32Array.from(prof, (h, k) => {
+        const v = coastVerdict!(place(e, k / (prof.length - 1)), h);
+        return v === undefined ? h : v ? Math.min(h, 0) : Math.max(h, LAND_MIN_M);
+      });
+    });
+  }
   /** simplified profile per edge: fraction along the edge and height */
   const simplified = profiles.map((prof, e) => {
     const edgeLen = tileRowMeters(tile.z, e === 0 ? tile.y : e === 1 ? tile.y + 1 : tile.y + 0.5);
@@ -744,6 +826,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   let chains: Chain[] = [];
   let lines: Polyline[] = [];
   for (let attempt = 0; ; attempt++) {
+    // the DEM's shoreline too: where the coastline cannot tell (loose ends) the DEM decides
     lines = beltLevels(minH, maxH, step).flatMap((l) => extractIsolines(heights, grid, l));
     chains = [];
     for (const line of lines) {
@@ -789,6 +872,15 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         const e = edgeOf(p);
         if (e < 0) continue;
         vid(p, c.level === COAST_LEVEL ? 0 : borderHeight(p));
+        onBorder[e].push(p);
+      }
+    }
+    // the OSM coastline ends on the border at sea level, like the DEM's
+    for (const piece of coastPieces) {
+      for (const p of [piece[0], piece[piece.length - 1]]) {
+        const e = edgeOf(p);
+        if (e < 0) continue;
+        vid(p, 0);
         onBorder[e].push(p);
       }
     }
@@ -839,6 +931,16 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         }
         prev = id;
       }
+    }
+
+    // the OSM coastline: fixed edges at 0 m, split where it crosses an isoline; every piece of it
+    // (not the halves of other edges it split) separates sea from land
+    if (coastPieces.length) {
+      const from = constraints.length;
+      const halves = new Set<number>();
+      insertColourLines(coastPieces, constraints, vx, vy, vh, vid, () => 0, { verts: 0, crossings: 0 }, (p) => edgeOf(p) >= 0,
+        (ci, added) => { halves.add(added); if (coast[ci]) coast[added] = true; });
+      for (let ci = from; ci < constraints.length; ci++) if (!halves.has(ci)) coast[ci] = true;
     }
 
     // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
@@ -950,7 +1052,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   }
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
-  const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid);
+  const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid, seaAt);
   if (opts.debug) {
     Object.assign(opts.debug, {
       step, eps, raw: lines, constraints, missing, borderVerts, refined: added, colourFlips: lastColourFlips,
@@ -982,7 +1084,11 @@ const edgeKey = (u: number, v: number): number => (u < v ? u * 1048576 + v : v *
  * decide it: coastline vertices are at 0 m, and an island lower than the first belt level has no
  * other vertex — all-zero corners made it sea.
  */
-export function seaFaces(vx: number[], vy: number[], tris: Tri[], coastEdges: Set<number>, heights: Float32Array, grid: number): Uint8Array {
+export function seaFaces(
+  vx: number[], vy: number[], tris: Tri[], coastEdges: Set<number>, heights: Float32Array, grid: number,
+  /** the OSM coastline's verdict for a point (TinOptions.coast); the DEM decides without it */
+  seaAt?: (p: Pt) => boolean,
+): Uint8Array {
   const byEdge = new Map<number, number[]>();
   tris.forEach((t, i) => {
     for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
@@ -1003,7 +1109,7 @@ export function seaFaces(vx: number[], vy: number[], tris: Tri[], coastEdges: Se
       const t = tris[members[q]];
       const area = Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2;
       const c = { x: (vx[t.a] + vx[t.b] + vx[t.c]) / 3, y: (vy[t.a] + vy[t.b] + vy[t.c]) / 3 };
-      vote += latticeHeight(heights, grid, c) < COAST_LEVEL ? area : -area;
+      vote += (seaAt ? seaAt(c) : latticeHeight(heights, grid, c) < COAST_LEVEL) ? area : -area;
       for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
         const k = edgeKey(u, v);
         if (coastEdges.has(k)) continue;

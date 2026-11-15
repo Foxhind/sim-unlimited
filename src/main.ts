@@ -175,8 +175,10 @@ function startLocation(fc: { location: string; customPoint: LatLon | null }): La
 }
 
 // Q40: a fresh runway tile invalidates nearby terrain so flattening is applied
-osm.onTileReady = (tile, runways) => {
+osm.onTileReady = (tile, runways, coast) => {
+  // runways flatten the terrain and the OSM coastline reshapes the shore: rebuild with the OSM
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
+  else if (coast) chunks.invalidate(tile); // only this tile's shore changes
 };
 
 type SimState = 'menu' | 'loading' | 'flying' | 'paused' | 'crashed';

@@ -14,6 +14,7 @@ const FULL_FILTER = `
   way["natural"~"water|wood|scrub|beach|bare_rock"]; relation["natural"="water"];
   way["landuse"="forest"]; relation["landuse"="forest"]; relation["natural"="wood"];
   way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"];
+  way["natural"="coastline"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
@@ -63,11 +64,14 @@ const AREA_KEYS = ['natural', 'landuse', 'leisure', 'aeroway', 'waterway', 'buil
 
 function isAreaTags(tags: Record<string, string>): boolean {
   if (tags.area === 'no') return false;
+  // an island's coastline closes on itself, but it is a line: land on its left (see coast.ts)
+  if (tags.natural === 'coastline') return false;
   return AREA_KEYS.some((k) => tags[k] !== undefined);
 }
 
 function isLineTags(tags: Record<string, string>): boolean {
-  return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined;
+  return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
+    tags.natural === 'coastline';
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {

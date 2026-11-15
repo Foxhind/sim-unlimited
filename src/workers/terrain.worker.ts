@@ -5,6 +5,8 @@ import { buildTerrainMesh } from '../world/terrain-mesher';
 import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
+import { coastlineWays } from '../world/coast';
+import type { LonLat } from '../world/osm-types';
 import { flattenRunways } from '../world/runway';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 
@@ -58,12 +60,14 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     }
     const png = await fetchTerrariumPng(tile);
     const { heights, borders } = await loadTileDem(tile, grid);
+    let coast: LonLat[][] | undefined;
     if (osmRaw) {
       try {
         const lines = parseOverpass(JSON.parse(osmRaw.json)).lines;
         flattenRunways(heights, tile, grid, lines, await decodePngToSampler(png, tile));
+        coast = coastlineWays(lines);
       } catch {
-        // corrupt raw cache: fall back to unflattened relief
+        // corrupt raw cache: fall back to unflattened relief and the DEM's shoreline
       }
     }
     // Landsat: colour boundaries shape the TIN and faces take the imagery colour. A tile is shown
@@ -74,6 +78,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       tile, grid, heights, borders,
       faceColor: ls.faceColor,
       colourLines: { lines: ls.lines, maxVerts: ls.maxVerts },
+      coast,
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;

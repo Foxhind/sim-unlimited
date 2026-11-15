@@ -8,6 +8,7 @@ import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
 import { OSM_SCHEMA_VERSION } from './osm-source';
 import { parseOverpass } from './overpass';
+import { coastlineWays } from './coast';
 import { buildingHeights } from './building-mesher';
 import type { GroundContact } from '../flight/model';
 
@@ -105,7 +106,11 @@ export class GroundProbe {
       // Landsat colour boundaries are part of the TIN; without imagery use the plain TIN for now and
       // reload the tile later so collision matches the mesh once it is rebuilt with imagery
       const ls = await loadLandsatTerrain(tile, grid);
-      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, { borders, colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined }), tile);
+      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, {
+        borders,
+        colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined,
+        coast: data ? coastlineWays(data.lines) : undefined,
+      }), tile);
       this.samplers.set(key, surface);
       if (!ls) this.stale.set(key, now + 10000);
       else this.stale.delete(key);

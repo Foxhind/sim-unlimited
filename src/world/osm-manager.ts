@@ -82,6 +82,7 @@ interface MeshPayload {
   roadLines: ArrayBuffer;
   lamps: ArrayBuffer;
   runways: number;
+  coast: boolean;
 }
 
 interface WorkerSlot {
@@ -108,7 +109,8 @@ export class OsmManager {
   readonly chunks = new Map<string, OsmChunk>();
   renderList: OsmChunk[] = [];
   /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
-  onTileReady?: (tile: Tile, runways: number) => void;
+  /** a tile's OSM arrived: `runways` and `coast` reshape its terrain, which then needs a rebuild */
+  onTileReady?: (tile: Tile, runways: number, coast: boolean) => void;
   /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
   grade: ColourGrade = NEUTRAL_GRADE;
   private readyFired = new Set<string>();
@@ -144,7 +146,7 @@ export class OsmManager {
             glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), roadLines: buf(msg.roadLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
-            lamps: buf(msg.lamps), runways: msg.runways ?? 0,
+            lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -360,7 +362,7 @@ export class OsmManager {
     chunk.status = 'ready';
     if (!this.readyFired.has(chunk.key)) {
       this.readyFired.add(chunk.key);
-      this.onTileReady?.(chunk.tile, data.runways);
+      this.onTileReady?.(chunk.tile, data.runways, data.coast);
     }
   }
 
