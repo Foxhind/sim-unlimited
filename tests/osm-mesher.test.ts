@@ -55,12 +55,29 @@ describe('buildOsmMesh', () => {
 
   it('renders water as a flat plane at the boundary height', () => {
     const data: OsmTileData = { areas: [{ rings: [squareRing()], tags: { natural: 'water' } }], lines: [], points: [], buildings: [] };
-    const m = mesh(data, () => 42, 40);
+    const all = mesh(data, () => 42, 40);
+    expect(all.vertexCount).toBe(0); // water is a mesh of its own (drawn after the drape, no depth writes)
+    const m = all.water;
     expect(m.vertexCount).toBeGreaterThan(0);
     for (let i = 0; i < m.vertexCount; i++) {
       expect(m.ramps[i]).toBe(RAMP.WATER);
       expect(m.vertices[i * 6 + 1]).toBeCloseTo(42.3, 3);
     }
+  });
+
+  it('river and canal ribbons go to the water mesh, roads over them to the road mesh', () => {
+    const c = tileCenter(TILE);
+    const b = tileBounds(TILE);
+    const across = (tags: Record<string, string>) => ({
+      points: [[b.west + (b.east - b.west) * 0.2, c.lat], [b.west + (b.east - b.west) * 0.8, c.lat]] as [number, number][], tags,
+    });
+    const data: OsmTileData = { areas: [], lines: [across({ waterway: 'river' }), across({ highway: 'primary' })], points: [], buildings: [] };
+    const m = mesh(data, flat, 40);
+    expect(m.vertexCount).toBe(0);
+    expect(m.water.vertexCount).toBeGreaterThan(0);
+    for (let i = 0; i < m.water.vertexCount; i++) expect(m.water.ramps[i]).toBe(RAMP.WATER);
+    expect(m.roads.vertexCount).toBeGreaterThan(0);
+    for (let i = 0; i < m.roads.vertexCount; i++) expect(m.roads.ramps[i]).not.toBe(RAMP.WATER);
   });
 
   it('builds a draped road ribbon wider than its centerline', () => {

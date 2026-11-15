@@ -203,10 +203,12 @@ export class Renderer {
     fogEnd: number,
     /** terrain tiles: edges (bits 1 n, 2 s, 4 w, 8 e) stitched to a coarser neighbour */
     coarse = 0,
+    /** false: depth-tested but leaves no depth (OSM water, so roads drawn later always show over it) */
+    depthWrite = true,
   ): void {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(true);
+    gl.depthMask(depthWrite);
     gl.useProgram(this.worldProg);
     gl.uniform1i(this.worldU.uCoarse, coarse);
     gl.uniform1f(this.worldU.uOrthoFar, this.orthoFar);
@@ -221,6 +223,7 @@ export class Renderer {
     gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    if (!depthWrite) gl.depthMask(true);
   }
 
   /** Q36: instanced trees of one type: its `vertexCount` geometry vertices from `first`, `count` instances. */

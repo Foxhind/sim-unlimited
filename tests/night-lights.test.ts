@@ -289,18 +289,15 @@ describe('street lighting', () => {
     expect(isLitRoad({ railway: 'rail', lit: 'yes' })).toBe(false);
   });
 
-  it('a lit road glows and has lamps and glowing far lines; an unlit one has none', () => {
+  it('a lit road glows and has lamps (its far dotted line too); an unlit one has none', () => {
     const lit = road({ highway: 'residential' });
     const asphalt = lit.roads.ramps.filter((r) => withGlow(r, 0) === RAMP.ASPHALT);
     expect(asphalt.length).toBeGreaterThan(0);
     for (const r of asphalt) expect(rampGlowLevel(r)).toBe(LIT_ROAD_GLOW);
-    expect(lit.litRoadLines.length).toBe(lit.roadLines.length);
-    for (let k = 3; k < lit.litRoadLines.length; k += 4) expect(lit.litRoadLines[k]).toBe(LIGHT.STREET);
     expect(lit.lamps.length).toBeGreaterThan(0);
 
     const dark = road({ highway: 'tertiary' });
     for (const r of dark.roads.ramps) expect(rampGlowLevel(r)).toBe(0);
-    expect(dark.litRoadLines.length).toBe(0);
     expect(dark.lamps.length).toBe(0);
     expect(dark.roads.vertexCount).toBeGreaterThan(0);
   });

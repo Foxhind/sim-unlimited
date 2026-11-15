@@ -64,11 +64,15 @@ const LAMP_RAMP = RAMP.HULL_DARK;
 export interface OsmMeshData extends TerrainMeshData {
   /** road ribbons (highway=*) and street lamp poles, drawn only near like the buildings */
   roads: TerrainMeshData;
+  /**
+   * water areas and river/canal ribbons, drawn after the drape without writing depth: whatever
+   * comes after (roads first of all) always shows over the water
+   */
+  water: TerrainMeshData;
   /** far stand-in for the roads: GL line vertex pairs (x, y, z, palette index) on the terrain */
   roadLines: Float32Array;
-  /** night, far: the street-lit roads as glowing lines (same layout, LIGHT.STREET) */
-  litRoadLines: Float32Array;
-  /** night, near: lamp heads at the ends of the lamp arms (x, y, z, palette index) */
+  /** night: lamp heads at the ends of the lamp arms (x, y, z, palette index); far, the same points
+   *  stand in for the street-lit roads as a dotted line */
   lamps: Float32Array;
 }
 
@@ -188,8 +192,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   interface Out { verts: number[]; ramps: number[] }
   const main: Out = { verts: [], ramps: [] };
   const roads: Out = { verts: [], ramps: [] };
+  const water: Out = { verts: [], ramps: [] };
   const roadLines: number[] = [];
-  const litRoadLines: number[] = [];
   const lamps: number[] = [];
   const { verts, ramps } = main;
 
@@ -354,7 +358,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       }
       level = Math.max(level, 0) + style.bias * biasScale;
       const pts = lls.map(([lon, lat]) => makePt(lon, lat, level));
-      for (let i = 0; i < tris.length; i += 3) emitTri(pts[tris[i]], pts[tris[i + 1]], pts[tris[i + 2]], style.ramp);
+      for (let i = 0; i < tris.length; i += 3) emitTri(pts[tris[i]], pts[tris[i + 1]], pts[tris[i + 2]], style.ramp, water);
       return;
     }
 
@@ -417,12 +421,6 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       walked += len;
     }
   };
-  /** the far line pairs added since `from`, again with the street-light colour */
-  const copyLit = (from: number): void => {
-    for (let k = from; k < roadLines.length; k += 4) {
-      litRoadLines.push(roadLines[k], roadLines[k + 1], roadLines[k + 2], LIGHT.STREET);
-    }
-  };
 
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
@@ -434,10 +432,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const half = style.width / 2;
     const road = !!line.tags.highway;
     const lit = road && isLitRoad(line.tags);
-    const out = road ? roads : main;
+    const out = road ? roads : style.ramp === RAMP.WATER ? water : main;
     // a street-lit surface glows at night (the shader shows the level only then)
     const ramp = lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp;
-    const linesFrom = roadLines.length;
     if (lit) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
@@ -460,7 +457,6 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         onFaces([right[i], right[i + 1], left[i + 1]], ramp, bias, out);
         if (road) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
       }
-      if (lit) copyLit(linesFrom);
       return;
     }
 
@@ -510,7 +506,6 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         roadLines.push(a.x, a.y, a.z, ROAD_LINE_INDEX, b.x, b.y, b.z, ROAD_LINE_INDEX);
       }
     }
-    if (lit) copyLit(linesFrom);
   };
 
   const buildPoint = (p: OsmPoint): void => {
@@ -542,8 +537,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     ramps: new Uint16Array(ramps), // VGA ramps (building colours) go past 255
     vertexCount: ramps.length,
     roads: { vertices: new Float32Array(roads.verts), ramps: new Uint16Array(roads.ramps), vertexCount: roads.ramps.length },
+    water: { vertices: new Float32Array(water.verts), ramps: new Uint16Array(water.ramps), vertexCount: water.ramps.length },
     roadLines: new Float32Array(roadLines),
-    litRoadLines: new Float32Array(litRoadLines),
     lamps: new Float32Array(lamps),
   };
 }

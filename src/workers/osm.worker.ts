@@ -18,7 +18,7 @@ import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } f
 import { buildGlowGround } from '../world/terrain-mesher';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 20;
+export const OSM_MESH_SCHEMA = 22;
 
 export interface OsmRequest {
   type: 'osm';
@@ -53,9 +53,11 @@ export interface OsmMeshResponse {
   /** road ribbons (near, pos+normal with Uint16 ramps) and their far 1 px GL lines (x, y, z, palette index) */
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
+  /** water areas and river ribbons (pos+normal with Uint16 ramps), drawn without depth writes */
+  wVertices: ArrayBuffer;
+  wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
-  /** night: street-lit roads as far lines, lamp heads near (x, y, z, palette index) */
-  litRoadLines: ArrayBuffer;
+  /** night: lamp heads (x, y, z, palette index); far, the street-lit roads' dotted line */
   lamps: ArrayBuffer;
   runways: number;
 }
@@ -109,7 +111,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights,
       res.windows, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
-      res.rVertices, res.rRamps, res.roadLines, res.litRoadLines, res.lamps,
+      res.rVertices, res.rRamps, res.wVertices, res.wRamps, res.roadLines, res.lamps,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -124,7 +126,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), roadLines: cached.roadLines ?? empty(),
-        litRoadLines: cached.litRoadLines ?? empty(), lamps: cached.lamps ?? empty(),
+        wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
+        lamps: cached.lamps ?? empty(),
         runways: detail === 'full' ? await runwayCount(tile) : 0,
       });
       return;
@@ -169,6 +172,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const glow = buildGlowGround(tile, tin, levels, ls.faceColor);
     applyGlow(mesh.vertices, mesh.ramps, tile, locate, levels);
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
+    applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);
     applyGlow(bmesh.vertices, bmesh.ramps, tile, locate, levels);
     applyGlowToTrees(props.trees, tile, locate, levels);
     const out = {
@@ -179,8 +183,9 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
       glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer,
+      wVertices: mesh.water.vertices.slice().buffer, wRamps: mesh.water.ramps.slice().buffer,
       roadLines: mesh.roadLines.slice().buffer,
-      litRoadLines: mesh.litRoadLines.slice().buffer, lamps: mesh.lamps.slice().buffer,
+      lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
     send({ ...out, runways: data.lines.filter((l) => l.tags.aeroway === 'runway').length });
