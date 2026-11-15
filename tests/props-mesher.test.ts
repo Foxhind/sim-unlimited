@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -111,7 +111,7 @@ describe('buildProps trees (Q36)', () => {
       expect(t[1]).toBe(100);
       expect(t[3]).toBeGreaterThanOrEqual(8);
       expect(t[3]).toBeLessThanOrEqual(20);
-      expect(t[4]).toBe(snowy(RAMP.FOREST));
+      expect(treeColour(a.trees, i * TREE_STRIDE)).toBe(snowy(RAMP.FOREST));
       expect(Number.isInteger(t[5]) && t[5] >= 0 && t[5] < TREE_TYPES).toBe(true);
       expect(t[5]).toBeGreaterThanOrEqual(prevType); // sorted by type: one draw per type
       prevType = t[5];
@@ -153,7 +153,7 @@ describe('buildProps trees (Q36)', () => {
     const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
     const p = buildProps({ tile: TILE, detail: 'full', data, sampleHeight: flat, treeRamp: () => 77 });
     expect(p.trees.length).toBeGreaterThan(0);
-    for (let i = 4; i < p.trees.length; i += TREE_STRIDE) expect(p.trees[i]).toBe(snowy(77));
+    for (let i = 0; i < p.trees.length; i += TREE_STRIDE) expect(treeColour(p.trees, i)).toBe(snowy(77));
   });
 
   it('ignores non-forest areas and the large detail layer', () => {

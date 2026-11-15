@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildLUT, LIGHT, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, OVERLAY_LUT_BASE, nearestVga, paletteAt, quantize6bit, RAMP, RAMP_STEPS, rampIndex, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import {
+  buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, LIGHT, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
+  material, OVERLAY_LUT_BASE, paletteAt, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
+} from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
-
-const VALID_6BIT = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
 
 function entry(lut: Uint8Array, index: number): [number, number, number] {
   return [lut[index * 4], lut[index * 4 + 1], lut[index * 4 + 2]];
@@ -12,37 +13,30 @@ function luminance(c: [number, number, number]): number {
   return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 }
 
-describe('quantize6bit', () => {
-  it('maps to VGA DAC levels only', () => {
-    for (let v = 0; v <= 255; v++) expect(VALID_6BIT.has(quantize6bit(v))).toBe(true);
-  });
-  it('pins endpoints', () => {
-    expect(quantize6bit(0)).toBe(0);
-    expect(quantize6bit(255)).toBe(255);
-  });
-});
-
 describe('buildLUT', () => {
   const lut = buildLUT(paletteAt(45));
 
-  it('covers every entry (materials + VGA terrain ramps, plain and per glow level) with 6-bit channels', () => {
+  it('holds the material ramps, plain and per glow level, in whole 256-entry rows', () => {
     expect(LUT_TOTAL % LUT_SIZE).toBe(0);
+    expect(LUT_SIZE % 256).toBe(0);
     expect(LUT_ENTRIES % 256).toBe(0);
     expect(lut.length).toBe(LUT_ENTRIES * 4);
-    for (let i = 0; i < LUT_ENTRIES; i++) {
-      const [r, g, b] = entry(lut, i);
-      expect(VALID_6BIT.has(r)).toBe(true);
-      expect(VALID_6BIT.has(g)).toBe(true);
-      expect(VALID_6BIT.has(b)).toBe(true);
-      expect(lut[i * 4 + 3]).toBe(255);
-    }
+    expect(MAT.SEA * RAMP_STEPS).toBeLessThan(LUT_SIZE);
+    for (let i = 0; i <= MAT.SEA * RAMP_STEPS + 15; i++) expect(lut[i * 4 + 3]).toBe(255);
+  });
+
+  it('is not limited to 6-bit DAC levels any more', () => {
+    const levels = new Set<number>();
+    for (let i = 0; i < LUT_SIZE * 4; i++) if (i % 4 !== 3) levels.add(lut[i]);
+    const sixBit = new Set(Array.from({ length: 64 }, (_, q) => Math.round((q * 255) / 63)));
+    expect([...levels].some((v) => !sixBit.has(v))).toBe(true);
   });
 
   it('material lighting ramps are monotonic in brightness (steps 0..11)', () => {
     for (const ramp of [RAMP.GRASS, RAMP.WATER, RAMP.CONCRETE, RAMP.BRICK]) {
       let prev = -1;
       for (let s = 0; s < 12; s++) {
-        const l = luminance(entry(lut, ramp * RAMP_STEPS + s));
+        const l = luminance(entry(lut, rampIndex(ramp, s)));
         expect(l).toBeGreaterThan(prev);
         prev = l;
       }
@@ -50,7 +44,7 @@ describe('buildLUT', () => {
   });
 
   it('fog end of every material ramp equals the sky horizon color', () => {
-    const horizon = entry(lut, RAMP.SKY * RAMP_STEPS + 15);
+    const horizon = entry(lut, rampIndex(RAMP.SKY, 15));
     for (let ramp = 0; ramp < 12; ramp++) {
       expect(entry(lut, ramp * RAMP_STEPS + 15)).toEqual(horizon);
     }
@@ -61,12 +55,12 @@ describe('buildLUT', () => {
     const night = buildLUT(paletteAt(-20));
     for (const ramp of [RAMP.EMISSIVE, RAMP.HUD_GREEN, RAMP.HUD_AMBER]) {
       for (let s = 0; s < RAMP_STEPS; s++) {
-        const i = ramp * RAMP_STEPS + s;
+        const i = rampIndex(ramp, s);
         expect(entry(night, i)).toEqual(entry(day, i));
       }
     }
-    expect(luminance(entry(night, RAMP.GRASS * RAMP_STEPS + 8))).toBeLessThan(
-      luminance(entry(day, RAMP.GRASS * RAMP_STEPS + 8)),
+    expect(luminance(entry(night, rampIndex(RAMP.GRASS, 8)))).toBeLessThan(
+      luminance(entry(day, rampIndex(RAMP.GRASS, 8))),
     );
   });
 });
@@ -83,49 +77,65 @@ describe('paletteAt', () => {
   });
 });
 
-describe('VGA terrain colours', () => {
-  it('is the default mode 13h palette', () => {
-    expect(VGA_PALETTE).toHaveLength(256);
-    expect(VGA_PALETTE[1]).toEqual([0, 0, 170]);
-    expect(VGA_PALETTE[6]).toEqual([170, 85, 0]);
-    expect(VGA_PALETTE[31]).toEqual([255, 255, 255]);
-    expect(VGA_PALETTE[32]).toEqual([0, 0, 255]);
-    expect(VGA_PALETTE[40]).toEqual([255, 0, 0]);
-    expect(VGA_PALETTE[48]).toEqual([0, 255, 0]);
-    expect(VGA_PALETTE[104]).toEqual([0, 0, 113]);
-    expect(VGA_PALETTE[247]).toEqual([45, 49, 65]);
+describe('face colours', () => {
+  it('pack any RGB colour exactly, apart from material ramps, glow levels and the snow flag', () => {
+    const c = colour(123, 45, 67);
+    expect(rgbOf(c)).toEqual([123, 45, 67]);
+    expect(isMaterial(c)).toBe(false);
+    expect(isMaterial(RAMP.GRASS)).toBe(true);
+    expect(RAMP.SEA).toBe(material(MAT.SEA));
+    const g = withGlow(snowy(c), 5);
+    expect(rampGlowLevel(g)).toBe(5);
+    expect(g & SNOW_FLAG).not.toBe(0);
+    expect(rgbOf(g)).toEqual([123, 45, 67]);
+    expect(rampGlowLevel(withGlow(g, 2))).toBe(2);
+    expect(g).toBeGreaterThan(0); // unsigned: fits a Uint32Array as it is
+    expect(new Uint32Array([g])[0]).toBe(g);
   });
 
-  it('nearestVga picks exact entries and never the black filler', () => {
-    for (const i of [2, 20, 77, 150, 200, 247]) expect(nearestVga(...VGA_PALETTE[i])).toBe(i);
-    expect(nearestVga(0, 0, 0)).toBe(0);
+  it('an RGB colour is lit dark → bright, fogs toward the horizon and darkens at night', () => {
+    const day = paletteAt(60), night = paletteAt(-30);
+    const c = [38, 58, 32] as const;
+    const lum = (v: readonly number[]) => v[0] + v[1] + v[2];
+    for (let s = 1; s < 12; s++) expect(lum(shadeColour(c, s, day))).toBeGreaterThan(lum(shadeColour(c, s - 1, day)));
+    expect(shadeColour(c, 15, day)).toEqual(day.horizon);
+    expect(lum(shadeColour(c, 9, night))).toBeLessThan(lum(shadeColour(c, 9, day)));
+    // a street-lit level lights it better than the night sky does
+    expect(lum(shadeColour(c, 9, night, 7))).toBeGreaterThan(lum(shadeColour(c, 9, night)));
   });
 
-  it('each VGA ramp is lit dark → bright and fogs toward the horizon', () => {
-    const day = buildLUT(paletteAt(60));
-    const v = nearestVga(38, 58, 32);
-    const at = (s: number) => entry(day, rampIndex(TERRAIN_RAMP_BASE + v, s));
-    const lum = (c: number[]) => c[0] + c[1] + c[2];
-    for (let s = 1; s < 12; s++) expect(lum(at(s))).toBeGreaterThanOrEqual(lum(at(s - 1)));
-    const night = buildLUT(paletteAt(-30));
-    expect(lum(entry(night, rampIndex(TERRAIN_RAMP_BASE + v, 9)))).toBeLessThan(lum(at(9)));
+  it('the shader gets the light of every glow level and the haze as uniforms', () => {
+    const night = paletteAt(-30);
+    const u = lightUniforms(night);
+    expect(u.levels).toHaveLength(24);
+    expect(u.levels[0]).toBeCloseTo(night.lightMul * night.tint[0]);
+    const g7 = glowParams(night, 7);
+    expect(u.levels[21 + 1]).toBeCloseTo(g7.lightMul * g7.tint[1]);
+    expect([...u.haze].map((v) => Math.round(v * 255))).toEqual(night.horizon.map(Math.round));
+    expect(FLASH_LIGHT.levels.every((v) => v > 1)).toBe(true);
+  });
+
+  it('points carry a LUT index, or an RGB colour as a negative float', () => {
+    expect(pointValue(RAMP.EMISSIVE, 13)).toBe(rampIndex(RAMP.EMISSIVE, 13));
+    const v = pointValue(colour(255, 255, 255));
+    expect(v).toBe(-0x1000000);
+    expect(Math.fround(v)).toBe(v);
   });
 });
 
-describe('green and water VGA colours', () => {
-  it('greenVga keeps greens and pulls other colours to the nearest green', async () => {
-    const { greenVga, isGreenVga, isWaterVga } = await import('../src/engine/palette');
-    expect(isGreenVga(48)).toBe(true); // (0,255,0)
-    expect(greenVga(48)).toBe(48);
-    for (const i of [7, 24, 40, 6, 114, 247]) {
-      const g = greenVga(i);
-      expect(isGreenVga(g), `VGA ${i} → ${g}`).toBe(true);
-      const [r, gg, b] = VGA_PALETTE[g];
-      expect(gg).toBeGreaterThan(Math.max(r, b));
+describe('green and water colours', () => {
+  it('greenColour keeps greens and pulls other colours to the nearest green land colour', () => {
+    const green = colour(0, 255, 0);
+    expect(greenColour(green)).toBe(green);
+    for (const c of [colour(170, 170, 170), colour(255, 0, 0), colour(170, 85, 0), colour(45, 49, 65)]) {
+      const g = greenColour(withGlow(c, 3));
+      expect(isGreen(rgbOf(g))).toBe(true);
+      expect(rampGlowLevel(g)).toBe(3);
     }
-    expect(isWaterVga(1)).toBe(true); // EGA blue
-    expect(isWaterVga(247)).toBe(false); // bluish grey
-    expect(isWaterVga(24)).toBe(false); // grey
+    expect(greenColour(RAMP.FOREST)).toBe(RAMP.FOREST);
+    expect(isWater([0, 0, 170])).toBe(true);
+    expect(isWater([45, 49, 65])).toBe(false); // bluish grey
+    expect(isWater([100, 100, 100])).toBe(false);
   });
 });
 
@@ -178,46 +188,36 @@ describe('winter surface (weather)', () => {
     for (let i = 0; i < LUT_SIZE; i++) {
       if (entry(ice, i).join() !== entry(plain, i).join()) changed.add(Math.floor(i / RAMP_STEPS));
     }
-    expect([...changed].sort((a, b) => a - b)).toEqual([RAMP.WATER, RAMP.SEA]);
+    expect([...changed].sort((a, b) => a - b)).toEqual([MAT.WATER, MAT.SEA]);
     const [r, , b] = entry(ice, LIGHT.TAXI_BLUE);
     expect(b - r).toBeGreaterThan(100);
   });
 
-  it('the sea ramp is a VGA filler slot no imagery colour maps to', () => {
-    expect(RAMP.SEA).toBe(TERRAIN_RAMP_BASE + 248);
-    expect(nearestVga(0, 0, 0)).toBeLessThan(248);
-  });
 });
 
 describe('land palette', () => {
-  it('has 240 distinct 6-bit colours whose ramps fill the 16-bit index buffer exactly', async () => {
-    const { LAND_PALETTE, LAND_PALETTE_SIZE, LAND_RAMP_BASE, LUT_TOTAL, RAMP_STEPS: STEPS } = await import('../src/engine/palette');
+  it('has 240 distinct colours', async () => {
+    const { LAND_PALETTE, LAND_PALETTE_SIZE } = await import('../src/engine/palette');
     const { LAND_PALETTE_6BIT } = await import('../src/engine/land-palette');
     expect(LAND_PALETTE).toHaveLength(LAND_PALETTE_SIZE);
     expect(new Set(LAND_PALETTE_6BIT.map((c) => c.join(','))).size).toBe(LAND_PALETTE_SIZE);
     for (const c of LAND_PALETTE_6BIT) for (const v of c) expect(v >= 0 && v <= 63 && Number.isInteger(v)).toBe(true);
-    expect(LUT_TOTAL).toBeLessThanOrEqual(65536);
-    expect((LAND_RAMP_BASE + LAND_PALETTE_SIZE) * STEPS).toBeLessThanOrEqual(LUT_TOTAL);
   });
 
-  it('keeps muted warm colours that the VGA palette turns grey (Grand Canyon sand)', async () => {
-    const { LAND_PALETTE, nearestLand, nearestVga, VGA_PALETTE: VGA } = await import('../src/engine/palette');
+  it('keeps muted warm colours (Grand Canyon sand)', async () => {
+    const { LAND_PALETTE, nearestLand } = await import('../src/engine/palette');
     const sat = ([r, g, b]: readonly number[]) => (Math.max(r, g, b) - Math.min(r, g, b)) / Math.max(r, g, b);
     for (const sand of [[136, 119, 98], [151, 132, 109], [176, 157, 131]]) {
       const [r, g, b] = sand;
-      expect(sat(VGA[nearestVga(r, g, b)])).toBe(0);
       const c = LAND_PALETTE[nearestLand(r, g, b)];
       expect(sat(c)).toBeGreaterThan(0.15);
       expect(Math.hypot(c[0] - sand[0], c[1] - sand[1], c[2] - sand[2])).toBeLessThan(15);
     }
   });
 
-  it('land ramps are written into the LUT, and foliage over land is green', async () => {
-    const { buildLUT, greenLand, isGreenLand, LAND_PALETTE_SIZE, LAND_RAMP_BASE, paletteAt, rampIndex } = await import('../src/engine/palette');
-    const lut = buildLUT(paletteAt(45));
-    const i = rampIndex(LAND_RAMP_BASE + LAND_PALETTE_SIZE - 1, 9) * 4;
-    expect(lut[i + 3]).toBe(255);
-    for (let k = 0; k < LAND_PALETTE_SIZE; k++) expect(isGreenLand(greenLand(k))).toBe(true);
+  it('foliage over any land colour is green', async () => {
+    const { greenColour, isGreen, LAND_PALETTE, LAND_PALETTE_SIZE, colourOf, rgbOf } = await import('../src/engine/palette');
+    for (let k = 0; k < LAND_PALETTE_SIZE; k++) expect(isGreen(rgbOf(greenColour(colourOf(LAND_PALETTE[k]))))).toBe(true);
   });
 });
 

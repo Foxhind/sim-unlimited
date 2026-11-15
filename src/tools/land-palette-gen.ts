@@ -67,7 +67,7 @@ const GREYS = 16;
 /**
  * The land palette: GREYS neutral greys plus a weighted median cut of the histogram in OKLab.
  * Weights are counts^0.5, so rare colours (snow, red desert, water) still get boxes of their own.
- * Every entry is 6-bit (0..63 per channel, as the VGA DAC), distinct, sorted dark to light by hue.
+ * Every entry is 6-bit (0..63 per channel: the compact storage of land-palette.ts), distinct, sorted dark to light by hue.
  */
 export function buildLandPalette(h: Histogram, size = LAND_PALETTE_SIZE): Array<[number, number, number]> {
   const out = new Map<number, [number, number, number]>();

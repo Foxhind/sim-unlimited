@@ -614,10 +614,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
 
   return {
     vertices: new Float32Array(verts),
-    ramps: new Uint16Array(ramps), // VGA ramps (building colours) go past 255
+    ramps: new Uint32Array(ramps), // face colours (palette.ts)
     vertexCount: ramps.length,
-    roads: { vertices: new Float32Array(roads.verts), ramps: new Uint16Array(roads.ramps), vertexCount: roads.ramps.length },
-    water: { vertices: new Float32Array(water.verts), ramps: new Uint16Array(water.ramps), vertexCount: water.ramps.length },
+    roads: { vertices: new Float32Array(roads.verts), ramps: new Uint32Array(roads.ramps), vertexCount: roads.ramps.length },
+    water: { vertices: new Float32Array(water.verts), ramps: new Uint32Array(water.ramps), vertexCount: water.ramps.length },
     roadLines: new Float32Array(roadLines),
     lamps: new Float32Array(lamps),
   };

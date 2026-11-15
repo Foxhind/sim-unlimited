@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nearestVga, SNOW_FLAG, TERRAIN_RAMP_BASE, VGA_PALETTE } from '../src/engine/palette';
+import { colour, isMaterial, rgbOf, SNOW_FLAG } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import {
   buildBuildingMesh,
@@ -63,8 +63,7 @@ describe('computeHeights', () => {
 });
 
 describe('colors', () => {
-  const vga = (r: number, g: number, b: number) => TERRAIN_RAMP_BASE + nearestVga(r, g, b);
-  const isVga = (ramp: number) => ramp >= TERRAIN_RAMP_BASE && ramp < TERRAIN_RAMP_BASE + 248;
+  const isRgb = (ramp: number) => !isMaterial(ramp);
 
   it('parses hex, rgb() and the full CSS name list', () => {
     expect(parseColor('#ff0000')).toEqual([255, 0, 0]);
@@ -76,24 +75,25 @@ describe('colors', () => {
     expect(parseColor('nonsense')).toBeUndefined();
   });
 
-  const rgb = (ramp: number) => VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+  const rgb = (ramp: number) => rgbOf(ramp);
   const sat = (ramp: number) => {
     const c = rgb(ramp), mx = Math.max(...c), mn = Math.min(...c);
     return mx ? (mx - mn) / mx : 0;
   };
 
-  it('snaps OSM wall colours, materials and type defaults to the nearest VGA colour', () => {
-    expect(wallRamp({ 'building:colour': '#646464' })).toBe(vga(100, 100, 100));
-    expect(wallRamp({ 'building:colour': '#ffffff', 'building:material': 'brick' })).toBe(vga(255, 255, 255));
-    expect(wallRamp({ building: 'yes', 'building:material': 'brick' })).toBe(vga(156, 88, 64));
-    expect(isVga(wallRamp({ building: 'garage' }))).toBe(true);
-    expect(isVga(wallRamp({}))).toBe(true);
+  it('takes OSM wall colours, materials and type defaults as exact RGB colours', () => {
+    expect(wallRamp({ 'building:colour': '#646464' })).toBe(colour(100, 100, 100));
+    expect(wallRamp({ 'building:colour': '#ffffff', 'building:material': 'brick' })).toBe(colour(255, 255, 255));
+    expect(wallRamp({ building: 'yes', 'building:material': 'brick' })).toBe(colour(156, 88, 64));
+    expect(wallRamp({ 'building:colour': '#7a5c3d' })).toBe(colour(0x7a, 0x5c, 0x3d)); // no palette snap
+    expect(isRgb(wallRamp({ building: 'garage' }))).toBe(true);
+    expect(isRgb(wallRamp({}))).toBe(true);
   });
 
   it('takes roof colour, then roof material, from OSM', () => {
     const gabled = { 'roof:shape': 'gabled' };
-    expect(roofRamp({ ...gabled, 'roof:colour': '#ff0000' })).toBe(TERRAIN_RAMP_BASE + 40);
-    expect(roofRamp({ ...gabled, 'roof:material': 'slate' })).toBe(vga(72, 76, 84));
+    expect(roofRamp({ ...gabled, 'roof:colour': '#ff0000' })).toBe(colour(255, 0, 0));
+    expect(roofRamp({ ...gabled, 'roof:material': 'slate' })).toBe(colour(72, 76, 84));
     expect(roofRamp({ ...gabled, 'roof:colour': 'red', 'roof:material': 'slate' })).toBe(roofRamp({ ...gabled, 'roof:colour': 'red' }));
   });
 
@@ -113,19 +113,19 @@ describe('colors', () => {
     expect(rgb(wallRamp({ 'building:colour': 'black' }))[0]).toBeGreaterThan(0);
     expect(rgb(wallRamp({ 'building:colour': 'white' }))[0]).toBeGreaterThan(rgb(wallRamp({ 'building:colour': 'black' }))[0]);
     // hex is exact, even a loud one
-    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(vga(255, 0, 0));
+    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(colour(255, 0, 0));
     expect(sat(wallRamp({ 'building:colour': '#00ff00' }))).toBe(1);
   });
 
   const isGrey = (ramp: number) => {
-    const [r, g, b] = VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+    const [r, g, b] = rgbOf(ramp);
     return r === g && g === b;
   };
 
   it('lets OSM colour a flat roof; only an untagged flat roof is forced grey', () => {
     expect(isGrey(roofRamp({ 'roof:colour': '#ff0000' }))).toBe(false);
     expect(isGrey(roofRamp({ 'roof:shape': 'flat', 'roof:colour': 'green' }))).toBe(false);
-    expect(roofRamp({ 'roof:shape': 'flat', 'roof:material': 'copper' })).toBe(vga(96, 160, 140));
+    expect(roofRamp({ 'roof:shape': 'flat', 'roof:material': 'copper' })).toBe(colour(96, 160, 140));
   });
 
   it('picks an untagged roof deterministically: grey/dark grey, orange only on low-rise pitched roofs', () => {
@@ -141,7 +141,7 @@ describe('colors', () => {
       flatSet.add(roofRamp(lowFlat, seed));
     }
     const orange = (ramp: number) => {
-      const [r, g, b] = VGA_PALETTE[ramp - TERRAIN_RAMP_BASE];
+      const [r, g, b] = rgbOf(ramp);
       return r > g + 40 && g > b;
     };
     for (const r of tallSet) expect(isGrey(r)).toBe(true);
@@ -200,7 +200,7 @@ describe('buildBuildingMesh', () => {
   });
 
   it('winter: snow can lie on a flat roof only (not on walls or a pitched roof)', () => {
-    const flagged = (m: { vertices: Float32Array; ramps: Uint16Array; vertexCount: number }, up: boolean) => {
+    const flagged = (m: { vertices: Float32Array; ramps: Uint32Array; vertexCount: number }, up: boolean) => {
       const out: boolean[] = [];
       for (let i = 0; i < m.vertexCount; i++) {
         const ny = m.vertices[i * 6 + 4];

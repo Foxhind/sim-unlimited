@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 31;
+export const SCHEMA_VERSION = 32;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';

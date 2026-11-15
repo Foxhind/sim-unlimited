@@ -1,6 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
-import { LUT_ENTRIES } from './palette';
+import { LUT_ENTRIES, type LightUniforms } from './palette';
 import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -15,7 +15,8 @@ export class Renderer {
   msaa = false;
 
   private fbo: WebGLFramebuffer;
-  private indexTex: WebGLTexture;
+  /** the world in RGB (2x supersampled with msaa) */
+  private worldTex: WebGLTexture;
   private depthRb: WebGLRenderbuffer;
   private overlayFbo: WebGLFramebuffer;
   private overlayTex: WebGLTexture;
@@ -38,6 +39,8 @@ export class Renderer {
   private resolveU: Uniforms;
 
   private invViewProj = mat4.create();
+  /** lighting of RGB face colours this frame (beginFrame) */
+  private light: LightUniforms | undefined;
   /** night: faces whose ramp carries a glow level are drawn street-lit (palette.ts GLOW_*) */
   nightGlow = false;
   /** winter: faces flagged SNOW_FLAG are drawn in snow (palette.ts) */
@@ -55,16 +58,16 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 is not available');
     this.gl = gl;
 
-    this.indexTex = must(gl.createTexture(), 'index texture');
+    this.worldTex = must(gl.createTexture(), 'world texture');
     this.depthRb = must(gl.createRenderbuffer(), 'depth renderbuffer');
-    this.fbo = must(gl.createFramebuffer(), 'index framebuffer');
+    this.fbo = must(gl.createFramebuffer(), 'world framebuffer');
     this.overlayTex = must(gl.createTexture(), 'overlay texture');
     this.overlayFbo = must(gl.createFramebuffer(), 'overlay framebuffer');
     this.colorTex = must(gl.createTexture(), 'resolve color texture');
     this.colorFbo = must(gl.createFramebuffer(), 'resolve color framebuffer');
     this.lutTex = must(gl.createTexture(), 'LUT texture');
     for (const [tex, internal, format, type] of [
-      [this.indexTex, gl.R16UI, gl.RED_INTEGER, gl.UNSIGNED_SHORT],
+      [this.worldTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
       [this.overlayTex, gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE],
       [this.colorTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
       [this.lutTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
@@ -89,28 +92,35 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
+      'uLut', 'uLight', 'uHaze',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
+      'uLut', 'uLight', 'uHaze',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar',
+      'uLut', 'uLight', 'uHaze',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
-    this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir']);
+    this.skyU = uniformMap(gl, this.skyProg, ['uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut']);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, DOWNSAMPLE_FS);
-    this.dsU = uniformMap(gl, this.dsProg, ['uIndexTex', 'uLut']);
+    this.dsU = uniformMap(gl, this.dsProg, ['uWorldTex']);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
-    this.resolveU = uniformMap(gl, this.resolveProg, ['uIndexTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
+    this.resolveU = uniformMap(gl, this.resolveProg, ['uWorldTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
+    // the LUT lives on its own texture unit for the whole frame
+    for (const [prog, u] of [
+      [this.worldProg, this.worldU], [this.treeProg, this.treeU], [this.pointsProg, this.pointsU],
+      [this.skyProg, this.skyU], [this.resolveProg, this.resolveU],
+    ] as [WebGLProgram, Uniforms][]) {
+      gl.useProgram(prog);
+      gl.uniform1i(u.uLut, LUT_UNIT);
+    }
   }
 
-  /**
-   * Q12: "MSAA" = 2x supersampled world pass. Integer targets cannot blend, so the
-   * downsample averages LUT colors only where the four subsamples disagree; with the
-   * toggle off the image stays strictly palette-indexed.
-   */
+  /** Q12: "MSAA" = 2x supersampled world pass, averaged 2×2 down to the screen. */
   setMsaa(enabled: boolean): void {
     if (enabled === this.msaa) return;
     this.msaa = enabled;
@@ -132,15 +142,15 @@ export class Renderer {
     const gl = this.gl;
     const s = this.msaa ? 2 : 1;
     const w = this.width * s, h = this.height * s;
-    gl.bindTexture(gl.TEXTURE_2D, this.indexTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16UI, w, h, 0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, null);
+    gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthRb);
     gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.indexTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.worldTex, 0);
     gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depthRb);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-      throw new Error('Index framebuffer incomplete');
+      throw new Error('World framebuffer incomplete');
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.overlayTex);
@@ -161,17 +171,21 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
-  beginFrame(lut: Uint8Array): void {
+  /** `lut`: material ramps, sky, lights and overlay colours (buildLUT); `light`: how RGB face colours are lit (lightUniforms) */
+  beginFrame(lut: Uint8Array, light: LightUniforms): void {
     const gl = this.gl;
+    this.light = light;
+    gl.activeTexture(gl.TEXTURE0 + LUT_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_ENTRIES / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
+    gl.activeTexture(gl.TEXTURE0);
 
     const s = this.msaa ? 2 : 1;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.viewport(0, 0, this.width * s, this.height * s);
     // overlay passes leave depthMask false; depth clears are masked by it
     gl.depthMask(true);
-    gl.clearBufferuiv(gl.COLOR, 0, new Uint32Array([0, 0, 0, 0]));
+    gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 1]));
     gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([1]));
   }
 
@@ -221,6 +235,7 @@ export class Renderer {
     gl.uniform1f(this.worldU.uFogEnd, fogEnd);
     gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
+    this.setLight(this.worldU);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (!depthWrite) gl.depthMask(true);
@@ -255,6 +270,7 @@ export class Renderer {
     gl.uniform1f(this.treeU.uFogEnd, fogEnd);
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.treeU.uSnow, this.snow ? 1 : 0);
+    this.setLight(this.treeU);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
@@ -284,12 +300,13 @@ export class Renderer {
     gl.uniform3fv(this.pointsU.uCamPos, camPos);
     gl.uniform1f(this.pointsU.uPointSize, pointSize);
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
+    this.setLight(this.pointsU);
     gl.bindVertexArray(vao);
     gl.drawArrays(mode === 'points' ? gl.POINTS : gl.LINES, 0, count);
     gl.depthMask(true);
   }
 
-  /** Index-buffer passes (font) run between drawWorld and resolve with depth disabled. */
+  /** Overlay passes (font, vectors: 8-bit palette indices) run between drawWorld and resolve with depth disabled. */
   beginOverlay(): void {
     const gl = this.gl;
     gl.disable(gl.DEPTH_TEST);
@@ -299,11 +316,8 @@ export class Renderer {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.colorFbo);
       gl.useProgram(this.dsProg);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.indexTex);
-      gl.activeTexture(gl.TEXTURE1);
-      gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
-      gl.uniform1i(this.dsU.uIndexTex, 0);
-      gl.uniform1i(this.dsU.uLut, 1);
+      gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
+      gl.uniform1i(this.dsU.uWorldTex, 0);
       gl.bindVertexArray(this.triVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
@@ -319,23 +333,30 @@ export class Renderer {
     gl.disable(gl.DEPTH_TEST);
     gl.useProgram(this.resolveProg);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.indexTex);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
+    gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.overlayTex);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.colorTex);
-    gl.uniform1i(this.resolveU.uIndexTex, 0);
-    gl.uniform1i(this.resolveU.uLut, 1);
+    gl.uniform1i(this.resolveU.uWorldTex, 0);
     gl.uniform1i(this.resolveU.uOverlayTex, 2);
     gl.uniform1i(this.resolveU.uColorTex, 3);
     gl.uniform1i(this.resolveU.uMsaa, this.msaa ? 1 : 0);
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
+  private setLight(u: Uniforms): void {
+    if (!this.light) return;
+    this.gl.uniform3fv(u.uLight, this.light.levels);
+    this.gl.uniform3fv(u.uHaze, this.light.haze);
   }
 }
+
+/** texture unit the LUT stays bound to */
+const LUT_UNIT = 5;
 
 /** uOffset (see PLACE_VS): a vec3 offset places a mesh without turning it */
 function setPlacement(gl: WebGL2RenderingContext, loc: WebGLUniformLocation | null, offset: vec3 | vec4): void {

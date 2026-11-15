@@ -1,4 +1,4 @@
-import { RAMP, TERRAIN_RAMP_BASE } from '../engine/palette';
+import { PAYLOAD_MASK, RAMP } from '../engine/palette';
 import f117Model from './models/f117.json';
 import su27Model from './models/su27.json';
 
@@ -285,8 +285,8 @@ export function tableLookup(table: AeroTable, x: number): number {
 
 export interface AircraftMesh {
   vertices: Float32Array; // pos.xyz + normal.xyz per vertex
-  /** per vertex: palette ramp (a material ramp or TERRAIN_RAMP_BASE + VGA index) */
-  ramps: Uint16Array;
+  /** per vertex: face colour (palette.ts: an RGB colour or a material ramp) */
+  ramps: Uint32Array;
   /** per vertex: 0 = fuselage, otherwise index into PART_IDS + 1 */
   parts: Uint8Array;
 }
@@ -344,7 +344,7 @@ class MeshBuilder {
   }
 
   build(): AircraftMesh {
-    return { vertices: new Float32Array(this.verts), ramps: new Uint16Array(this.ramps), parts: new Uint8Array(this.parts) };
+    return { vertices: new Float32Array(this.verts), ramps: new Uint32Array(this.ramps), parts: new Uint8Array(this.parts) };
   }
 }
 
@@ -352,22 +352,22 @@ class MeshBuilder {
 interface ModelJson {
   /** 9 numbers per triangle, mesh space (x right, y up, z aft) */
   positions: number[];
-  /** VGA palette index of each triangle */
-  vga: number[];
+  /** colour of each triangle, 0xRRGGBB */
+  rgb: number[];
   /** separable part of each triangle: 0 = fuselage, otherwise index into PART_IDS + 1 */
   parts: number[];
 }
 
 const MODELS: Record<AircraftConfig['id'], ModelJson> = { su27: su27Model, f117: f117Model };
 
-/** Flat-shaded mesh of an exported model; each face keeps its VGA colour (lit through its terrain ramp). */
+/** Flat-shaded mesh of an exported model; each face keeps its RGB colour (lit in the shader). */
 function loadModel(json: ModelJson): AircraftMesh {
   const m = new MeshBuilder();
   const P = json.positions;
-  for (let t = 0; t < json.vga.length; t++) {
+  for (let t = 0; t < json.rgb.length; t++) {
     const v = (k: number): V3 => [P[t * 9 + k * 3], P[t * 9 + k * 3 + 1], P[t * 9 + k * 3 + 2]];
     const tag = json.parts[t];
-    const add = (): void => m.tri(v(0), v(1), v(2), TERRAIN_RAMP_BASE + json.vga[t]);
+    const add = (): void => m.tri(v(0), v(1), v(2), json.rgb[t] & PAYLOAD_MASK);
     if (tag) m.part(PART_IDS[tag - 1], add);
     else add();
   }

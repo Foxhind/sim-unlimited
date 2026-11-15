@@ -261,7 +261,7 @@ export class OsmManager {
     });
   }
 
-  /** interleaved pos+normal (stride 24) with Uint16 ramps, as the world shader expects */
+  /** interleaved pos+normal (stride 24) with Uint32 face colours, as the world shader expects */
   private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer): Mesh | undefined {
     if (ramps.byteLength === 0) return undefined;
     const gl = this.gl;
@@ -278,14 +278,14 @@ export class OsmManager {
     gl.bindBuffer(gl.ARRAY_BUFFER, rb);
     gl.bufferData(gl.ARRAY_BUFFER, ramps, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA colours)
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, 0); // Uint32 face colours (palette.ts)
     gl.bindVertexArray(null);
     chunk.buffers.push(vb, rb);
     chunk.vaos.push(vao);
-    return { vao, vertexCount: ramps.byteLength / 2 };
+    return { vao, vertexCount: ramps.byteLength / 4 };
   }
 
-  /** x, y, z, palette index per point */
+  /** x, y, z and a colour value per point (palette.ts pointValue: a LUT index, or an RGB colour) */
   private points(chunk: OsmChunk, data: ArrayBuffer): PropSet | undefined {
     if (data.byteLength === 0) return undefined;
     const gl = this.gl;
@@ -352,6 +352,9 @@ export class OsmManager {
         gl.enableVertexAttribArray(4);
         gl.vertexAttribPointer(4, 2, gl.FLOAT, false, iStride, start * iStride + 12);
         gl.vertexAttribDivisor(4, 1);
+        gl.enableVertexAttribArray(5);
+        gl.vertexAttribPointer(5, 1, gl.FLOAT, false, iStride, start * iStride + 24);
+        gl.vertexAttribDivisor(5, 1);
         gl.bindVertexArray(null);
         chunk.vaos.push(vao);
         sets.push({ vao, buffer: ib, count: end - start, first: mesh.first, vertexCount: mesh.count });

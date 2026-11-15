@@ -5,24 +5,45 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_LEVEL_MASK, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, OVERLAY_LUT_BASE, RAMP, RAMP_MASK, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
+import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
- * Night glow (palette.ts): ramp | level << GLOW_SHIFT. With uGlow on, a glowing face is shaded at
- * least at step GLOW_STEP_BASE + level and looked up in that level's street-lit copy of the LUT.
- * Winter: with uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp.
+ * World colour (palette.ts): the world passes write RGB, not palette indices. A face colour is a
+ * packed uint: an RGB colour, or (MATERIAL_FLAG) a material ramp looked up in the LUT; bits 24..26
+ * the night glow level, SNOW_FLAG the winter flag.
+ * Lighting stays stepped (12 lit steps, 4 fog steps toward the horizon haze) for both kinds: a
+ * material takes its ramp's LUT entry at the step, an RGB colour is shaded by the same law in place
+ * (palette.ts shadeColour) with the light of its glow level (uLight) — any colour, no palette snap.
+ * With uGlow on, a glowing face is shaded at least at step GLOW_STEP_BASE + level, in that level's
+ * street-lit light. With uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp.
  */
+const COLOUR_GLSL = `
+uniform sampler2D uLut;
+uniform vec3 uLight[${GLOW_LEVELS + 1}];
+uniform vec3 uHaze;
+vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
+vec3 rgbOf(uint p) { return vec3(float((p >> 16u) & 255u), float((p >> 8u) & 255u), float(p & 255u)) / 255.0; }
+vec3 imageryShade(vec3 c, float s, uint lvl) { return min(c * (0.4 + 0.8 * s / 11.0), 1.0) * uLight[lvl]; }
+vec3 shadeRgb(vec3 c, uint s, uint lvl) {
+  if (s < 12u) return imageryShade(c, float(s), lvl);
+  return mix(imageryShade(c, 11.0, lvl), uHaze, float(s - 11u) / 4.0);
+}
+`;
 const GLOW_VS = `
 uniform int uGlow;
 uniform int uSnow;
-uint glowIndex(uint packedRamp, float litStep, float fog) {
-  uint ramp = packedRamp & ${RAMP_MASK}u;
-  if (uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u) ramp = ${RAMP.SNOW}u;
+${COLOUR_GLSL}
+vec3 shadeColour(uint packedRamp, float litStep, float fog) {
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
-  float idx = mix(litStep, 15.0, fog);
-  return lvl * ${LUT_SIZE}u + ramp * 16u + uint(clamp(idx + 0.5, 0.0, 15.0));
+  uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));
+  bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;
+  if (snow || (packedRamp & ${MATERIAL_FLAG}u) != 0u) {
+    uint ramp = snow ? ${MAT.SNOW}u : packedRamp & ${PAYLOAD_MASK}u;
+    return lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + s);
+  }
+  return shadeRgb(rgbOf(packedRamp), s, lvl);
 }
 `;
 
@@ -75,7 +96,7 @@ uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
-flat out uint vIndex;
+flat out vec3 vColor;
 out float vLogW;
 ${GLOW_VS}
 void main() {
@@ -89,7 +110,7 @@ void main() {
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vIndex = glowIndex(aRamp, litStep, fog);
+  vColor = shadeColour(aRamp, litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -97,12 +118,12 @@ void main() {
 
 export const WORLD_FS = `#version 300 es
 precision highp float;
-flat in uint vIndex;
-out uint oIndex;
+flat in vec3 vColor;
+out vec4 oColor;
 ${LOG_DEPTH_FS}
 void main() {
   writeLogDepth();
-  oIndex = vIndex;
+  oColor = vec4(vColor, 1.0);
 }
 `;
 
@@ -113,7 +134,10 @@ layout(location=1) in vec3 aNormal;
 // 0 crown (the instance's foliage ramp), 1 trunk (bark, keeping the instance's glow level)
 layout(location=2) in float aPart;
 layout(location=3) in vec3 aInstPos;
+// x: height, y: the face colour's payload (RGB or material id), exact in a float
 layout(location=4) in vec2 aInstSR;
+// the face colour's bits 24..31 (glow level, snow, material)
+layout(location=5) in float aInstFlags;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec4 uOffset;
@@ -122,7 +146,7 @@ uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
-flat out uint vIndex;
+flat out vec3 vColor;
 out float vLogW;
 ${GLOW_VS}
 void main() {
@@ -135,9 +159,9 @@ void main() {
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  uint packed = uint(aInstSR.y);
-  if (aPart > 0.5) packed = (packed & ~${RAMP_MASK | SNOW_FLAG}u) | ${TREE_TRUNK_RAMP}u;
-  vIndex = glowIndex(packed, litStep, fog);
+  uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
+  if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
+  vColor = shadeColour(packed, litStep, fog);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -153,14 +177,16 @@ uniform vec4 uOffset;
 ${PLACE_VS}${ORTHO_VS}
 uniform vec3 uCamPos;
 uniform float uPointSize;
-flat out uint vIndex;
+flat out vec3 vColor;
 out float vLogW;
+${COLOUR_GLSL}
 void main() {
   vec3 wp = toWorld(aPos);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  vIndex = uint(aIndex);
+  // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
+  vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
@@ -169,11 +195,11 @@ void main() {
 
 export const POINTS_FS = `#version 300 es
 precision highp float;
-flat in uint vIndex;
+flat in vec3 vColor;
 uniform int uOn;
 /** 1: round points; 0: GL lines (gl_PointCoord is undefined for lines) */
 uniform int uRound;
-out uint oIndex;
+out vec4 oColor;
 ${LOG_DEPTH_FS}
 void main() {
   if (uOn == 0) discard;
@@ -182,7 +208,7 @@ void main() {
     vec2 c = gl_PointCoord - 0.5;
     if (dot(c, c) > 0.25) discard;
   }
-  oIndex = vIndex;
+  oColor = vec4(vColor, 1.0);
 }
 `;
 
@@ -203,7 +229,8 @@ uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
-out uint oIndex;
+uniform sampler2D uLut;
+out vec4 oColor;
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uCamPos);
@@ -232,31 +259,26 @@ void main() {
   } else if (ang < 0.045) {
     idx = ${LIGHT.SUN_HALO}u;
   }
-  oIndex = idx;
+  oColor = vec4(texelFetch(uLut, ivec2(int(idx & 255u), int(idx >> 8u)), 0).rgb, 1.0);
 }
 `;
 
+/** 2x supersampled world → screen: the mean of each 2×2 block */
 export const DOWNSAMPLE_FS = `#version 300 es
 precision highp float;
-uniform highp usampler2D uIndexTex;
-uniform sampler2D uLut;
+uniform sampler2D uWorldTex;
 out vec4 oColor;
-vec3 lut(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy) * 2;
-  uint a = texelFetch(uIndexTex, p, 0).r;
-  uint b = texelFetch(uIndexTex, p + ivec2(1, 0), 0).r;
-  uint c = texelFetch(uIndexTex, p + ivec2(0, 1), 0).r;
-  uint d = texelFetch(uIndexTex, p + ivec2(1, 1), 0).r;
-  vec3 ca = lut(a);
-  // interior pixels keep the exact palette color; only edges blend
-  oColor = vec4(a == b && a == c && a == d ? ca : (ca + lut(b) + lut(c) + lut(d)) * 0.25, 1.0);
+  vec3 c = texelFetch(uWorldTex, p, 0).rgb + texelFetch(uWorldTex, p + ivec2(1, 0), 0).rgb
+    + texelFetch(uWorldTex, p + ivec2(0, 1), 0).rgb + texelFetch(uWorldTex, p + ivec2(1, 1), 0).rgb;
+  oColor = vec4(c * 0.25, 1.0);
 }
 `;
 
 export const RESOLVE_FS = `#version 300 es
 precision highp float;
-uniform highp usampler2D uIndexTex;
+uniform sampler2D uWorldTex;
 uniform highp usampler2D uOverlayTex;
 uniform sampler2D uColorTex;
 uniform sampler2D uLut;
@@ -270,8 +292,7 @@ void main() {
   } else if (uMsaa == 1) {
     oColor = vec4(texelFetch(uColorTex, p, 0).rgb, 1.0);
   } else {
-    uint idx = texelFetch(uIndexTex, p, 0).r;
-    oColor = vec4(texelFetch(uLut, ivec2(int(idx & 255u), int(idx >> 8u)), 0).rgb, 1.0);
+    oColor = vec4(texelFetch(uWorldTex, p, 0).rgb, 1.0);
   }
 }
 `;

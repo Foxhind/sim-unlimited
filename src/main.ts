@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { LUT_ENTRIES, applyFlameColors, applySunColors, buildLUT, paletteAt } from './engine/palette';
+import { FLASH_LIGHT, LUT_ENTRIES, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt } from './engine/palette';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -139,6 +139,7 @@ const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
 let lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
+let light = lightUniforms(paletteAt(sun.elevationDeg));
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
@@ -166,6 +167,7 @@ function updateLight(): void {
     vec3.normalize(lightDir, lightDir);
   }
   lut = buildLUT(paletteAt(sun.elevationDeg), weather.surface);
+  light = lightUniforms(paletteAt(sun.elevationDeg));
   applySunColors(lut, sun.elevationDeg);
 }
 
@@ -496,7 +498,7 @@ function frame(now: number): void {
   const flashing = state === 'crashed' && now - crashTime < 150;
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
   applyFlameColors(lut, now / 1000);
-  renderer.beginFrame(flashing ? flashLut : lut);
+  renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
   renderer.drawSky(view, proj, camPos, sunDir, moonDir);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;

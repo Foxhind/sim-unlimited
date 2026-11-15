@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, snowy, TERRAIN_RAMP_BASE } from '../src/engine/palette';
+import { colour, RAMP, snowy } from '../src/engine/palette';
 import { LANDSAT_URL, landsatSource } from '../src/world/landsat';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 
@@ -17,8 +17,8 @@ describe('terrain mesh faceColor', () => {
   it('colours mesh land faces (snow may lie on them), sea stays sea', () => {
     const grid = 16, side = grid + 1;
     const heights = new Float32Array(side * side).map((_, k) => ((k % side) < 4 ? 0 : 50 + (k % side) * 30));
-    const mesh = buildTerrainMesh({ tile: { z: 12, x: 0, y: 0 }, grid, heights, skirtDepth: 0, faceColor: () => TERRAIN_RAMP_BASE + 5 });
+    const mesh = buildTerrainMesh({ tile: { z: 12, x: 0, y: 0 }, grid, heights, skirtDepth: 0, faceColor: () => colour(170, 85, 0) });
     const used = new Set(mesh.ramps);
-    expect(used).toEqual(new Set([snowy(TERRAIN_RAMP_BASE + 5), RAMP.SEA]));
+    expect(used).toEqual(new Set([snowy(colour(170, 85, 0)), RAMP.SEA]));
   });
 });

@@ -4,7 +4,8 @@ Export an aircraft .blend to the game's mesh JSON (src/flight/models/<id>.json).
   Blender -b assets/models/su27.blend --python tools/export-aircraft.py -- su27 src/flight/models/su27.json
 
 Axes: Blender x left (seen from the cockpit), y aft, z up -> game x right, y up, z aft (nose at -z).
-Colour: each material is named VGA_<index>_<RRGGBB>; the index picks the VGA ramp.
+Colour: each material's name ends in _<RRGGBB> (e.g. Hull_7D9EFF, or the older VGA_079_7D9EFF);
+that colour is the face colour, any RGB.
 Parts: a triangle is tagged as a separable part by where its centroid lies (REGIONS below).
 """
 import bpy, re, sys, json
@@ -52,12 +53,12 @@ def game(co):
     w = mw @ co
     return (-w.x, w.z, w.y)
 
-pos, vga, part = [], [], []
+pos, rgb, part = [], [], []
 for t in me.loop_triangles:
     mat = obj.material_slots[t.material_index].material
-    m = re.match(r'VGA_(\d+)_', mat.name if mat else '')
+    m = re.search(r'_([0-9A-Fa-f]{6})$', mat.name if mat else '')
     if not m:
-        raise SystemExit(f'material {mat and mat.name!r} is not named VGA_<index>_<hex>')
+        raise SystemExit(f'material {mat and mat.name!r} is not named <name>_<RRGGBB>')
     pts = [game(me.vertices[i].co) for i in t.vertices]
     cx = centroid(pts)[0]
     right = [(abs(p[0]), p[1], p[2]) for p in pts]
@@ -68,9 +69,9 @@ for t in me.loop_triangles:
             break
     for p in pts:
         pos.extend(round(c, 4) for c in p)
-    vga.append(int(m.group(1)))
+    rgb.append(int(m.group(1), 16))
     part.append(tag)
 
 with open(out, 'w') as f:
-    json.dump({'source': f'assets/models/{ident}.blend', 'positions': pos, 'vga': vga, 'parts': part}, f, separators=(',', ':'))
-print('exported', ident, len(vga), 'triangles', {PART_IDS[i - 1]: part.count(i) for i in set(part) if i})
+    json.dump({'source': f'assets/models/{ident}.blend', 'positions': pos, 'rgb': rgb, 'parts': part}, f, separators=(',', ':'))
+print('exported', ident, len(rgb), 'triangles', {PART_IDS[i - 1]: part.count(i) for i in set(part) if i})

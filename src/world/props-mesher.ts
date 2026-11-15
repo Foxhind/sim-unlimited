@@ -1,4 +1,4 @@
-import { LIGHT, RAMP, rampIndex, snowy } from '../engine/palette';
+import { GLOW_SHIFT, LIGHT, PAYLOAD_MASK, RAMP, rampIndex, snowy } from '../engine/palette';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import { clipTileData } from './clip';
 import type { LonLat, OsmDetail, OsmTileData } from './osm-types';
@@ -14,7 +14,7 @@ export interface PropsOptions {
 }
 
 export interface PropsData {
-  /** per tree: x, y, z, height, ramp, type (TREE_STRIDE), sorted by type */
+  /** per tree: x, y, z, height, colour payload, type, colour flags (TREE_STRIDE, treeColour), sorted by type */
   trees: Float32Array;
   /** per light: x, y, z, palette index (stride 4) */
   lights: Float32Array;
@@ -56,8 +56,22 @@ const LIGHT_TAXI = LIGHT.TAXI_BLUE;
 /** tree silhouettes; the instance's type field picks one */
 export const TREE = { SPRUCE: 0, BROADLEAF: 1, PINE: 2, CYPRESS: 3, PALM: 4 } as const;
 export const TREE_TYPES = 5;
-/** floats per tree instance: x, y, z, height, ramp, type */
-export const TREE_STRIDE = 6;
+/**
+ * floats per tree instance: x, y, z, height, colour payload, type, colour flags. The face colour
+ * (palette.ts) is split in two floats, its low 24 bits and its flag byte, so a float holds each exactly.
+ */
+export const TREE_STRIDE = 7;
+
+/** the face colour of tree instance i (its first float) */
+export function treeColour(trees: Float32Array, i: number): number {
+  return ((trees[i + 6] << GLOW_SHIFT) | trees[i + 4]) >>> 0;
+}
+
+/** sets the face colour of tree instance i (its first float) */
+export function setTreeColour(trees: Float32Array, i: number, packed: number): void {
+  trees[i + 4] = packed & PAYLOAD_MASK;
+  trees[i + 6] = packed >>> GLOW_SHIFT;
+}
 /** floats per tree geometry vertex: x, y, z, normal, part (0 crown, 1 trunk) */
 export const TREE_VERTEX_FLOATS = 7;
 
@@ -242,7 +256,8 @@ export function buildProps(opts: PropsOptions): PropsData {
       const [x, z] = enu(lon, lat);
       const type = pickType(treeWeights(climateLatitude(lat, y), area.tags), rng());
       const [h0, h1] = TREE_HEIGHT[type];
-      byType[type].push(x, y, z, h0 + rng() * (h1 - h0), snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST), type);
+      const packed = snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST);
+      byType[type].push(x, y, z, h0 + rng() * (h1 - h0), packed & PAYLOAD_MASK, type, packed >>> GLOW_SHIFT);
       placed++;
     }
   }

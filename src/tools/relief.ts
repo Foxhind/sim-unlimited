@@ -5,7 +5,7 @@
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { buildLUT, paletteAt } from '../engine/palette';
+import { buildLUT, lightUniforms, paletteAt } from '../engine/palette';
 import { Renderer } from '../engine/renderer';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
@@ -190,7 +190,7 @@ function frame(now: number): void {
   renderer.orthoFar = 2 * EYE_DISTANCE_M;
   renderer.snow = checked('snow');
   renderer.nightGlow = night;
-  renderer.beginFrame(lut);
+  renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
   // no fog: the view has no single distance to the ground
   chunks.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9);
   if (osmOn) osm.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9, night, POINT_SIZE * dpr);

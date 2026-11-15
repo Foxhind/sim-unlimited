@@ -6,9 +6,10 @@
  *      3-sigma margin;
  *   3. quantize: every pixel to the nearest colour of a palette, the whole land palette
  *      (palette.ts, LAND_PALETTE) or the k colours of a median cut of this tile, each snapped to it.
- * A terrain face then takes the most frequent quantized colour under it.
+ * A terrain face then takes the most frequent quantized colour under it, as an RGB face colour.
+ * The land palette is the terrain's own colour set (seams agree between tiles), not a renderer limit.
  */
-import { isWaterLand, LAND_PALETTE, LAND_PALETTE_SIZE, LAND_RAMP_BASE, nearestLand, RAMP, type RGB } from '../engine/palette';
+import { colourOf, isWaterLand, LAND_PALETTE, LAND_PALETTE_SIZE, nearestLand, RAMP, type RGB } from '../engine/palette';
 import { tileSizeMeters, type Tile } from './geodesy';
 import { fetchLandsatTile, landsatSource, type FaceColor, type RgbaImage } from './landsat';
 
@@ -313,11 +314,11 @@ export function faceColorByMode(q: Quantized, size: number, grid: number): FaceC
       const i = Math.max(0, Math.min(size - 1, Math.floor((x0 + x1 + x2) / 3)));
       const j = Math.max(0, Math.min(size - 1, Math.floor((y0 + y1 + y2) / 3)));
       const v = q.index[j * size + i];
-      return isWaterLand(v) ? RAMP.WATER : LAND_RAMP_BASE + v;
+      return isWaterLand(v) ? RAMP.WATER : colourOf(LAND_PALETTE[v]);
     }
     let best = 0;
     for (let v = 1; v < 256; v++) if (counts[v] > counts[best]) best = v;
-    return isWaterLand(best) ? RAMP.WATER : LAND_RAMP_BASE + best;
+    return isWaterLand(best) ? RAMP.WATER : colourOf(LAND_PALETTE[best]);
   };
 }
 

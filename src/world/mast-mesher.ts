@@ -26,9 +26,9 @@ export function beaconHeights(height: number): number[] {
 }
 
 export interface MastData {
-  /** square lattice trusses: interleaved pos+normal (stride 6) with Uint16 ramps, as the building mesh */
+  /** square lattice trusses: interleaved pos+normal (stride 6) with Uint32 face colours, as the building mesh */
   vertices: Float32Array;
-  ramps: Uint16Array;
+  ramps: Uint32Array;
   /** far stand-in: one vertical GL line per mast, vertex pairs of x, y, z, palette index */
   lines: Float32Array;
   /** red night lights on the mast axis: x, y, z, palette index */
@@ -130,7 +130,7 @@ export function buildMasts(points: OsmPoint[], tile: Tile, sampleHeight: HeightS
 
   return {
     vertices: new Float32Array(verts),
-    ramps: new Uint16Array(ramps),
+    ramps: new Uint32Array(ramps),
     lines: new Float32Array(lines),
     beacons: new Float32Array(beacons),
   };

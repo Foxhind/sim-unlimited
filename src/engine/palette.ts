@@ -2,7 +2,11 @@ import { LAND_PALETTE_6BIT } from './land-palette';
 
 export type RGB = readonly [number, number, number];
 
-export const RAMP = {
+/**
+ * Material ramps: hand-made dark → light colour ramps kept in the LUT (lit, fogged and night-tinted
+ * copies of each), for the generic surfaces, the sky, lights and the HUD. Ids, as LUT rows of 16 steps.
+ */
+export const MAT = {
   GRASS: 0,
   FOREST: 1,
   WATER: 2,
@@ -19,41 +23,86 @@ export const RAMP = {
   EMISSIVE: 13,
   HUD_GREEN: 14,
   HUD_AMBER: 15,
-  /**
-   * Seas and oceans (terrain at or below sea level), apart from inland water (WATER): it freezes
-   * to another colour. Lives in the unused black filler slot 248 of the VGA ramps.
-   */
-  SEA: 16 + 248,
+  /** seas and oceans (terrain at or below sea level), apart from inland water (WATER): it freezes to another colour */
+  SEA: 16,
 } as const;
 
-export const RAMP_COUNT = 16;
+/**
+ * Face colour of a mesh vertex, a packed uint32 (Uint32Array per vertex, `aRamp` in the shaders):
+ *   bits 0..23   payload: an RGB colour 0xRRGGBB, or with MATERIAL_FLAG the id of a material ramp (MAT);
+ *   bits 24..26  night glow level (GLOW_SHIFT);
+ *   bit 27       SNOW_FLAG;
+ *   bit 28       MATERIAL_FLAG.
+ * Any RGB colour is allowed: it is lit, fogged and tinted for the time of day in the shader by the
+ * same stepped law as the material ramps (shadeColour), not snapped to a palette.
+ */
+export const PAYLOAD_MASK = 0xffffff;
+export const GLOW_SHIFT = 24;
+export const GLOW_LEVEL_MASK = 7;
+export const SNOW_FLAG = 1 << 27;
+export const MATERIAL_FLAG = 1 << 28;
+
+/** a material ramp as a face colour */
+export function material(id: number): number {
+  return (MATERIAL_FLAG | id) >>> 0;
+}
+
+/** an RGB colour (0..255 per channel, rounded and clamped) as a face colour */
+export function colour(r: number, g: number, b: number): number {
+  const q = (v: number) => Math.max(0, Math.min(255, Math.round(v)));
+  return ((q(r) << 16) | (q(g) << 8) | q(b)) >>> 0;
+}
+
+/** the face colour of an RGB triple */
+export function colourOf(c: RGB): number {
+  return colour(c[0], c[1], c[2]);
+}
+
+/** a face colour that names a material ramp */
+export function isMaterial(packed: number): boolean {
+  return (packed & MATERIAL_FLAG) !== 0;
+}
+
+/** the RGB of a face colour that is not a material (glow and snow bits ignored) */
+export function rgbOf(packed: number): RGB {
+  return [(packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255];
+}
+
+/** the face colours of the material ramps */
+export const RAMP = {
+  GRASS: material(MAT.GRASS),
+  FOREST: material(MAT.FOREST),
+  WATER: material(MAT.WATER),
+  CONCRETE: material(MAT.CONCRETE),
+  BRICK: material(MAT.BRICK),
+  ASPHALT: material(MAT.ASPHALT),
+  SAND: material(MAT.SAND),
+  SNOW: material(MAT.SNOW),
+  ROCK: material(MAT.ROCK),
+  HULL_LIGHT: material(MAT.HULL_LIGHT),
+  HULL_DARK: material(MAT.HULL_DARK),
+  FIELD: material(MAT.FIELD),
+  SKY: material(MAT.SKY),
+  EMISSIVE: material(MAT.EMISSIVE),
+  HUD_GREEN: material(MAT.HUD_GREEN),
+  HUD_AMBER: material(MAT.HUD_AMBER),
+  SEA: material(MAT.SEA),
+} as const;
+
+/** material ramp rows reserved in the LUT (17 used) */
+export const RAMP_COUNT = 32;
 export const RAMP_STEPS = 16;
-/**
- * VGA colours: ramp TERRAIN_RAMP_BASE + i shades VGA palette entry i (0..255), so a face (a roof,
- * an aircraft part) can take any of the 256 default VGA colours and still get lighting, fog and
- * night from the LUT.
- */
-export const TERRAIN_RAMP_BASE = RAMP_COUNT;
-/**
- * Land colours: ramp LAND_RAMP_BASE + i shades LAND_PALETTE entry i, the palette of the
- * Landsat-coloured terrain (land-palette.ts). 240 colours is the most the 16-bit index buffer
- * holds: (16 + 256 + 240) ramps × 16 steps × 8 glow copies = 65536 indices.
- */
-export const LAND_RAMP_BASE = TERRAIN_RAMP_BASE + 256;
-export const LAND_PALETTE_SIZE = 240;
-/** LUT entries: 16 material ramps + 256 VGA ramps + 240 land ramps, 16 steps each (256-wide rows) */
-export const LUT_SIZE = (RAMP_COUNT + 256 + LAND_PALETTE_SIZE) * RAMP_STEPS;
+/** LUT entries of one world palette: the material ramps, 16 steps each (256-wide rows) */
+export const LUT_SIZE = RAMP_COUNT * RAMP_STEPS;
 export const LIT_STEPS = 12; // steps 0..11: lighting range, 12..15: fog range toward haze
 
 /**
  * Night glow: artificial light on the ground and on everything standing on it, in levels 1..7 by
- * how densely built the terrain triangle is (night-glow.ts). The level rides in the high bits of a
- * mesh ramp (ramp | level << GLOW_SHIFT); the LUT holds one full copy of all ramps per level,
- * lit by warm street light instead of the night sky, after the plain one (level 0).
+ * how densely built the terrain triangle is (night-glow.ts). The level rides in bits 24..26 of a
+ * face colour; the LUT holds one full copy of the material ramps per level, and the shader lights
+ * RGB colours by that level's light (lightUniforms), warm street light instead of the night sky.
  */
 export const GLOW_LEVELS = 7;
-export const GLOW_SHIFT = 12;
-export const RAMP_MASK = (1 << GLOW_SHIFT) - 1;
 /** entries of the world palettes: the plain palette and one copy per glow level */
 export const LUT_TOTAL = LUT_SIZE * (GLOW_LEVELS + 1);
 /**
@@ -74,24 +123,21 @@ const GLOW_MUL_MAX = 0.425;
 /** warm sodium / LED mix */
 const GLOW_TINT: RGB = [1.0, 0.86, 0.66];
 
-export function withGlow(ramp: number, level: number): number {
-  return (ramp & (RAMP_MASK | SNOW_FLAG)) | (Math.max(0, Math.min(GLOW_LEVELS, level)) << GLOW_SHIFT);
+export function withGlow(packed: number, level: number): number {
+  return ((packed & ~(GLOW_LEVEL_MASK << GLOW_SHIFT)) | (Math.max(0, Math.min(GLOW_LEVELS, level)) << GLOW_SHIFT)) >>> 0;
 }
 
 /**
- * Winter: a face that snow can lie on (open ground, trees, flat roofs) carries SNOW_FLAG in the
- * top bit of its ramp (above the glow level); with snow on, the shader draws it in RAMP.SNOW.
+ * Winter: a face that snow can lie on (open ground, trees, flat roofs) carries SNOW_FLAG;
+ * with snow on, the shader draws it in the snow ramp.
  */
-export const SNOW_FLAG = 1 << 15;
-export const GLOW_LEVEL_MASK = (1 << (15 - GLOW_SHIFT)) - 1;
-
-export function snowy(ramp: number): number {
-  return ramp | SNOW_FLAG;
+export function snowy(packed: number): number {
+  return (packed | SNOW_FLAG) >>> 0;
 }
 
-/** the night glow level of a packed mesh ramp (the snow flag above it ignored) */
+/** the night glow level of a face colour */
 export function rampGlowLevel(packed: number): number {
-  return (packed >> GLOW_SHIFT) & GLOW_LEVEL_MASK;
+  return (packed >>> GLOW_SHIFT) & GLOW_LEVEL_MASK;
 }
 
 /** what the weather does to the ground (weather.ts) */
@@ -160,56 +206,15 @@ const DAY: PaletteParams = {
 };
 
 
-/** The default 256-colour VGA (mode 13h) palette, 8-bit per channel. */
-export const VGA_PALETTE: RGB[] = (() => {
-  const six: number[][] = [];
-  // 0..15: EGA colours
-  for (const c of [
-    [0, 0, 0], [0, 0, 42], [0, 42, 0], [0, 42, 42], [42, 0, 0], [42, 0, 42], [42, 21, 0], [42, 42, 42],
-    [21, 21, 21], [21, 21, 63], [21, 63, 21], [21, 63, 63], [63, 21, 21], [63, 21, 63], [63, 63, 21], [63, 63, 63],
-  ]) six.push(c);
-  // 16..31: greys
-  for (const g of [0, 5, 8, 11, 14, 17, 20, 24, 28, 32, 36, 40, 45, 50, 56, 63]) six.push([g, g, g]);
-  // 32..247: 24 hues x 3 saturations x 3 intensities
-  for (const [hi, lo, m1, m2, m3] of [
-    [63, 0, 16, 31, 47], [63, 31, 39, 47, 55], [63, 45, 49, 54, 58],
-    [28, 0, 7, 14, 21], [28, 14, 17, 21, 24], [28, 20, 22, 24, 26],
-    [16, 0, 4, 8, 12], [16, 8, 10, 12, 14], [16, 11, 12, 13, 15],
-  ]) {
-    for (let k = 0; k < 24; k++) {
-      // hue order: blue, magenta, red, yellow, green, cyan (as in the VGA BIOS table)
-      const seg = Math.floor(k / 4), q = k % 4;
-      const rise = [lo, m1, m2, m3][q], fall = [hi, m3, m2, m1][q];
-      const rgb =
-        seg === 0 ? [rise, lo, hi] : seg === 1 ? [hi, lo, fall] : seg === 2 ? [hi, rise, lo]
-        : seg === 3 ? [fall, hi, lo] : seg === 4 ? [lo, hi, rise] : [lo, fall, hi];
-      six.push(rgb);
-    }
-  }
-  // 248..255: black
-  while (six.length < 256) six.push([0, 0, 0]);
-  return six.map(([r, g, b]) => [Math.round((r * 255) / 63), Math.round((g * 255) / 63), Math.round((b * 255) / 63)] as RGB);
-})();
+/** tree trunks: a bark brown */
+export const TREE_TRUNK_RAMP = colour(96, 68, 44);
 
-/** nearest VGA palette entry (0..247: the black filler 248..255 is never chosen) */
-export function nearestVga(r: number, g: number, b: number): number {
-  let best = 0;
-  let bestD = Infinity;
-  for (let i = 0; i < 248; i++) {
-    const [pr, pg, pb] = VGA_PALETTE[i];
-    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  }
-  return best;
-}
-
-/** tree trunks: a bark brown from the default VGA colours (terrain ramps) */
-export const TREE_TRUNK_RAMP = TERRAIN_RAMP_BASE + nearestVga(96, 68, 44);
-
-/** the land palette in 8 bits per channel */
+/**
+ * The land palette in 8 bits per channel: the colours a Landsat-coloured terrain face is quantized
+ * to (landsat-process.ts), so neighbouring tiles agree on colours at their seams. Not a hardware
+ * limit: any colour may be drawn, this is only the terrain's own colour set.
+ */
+export const LAND_PALETTE_SIZE = 240;
 export const LAND_PALETTE: RGB[] = LAND_PALETTE_6BIT.map(([r, g, b]) => [Math.round((r * 255) / 63), Math.round((g * 255) / 63), Math.round((b * 255) / 63)] as RGB);
 if (LAND_PALETTE.length !== LAND_PALETTE_SIZE) throw new Error(`land palette: ${LAND_PALETTE.length} colours, expected ${LAND_PALETTE_SIZE}`);
 
@@ -236,38 +241,14 @@ function hsv([r, g, b]: RGB): [number, number, number] {
 }
 
 /** a colour one would call green (hue 70°–170°, not grey, not black) */
-function isGreen(c: RGB): boolean {
+export function isGreen(c: RGB): boolean {
   const [h, s, v] = hsv(c);
   return h >= 70 && h <= 170 && s >= 0.2 && v >= 0.12;
 }
 
-/** a VGA colour one would call green */
-export function isGreenVga(i: number): boolean {
-  return isGreen(VGA_PALETTE[i]);
-}
-const GREEN_VGA = Array.from({ length: 248 }, (_, i) => i).filter(isGreenVga);
-
-/** the colour itself when green, else the nearest green VGA colour */
-export function greenVga(i: number): number {
-  if (isGreenVga(i)) return i;
-  const [r, g, b] = VGA_PALETTE[i];
-  let best = GREEN_VGA[0], bd = Infinity;
-  for (const k of GREEN_VGA) {
-    const [pr, pg, pb] = VGA_PALETTE[k];
-    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
-    if (d < bd) { bd = d; best = k; }
-  }
-  return best;
-}
-
 /** a colour that reads as open water in the imagery (clearly blue, not a bluish grey) */
-function isWater([r, g, b]: RGB): boolean {
+export function isWater([r, g, b]: RGB): boolean {
   return b >= r + 40 && b >= g + 15;
-}
-
-/** a VGA colour that reads as open water */
-export function isWaterVga(i: number): boolean {
-  return isWater(VGA_PALETTE[i]);
 }
 
 /** a land palette colour that reads as open water */
@@ -281,25 +262,29 @@ export function isGreenLand(i: number): boolean {
 }
 const GREEN_LAND = Array.from({ length: LAND_PALETTE_SIZE }, (_, i) => i).filter(isGreenLand);
 
-/** the land colour itself when green, else the nearest green land colour (foliage over that ground) */
-export function greenLand(i: number): number {
-  if (isGreenLand(i)) return i;
-  const [r, g, b] = LAND_PALETTE[i];
+/**
+ * Foliage over the ground of a face colour: the colour itself when green, else the nearest green
+ * land colour; glow and snow bits are kept. A material ramp stays as it is.
+ */
+export function greenColour(packed: number): number {
+  if (isMaterial(packed)) return packed;
+  const c = rgbOf(packed);
+  if (isGreen(c)) return packed;
   let best = GREEN_LAND[0], bd = Infinity;
   for (const k of GREEN_LAND) {
     const [pr, pg, pb] = LAND_PALETTE[k];
-    const d = (r - pr) ** 2 + (g - pg) ** 2 + (b - pb) ** 2;
+    const d = (c[0] - pr) ** 2 + (c[1] - pg) ** 2 + (c[2] - pb) ** 2;
     if (d < bd) { bd = d; best = k; }
   }
-  return best;
+  return ((packed & ~PAYLOAD_MASK) | colourOf(LAND_PALETTE[best])) >>> 0;
 }
 
 /**
- * Shade of a VGA terrain colour at lighting step s (0..LIT_STEPS-1): the imagery colour is what
- * the ground looks like under ordinary daylight, so it sits at ~3/4 of the lighting range; full sun
- * brightens it a little, the shadow side darkens it to about 40 %.
+ * Shade of an RGB face colour at lighting step s (0..LIT_STEPS-1) before the time of day: the colour
+ * is what the surface looks like under ordinary daylight, so it sits at ~3/4 of the lighting range;
+ * full sun brightens it a little, the shadow side darkens it to about 40 %. The shader does the same.
  */
-export function vgaShade(c: RGB, s: number): RGB {
+export function imageryShade(c: RGB, s: number): RGB {
   const k = 0.4 + (0.8 * s) / (LIT_STEPS - 1);
   return [Math.min(255, c[0] * k), Math.min(255, c[1] * k), Math.min(255, c[2] * k)];
 }
@@ -329,25 +314,52 @@ export function paletteAt(sunElevationDeg: number): PaletteParams {
   return DAY;
 }
 
-/** VGA DAC is 6 bits per channel: quantize then expand back to 8-bit values. */
-export function quantize6bit(v: number): number {
-  const q = Math.max(0, Math.min(63, Math.round((v / 255) * 63)));
-  return Math.round((q * 255) / 63);
-}
-
 function scaleRGB(c: RGB, p: PaletteParams): RGB {
-  return [
-    quantize6bit(c[0] * p.lightMul * p.tint[0]),
-    quantize6bit(c[1] * p.lightMul * p.tint[1]),
-    quantize6bit(c[2] * p.lightMul * p.tint[2]),
-  ];
+  return [c[0] * p.lightMul * p.tint[0], c[1] * p.lightMul * p.tint[1], c[2] * p.lightMul * p.tint[2]];
 }
 
 function writeEntry(lut: Uint8Array, index: number, c: RGB): void {
-  lut[index * 4 + 0] = quantize6bit(c[0]);
-  lut[index * 4 + 1] = quantize6bit(c[1]);
-  lut[index * 4 + 2] = quantize6bit(c[2]);
+  lut[index * 4 + 0] = Math.max(0, Math.min(255, Math.round(c[0])));
+  lut[index * 4 + 1] = Math.max(0, Math.min(255, Math.round(c[1])));
+  lut[index * 4 + 2] = Math.max(0, Math.min(255, Math.round(c[2])));
   lut[index * 4 + 3] = 255;
+}
+
+/**
+ * Lighting of RGB face colours, as shader uniforms (renderer.beginFrame): per glow level 0..7 the
+ * light multiplier (lightMul × tint of that level's palette), and the haze colour fog runs into.
+ */
+export interface LightUniforms {
+  /** 8 × rgb */
+  levels: Float32Array;
+  /** rgb 0..1 */
+  haze: Float32Array;
+}
+
+export function lightUniforms(p: PaletteParams): LightUniforms {
+  const levels = new Float32Array((GLOW_LEVELS + 1) * 3);
+  for (let k = 0; k <= GLOW_LEVELS; k++) {
+    const q = k === 0 ? p : glowParams(p, k);
+    for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
+  }
+  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255) };
+}
+
+/** the crash flash: everything white */
+export const FLASH_LIGHT: LightUniforms = {
+  levels: new Float32Array((GLOW_LEVELS + 1) * 3).fill(1000),
+  haze: new Float32Array([1, 1, 1]),
+};
+
+/**
+ * Colour of an RGB face colour at step s (0..15: lighting 0..11, fog 12..15) and glow level k,
+ * 0..255 per channel: the CPU mirror of shadeColour in the shaders.
+ */
+export function shadeColour(c: RGB, s: number, p: PaletteParams, k = 0): RGB {
+  const q = k === 0 ? p : glowParams(p, k);
+  const lit = (t: number) => scaleRGB(imageryShade(c, t), q);
+  if (s < LIT_STEPS) return lit(s);
+  return lerpRGB(lit(LIT_STEPS - 1), p.horizon, (s - LIT_STEPS + 1) / (RAMP_STEPS - LIT_STEPS));
 }
 
 /**
@@ -395,31 +407,18 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
   }
 
   for (let s = 0; s < RAMP_STEPS; s++) {
-    writeEntry(lut, RAMP.SKY * RAMP_STEPS + s, lerpRGB(p.zenith, p.horizon, s / (RAMP_STEPS - 1)));
+    writeEntry(lut, MAT.SKY * RAMP_STEPS + s, lerpRGB(p.zenith, p.horizon, s / (RAMP_STEPS - 1)));
   }
   for (const [ramp, m] of [
-    [RAMP.EMISSIVE, EMISSIVE],
-    [RAMP.HUD_GREEN, HUD_GREEN],
-    [RAMP.HUD_AMBER, HUD_AMBER],
+    [MAT.EMISSIVE, EMISSIVE],
+    [MAT.HUD_GREEN, HUD_GREEN],
+    [MAT.HUD_AMBER, HUD_AMBER],
   ] as const) {
     for (let s = 0; s < RAMP_STEPS; s++) {
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
-  const writeImagery = (ramp: number, colour: RGB): void => {
-    const base = ramp * RAMP_STEPS;
-    const light = scaleRGB(vgaShade(colour, LIT_STEPS - 1), p);
-    for (let s = 0; s < RAMP_STEPS; s++) {
-      const c = s < LIT_STEPS
-        ? scaleRGB(vgaShade(colour, s), p)
-        : lerpRGB(light, haze, (s - LIT_STEPS + 1) / (RAMP_STEPS - LIT_STEPS));
-      writeEntry(lut, base + s, c);
-    }
-  };
-  for (let v = 0; v < 256; v++) writeImagery(TERRAIN_RAMP_BASE + v, VGA_PALETTE[v]);
-  for (let v = 0; v < LAND_PALETTE_SIZE; v++) writeImagery(LAND_RAMP_BASE + v, LAND_PALETTE[v]);
-  // after the VGA ramps: the sea ramp sits in a filler slot of them
-  writeMaterial(RAMP.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX]);
+  writeMaterial(MAT.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX]);
 }
 
 /**
@@ -427,16 +426,16 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
  * They are written unscaled, so they glow the same by day and by night.
  */
 export const LIGHT = {
-  WINDOW_YELLOW: RAMP.SKY * RAMP_STEPS + 10,
-  WINDOW_WHITE: RAMP.SKY * RAMP_STEPS + 11,
-  RED: RAMP.SKY * RAMP_STEPS + 12,
+  WINDOW_YELLOW: MAT.SKY * RAMP_STEPS + 10,
+  WINDOW_WHITE: MAT.SKY * RAMP_STEPS + 11,
+  RED: MAT.SKY * RAMP_STEPS + 12,
   /** sun disc and its halo: white by day, yellow when low (applySunColors) */
-  SUN_HALO: RAMP.SKY * RAMP_STEPS + 13,
-  SUN: RAMP.SKY * RAMP_STEPS + 14,
+  SUN_HALO: MAT.SKY * RAMP_STEPS + 13,
+  SUN: MAT.SKY * RAMP_STEPS + 14,
   /** blue taxiway edge lights (kept apart from the water ramp, which turns to ice in frost) */
-  TAXI_BLUE: RAMP.SKY * RAMP_STEPS + 9,
+  TAXI_BLUE: MAT.SKY * RAMP_STEPS + 9,
   /** street lighting: lamp heads and far lit roads at night (sodium orange); a free step of the HUD amber ramp (3, 11, 13 are used) */
-  STREET: RAMP.HUD_AMBER * RAMP_STEPS + 14,
+  STREET: MAT.HUD_AMBER * RAMP_STEPS + 14,
 } as const;
 const LIGHT_COLORS: [number, RGB][] = [
   [LIGHT.TAXI_BLUE, [64, 128, 255]],
@@ -466,8 +465,20 @@ export function applySunColors(lut: Uint8Array, sunElevationDeg: number): void {
   writeEntry(lut, LIGHT.SUN_HALO, halo);
 }
 
+/** LUT index of a material ramp (MAT id, or its face colour RAMP.*) at a step */
 export function rampIndex(ramp: number, step: number): number {
-  return ramp * RAMP_STEPS + Math.max(0, Math.min(RAMP_STEPS - 1, step));
+  return (ramp & PAYLOAD_MASK) * RAMP_STEPS + Math.max(0, Math.min(RAMP_STEPS - 1, step));
+}
+
+/** RGB point colours (pointValue) are shaded at this lighting step, like a lit face */
+export const POINT_STEP = 9;
+
+/**
+ * The colour value of a point or line vertex (props, dots: x, y, z, value): a LUT index (>= 0) as
+ * it is; an RGB face colour as -(0xRRGGBB + 1), shaded at POINT_STEP by daylight. Floats hold both exactly.
+ */
+export function pointValue(packed: number, step = POINT_STEP): number {
+  return isMaterial(packed) ? rampIndex(packed, step) : -((packed & PAYLOAD_MASK) + 1);
 }
 
 /** Quantize an arbitrary RGB to the closest material ramp (S3DB colours, Q4). */
@@ -499,6 +510,6 @@ const FLAME_CORE: RGB[] = [EGA_RED, EGA_YELLOW, EGA_LIGHT_RED, EGA_YELLOW];
 /** Exhaust flicker: the plume and its core swap EGA red/yellow ~20 times a second. */
 export function applyFlameColors(lut: Uint8Array, timeSec: number): void {
   const tick = Math.floor(timeSec * 20) & 3;
-  writeEntry(lut, RAMP.HUD_AMBER * RAMP_STEPS + FLAME_STEP, FLAME_OUTER[tick]);
-  writeEntry(lut, RAMP.EMISSIVE * RAMP_STEPS + FLAME_STEP, FLAME_CORE[tick]);
+  writeEntry(lut, MAT.HUD_AMBER * RAMP_STEPS + FLAME_STEP, FLAME_OUTER[tick]);
+  writeEntry(lut, MAT.EMISSIVE * RAMP_STEPS + FLAME_STEP, FLAME_CORE[tick]);
 }

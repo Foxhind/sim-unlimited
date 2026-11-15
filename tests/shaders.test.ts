@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, SNOW_FLAG } from '../src/engine/palette';
+import { MAT, SNOW_FLAG } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 
 describe('logarithmic depth', () => {
@@ -22,9 +22,10 @@ describe('winter snow', () => {
   it('terrain, drapes, buildings and trees swap faces flagged for snow to the snow ramp', () => {
     for (const vs of [WORLD_VS, TREE_VS]) {
       expect(vs).toContain('uniform int uSnow;');
-      expect(vs).toContain(`if (uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u) ramp = ${RAMP.SNOW}u;`);
+      expect(vs).toContain(`bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;`);
+      expect(vs).toContain(`uint ramp = snow ? ${MAT.SNOW}u : packedRamp & 16777215u;`);
       // the snow flag must not leak into the glow level
-      expect(vs).toMatch(/>> 12u\) & 7u/);
+      expect(vs).toMatch(/>> 24u\) & 7u/);
     }
   });
 });

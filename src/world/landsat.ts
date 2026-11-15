@@ -3,8 +3,8 @@
  * (cloud-free, 30 m Landsat, year 2000), Web Mercator WMTS — the same z/x/y grid as the
  * Terrarium DEM. The layer stops at z12, so z13/z14 tiles read their part of the z12 ancestor.
  *
- * landsat-process.ts turns it into terrain colours (VGA palette, shaded through the LUT) and colour
- * boundaries for the TIN.
+ * landsat-process.ts turns it into terrain colours (the land palette, RGB face colours lit in the
+ * shader) and colour boundaries for the TIN.
  */
 import { RetryableError } from '../engine/queue';
 import type { Tile } from './geodesy';

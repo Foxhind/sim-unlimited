@@ -11,7 +11,7 @@ import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmLine } from '../world/osm-types';
 import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
 import { buildTerrainTin, COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
-import { greenLand, LAND_RAMP_BASE, RAMP } from '../engine/palette';
+import { greenColour, isMaterial, RAMP } from '../engine/palette';
 import { flattenRunways } from '../world/runway';
 import { gridForZoom } from '../world/chunks';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -19,7 +19,7 @@ import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 25;
+export const OSM_MESH_SCHEMA = 26;
 
 export interface OsmRequest {
   type: 'osm';
@@ -48,13 +48,13 @@ export interface OsmMeshResponse {
   beacons: ArrayBuffer;
   /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
   mastLines: ArrayBuffer;
-  /** night: street-lit copy of the built-up terrain faces (pos+normal, Uint16 ramps with glow level) */
+  /** night: street-lit copy of the built-up terrain faces (pos+normal, Uint32 face colours with glow level) */
   glowVertices: ArrayBuffer;
   glowRamps: ArrayBuffer;
-  /** road ribbons (near, pos+normal with Uint16 ramps) and their far 1 px GL lines (x, y, z, palette index) */
+  /** road ribbons (near, pos+normal with Uint32 face colours) and their far 1 px GL lines (x, y, z, palette index) */
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
-  /** water areas and river ribbons (pos+normal with Uint16 ramps), drawn without depth writes */
+  /** water areas and river ribbons (pos+normal with Uint32 face colours), drawn without depth writes */
   wVertices: ArrayBuffer;
   wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
@@ -109,8 +109,8 @@ function concatF32(a: Float32Array, b: Float32Array): Float32Array {
   out.set(b, a.length);
   return out;
 }
-function concatU16(a: Uint16Array, b: Uint16Array): Uint16Array {
-  const out = new Uint16Array(a.length + b.length);
+function concatU32(a: Uint32Array, b: Uint32Array): Uint32Array {
+  const out = new Uint32Array(a.length + b.length);
   out.set(a);
   out.set(b, a.length);
   return out;
@@ -169,7 +169,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       if (!r) return RAMP.FOREST;
       const t = tin.tris[r.tri];
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
-      return ramp >= LAND_RAMP_BASE ? LAND_RAMP_BASE + greenLand(ramp - LAND_RAMP_BASE) : RAMP.FOREST;
+      return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
     };
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false });
     const clipped = clipTileData(data, tile);
@@ -179,7 +179,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const masts = buildMasts(clipped.points, tile, drape);
     const bmesh = {
       vertices: concatF32(houses.vertices, masts.vertices),
-      ramps: concatU16(houses.ramps, masts.ramps),
+      ramps: concatU32(houses.ramps, masts.ramps),
     };
     const dotData = buildingDots(own, tile, drape);
     const night = buildingNightLights(own, tile, drape);

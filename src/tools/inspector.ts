@@ -9,7 +9,7 @@ import { PRESETS, SOURCE } from './presets';
 import { loadTileDem, fetchTerrariumPng, type TileBorders } from '../world/terrain-source';
 import { beltStepForZoom, buildTerrainTin, EPS_START, isSeaFace, type TerrainTin, type TinDebug } from '../world/terrain-tin';
 import { parseMapLink } from '../ui/map-links';
-import { LAND_PALETTE, LAND_RAMP_BASE } from '../engine/palette';
+import { isMaterial, LAND_PALETTE, nearestLand, rgbOf } from '../engine/palette';
 import { fetchLandsatTile, landsatSource, type RgbaImage } from '../world/landsat';
 import { cleanLabels, colourBoundaries, faceColorByMode, LANDSAT_TUNING, neighbourTiles, processLandsat, stitch3x3, type ColourLine, type ProcessedLandsat } from '../world/landsat-process';
 
@@ -821,9 +821,9 @@ function colourFaces(): void {
   const f = faceColorByMode(lsProc.quantized, lsProc.quantized.image.width, grid);
   lsFace = new Int16Array(tin.tris.length);
   tin.tris.forEach((t, ti) => {
-    lsFace![ti] = isSeaFace(tin, ti)
-      ? -1
-      : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]) - LAND_RAMP_BASE;
+    const c = isSeaFace(tin, ti) ? undefined : f(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
+    // faces take land palette colours (or the water ramp): back to the palette index
+    lsFace![ti] = c === undefined || isMaterial(c) ? -1 : nearestLand(...rgbOf(c));
   });
 }
 

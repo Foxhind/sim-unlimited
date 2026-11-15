@@ -9,6 +9,7 @@ import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
 } from '../src/world/night-glow';
 import { farLightSize } from '../src/world/osm-manager';
+import { setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
@@ -222,8 +223,8 @@ describe('night glow by building density', () => {
     const day = buildLUT(paletteAt(45));
     expect(entry(day, GLOW_LEVELS * LUT_SIZE + i)).toEqual(entry(day, i));
     expect(WORLD_VS).toContain(`lvl * ${LUT_SIZE}u`);
-    expect(TREE_VS).toContain('uint packed = uint(aInstSR.y);');
-    expect(TREE_VS).toContain('glowIndex(packed');
+    expect(TREE_VS).toContain('uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);');
+    expect(TREE_VS).toContain('shadeColour(packed');
   });
 
   it('the lit ground copies the built-up terrain face, raised a little, its ramp carrying the level', () => {
@@ -256,16 +257,18 @@ describe('night glow by building density', () => {
     applyGlow(m.vertices, dark, TILE, locate, new Uint8Array(tin.tris.length));
     expect(dark).toEqual(m.ramps);
     const [e, n] = latLonToEnu(tileCenter(TILE), at.lat, at.lon, 0);
-    const trees = new Float32Array([e, GROUND, -n, 10, RAMP.FOREST, 0]);
+    const trees = new Float32Array(TREE_STRIDE);
+    trees.set([e, GROUND, -n, 10]);
+    setTreeColour(trees, 0, RAMP.FOREST);
     applyGlowToTrees(trees, TILE, locate, levels);
-    expect(trees[4]).toBe(withGlow(RAMP.FOREST, 3));
+    expect(treeColour(trees, 0)).toBe(withGlow(RAMP.FOREST, 3));
   });
 
   it('a face already glowing brighter (a lit street) keeps its own level', () => {
     const levels = new Uint8Array(tin.tris.length);
     levels[under] = 3;
     const m = buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat });
-    const bright = Uint16Array.from(m.ramps, (r) => withGlow(r, 6));
+    const bright = Uint32Array.from(m.ramps, (r) => withGlow(r, 6));
     applyGlow(m.vertices, bright, TILE, locate, levels);
     for (const r of bright) expect(rampGlowLevel(r)).toBe(6);
   });

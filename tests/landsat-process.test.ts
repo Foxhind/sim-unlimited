@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LAND_PALETTE, LAND_RAMP_BASE, nearestLand } from '../src/engine/palette';
+import { colourOf, LAND_PALETTE, nearestLand } from '../src/engine/palette';
 import type { RgbaImage } from '../src/world/landsat';
 import {
   crop, faceColorByMode, FULL_LAND, gaussianBlur, gradeImage, isNeutralGrade, LS_PX, NEUTRAL_GRADE, medianCut, neighbourTiles, processLandsat, quantize, stitch3x3,
@@ -74,10 +74,10 @@ describe('processLandsat', () => {
     expect(soft.sigmaPx).toBeGreaterThan(3);
   });
 
-  it('a face takes the most frequent quantized colour under it', () => {
+  it('a face takes the most frequent quantized colour under it, as an RGB face colour', () => {
     const p = processLandsat(mosaic, { z: 12, x: 4, y: 4 }, { blurM: 0, colours: 0 });
     const f = faceColorByMode(p.quantized, p.raw.width, 48);
-    expect(f(1, 1, 40, 1, 1, 40)).toBe(LAND_RAMP_BASE + nearestLand(...sand));
+    expect(f(1, 1, 40, 1, 1, 40)).toBe(colourOf(LAND_PALETTE[nearestLand(...sand)]));
   });
 });
 

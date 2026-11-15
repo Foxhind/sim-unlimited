@@ -7,8 +7,8 @@ import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from '
 
 export interface TerrainMeshData {
   vertices: Float32Array; // interleaved pos.xyz + normal.xyz
-  /** ramp per vertex: Uint16, VGA ramps go past 255 */
-  ramps: Uint16Array;
+  /** face colour per vertex (palette.ts: RGB or a material ramp, glow and snow bits) */
+  ramps: Uint32Array;
   vertexCount: number;
   /** per vertex: metres to the coarser neighbour's border line, and the edge bits it applies to (TerrainTin.coarse) */
   morph?: Float32Array;
@@ -119,12 +119,12 @@ export function buildGlowGround(
   levels: Uint8Array,
   faceColor?: FaceColor,
   lift = GLOW_GROUND_LIFT_M,
-): { vertices: Float32Array; ramps: Uint16Array } {
+): { vertices: Float32Array; ramps: Uint32Array } {
   const { vx, vy, vh, tris } = tin;
   let lit = 0;
   for (let i = 0; i < tris.length; i++) if (levels[i] > 0) lit++;
   const vertices = new Float32Array(lit * 18);
-  const ramps = new Uint16Array(lit * 3);
+  const ramps = new Uint32Array(lit * 3);
   if (lit === 0) return { vertices, ramps };
   const { wx, wz } = tinToWorld(tile, tin.grid, vx, vy);
   const wy = vh.map((h) => Math.max(h, 0));
@@ -175,7 +175,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
 
   const vertexCount = (landTris + skirtQuads * 2) * 3;
   const vertices = new Float32Array(vertexCount * 6);
-  const ramps = new Uint16Array(vertexCount);
+  const ramps = new Uint32Array(vertexCount);
   const morph = coarse ? new Float32Array(vertexCount * 2) : undefined;
   let fi = 0;
   let ri = 0;

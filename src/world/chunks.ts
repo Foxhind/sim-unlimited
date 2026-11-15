@@ -396,7 +396,7 @@ export class ChunkManager {
     gl.bindBuffer(gl.ARRAY_BUFFER, rb);
     gl.bufferData(gl.ARRAY_BUFFER, data.ramps, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
-    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_SHORT, 2, 0); // Uint16 ramps (VGA terrain colours)
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, 0); // Uint32 face colours (palette.ts)
     chunk.buffers = [vb, rb];
     if (data.morph) {
       const mb = must(gl.createBuffer(), 'chunk morph');
@@ -408,7 +408,7 @@ export class ChunkManager {
     }
     gl.bindVertexArray(null);
     chunk.vao = vao;
-    chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 2 };
+    chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 4 };
     chunk.status = 'ready';
   }
 
