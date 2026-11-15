@@ -41,13 +41,24 @@ export function isLitRoad(tags: Record<string, string>): boolean {
 
 /** glow level of a street-lit road surface at night (the brightest built-up ground is GLOW_LEVELS) */
 export const LIT_ROAD_GLOW = 6;
-/** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating */
+/** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating; a one-way road keeps
+ *  them on one side (see lampSide) */
 export const LAMP_SPACING_M = 35;
 export const LAMP_HEIGHT_M = 8;
 /** pole foot this far beyond the road edge; the arm reaches back over the road */
 const LAMP_SETBACK_M = 1;
 const LAMP_ARM_M = 2;
 const LAMP_POLE_HALF_M = 0.12;
+
+/**
+ * the side of the way's drawing direction its lamps stand on: oneway=yes only to the right,
+ * oneway=-1 only to the left, anything else alternating (0)
+ */
+export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
+  if (tags.oneway === 'yes') return 1;
+  if (tags.oneway === '-1') return -1;
+  return 0;
+}
 const LAMP_RAMP = RAMP.HULL_DARK;
 
 export interface OsmMeshData extends TerrainMeshData {
@@ -375,11 +386,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0]);
   };
   /** street lamps along a road: pole beside it, arm over it, a light at the arm's end */
-  const placeLamps = (points: LonLat[], half: number): void => {
+  const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0): void => {
     const p = points.map(([lon, lat]) => enu(lon, lat));
     let next = LAMP_SPACING_M / 2;
     let walked = 0;
-    let side = 1;
+    // side 1 is to the right of the drawing direction (z points south: walking east, +z is right)
+    let side: number = fixedSide || 1;
     for (let i = 0; i + 1 < p.length; i++) {
       const [ax, az] = p[i], [bx, bz] = p[i + 1];
       const len = Math.hypot(bx - ax, bz - az);
@@ -399,7 +411,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         const tx = fx - nx * LAMP_ARM_M, tz = fz - nz * LAMP_ARM_M;
         box(Math.min(fx, tx) - r, top - 2 * r, Math.min(fz, tz) - r, Math.max(fx, tx) + r, top, Math.max(fz, tz) + r);
         lamps.push(tx, top - 2 * r - 0.1, tz, LIGHT.STREET);
-        side = -side;
+        if (!fixedSide) side = -side;
         next += LAMP_SPACING_M;
       }
       walked += len;
@@ -426,7 +438,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     // a street-lit surface glows at night (the shader shows the level only then)
     const ramp = lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp;
     const linesFrom = roadLines.length;
-    if (lit) placeLamps(line.points, half);
+    if (lit) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
       // the ribbon in lattice coordinates, each triangle cut by the terrain faces under it: every

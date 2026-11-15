@@ -13,7 +13,7 @@ import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/wo
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
-import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, LAMP_SPACING_M, LIT_ROAD_GLOW } from '../src/world/osm-mesher';
+import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
 
@@ -321,5 +321,19 @@ describe('street lighting', () => {
       expect(Math.abs(z)).toBeCloseTo(6, 0);
       if (i > 0) expect(Math.sign(z)).toBe(-Math.sign(m.lamps[(i - 1) * 4 + 2]));
     }
+  });
+
+  it('one-way roads: oneway=yes lamps only right of the drawing direction, oneway=-1 only left', () => {
+    expect(lampSide({ highway: 'primary' })).toBe(0);
+    expect(lampSide({ highway: 'primary', oneway: 'no' })).toBe(0);
+    expect(lampSide({ highway: 'primary', oneway: 'yes' })).toBe(1);
+    expect(lampSide({ highway: 'primary', oneway: '-1' })).toBe(-1);
+    // the test road runs west to east; mesh z points south, so its right side is +z
+    const zs = (m: ReturnType<typeof road>) => Array.from({ length: m.lamps.length / 4 }, (_, i) => m.lamps[i * 4 + 2]);
+    const right = zs(road({ highway: 'primary', oneway: 'yes' }));
+    const left = zs(road({ highway: 'primary', oneway: '-1' }));
+    expect(right.length).toBe(zs(road({ highway: 'primary' })).length);
+    for (const z of right) expect(z).toBeCloseTo(6, 0);
+    for (const z of left) expect(z).toBeCloseTo(-6, 0);
   });
 });
