@@ -91,6 +91,13 @@ export interface TinOptions {
   colour?: ColourLabels;
   /** colour boundaries (lattice coordinates) forced in as fixed edges, longest first */
   colourLines?: { lines: Array<{ pts: Pt[]; closed: boolean }>; maxVerts?: number };
+  /**
+   * Inscribed isolines (default true, the game's surface): simplification keeps the same points,
+   * but every simplified segment is then moved uphill (into the ground) by as much as it passed
+   * downhill of the raw line it replaces, so the belts lie inside the relief instead of following
+   * it both ways. false: plain Douglas–Peucker, the line kept as close to the raw one as it gets.
+   */
+  inscribed?: boolean;
 }
 
 /**
@@ -166,6 +173,9 @@ export interface TinDebug {
   /** colour-boundary vertices and their crossings with isolines in the last triangulation */
   colourVerts?: number;
   colourCrossings?: number;
+  /** inscribed isolines: vertices moved uphill, and vertices put back (their move crossed something) */
+  inscribedMoved?: number;
+  inscribedReverted?: number;
 }
 
 /** one isoline being simplified: raw points (rings repeat point 0 at the end) and a keep-mask */
@@ -265,6 +275,139 @@ interface Seg {
   chain: number; // −1 for the tile border
   lo: number;
   hi: number;
+}
+
+/** last inscribe() run: vertices moved, chains reverted (read into TinDebug) */
+const inscribedStats = { moved: 0, reverted: 0 };
+
+/**
+ * Inscribed isolines (TinOptions.inscribed): the simplified points of every chain, moved uphill so
+ * that no simplified segment passes downhill of a raw point it replaced. Nothing is added: each
+ * segment is shifted along its uphill normal by the largest such overshoot (turned about its end
+ * when that end is fixed on the tile border), and a vertex between two segments goes to the
+ * intersection of their shifted lines (a segment without overshoot keeps its line). Moves are
+ * capped at 2·eps; the ends of a moved segment that would cross another boundary, or a point
+ * that would leave the tile, go back to their raw points. Returns, per chain, the moved points
+ * by raw index.
+ */
+function inscribe(chains: Chain[], border: Seg[], uphill: (p: Pt, q: Pt) => number, eps: number, grid: number): Array<Map<number, Pt> | undefined> {
+  const onBorder = (p: Pt) => p.x <= 0 || p.y <= 0 || p.x >= grid || p.y >= grid;
+  const cap = 2 * eps;
+  const out: Array<Map<number, Pt> | undefined> = chains.map((c) => {
+    const ks: number[] = [];
+    for (let k = 0; k < c.pts.length; k++) if (c.keep[k]) ks.push(k);
+    if (ks.length < 2) return undefined;
+    const last = c.pts.length - 1;
+    const ring = c.pts[0].x === c.pts[last].x && c.pts[0].y === c.pts[last].y;
+    // per kept point: the (normal, distance) each adjacent segment needs it moved by
+    const need = new Map<number, Array<{ nx: number; ny: number; d: number }>>();
+    const add = (k: number, nx: number, ny: number, d: number) => {
+      const key = ring && k === last ? 0 : k;
+      (need.get(key) ?? need.set(key, []).get(key)!).push({ nx, ny, d });
+    };
+    for (let i = 0; i + 1 < ks.length; i++) {
+      const ka = ks[i], kb = ks[i + 1];
+      const a = c.pts[ka], b = c.pts[kb];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      if (len === 0) continue;
+      const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+      let nx = -uy, ny = ux;
+      // uphill side of the segment: where the raw points it replaces rise (its middle if none)
+      let rise = 0;
+      for (let m = ka + 1; m < kb; m++) rise += uphill(c.pts[m], { x: c.pts[m].x + nx, y: c.pts[m].y + ny });
+      if (kb === ka + 1) rise = uphill({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, { x: (a.x + b.x) / 2 + nx, y: (a.y + b.y) / 2 + ny });
+      if (rise < 0) { nx = -nx; ny = -ny; }
+      const fa = onBorder(a), fb = onBorder(b);
+      let da = 0, db = 0;
+      for (let m = ka + 1; m < kb; m++) {
+        const p = c.pts[m];
+        const sOff = (p.x - a.x) * nx + (p.y - a.y) * ny; // > 0: the raw point is uphill of the segment
+        if (sOff <= 0) continue;
+        const t = Math.max(0.1, Math.min(0.9, ((p.x - a.x) * ux + (p.y - a.y) * uy) / len));
+        if (!fa && !fb) da = db = Math.max(da, sOff);
+        else if (fa && !fb) db = Math.max(db, sOff / t);
+        else if (!fa && fb) da = Math.max(da, sOff / (1 - t));
+      }
+      if (!fa) add(ka, nx, ny, da);
+      if (!fb) add(kb, nx, ny, db);
+    }
+    const moved = new Map<number, Pt>();
+    for (const [k, cs] of need) {
+      if (!cs.some((q) => q.d > 0)) continue;
+      let vx: number, vy: number;
+      if (cs.length === 1) {
+        vx = cs[0].nx * cs[0].d; vy = cs[0].ny * cs[0].d;
+      } else {
+        const [p, q] = cs;
+        const det = p.nx * q.ny - p.ny * q.nx;
+        if (Math.abs(det) < 0.2) {
+          // nearly straight through the vertex: move along the mean normal by the larger need
+          const mx = p.nx + q.nx, my = p.ny + q.ny, ml = Math.hypot(mx, my) || 1;
+          const d = Math.max(p.d, q.d);
+          vx = (mx / ml) * d; vy = (my / ml) * d;
+        } else {
+          vx = (p.d * q.ny - q.d * p.ny) / det;
+          vy = (q.d * p.nx - p.d * q.nx) / det;
+        }
+      }
+      const vl = Math.hypot(vx, vy);
+      if (vl > cap) { vx *= cap / vl; vy *= cap / vl; }
+      moved.set(k, { x: c.pts[k].x + vx, y: c.pts[k].y + vy });
+      if (ring && k === 0) moved.set(last, moved.get(0)!);
+    }
+    return moved.size ? moved : undefined;
+  });
+
+  // a moved segment must still cross nothing and stay inside the tile; otherwise its ends go back
+  // to their raw points (the rest of the chain stays moved)
+  const segsOf = (ci: number): Seg[] => {
+    const c = chains[ci], m = out[ci];
+    const p = (k: number) => m?.get(k) ?? c.pts[k];
+    const segs: Seg[] = [];
+    let lo = -1;
+    for (let k = 0; k < c.pts.length; k++) {
+      if (!c.keep[k]) continue;
+      if (lo >= 0) segs.push({ a: p(lo), b: p(k), chain: ci, lo, hi: k });
+      lo = k;
+    }
+    return segs;
+  };
+  let reverted = 0;
+  const back = (ci: number, k: number): boolean => {
+    const m = out[ci];
+    if (!m?.has(k)) return false;
+    const last = chains[ci].pts.length - 1;
+    m.delete(k);
+    if (k === 0 || k === last) { m.delete(0); m.delete(last); }
+    reverted++;
+    return true;
+  };
+  for (let round = 0; round < 200; round++) {
+    let changed = false;
+    for (const [ci, m] of out.entries()) {
+      for (const [k, q] of [...(m ?? [])]) if (q.x <= 0 || q.y <= 0 || q.x >= grid || q.y >= grid) changed = back(ci, k) || changed;
+    }
+    const segs = [...border, ...chains.flatMap((_, ci) => segsOf(ci))];
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      for (let j = i + 1; j < segs.length; j++) {
+        const t = segs[j];
+        if (Math.max(s.a.x, s.b.x) < Math.min(t.a.x, t.b.x) || Math.max(t.a.x, t.b.x) < Math.min(s.a.x, s.b.x)) continue;
+        if (Math.max(s.a.y, s.b.y) < Math.min(t.a.y, t.b.y) || Math.max(t.a.y, t.b.y) < Math.min(s.a.y, s.b.y)) continue;
+        if (!segsMeet(s.a, s.b, t.a, t.b)) continue;
+        for (const g of [s, t]) {
+          if (g.chain < 0) continue;
+          changed = back(g.chain, g.lo) || changed;
+          changed = back(g.chain, g.hi) || changed;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+  inscribedStats.moved = out.reduce((n, m) => n + (m ? m.size : 0), 0);
+  // a crossing between two raw segments cannot be undone here (untangle leaves none)
+  inscribedStats.reverted = reverted;
+  return out;
 }
 
 /** refine chains until no two boundary segments (isolines or border) meet; deterministic */
@@ -583,6 +726,18 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // tolerance does not fit, make the belts thicker and start the tolerance over. Thicker belts
   // cost far more accuracy than a looser tolerance, but every open isoline costs two border
   // vertices whatever the tolerance, so on rough terrain only fewer levels meet the budget.
+  /** inscribed: the lattice's rise from point p towards q (only the sign matters) */
+  const uphill = (opts.inscribed ?? true)
+    ? (p: Pt, q: Pt): number => {
+        const dx = q.x - p.x, dy = q.y - p.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const h = (s: number) => latticeHeight(heights, grid, {
+          x: Math.max(0, Math.min(grid, p.x + (dx / len) * s)),
+          y: Math.max(0, Math.min(grid, p.y + (dy / len) * s)),
+        });
+        return h(0.05) - h(-0.05);
+      }
+    : undefined;
   let step = baseStep;
   const eps0 = opts.eps ?? EPS_START;
   let eps = eps0;
@@ -664,16 +819,19 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     });
 
     untangle(chains, borderSegs);
+    const moved = uphill ? inscribe(chains, borderSegs, uphill, eps, grid) : null;
+    /** where kept point k of chain ci lies: moved uphill (inscribed) or on its raw line */
+    const at = (ci: number, k: number): Pt => moved?.[ci]?.get(k) ?? chains[ci].pts[k];
 
     const constraints: Array<[number, number]> = [];
     /** constraint index → it is a piece of the coastline */
     const coast: boolean[] = [];
     for (const l of borderChains) for (let k = 1; k < l.length; k++) constraints.push([vid(l[k - 1], 0), vid(l[k], 0)]);
-    for (const c of chains) {
+    for (const [ci, c] of chains.entries()) {
       let prev = -1;
       for (let k = 0; k < c.pts.length; k++) {
         if (!c.keep[k]) continue;
-        const p = c.pts[k];
+        const p = at(ci, k);
         const id = vid(p, c.level === COAST_LEVEL ? 0 : edgeOf(p) >= 0 ? borderHeight(p) : lineHeight(c.level));
         if (prev >= 0 && prev !== id) {
           if (c.level === COAST_LEVEL) coast[constraints.length] = true;
@@ -797,6 +955,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     Object.assign(opts.debug, {
       step, eps, raw: lines, constraints, missing, borderVerts, refined: added, colourFlips: lastColourFlips,
       colourVerts: stats.verts, colourCrossings: stats.crossings,
+      ...(uphill ? { inscribedMoved: inscribedStats.moved, inscribedReverted: inscribedStats.reverted } : {}),
     });
   }
   if (!coarseLines.some((l) => l)) return { grid, vx, vy, vh, tris, sea };

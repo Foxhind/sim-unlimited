@@ -89,3 +89,45 @@ it('the colour vertex cap takes the longest boundaries that fit', async () => {
   });
   expect(dbg.colourVerts).toBe(2); // the long one (4) does not fit, the short one does
 });
+
+/** TIN height at lattice point (x, y), or null outside every triangle */
+function tinAt(tin: ReturnType<typeof buildTerrainTin>, x: number, y: number): number | null {
+  for (const t of tin.tris) {
+    const ax = tin.vx[t.a], ay = tin.vy[t.a], bx = tin.vx[t.b], by = tin.vy[t.b], cx = tin.vx[t.c], cy = tin.vy[t.c];
+    const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (!d) continue;
+    const w1 = ((x - ax) * (cy - ay) - (cx - ax) * (y - ay)) / d;
+    const w2 = ((bx - ax) * (y - ay) - (x - ax) * (by - ay)) / d;
+    const w0 = 1 - w1 - w2;
+    if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
+    return tin.vh[t.a] * w0 + tin.vh[t.b] * w1 + tin.vh[t.c] * w2;
+  }
+  return null;
+}
+
+/** share of raw isoline points (land levels) where the TIN stands more than 1 m above the level */
+function overIsolines(tin: ReturnType<typeof buildTerrainTin>, dbg: TinDebug): number {
+  let over = 0, n = 0;
+  for (const l of dbg.raw ?? []) {
+    if (l.level < 1) continue;
+    for (const p of l.pts) {
+      const h = tinAt(tin, p.x, p.y);
+      if (h === null) continue;
+      n++;
+      if (h > l.level + 1) over++;
+    }
+  }
+  return over / n;
+}
+
+it('inscribed isolines (the default): same simplification, moved into the ground', async () => {
+  for (const name of ['terrarium-12-2177-1436', 'terrarium-12-2379-1599']) {
+    const { tile, grid, heights, borders } = await fx(name);
+    const d0: TinDebug = {}, d1: TinDebug = {};
+    const both = buildTerrainTin(tile, grid, heights, { borders, debug: d0, inscribed: false });
+    const inscribed = buildTerrainTin(tile, grid, heights, { borders, debug: d1 });
+    expect(d1.inscribedMoved).toBeGreaterThan(0);
+    // the TIN stands over its own isolines far less often (moves that would cross something are undone)
+    expect(overIsolines(inscribed, d1)).toBeLessThan(overIsolines(both, d0) * 0.75);
+  }
+});

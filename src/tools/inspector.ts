@@ -128,6 +128,7 @@ function build(): void {
   const tin = buildTerrainTin(tile, grid, lattice, {
     step: num('step'),
     eps: num('eps'),
+    inscribed: $<HTMLInputElement>('inscribed').checked,
     borders: borders ?? undefined,
     debug: dbg,
     colour: lsProc && $<HTMLInputElement>('lsMesh').checked
@@ -304,6 +305,9 @@ function renderStats(): void {
     `изолиний ${(b.dbg.raw ?? []).length}, сырых точек ${rawPts}`,
     `вершин ${tin.vx.length}: граница ${b.dbg.borderVerts}, изолинии ${tin.vx.length - (b.dbg.borderVerts ?? 0) - (b.dbg.colourVerts ?? 0) - (b.dbg.colourCrossings ?? 0)}` +
       (b.dbg.colourVerts ? `, границы цветов ${b.dbg.colourVerts} + пересечения ${b.dbg.colourCrossings}` : ''),
+    ...(b.dbg.inscribedMoved !== undefined
+      ? [`внутрь грунта: сдвинуто вершин ${b.dbg.inscribedMoved}, возвращено ${b.dbg.inscribedReverted} (сдвиг пересекал соседей)`]
+      : []),
     `треугольников ${tin.tris.length}, плоских ${flats}`,
     `рёбер-ограничений ${(b.dbg.constraints ?? []).length}` +
       (b.dbg.missing ? `, <span class="err">не вставлено ${b.dbg.missing}</span>` : ', все вставлены'),
@@ -856,6 +860,7 @@ function applyGameDefaults(force: boolean): void {
   set('grid', gridForZoom(tile.z));
   set('step', beltStepForZoom(tile.z));
   set('eps', EPS_START);
+  if (force) $<HTMLInputElement>('inscribed').checked = true; // the game's isolines are inscribed
 }
 
 async function relattice(): Promise<void> {
@@ -949,6 +954,7 @@ function init(): void {
       void relattice();
     };
   }
+  $('inscribed').onchange = build;
   $('asGame').onclick = () => {
     applyGameDefaults(true);
     void relattice();
