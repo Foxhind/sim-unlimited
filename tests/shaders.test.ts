@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAT, SNOW_FLAG } from '../src/engine/palette';
+import { MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 
 describe('logarithmic depth', () => {
@@ -54,5 +54,17 @@ describe('base ground (horizon without tiles)', () => {
     expect(Math.abs(hit(-dip * 1.0001, h)! / Math.sqrt(2 * h * R) - 1)).toBeLessThan(0.05);
     expect(hit(-1, h)!).toBeCloseTo(h); // straight down
     expect(hit(0.1, h)).toBeUndefined();
+  });
+});
+
+describe('aircraft lights', () => {
+  it('a self-lit colour skips the sun, the night and the street glow, and is only half hazed', () => {
+    const c = selfLit(0xff2a1a);
+    expect(c & 0xffffff).toBe(0xff2a1a);
+    expect(c & SELF_LIT_FLAG).not.toBe(0);
+    expect(new Uint32Array([c])[0]).toBe(c);
+    expect(WORLD_VS).toContain(`if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), uHaze, 0.5 * fog);`);
+    // checked before the glow level and the lit step are applied
+    expect(WORLD_VS.indexOf(`${SELF_LIT_FLAG}u`)).toBeLessThan(WORLD_VS.indexOf('litStep = max(litStep'));
   });
 });

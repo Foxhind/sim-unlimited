@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
+import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
 /** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
@@ -18,7 +18,8 @@ const EARTH_R = 6371000;
  * material takes its ramp's LUT entry at the step, an RGB colour is shaded by the same law in place
  * (palette.ts shadeColour) with the light of its glow level (uLight) — any colour, no palette snap.
  * With uGlow on, a glowing face is shaded at least at step GLOW_STEP_BASE + level, in that level's
- * street-lit light. With uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp.
+ * street-lit light. With uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp. A face flagged
+ * SELF_LIT_FLAG (an aircraft light) is its own colour, unlit and unshaded.
  */
 const COLOUR_GLSL = `
 uniform sampler2D uLut;
@@ -42,6 +43,8 @@ uniform int uGlow;
 uniform int uSnow;
 ${COLOUR_GLSL}
 vec3 shadeColour(uint packedRamp, float litStep, float fog) {
+  // a light source: its own colour at full strength, seen through half the haze
+  if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), uHaze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));

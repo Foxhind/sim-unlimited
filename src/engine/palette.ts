@@ -34,7 +34,9 @@ export const MAT = {
  *   bits 0..23   payload: an RGB colour 0xRRGGBB, or with MATERIAL_FLAG the id of a material ramp (MAT);
  *   bits 24..26  night glow level (GLOW_SHIFT);
  *   bit 27       SNOW_FLAG;
- *   bit 28       MATERIAL_FLAG.
+ *   bit 28       MATERIAL_FLAG;
+ *   bit 29       SELF_LIT_FLAG: an RGB colour that is a light source (aircraft lights), drawn at full
+ *                strength whatever the sun or night, and only half as hazed by the fog.
  * Any RGB colour is allowed: it is lit, fogged and tinted for the time of day in the shader by the
  * same stepped law as the material ramps (shadeColour), not snapped to a palette.
  */
@@ -43,6 +45,12 @@ export const GLOW_SHIFT = 24;
 export const GLOW_LEVEL_MASK = 7;
 export const SNOW_FLAG = 1 << 27;
 export const MATERIAL_FLAG = 1 << 28;
+export const SELF_LIT_FLAG = 1 << 29;
+
+/** an RGB face colour that shines by itself (a light source) */
+export function selfLit(packed: number): number {
+  return ((packed & PAYLOAD_MASK) | SELF_LIT_FLAG) >>> 0;
+}
 
 /** a material ramp as a face colour */
 export function material(id: number): number {

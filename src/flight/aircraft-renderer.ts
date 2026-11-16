@@ -1,14 +1,17 @@
 import { mat3, vec3, type mat4 } from 'gl-matrix';
 import { must } from '../engine/gl';
 import type { Mesh, Renderer } from '../engine/renderer';
-import { GLOW_LEVELS, withGlow } from '../engine/palette';
+import { selfLit } from '../engine/palette';
 import { aircraftMesh, flameMesh, type AircraftConfig } from './aircraft';
 import { lightOn, newPoses, poseJoints, signals, type JointDef, type JointPose, type LightDef } from './articulation';
 import type { FlightModel } from './model';
 
-/** a light is drawn as a small self-lit diamond: this radius, m, or this share of the camera distance if larger */
-const LIGHT_SIZE = 0.12;
-const LIGHT_ANGLE = 0.0035;
+/**
+ * a light is drawn as a small self-lit diamond: this radius, m, or this share of the camera distance if
+ * larger (about 1.5 px at 1080 lines), so it still reads as a point of light from afar
+ */
+const LIGHT_SIZE = 0.14;
+const LIGHT_ANGLE = 0.004;
 
 /**
  * The world shader takes only an offset uniform, so the airframe (a few hundred triangles)
@@ -212,7 +215,7 @@ export class AircraftRenderer {
       }
       vec3.sub(p, p, cg);
       vec3.transformMat3(p, p, this.rot);
-      const colour = withGlow(l.rgb, GLOW_LEVELS);
+      const colour = selfLit(l.rgb);
       // octahedron: 8 faces round the centre
       const ax: [number, number, number][] = [[size, 0, 0], [0, size, 0], [0, 0, size]];
       for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
