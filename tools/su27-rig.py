@@ -253,8 +253,15 @@ def cut(region, halfspaces, box):
         faces = [f for f in hbm.faces if region(f) and near(f)]
         geom = list({v for f in faces for v in f.verts}) + list({e for f in faces for e in f.edges}) + faces
         bmesh.ops.bisect_plane(hbm, geom=geom, dist=1e-5, plane_co=co, plane_no=no)
-    return [f for f in hbm.faces if region(f)
-            and all((f.calc_center_median() - co).dot(no) > 1e-4 for co, no in halfspaces)]
+    # the half-spaces alone are not enough: the stabilator, aft of the flaperon hinge and within its span,
+    # sits in the wing's region too. A panel is what lies inside its box as well.
+    inside = [f for f in hbm.faces if region(f)
+              and all(lo[k] <= f.calc_center_median()[k] <= hi[k] for k in range(3))
+              and all((f.calc_center_median() - co).dot(no) > 1e-4 for co, no in halfspaces)]
+    stray = [v.co for f in inside for v in f.verts if not all(lo[k] <= v.co[k] <= hi[k] for k in range(3))]
+    if stray or not inside:
+        raise RuntimeError(f'panel faces outside its box {box}: {stray[:3]}' if stray else f'no faces in box {box}')
+    return inside
 
 
 def extract(faces, keep_copy=None):
@@ -335,9 +342,8 @@ for side, sg in SIDES:
     faces = [f for f in hbm.faces if in_stab(f)]
     bm = extract(faces)
     root = [e for e in hbm.edges if e.is_boundary and all(v.co.x * sg >= 2.38 and v.co.y > 5.5 and v.co.z < 0.0 for v in e.verts)]
+    # only the fuselage side is closed: a cap on the stabilator too would lie on top of it at rest
     bmesh.ops.holes_fill(hbm, edges=root, sides=0)
-    bm.edges.ensure_lookup_table()
-    bmesh.ops.holes_fill(bm, edges=[e for e in bm.edges if e.is_boundary and all(v.co.x * sg < 2.55 for v in e.verts)], sides=0)
     piv = P(18.4, sg * 2.45, -0.15)
     made['stab' + side] = joint(
         f'Stabilator_{side}', bm, piv, Vector((1, 0, 0)), Vector((0, 0, 1)), P(19.9, sg * 3.5, -0.1), Vector((0, 0, 1)),

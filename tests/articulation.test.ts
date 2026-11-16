@@ -72,6 +72,25 @@ describe('Su-27 rig exported from the .blend', () => {
     expect(wingR.tip).toEqual([7, 0, 6.1 - 1.4]);
   });
 
+  it('each panel is only its own surface (the stabilator once rode on the flaperon)', () => {
+    const zRange = (name: string): [number, number] => {
+      const j = idOf(name) + 1;
+      let lo = Infinity, hi = -Infinity;
+      for (let v = 0; v < mesh.joint.length; v++) {
+        if (mesh.joint[v] !== j) continue;
+        lo = Math.min(lo, mesh.vertices[v * 6 + 2]);
+        hi = Math.max(hi, mesh.vertices[v * 6 + 2]);
+      }
+      return [lo, hi];
+    };
+    for (const s of ['L', 'R']) {
+      const flap = zRange(`Flaperon_${s}`);
+      const stab = zRange(`Stabilator_${s}`);
+      expect(flap[1]).toBeLessThan(stab[0]); // the whole flaperon is ahead of the stabilator
+      expect(stab[1] - stab[0]).toBeGreaterThan(3); // the stabilator keeps its whole 3.4 m root-to-tip chord
+    }
+  });
+
   it('rest pose: every hinge at zero and drawn', () => {
     const poses = poseJoints(mesh.joints, signals(REST), newPoses(mesh.joints));
     for (const p of poses) {
