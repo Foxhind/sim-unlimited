@@ -337,6 +337,14 @@ void main() {
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
 const GLOW_RINGS = 4;
+/**
+ * the sky on the side away from the sun (SKY_FS): how far it goes toward ANTISUN_TINT (a darker,
+ * bluer copy of the band, the Earth's shadow) by day and at dusk, and in how many steps
+ */
+const ANTISUN_DAY = 0.25;
+const ANTISUN_DUSK = 1.0;
+const ANTISUN_STEPS = 4;
+const ANTISUN_TINT = 'vec3(0.42, 0.48, 0.72)';
 
 export const SKY_FS = `#version 300 es
 precision highp float;
@@ -390,6 +398,16 @@ void main() {
   if (g > 0.0) {
     uint ring = ${SKY_BANDS - 1 - GLOW_RINGS}u + uint(g * ${GLOW_RINGS}.0 + 0.5);
     col = mix(col, lutColor(${MAT.SKY_GLOW * 16}u + ring), min(1.0, g * 1.25));
+  }
+  // The far side: the sky turns darker and bluer the further round from the sun's azimuth, most
+  // low down (the zenith stays as it is), strongest at dusk, in steps like the bands.
+  vec2 dh = dir.xz, sh = uSunDir.xz;
+  if (dot(dh, dh) > 1e-8 && dot(sh, sh) > 1e-8) {
+    float away = smoothstep(0.2, 1.0, 0.5 - 0.5 * dot(normalize(dh), normalize(sh)));
+    float most = mix(${ANTISUN_DAY.toFixed(2)}, ${ANTISUN_DUSK.toFixed(2)}, uSunGlow) * clamp((uSunDir.y + 0.1) / 0.1, 0.0, 1.0);
+    float d = away * pow(1.0 - t, 0.8);
+    d = floor(d * ${ANTISUN_STEPS}.0 + 0.5) / ${ANTISUN_STEPS}.0 * most;
+    col = mix(col, col * ${ANTISUN_TINT}, d);
   }
   uint idx = 0u;
   // moon: disc (exaggerated ~1.8 deg radius) lit by the sun; the dark limb stays sky-coloured
