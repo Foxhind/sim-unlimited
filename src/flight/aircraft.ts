@@ -1,4 +1,5 @@
 import { PAYLOAD_MASK, RAMP } from '../engine/palette';
+import type { JointDef, LightDef } from './articulation';
 import f117Model from './models/f117.json';
 import su27Model from './models/su27.json';
 
@@ -123,6 +124,31 @@ export interface AircraftConfig {
 const UP: V3 = [0, 1, 0];
 const SIDE: V3 = [1, 0, 0];
 
+/** what tools/export-aircraft.py writes from assets/models/<id>.blend */
+interface ModelJson {
+  /** 9 numbers per triangle, mesh space (x right, y up, z aft) */
+  positions: number[];
+  /** colour of each triangle, 0xRRGGBB */
+  rgb: number[];
+  /** separable part of each triangle: 0 = fuselage, otherwise index into PART_IDS + 1 */
+  parts: number[];
+  /** rigged models: hinge each triangle turns on (1-based into joints, 0 = none) */
+  joint?: number[];
+  joints?: JointDef[];
+  lights?: LightDef[];
+  /** where each separable part breaks off: its tip and the load that does it */
+  breaks?: { id: string; tip: number[]; maxLoad: number }[];
+}
+
+/** the separable parts as the model draws them */
+function breakPoints(json: ModelJson): PartDef[] {
+  if (!json.breaks?.length) throw new Error('model has no break points: re-export it from its .blend');
+  return json.breaks.map((b) => {
+    if (!PART_IDS.includes(b.id as PartId)) throw new Error(`unknown part ${b.id}`);
+    return { id: b.id as PartId, tip: [b.tip[0], b.tip[1], b.tip[2]], maxLoad: b.maxLoad };
+  });
+}
+
 /** the same surface on the right and, mirrored, on the left (for surfaces whose normal is plain up or sideways) */
 function pair(def: Omit<SurfaceDef, 'part'>, right: PartId, left: PartId): SurfaceDef[] {
   return [
@@ -177,16 +203,10 @@ export const SU27: AircraftConfig = fromModel({
     // forebody side area: destabilising in yaw, as on the real aircraft
     { pos: [0, -0.08, -3.0], normal: SIDE, area: 3.5, cla: 0.6, stall: 12, k: 0.5 },
   ],
-  parts: [
-    // wings: 9 g limit x 1.5 = 13.5 g ultimate, of which a panel carries ~40%
-    { id: 'wingR', tip: [7.0, 0, 6.1], maxLoad: 960e3 },
-    { id: 'wingL', tip: [-7.0, 0, 6.1], maxLoad: 960e3 },
-    // tails: full attached lift at ~60% of the limit dynamic pressure
-    { id: 'stabR', tip: [4.95, -0.1, 9.2], maxLoad: 330e3 },
-    { id: 'stabL', tip: [-4.95, -0.1, 9.2], maxLoad: 330e3 },
-    { id: 'finR', tip: [2.1, 3.4, 7.3], maxLoad: 290e3 },
-    { id: 'finL', tip: [-2.1, 3.4, 7.3], maxLoad: 290e3 },
-  ],
+  // the damage model is drawn in assets/models/su27.blend (BREAK_<part> empties): tips and the loads that
+  // tear the parts off. Wings: 9 g limit x 1.5 = 13.5 g ultimate, of which a panel carries ~40% (960 kN);
+  // tails: full attached lift at ~60% of the limit dynamic pressure (stabilators 330 kN, fins 290 kN)
+  parts: breakPoints(su27Model),
   nose: [0, -0.55, -10.6],
   tail: [0, 0, 10.6],
   // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model
@@ -289,6 +309,10 @@ export interface AircraftMesh {
   ramps: Uint32Array;
   /** per vertex: 0 = fuselage, otherwise index into PART_IDS + 1 */
   parts: Uint8Array;
+  /** per vertex: hinge it turns on, 1-based into `joints`; 0 = fixed to the airframe */
+  joint: Uint8Array;
+  joints: JointDef[];
+  lights: LightDef[];
 }
 
 class MeshBuilder {
@@ -315,6 +339,7 @@ class MeshBuilder {
       this.verts.push(p[0], p[1], p[2], nx, ny, nz);
       this.ramps.push(ramp);
       this.parts.push(this.tag);
+      this.joint.push(this.jointTag);
     }
   }
 
@@ -343,19 +368,19 @@ class MeshBuilder {
     if (capBack) this.poly(rings[rings.length - 1], ramp);
   }
 
-  build(): AircraftMesh {
-    return { vertices: new Float32Array(this.verts), ramps: new Uint32Array(this.ramps), parts: new Uint8Array(this.parts) };
-  }
-}
+  /** hinge given to the triangles added next (1-based, 0 = none) */
+  jointTag = 0;
+  joint: number[] = [];
 
-/** what tools/export-aircraft.py writes from assets/models/<id>.blend */
-interface ModelJson {
-  /** 9 numbers per triangle, mesh space (x right, y up, z aft) */
-  positions: number[];
-  /** colour of each triangle, 0xRRGGBB */
-  rgb: number[];
-  /** separable part of each triangle: 0 = fuselage, otherwise index into PART_IDS + 1 */
-  parts: number[];
+  build(joints: JointDef[] = [], lights: LightDef[] = []): AircraftMesh {
+    const n = this.parts.length;
+    const joint = new Uint8Array(n);
+    if (this.joint.length) joint.set(this.joint);
+    return {
+      vertices: new Float32Array(this.verts), ramps: new Uint32Array(this.ramps), parts: new Uint8Array(this.parts),
+      joint, joints, lights,
+    };
+  }
 }
 
 const MODELS: Record<AircraftConfig['id'], ModelJson> = { su27: su27Model, f117: f117Model };
@@ -367,11 +392,15 @@ function loadModel(json: ModelJson): AircraftMesh {
   for (let t = 0; t < json.rgb.length; t++) {
     const v = (k: number): V3 => [P[t * 9 + k * 3], P[t * 9 + k * 3 + 1], P[t * 9 + k * 3 + 2]];
     const tag = json.parts[t];
+    m.jointTag = json.joint?.[t] ?? 0;
     const add = (): void => m.tri(v(0), v(1), v(2), json.rgb[t] & PAYLOAD_MASK);
     if (tag) m.part(PART_IDS[tag - 1], add);
     else add();
   }
-  return m.build();
+  const joints = json.joints ?? [];
+  if (joints.length > 255) throw new Error('more than 255 joints');
+  for (const j of m.joint) if (j > joints.length) throw new Error(`triangle on joint ${j} of ${joints.length}`);
+  return m.build(joints, json.lights ?? []);
 }
 
 const meshCache = new Map<string, AircraftMesh>();

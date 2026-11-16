@@ -43,8 +43,11 @@ describe('aircraft configs', () => {
     for (const id of ['su27', 'f117'] as const) {
       const m = aircraftMesh(id);
       const tris = m.ramps.length / 3;
+      // the fixed airframe stays low-poly; hinged parts (surfaces, gear, doors) come on top of it
+      const fixed = m.joint.filter((j, v) => v % 3 === 0 && j === 0).length;
       expect(tris).toBeGreaterThan(100);
-      expect(tris).toBeLessThan(600);
+      expect(fixed).toBeLessThan(600);
+      expect(tris).toBeLessThan(900);
       expect(m.vertices.length).toBe(m.ramps.length * 6);
       expect(m.vertices.every(Number.isFinite)).toBe(true);
       expect(aircraftMesh(id)).toBe(m); // cached

@@ -1,8 +1,14 @@
 import { mat3, vec3, type mat4 } from 'gl-matrix';
 import { must } from '../engine/gl';
 import type { Mesh, Renderer } from '../engine/renderer';
+import { GLOW_LEVELS, withGlow } from '../engine/palette';
 import { aircraftMesh, flameMesh, type AircraftConfig } from './aircraft';
+import { lightOn, newPoses, poseJoints, signals, type JointDef, type JointPose, type LightDef } from './articulation';
 import type { FlightModel } from './model';
+
+/** a light is drawn as a small self-lit diamond: this radius, m, or this share of the camera distance if larger */
+const LIGHT_SIZE = 0.12;
+const LIGHT_ANGLE = 0.0035;
 
 /**
  * The world shader takes only an offset uniform, so the airframe (a few hundred triangles)
@@ -17,6 +23,14 @@ export class AircraftRenderer {
   private live: Float32Array;
   private rot = mat3.create();
   private parts: Uint8Array = new Uint8Array(0);
+  /** per vertex: the hinge it turns on (1-based), and the hinges' current poses */
+  private joint: Uint8Array = new Uint8Array(0);
+  private joints: JointDef[] = [];
+  private poses: JointPose[] = [];
+  private lights: LightDef[] = [];
+  private lMesh: Mesh;
+  private lvbo: WebGLBuffer;
+  private lrbo: WebGLBuffer;
   /** per part tag: centroid of its vertices in mesh space (the point a broken-off piece tumbles about) */
   private pivots: vec3[] = [];
   private cfgId = '';
@@ -26,6 +40,10 @@ export class AircraftRenderer {
 
   constructor(gl: WebGL2RenderingContext) {
     this.gl = gl;
+    const lights = AircraftRenderer.dynamicMesh(gl, 'lights');
+    this.lMesh = lights.mesh;
+    this.lvbo = lights.vbo;
+    this.lrbo = lights.rbo;
     this.base = new Float32Array(0);
     this.live = new Float32Array(0);
     const vao = must(gl.createVertexArray(), 'aircraft VAO');
@@ -61,12 +79,34 @@ export class AircraftRenderer {
     this.fMesh = { vao: fvao, vertexCount: 0 };
   }
 
+  /** a vertex array for a mesh rebuilt every frame: pos.xyz + normal.xyz, and a face colour per vertex */
+  private static dynamicMesh(gl: WebGL2RenderingContext, label: string): { mesh: Mesh; vbo: WebGLBuffer; rbo: WebGLBuffer } {
+    const vao = must(gl.createVertexArray(), `${label} VAO`);
+    gl.bindVertexArray(vao);
+    const vbo = must(gl.createBuffer(), `${label} vertices`);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    const rbo = must(gl.createBuffer(), `${label} ramps`);
+    gl.bindBuffer(gl.ARRAY_BUFFER, rbo);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, 0);
+    gl.bindVertexArray(null);
+    return { mesh: { vao, vertexCount: 0 }, vbo, rbo };
+  }
+
   private ensureMesh(cfg: AircraftConfig): void {
     if (this.cfgId === cfg.id) return;
     this.cfgId = cfg.id;
     const src = aircraftMesh(cfg.id);
     this.base = src.vertices;
     this.parts = src.parts;
+    this.joint = src.joint;
+    this.joints = src.joints;
+    this.poses = newPoses(src.joints);
+    this.lights = src.lights;
     this.live = new Float32Array(src.vertices.length);
     const sums: { p: vec3; n: number }[] = [];
     for (let v = 0; v < src.parts.length; v++) {
@@ -102,21 +142,32 @@ export class AircraftRenderer {
       const d = model.debris.find((x) => x.part === i);
       state[i + 1] = d && this.pivots[i + 1] ? { rot: mat3.fromQuat(mat3.create(), d.quat), rel: d.rel, pivot: this.pivots[i + 1] } : 1;
     }
+    // control surfaces, airbrake, gear and doors where the actuators have put them
+    const sig = signals(model.actuators);
+    poseJoints(this.joints, sig, this.poses);
     for (let i = 0, v = 0; i < this.base.length; i += 6, v++) {
       const st = state[this.parts[v]];
-      if (st === 1) {
-        // gone: collapse the triangle
+      const jn = this.joint[v];
+      const pose = jn ? this.poses[jn - 1] : null;
+      if (st === 1 || (pose && !pose.visible)) {
+        // gone, or stowed out of sight: collapse the triangle
         this.live[i] = this.live[i + 1] = this.live[i + 2] = 0;
         continue;
       }
+      vec3.set(p, this.base[i], this.base[i + 1], this.base[i + 2]);
       vec3.set(n, this.base[i + 3], this.base[i + 4], this.base[i + 5]);
+      if (pose) {
+        vec3.transformMat3(p, p, pose.rot);
+        vec3.add(p, p, pose.off);
+        vec3.transformMat3(n, n, pose.rot);
+      }
       if (st === 0) {
         // the physics turns the aircraft about its centre of gravity, so the mesh does too
-        vec3.set(p, this.base[i] - cg[0], this.base[i + 1] - cg[1], this.base[i + 2] - cg[2]);
+        vec3.sub(p, p, cg);
         vec3.transformMat3(p, p, this.rot);
         vec3.transformMat3(n, n, this.rot);
       } else {
-        vec3.set(p, this.base[i] - st.pivot[0], this.base[i + 1] - st.pivot[1], this.base[i + 2] - st.pivot[2]);
+        vec3.sub(p, p, st.pivot);
         vec3.transformMat3(p, p, st.rot);
         vec3.add(p, p, st.rel);
         vec3.transformMat3(n, n, st.rot);
@@ -137,8 +188,53 @@ export class AircraftRenderer {
     renderer.rimWeight = 0;
     renderer.twoSided = false;
     this.drawFlame(renderer, model, view, proj, camPos, sunDir, throttle, time);
+    this.drawLights(renderer, model, view, proj, camPos, sunDir, time, sig, state);
     renderer.rimWeight = rimWeight;
     renderer.twoSided = true;
+  }
+
+  /** navigation lights, beacons and the landing light: small self-lit diamonds that keep a visible size */
+  private drawLights(
+    renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, time: number,
+    sig: ReturnType<typeof signals>, state: unknown[],
+  ): void {
+    if (this.lights.length === 0) return;
+    const verts: number[] = [];
+    const ramps: number[] = [];
+    const size = Math.max(LIGHT_SIZE, vec3.distance(camPos, model.pos) * LIGHT_ANGLE);
+    const cg = model.cfg.cg;
+    const p = vec3.create();
+    for (const l of this.lights) {
+      if (state[l.part] !== 0 || !lightOn(l, sig, time)) continue;
+      const pose = l.joint ? this.poses[l.joint - 1] : null;
+      if (pose && !pose.visible) continue;
+      vec3.set(p, l.pos[0], l.pos[1], l.pos[2]);
+      if (pose) {
+        vec3.transformMat3(p, p, pose.rot);
+        vec3.add(p, p, pose.off);
+      }
+      vec3.sub(p, p, cg);
+      vec3.transformMat3(p, p, this.rot);
+      const colour = withGlow(l.rgb, GLOW_LEVELS);
+      // octahedron: 8 faces round the centre
+      const ax: [number, number, number][] = [[size, 0, 0], [0, size, 0], [0, 0, size]];
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+        for (const k of [0, 1, 2]) {
+          const a = ax[k];
+          const sgn = k === 0 ? sx : k === 1 ? sy : sz;
+          verts.push(p[0] + a[0] * sgn, p[1] + a[1] * sgn, p[2] + a[2] * sgn, sunDir[0], sunDir[1], sunDir[2]);
+          ramps.push(colour);
+        }
+      }
+    }
+    this.lMesh.vertexCount = ramps.length;
+    if (ramps.length === 0) return;
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lvbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lrbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Uint32Array(ramps), gl.DYNAMIC_DRAW);
+    renderer.drawWorld(this.lMesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
   }
 
   private drawFlame(

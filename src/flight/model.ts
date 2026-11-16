@@ -2,6 +2,7 @@ import { mat3, quat, vec3 } from 'gl-matrix';
 import { G0 } from './atmosphere';
 import { CALM_AIR, newAirSample, type Air, type AirSample } from './air';
 import { PART_IDS, tableLookup, type AircraftConfig, type PartId } from './aircraft';
+import type { ControlInputs } from './articulation';
 
 export const PHYSICS_STEP = 1 / 120;
 const D2R = Math.PI / 180;
@@ -29,6 +30,12 @@ const TIP_PROBE_AGL = 150;
 /** seconds of flutter beyond the never-exceed speed before something comes off */
 const FLUTTER_TIME = 1.5;
 const DEBRIS_LIFE = 25;
+/** drawn surfaces follow the fly-by-wire commands at this many full deflections per second */
+const SURFACE_RATE = 4;
+/** seconds for a full gear cycle, for the flaps and for the airbrake to run out (drawing only) */
+const GEAR_TIME = 6;
+const FLAP_TIME = 4;
+const AIRBRAKE_TIME = 2;
 
 export interface FlightControls {
   pitch: number; // -1 push .. +1 pull
@@ -148,6 +155,15 @@ export class FlightModel {
   readonly debris: Debris[] = [];
   /** model clock, s */
   time = 0;
+  /**
+   * Where the moving parts are drawn (articulation.ts): the fly-by-wire commands, and the gear, flaps and
+   * airbrake running at their actuator speeds. The physics itself uses the switches as they are.
+   */
+  readonly actuators: ControlInputs = {
+    pitch: 0, roll: 0, yaw: 0, flaps: 0, speedbrake: 0, gear: 1, nav: 1, beacon: 1, landing: 1,
+  };
+  /** the next step puts the actuators where the controls are, without travel (after a spawn) */
+  private snapActuators = true;
 
   private rot = mat3.create();
   private tmpQ = quat.create();
@@ -284,6 +300,7 @@ export class FlightModel {
     this.nz = 1;
     this.flutter = 0;
     this.touchdownTimer = 0;
+    this.snapActuators = true;
     for (const s of this.surfs) {
       s.defl = 0;
       s.alpha = 0;
@@ -392,6 +409,19 @@ export class FlightModel {
     }
   }
 
+  private moveActuators(dt: number, c: FlightControls, pitch: number, roll: number, yaw: number): void {
+    const a = this.actuators;
+    const snap = this.snapActuators;
+    const go = (cur: number, target: number, rate: number): number => (snap ? target : cur + clamp(target - cur, -rate * dt, rate * dt));
+    a.pitch = go(a.pitch, pitch, SURFACE_RATE);
+    a.roll = go(a.roll, roll, SURFACE_RATE);
+    a.yaw = go(a.yaw, yaw, SURFACE_RATE);
+    a.flaps = go(a.flaps, c.flaps ? 1 : 0, 1 / FLAP_TIME);
+    a.speedbrake = go(a.speedbrake, c.speedbrake ? 1 : 0, 1 / AIRBRAKE_TIME);
+    a.gear = go(a.gear, c.gearDown ? 1 : 0, 1 / GEAR_TIME);
+    this.snapActuators = false;
+  }
+
   private step(dt: number, c: FlightControls, probe: GroundProbe, env: Air): void {
     const cfg = this.cfg;
     this.time += dt;
@@ -466,6 +496,8 @@ export class FlightModel {
       const yLim = 0.5 * (1 - smooth((Math.abs(alpha) - 22 * D2R) / (15 * D2R)));
       Y = clamp(c.yaw * Math.min(1, RUDDER_Q / qf) + clamp((yAcc * cfg.inertia[1]) / (qf * this.yawEff), -yLim, yLim), -1, 1);
     }
+
+    this.moveActuators(dt, c, P, Rc, Y);
 
     // ---- aerodynamic forces and moments, body axes ---------------------------------------------
     let Fx = 0, Fy = 0, Fz = 0, Mx = 0, My = 0, Mz = 0;
