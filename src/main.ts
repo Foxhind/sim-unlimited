@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, type LightUniforms, type PaletteParams, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -171,18 +171,26 @@ function baseGround(lightDir: vec3): BaseGround {
   }
   return { y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), lightDir, fogStart: FOG_START_M, fogEnd: FOG_END_M };
 }
-/** day palette for the sun now and the weather in force: sunnier the clearer the sky */
-const dayPalette = () => paletteAt(sun.elevationDeg, sunniness(cloudsOverride ?? weatherInForce()?.cloudPct));
+let sunLoc: LatLon = start.latLon;
+/** the sun is rising (morning colours) when it stands higher a minute later */
+const sunRising = (): boolean => sunPosition(new Date(simTime.getTime() + 60000), sunLoc).elevationDeg > sun.elevationDeg;
+/** day palette for the sun now and the weather in force: sunnier the clearer the sky, cool colours in the morning */
+const dayPalette = () => paletteAt(sun.elevationDeg, sunniness(cloudsOverride ?? weatherInForce()?.cloudPct), sunRising());
+/** light uniforms of a palette; frozen water has no glitter path */
+function lightOf(p: PaletteParams): LightUniforms {
+  const l = lightUniforms(p);
+  if (weather.surface.ice) l.glitter[0] = 0;
+  return l;
+}
 let palette = dayPalette();
 let lut = buildLUT(palette, weather.surface);
-let light = lightUniforms(dayPalette());
+let light = lightOf(palette);
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
 /** whether the current LUT was built with frozen water */
 let lutIce = weather.surface.ice;
 let previewKey = '';
-let sunLoc: LatLon = start.latLon;
 
 function updateLight(): void {
   sun = sunPosition(simTime, sunLoc);
@@ -204,7 +212,7 @@ function updateLight(): void {
   }
   palette = dayPalette();
   lut = buildLUT(palette, weather.surface);
-  light = lightUniforms(palette);
+  light = lightOf(palette);
   applySunColors(lut, sun.elevationDeg);
 }
 
@@ -553,6 +561,7 @@ function frame(now: number): void {
   renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
+  renderer.time = now / 1000;
   renderer.snow = surface.snow;
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
   profiler.stage('небо');

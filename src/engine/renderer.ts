@@ -53,6 +53,8 @@ export class Renderer {
   nightGlow = false;
   /** winter: faces flagged SNOW_FLAG are drawn in snow (palette.ts) */
   snow = false;
+  /** seconds, for the glitter path's flicker (GLITTER_GLSL) */
+  time = 0;
   /** far plane of an orthographic projection (near 0); 0 = perspective (see ORTHO_VS) */
   orthoFar = 0;
   /** rim light this frame (rim.ts rimFrame) */
@@ -112,12 +114,12 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided',
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided',
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -127,7 +129,7 @@ export class Renderer {
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
-      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd',
+      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', ...GLITTER_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
     this.dsU = uniformMap(gl, this.dsProg, [
@@ -437,6 +439,13 @@ export class Renderer {
     this.gl.uniform3fv(u.uLight, this.light.levels);
     this.gl.uniform3fv(u.uHaze, this.light.haze);
     this.gl.uniform1f(u.uSat, this.light.saturation);
+    if (u.uGlitter === undefined) return;
+    const g = this.light.glitter;
+    this.gl.uniform1f(u.uGlitter, g[0]);
+    this.gl.uniform3fv(u.uGlitterSun, this.sunDir);
+    this.gl.uniform3f(u.uGlitterCore, g[1], g[2], g[3]);
+    this.gl.uniform3f(u.uGlitterEdge, g[4], g[5], g[6]);
+    this.gl.uniform1f(u.uTime, this.time);
   }
 }
 
@@ -451,6 +460,9 @@ export interface BaseGround {
   fogStart: number;
   fogEnd: number;
 }
+
+/** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
+const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime'];
 
 /** texture unit the LUT stays bound to */
 const LUT_UNIT = 5;

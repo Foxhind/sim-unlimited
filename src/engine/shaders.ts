@@ -75,6 +75,44 @@ vec3 rimLight(vec3 n, vec3 wp, float fog) {
 }
 `;
 
+/**
+ * Glitter path (synthwave): under a low sun the water below it breaks into horizontal stripes of
+ * light, a column on the sun's azimuth that is a thin line at the horizon, widest a little nearer
+ * and fades toward the eye. The stripes are spaced by the log of the depression angle (thinner
+ * toward the horizon, as in perspective), creep toward the eye, and each flickers in width a few
+ * times a second. Stepped: a near-white core and edges in the glow's colour, no blending.
+ * uGlitter strength 0..1 (0: off), uGlitterSun the true sun direction (the world passes' uSunDir is
+ * the terrain's light, which leans toward the moon at dusk), uGlitterCore / uGlitterEdge rgb (palette.ts LightUniforms.glitter), uTime s.
+ */
+const GLITTER_GLSL = `
+uniform float uTime;
+uniform float uGlitter;
+uniform vec3 uGlitterSun;
+uniform vec3 uGlitterCore;
+uniform vec3 uGlitterEdge;
+float glitterHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+// the glitter colour along the view ray d (unit, from the eye), alpha 1 where it lights the water
+vec4 glitter(vec3 d) {
+  if (uGlitter <= 0.0 || d.y >= 0.0) return vec4(0.0);
+  vec3 sun = uGlitterSun;
+  float k = uGlitter * clamp((sun.y + 0.02) / 0.03, 0.0, 1.0);
+  if (k <= 0.0 || dot(d.xz, sun.xz) <= 0.0) return vec4(0.0);
+  vec2 dh = normalize(d.xz), sh = normalize(sun.xz);
+  float lat = abs(dh.x * sh.y - dh.y * sh.x);
+  float e = -d.y;
+  float fall = 1.0 - e / (0.24 + max(sun.y, 0.0));
+  if (fall <= 0.0) return vec4(0.0);
+  float w = k * (0.01 + 0.22 * e) * sqrt(fall);
+  float u = log2(e + 0.04) * 16.0 + uTime * 1.5;
+  // thin lines, never under a pixel: toward the horizon, where they crowd, they merge into one
+  float duty = max(0.25, fwidth(u));
+  if (fract(u) > duty) return vec4(0.0);
+  float wi = w * (0.35 + 0.9 * glitterHash(vec2(floor(u), floor(uTime * 7.0))));
+  if (lat > wi) return vec4(0.0);
+  return vec4(lat < wi * 0.4 ? uGlitterCore : uGlitterEdge, 1.0);
+}
+`;
+
 const LOG_DEPTH_FS = `
 in float vLogW;
 // orthographic views (see ORTHO_VS) are all far from the eye, where the logarithm is at its
@@ -127,6 +165,9 @@ uniform float uFogEnd;
 uniform int uTwoSided;
 flat out vec3 vColor;
 out float vLogW;
+// water (WATER, SEA material ramps, not snowed over) and the ray from the eye: the glitter path
+flat out float vWater;
+out vec3 vRay;
 ${GLOW_VS}${RIM_GLSL}
 void main() {
   vec3 wp = toWorld(aPos);
@@ -144,6 +185,10 @@ void main() {
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   vColor = min(shadeColour(aRamp, litStep, fog) + rimLight(n, wp, fog), 1.0);
+  uint id = aRamp & ${PAYLOAD_MASK}u;
+  bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
+  vWater = water && !(uSnow == 1 && (aRamp & ${SNOW_FLAG}u) != 0u) ? 1.0 : 0.0;
+  vRay = wp - uCamPos;
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -152,11 +197,19 @@ void main() {
 export const WORLD_FS = `#version 300 es
 precision highp float;
 flat in vec3 vColor;
+flat in float vWater;
+in vec3 vRay;
+uniform vec3 uSunDir;
 out vec4 oColor;
-${LOG_DEPTH_FS}
+${LOG_DEPTH_FS}${GLITTER_GLSL}
 void main() {
   writeLogDepth();
-  oColor = vec4(vColor, 1.0);
+  vec3 c = vColor;
+  if (vWater > 0.5) {
+    vec4 g = glitter(normalize(vRay));
+    if (g.a > 0.0) c = g.rgb;
+  }
+  oColor = vec4(c, 1.0);
 }
 `;
 
@@ -182,9 +235,13 @@ uniform float uFogEnd;
 uniform int uTwoSided;
 flat out vec3 vColor;
 out float vLogW;
+flat out float vWater;
+out vec3 vRay;
 ${GLOW_VS}${RIM_GLSL}
 void main() {
   vec3 wp = toWorld(aPos * aInstSR.x + aInstPos);
+  vWater = 0.0;
+  vRay = vec3(0.0, 1.0, 0.0);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
@@ -297,7 +354,7 @@ uniform float uFogEnd;
 // sky glow toward a low sun, 0..1 (palette.ts PaletteParams.glow)
 uniform float uSunGlow;
 out vec4 oColor;
-${GLOW_VS}
+${GLOW_VS}${GLITTER_GLSL}
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uCamPos);
@@ -313,6 +370,10 @@ void main() {
       fog = floor(fog * 12.0) / 12.0;
       float lit = 0.30 + 0.70 * max(uLightDir.y, 0.0);
       oColor = vec4(shadeColour(uGroundRamp, lit * 11.0, fog), 1.0);
+      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) {
+        vec4 g = glitter(dir);
+        if (g.a > 0.0) oColor = vec4(g.rgb, 1.0);
+      }
       return;
     }
   }

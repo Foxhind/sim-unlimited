@@ -100,6 +100,22 @@ describe('sunset sky', () => {
     expect(lightUniforms(paletteAt(0)).sunGlow).toBe(1);
   });
 
+  it('runs blue and cyan instead of violet and magenta in the morning, with the same glow', () => {
+    const lut = buildLUT(paletteAt(0, 0, true));
+    for (const s of [0, 4, 8]) {
+      const h = hue(entry(lut, rampIndex(RAMP.SKY, s)));
+      expect(h).toBeGreaterThan(180);
+      expect(h).toBeLessThan(240);
+    }
+    expect(lightUniforms(paletteAt(0, 0, true)).sunGlow).toBe(1);
+    expect(paletteAt(45, 1, true)).toEqual(paletteAt(45, 1));
+  });
+
+  it('lays a glitter path on the water under a low sun only', () => {
+    expect(lightUniforms(paletteAt(0)).glitter[0]).toBe(1);
+    expect(lightUniforms(paletteAt(45)).glitter[0]).toBe(0);
+  });
+
   it('keeps the horizon a line: the haze (fully fogged ground) stands apart from the lowest sky band', () => {
     // from civil twilight on (at night everything is dark anyway), cloudy and sunny
     for (const sunny of [0, 1]) {

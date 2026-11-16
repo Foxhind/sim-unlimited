@@ -239,6 +239,24 @@ const DUSK: PaletteParams = {
   tint: [1.0, 0.66, 0.74],
   saturation: 1.15,
 };
+/**
+ * Sunrise (sun on the horizon, rising): the same glow as the sunset in the cool colours of a
+ * morning — a deep blue zenith, azure half-way down, pale cyan above the horizon, pale gold round
+ * the sun; cool light on the ground, water mirroring the blue sky. The haze is a dusky steel blue,
+ * darker than the sky above the horizon, as DUSK's is.
+ */
+const DAWN: PaletteParams = {
+  zenith: [20, 40, 128],
+  skyMid: [48, 132, 220],
+  skyLow: [150, 214, 240],
+  sunGlow: [255, 220, 150],
+  horizon: [84, 120, 168],
+  glow: 1,
+  waterSky: 0.75,
+  lightMul: 0.62,
+  tint: [0.82, 0.92, 1.06],
+  saturation: 1.1,
+};
 /** daylight under a cloudy sky: the plain, even light */
 const DAY: PaletteParams = {
   ...plainSky([32, 72, 192], [168, 200, 232]),
@@ -389,18 +407,20 @@ const HAZE_EXP = 0.5;
  * Palette keyframe for a sun elevation in degrees (Q7: day/dusk/night blend). `sunny` (0..1,
  * sunniness) moves the day keyframe from the plain cloudy daylight to SUNNY_DAY; it fades in with
  * the sun through dusk like the rest of the day, so nights and sunsets keep their look.
+ * `morning` (the sun rising): the low-sun keyframe is the cool DAWN instead of the violet DUSK.
  */
-export function paletteAt(sunElevationDeg: number, sunny = 0): PaletteParams {
+export function paletteAt(sunElevationDeg: number, sunny = 0, morning = false): PaletteParams {
   const day = sunny > 0 ? lerpParams(DAY, SUNNY_DAY, Math.min(1, sunny)) : DAY;
+  const low = morning ? DAWN : DUSK;
   if (sunElevationDeg <= -8) return NIGHT;
-  if (sunElevationDeg < 0) return lerpParams(NIGHT, DUSK, (sunElevationDeg + 8) / 8);
-  // the sunset colours hold while the sun is low and give way to the day faster as it climbs
+  if (sunElevationDeg < 0) return lerpParams(NIGHT, low, (sunElevationDeg + 8) / 8);
+  // the low-sun colours hold while the sun is low and give way to the day faster as it climbs
   if (sunElevationDeg < DUSK_DAY_DEG) {
     const k = sunElevationDeg / DUSK_DAY_DEG;
-    const p = lerpParams(DUSK, day, k ** 1.5);
+    const p = lerpParams(low, day, k ** 1.5);
     // the haze turns to the day's earlier than the sky above it, so the two never meet in one
-    // colour on the way (the mauve dusk haze is darker than the sky band over it, the day's lighter)
-    return { ...p, horizon: lerpRGB(DUSK.horizon, day.horizon, k ** HAZE_EXP) };
+    // colour on the way (the dusk haze is darker than the sky band over it, the day's lighter)
+    return { ...p, horizon: lerpRGB(low.horizon, day.horizon, k ** HAZE_EXP) };
   }
   return day;
 }
@@ -438,6 +458,11 @@ export interface LightUniforms {
   saturation: number;
   /** sky glow toward the sun, 0..1 (PaletteParams.glow, SKY_FS) */
   sunGlow: number;
+  /**
+   * the glitter path on water under a low sun (GLITTER_GLSL): x strength 0..1 (the sky glow; 0 off,
+   * e.g. frozen water), then rgb 0..1 of its core (next to the sun's line) and of its edges
+   */
+  glitter: Float32Array;
 }
 
 export function lightUniforms(p: PaletteParams): LightUniforms {
@@ -446,7 +471,14 @@ export function lightUniforms(p: PaletteParams): LightUniforms {
     const q = k === 0 ? p : glowParams(p, k);
     for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
   }
-  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow };
+  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p) };
+}
+
+/** glitter colours: a pale gold core lit by the sun's glow, edges between the glow and the mid sky */
+function glitterOf(p: PaletteParams): Float32Array {
+  const core = lerpRGB(p.sunGlow, [255, 246, 176], 0.6);
+  const edge = lerpRGB(p.sunGlow, p.skyMid, 0.5);
+  return Float32Array.from([p.glow, ...core.map((v) => v / 255), ...edge.map((v) => v / 255)]);
 }
 
 /** the crash flash: everything white */
@@ -455,6 +487,7 @@ export const FLASH_LIGHT: LightUniforms = {
   haze: new Float32Array([1, 1, 1]),
   saturation: 1,
   sunGlow: 0,
+  glitter: new Float32Array(7),
 };
 
 /**
