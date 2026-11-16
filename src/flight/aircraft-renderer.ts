@@ -183,14 +183,11 @@ export class AircraftRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.live);
     renderer.drawWorld(this.mesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
-    // the flame lights itself (its normals face the sun): no rim, no two-sided flip
-    const rimWeight = renderer.rimWeight;
-    renderer.rimWeight = 0;
-    renderer.twoSided = false;
+    // the flame and the lights light themselves: no rim of either kind, no two-sided flip
+    renderer.selfLit = true;
     this.drawFlame(renderer, model, view, proj, camPos, sunDir, throttle, time);
     this.drawLights(renderer, model, view, proj, camPos, sunDir, time, sig, state);
-    renderer.rimWeight = rimWeight;
-    renderer.twoSided = true;
+    renderer.selfLit = false;
   }
 
   /** navigation lights, beacons and the landing light: small self-lit diamonds that keep a visible size */

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { paletteAt, sunColour } from '../src/engine/palette';
 import { DEFAULT_RIM, rimFrame } from '../src/engine/rim';
-import { DEPTH_FAR, TREE_VS, WORLD_POST_FS, WORLD_VS } from '../src/engine/shaders';
+import { DEPTH_FAR, TREE_VS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from '../src/engine/shaders';
 
 describe('rim light', () => {
   const at = (el: number, p = DEFAULT_RIM) => rimFrame(p, paletteAt(el), sunColour(el), el);
@@ -62,5 +62,10 @@ describe('rim light', () => {
     }
     expect(WORLD_POST_FS).toContain(`const float LOG_FAR = ${Math.log2(DEPTH_FAR + 1).toFixed(8)};`);
     expect(WORLD_POST_FS).toContain('exp2(d * LOG_FAR) - 1.0');
+  });
+
+  it('leaves self-lit faces (exhaust flame, aircraft lights) without the silhouette rim', () => {
+    expect(WORLD_FS).toContain('oColor = vec4(c, 1.0 - uSelfLit);');
+    expect(WORLD_POST_FS).toContain('if (uOutline.x > 0.0 && t.a > 0.5) return min(t.rgb + outline(q), 1.0);');
   });
 });

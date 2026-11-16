@@ -200,6 +200,8 @@ flat in vec3 vColor;
 flat in float vWater;
 in vec3 vRay;
 uniform vec3 uSunDir;
+// 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
+uniform float uSelfLit;
 out vec4 oColor;
 ${LOG_DEPTH_FS}${GLITTER_GLSL}
 void main() {
@@ -209,7 +211,7 @@ void main() {
     vec4 g = glitter(normalize(vRay));
     if (g.a > 0.0) c = g.rgb;
   }
-  oColor = vec4(c, 1.0);
+  oColor = vec4(c, 1.0 - uSelfLit);
 }
 `;
 
@@ -496,9 +498,10 @@ vec3 outline(ivec2 p) {
   return uRimColor * r * (1.0 - fog);
 }
 vec3 px(ivec2 q) {
-  vec3 c = texelFetch(uWorldTex, q, 0).rgb;
-  if (uOutline.x > 0.0) c = min(c + outline(q), 1.0);
-  return c;
+  vec4 t = texelFetch(uWorldTex, q, 0);
+  // alpha 0: a self-lit face (WORLD_FS uSelfLit), no rim on it
+  if (uOutline.x > 0.0 && t.a > 0.5) return min(t.rgb + outline(q), 1.0);
+  return t.rgb;
 }
 void main() {
   worldSize = textureSize(uWorldTex, 0);

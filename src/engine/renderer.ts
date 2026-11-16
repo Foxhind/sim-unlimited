@@ -64,10 +64,11 @@ export class Renderer {
   /** weight of the rim light for trees (drawTrees) */
   rimTreeWeight = 1;
   /**
-   * two-sided lighting for what drawWorld draws next: a face seen from behind is lit by its visible
-   * side's normal (false: the flame, whose normals are set toward the sun to keep it bright)
+   * what drawWorld draws next lights itself (the exhaust flame, aircraft lights): no rim light of
+   * either kind (its pixels are marked with alpha 0 for the silhouette pass) and no two-sided flip
+   * (the flame's normals are set toward the sun to keep it bright)
    */
-  twoSided = true;
+  selfLit = false;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -114,7 +115,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', ...GLITTER_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -280,8 +281,9 @@ export class Renderer {
     gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.worldU);
-    this.setRim(this.worldU, this.rimWeight);
-    gl.uniform1i(this.worldU.uTwoSided, this.twoSided ? 1 : 0);
+    this.setRim(this.worldU, this.selfLit ? 0 : this.rimWeight);
+    gl.uniform1i(this.worldU.uTwoSided, this.selfLit ? 0 : 1);
+    gl.uniform1f(this.worldU.uSelfLit, this.selfLit ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (!depthWrite) gl.depthMask(true);
