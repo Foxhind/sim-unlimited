@@ -7,7 +7,7 @@ import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Ti
 import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
-/** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, roof-coloured dots and 1 px road lines */
+/** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines */
 export const HOUSE_RADIUS_M = 3500;
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
@@ -416,9 +416,13 @@ export class OsmManager {
           renderer.drawLights(c.windows.vao, c.windows.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
       } else {
-        // far buildings: fat roof-coloured dots at their centroids by day, thin (1 px) yellow/white lights by night
-        const dots = lightsOn ? c.nightDots : c.dots;
-        if (dots) renderer.drawLights(dots.vao, dots.count, c.offset, view, proj, camPos, lightsOn ? farLightSize(pointSize) : pointSize * 1.5, true);
+        // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one; by night only
+        // their 1 px yellow/white lights, no roof
+        if (lightsOn) {
+          if (c.nightDots) renderer.drawLights(c.nightDots.vao, c.nightDots.count, c.offset, view, proj, camPos, farLightSize(pointSize), true);
+        } else if (c.dots) {
+          renderer.drawLights(c.dots.vao, c.dots.count, c.offset, view, proj, camPos, farLightSize(pointSize), true, 'points', true);
+        }
         // far roads: 1 px asphalt lines on the terrain by day; at night only the street-lit ones, as a
         // dotted line of their lamps: the same lamps, the same size as near
         if (lightsOn) {

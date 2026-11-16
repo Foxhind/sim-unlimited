@@ -215,6 +215,11 @@ uniform vec4 uOffset;
 ${PLACE_VS}${ORTHO_VS}
 uniform vec3 uCamPos;
 uniform float uPointSize;
+/**
+ * Far building dots (wall + roof pairs) when > 0: the framebuffer height. Odd vertices (roofs) are
+ * lifted on screen by one point size, onto the even one (walls) before them.
+ */
+uniform float uStackH;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}
@@ -228,6 +233,7 @@ void main() {
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
+  if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }
 `;
 

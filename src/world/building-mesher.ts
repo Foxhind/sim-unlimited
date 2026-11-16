@@ -504,8 +504,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
 }
 
 /**
- * Far stand-in for buildings: one point per building at its centroid, at roof-top height, in its
- * roof colour (lit step 9). Per point: x, y, z (tile-centre ENU like the meshes), palette index.
+ * Far stand-in for buildings: two points per building at its centroid, half-way up the building:
+ * first in its wall colour, then in its roof colour (both lit step 9). The renderer draws them as
+ * square dots of one size, the roof one stacked on screen right above the wall one (draw order:
+ * even vertex = wall, odd = roof). Per point: x, y, z (tile-centre ENU like the meshes), palette index.
  */
 export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight: HeightSampler): Float32Array {
   const center = tileCenter(tile);
@@ -519,7 +521,9 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     lat /= ring.length;
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
-    out.push(e, Math.max(0, sampleHeight(lon, lat)) + h.min + h.wall + h.roof, -n, pointValue(roofRamp(b.tags, buildingSeed(ring))));
+    const y = Math.max(0, sampleHeight(lon, lat)) + h.min + (h.wall + h.roof) * 0.5;
+    out.push(e, y, -n, pointValue(wallRamp(b.tags)));
+    out.push(e, y, -n, pointValue(roofRamp(b.tags, buildingSeed(ring))));
   }
   return new Float32Array(out);
 }
