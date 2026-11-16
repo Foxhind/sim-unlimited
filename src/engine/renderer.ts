@@ -121,7 +121,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull',
       'uLut', 'uLight', 'uHaze', 'uSat',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
@@ -335,6 +335,8 @@ export class Renderer {
     mode: 'points' | 'lines' = 'points',
     /** far building dots: square, each roof point stacked on screen over its wall point (building-mesher buildingDots) */
     stacked = false,
+    /** pull toward the eye, metres: [constant, per metre of distance] (POINTS_VS uPull) */
+    pull: readonly [number, number] = [0, 0],
   ): void {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
@@ -343,6 +345,7 @@ export class Renderer {
     gl.uniform1i(this.pointsU.uRound, mode === 'points' && !stacked ? 1 : 0);
     const fbHeight = this.height * (this.msaa ? 2 : 1);
     gl.uniform1f(this.pointsU.uStackH, stacked ? fbHeight : 0);
+    gl.uniform2f(this.pointsU.uPull, pull[0], pull[1]);
     gl.uniform1f(this.pointsU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);
     gl.uniformMatrix4fv(this.pointsU.uProj, false, proj);

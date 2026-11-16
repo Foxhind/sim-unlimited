@@ -569,7 +569,13 @@ export interface NightLights {
  * Night lights of buildings; per point x, y, z (tile-centre ENU), palette index, like buildingDots.
  * Windows: every 4 m along each outer wall on every 3 m floor, about a third of them lit, mostly yellow.
  */
-export function buildingNightLights(buildings: OsmBuilding[], tile: Tile, sampleHeight: HeightSampler): NightLights {
+export function buildingNightLights(
+  buildings: OsmBuilding[],
+  tile: Tile,
+  sampleHeight: HeightSampler,
+  /** false: only the far dots (the far OSM ring has no near mesh to put windows on) */
+  withWindows = true,
+): NightLights {
   const center = tileCenter(tile);
   const windows: number[] = [];
   const dots: number[] = [];
@@ -605,7 +611,7 @@ export function buildingNightLights(buildings: OsmBuilding[], tile: Tile, sample
     }
     if (tall) dots.push(cx, roofTop, cz, LIGHT.RED);
 
-    if (lit && h.wall >= 2.5 && windows.length / 4 < MAX_WINDOWS_PER_TILE) {
+    if (withWindows && lit && h.wall >= 2.5 && windows.length / 4 < MAX_WINDOWS_PER_TILE) {
       const floors = Math.max(1, Math.floor(h.wall / FLOOR_M));
       let count = 0;
       for (let i = 0; i < ring.length && count < MAX_WINDOWS_PER_BUILDING; i++) {

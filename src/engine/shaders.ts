@@ -220,6 +220,12 @@ uniform float uPointSize;
  * lifted on screen by one point size, onto the even one (walls) before them.
  */
 uniform float uStackH;
+/**
+ * Pull toward the eye along the view ray, metres: x + y × distance. The point stays where it is on
+ * screen; only its depth comes nearer, so terrain a little above it (the far OSM ring's heights are
+ * from the DEM, the coarse terrain under it is a simplified TIN) no longer hides it.
+ */
+uniform vec2 uPull;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}
@@ -228,6 +234,11 @@ void main() {
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
+  if (uPull.x + uPull.y > 0.0) {
+    vec3 ray = wp - uCamPos;
+    float len = length(ray);
+    wp = uCamPos + ray * max(0.0, 1.0 - (uPull.x + uPull.y * len) / max(len, 1.0));
+  }
   // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
   vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
   gl_Position = uProj * uView * vec4(wp, 1.0);

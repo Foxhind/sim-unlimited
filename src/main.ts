@@ -12,6 +12,8 @@ import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
+import { FarOsmManager } from './world/far-osm-manager';
+import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
 import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geodesy';
 import { GroundProbe, towerAnchor } from './world/ground';
 import { moonPosition, sunPosition } from './world/sun';
@@ -89,6 +91,7 @@ const rig = new CameraRig();
 const aircraftRenderer = new AircraftRenderer(gl);
 const chunks = new ChunkManager(gl, start.latLon);
 const osm = new OsmManager(gl, start.latLon);
+const farOsm = new FarOsmManager(gl, start.latLon);
 const ground = new GroundProbe(() => chunks.origin);
 const camWorld: CameraWorld = {
   pos: model.pos, // shared reference: rebase zeroes the model position in place
@@ -294,7 +297,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
+    renderer, chunks, osm, farOsm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
     get state() { return state; },
     get simTime() { return simTime; },
     get palette() { return palette; },
@@ -513,6 +516,8 @@ function frame(now: number): void {
   // a detailed (z14) tile is shown only once its OSM is ready; until then its coarse parent stands in
   chunks.update(camWorld, view, proj, now, (key) => osm.ready(key));
   osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
+  const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
+  farOsm.update(camWorld, view, proj, now, chunks.origin, farOsmTiles(camWorld.latLon, camWorld.alt, detailKeys), chunks.shownDetail);
 
   profiler.stage('солнце, погода, палитра');
   if (state === 'menu' && menu.screen === 'start') {
@@ -559,6 +564,7 @@ function frame(now: number): void {
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
   osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
+  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u);
   renderer.rimWeight = rim.aircraft;
   profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
@@ -593,19 +599,21 @@ function frame(now: number): void {
   if (import.meta.env.DEV && rimLab.hud) {
     const st = chunks.stats;
     const os = osm.stats;
+    const fs = farOsm.stats;
     font.text(
-      `FPS ${Math.round(fpsAvg)}  DRAW ${st.drawCalls + os.drawCalls}  BUF ${st.gpuBuffers}  OSM ERR ${os.errors}  ${state.toUpperCase()}`,
-      pad, renderer.height - pad - 16 * u, u, HUD_GREEN,
+      `FPS ${Math.round(fpsAvg)}  DRAW ${st.drawCalls + os.drawCalls + farOsm.drawCalls}  BUF ${st.gpuBuffers}  OSM ERR ${os.errors}  FAR ${fs.ready}/${fs.chunks}  ${state.toUpperCase()}`,
+      // a row above the attribution (which fills the bottom row) and below the throttle readout
+      pad, renderer.height - pad - 34 * u, u, HUD_GREEN,
     );
   }
-  const attr = `© OpenStreetMap contributors · ${LANDSAT_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
+  const attr = `© OpenStreetMap contributors · ${OPENFREEMAP_ATTRIBUTION} · ${LANDSAT_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
   font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
   font.flush();
   vectors.flush();
   profiler.stage('вывод на экран');
   renderer.resolve();
   profiler.end();
-  telemetry.tick(now, fpsAvg, chunks.stats.drawCalls + osm.stats.drawCalls);
+  telemetry.tick(now, fpsAvg, chunks.stats.drawCalls + osm.stats.drawCalls + farOsm.drawCalls);
 
   if (spawned && state === 'flying' && !rimLab.active && now - lastUrlUpdate > 1000) {
     lastUrlUpdate = now;
