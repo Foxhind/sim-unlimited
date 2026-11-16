@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rim light lab</title>
+    <style>
+      :root {
+        --bg: #101318; --panel: #171b22; --line: #2a303a; --text: #d6dbe2; --dim: #8a93a0;
+        --accent: #f0b54a;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+      body { display: grid; grid-template-columns: 320px 1fr; }
+      aside { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+      h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); }
+      h2 { font-size: 11px; margin: 14px 0 6px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+      label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+      .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+      .row > * { flex: 1; min-width: 0; }
+      .slider { display: grid; grid-template-columns: 1fr 44px; gap: 2px 6px; margin: 5px 0; }
+      .slider span { color: var(--dim); }
+      .slider output { text-align: right; }
+      .slider input { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: var(--accent); }
+      select { background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 3px 5px; font: inherit; width: 100%; }
+      button { background: #222833; color: var(--text); border: 1px solid var(--line); padding: 4px 6px; font: inherit; cursor: pointer; }
+      button:hover { border-color: var(--accent); }
+      pre { margin: 6px 0 0; white-space: pre-wrap; color: var(--dim); }
+      pre.perf { color: var(--text); white-space: pre; overflow-x: auto; font-size: 11px; }
+      .hint { color: var(--dim); }
+      main { position: relative; min-width: 0; min-height: 0; }
+      canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+      @media (max-width: 900px) {
+        body { grid-template-columns: 1fr; grid-template-rows: 70vh auto; }
+        html, body { height: auto; }
+        aside { order: 2; border-right: 0; border-top: 1px solid var(--line); }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Контровой свет</h1>
+      <div class="hint">Игра с замороженным полётом. Тащи мышью — камера вращается вокруг самолёта, колесо — ближе/дальше.</div>
+
+      <h2>Ракурс</h2>
+      <select id="view"></select>
+      <div class="row"><button id="resetView">Сбросить ракурс</button></div>
+
+      <h2>Солнце</h2>
+      <div id="sunGroup"></div>
+
+      <h2>Камера (от солнца)</h2>
+      <div id="camGroup"></div>
+
+      <h2>Самолёт</h2>
+      <div id="planeGroup"></div>
+
+      <h2>Шейдер</h2>
+      <label><input type="checkbox" id="rimOn" /> включён</label>
+      <label><input type="checkbox" id="lowSunOnly" /> только при низком солнце</label>
+      <div id="rimGroup"></div>
+
+      <h2>По граням</h2>
+      <div class="hint">Грани, повёрнутые к солнцу и видимые с ребра: самолёт, скаты крыш, хребты, деревья.</div>
+      <div id="faceGroup"></div>
+      <div class="hint">Где:</div>
+      <div id="weightGroup"></div>
+
+      <h2>По силуэту</h2>
+      <div class="hint">Полоса вдоль краёв, за которыми со стороны солнца небо или далёкий фон: контуры зданий, самолёта, гор.</div>
+      <div id="outlineGroup"></div>
+
+      <h2>Производительность</h2>
+      <label><input type="checkbox" id="msaa" /> MSAA (2× суперсэмплинг)</label>
+      <pre id="perf" class="perf">ждём первых кадров…</pre>
+      <div class="hint">Среднее за 60 кадров. CPU — время JS стадии вместе с отправкой команд GL; GPU — время на видеокарте (таймер EXT_disjoint_timer_query_webgl2, если браузер его даёт). FPS упирается в частоту экрана, поэтому смотри на «JS за кадр» и «GPU всего».</div>
+
+      <h2>Вид</h2>
+      <label><input type="checkbox" id="hud" /> HUD</label>
+      <div class="row"><button id="resetRim">Параметры по умолчанию</button><button id="copy">Копировать</button></div>
+      <pre id="params"></pre>
+    </aside>
+    <main>
+      <canvas id="screen"></canvas>
+    </main>
+    <script type="module" src="/src/tools/rim-lab.ts"></script>
+  </body>
+</html>

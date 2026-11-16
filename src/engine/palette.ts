@@ -25,6 +25,8 @@ export const MAT = {
   HUD_AMBER: 15,
   /** seas and oceans (terrain at or below sea level), apart from inland water (WATER): it freezes to another colour */
   SEA: 16,
+  /** the sunset glow round a low sun (SKY_FS): zenith → skyLow (step 4) → sunGlow (step 8); its rings use steps 5..8 */
+  SKY_GLOW: 17,
 } as const;
 
 /**
@@ -89,7 +91,7 @@ export const RAMP = {
   SEA: material(MAT.SEA),
 } as const;
 
-/** material ramp rows reserved in the LUT (17 used) */
+/** material ramp rows reserved in the LUT (18 used) */
 export const RAMP_COUNT = 32;
 export const RAMP_STEPS = 16;
 /** LUT entries of one world palette: the material ramps, 16 steps each (256-wide rows) */
@@ -181,31 +183,65 @@ const HUD_AMBER: MaterialRamp = { dark: [48, 32, 0], light: [255, 200, 72] };
 
 export interface PaletteParams {
   zenith: RGB;
+  /** the haze at the horizon: what fog runs into (and sky ramp step 15) */
   horizon: RGB;
+  /** sky colour half-way down (band 4 of the 9 drawn sky bands) */
+  skyMid: RGB;
+  /** sky colour of the lowest drawn band, just above the horizon (band 8) */
+  skyLow: RGB;
+  /** colour of the sky right above a low sun (the lowest band of the SKY_GLOW ramp) */
+  sunGlow: RGB;
+  /** how strongly the sky glows toward the sun, 0..1 (0: no glow, the plain sky ramp all round) */
+  glow: number;
+  /** how much water mirrors the sky instead of its own blue, 0..1 */
+  waterSky: number;
   lightMul: number;
   tint: RGB;
   /** colour saturation of lit surfaces (1 = as they are), applied before the light */
   saturation: number;
 }
 
+/**
+ * A plain two-colour sky (day, night): the drawn bands run a straight line from the zenith toward
+ * the horizon haze (band b at b/15 of the way, as the sky ramp always did), no glow toward the sun.
+ * sunGlow is not drawn there (glow 0); it is the warm white of plain sunlight, which the rim light
+ * (rim.ts) takes its colour from by day.
+ */
+function plainSky(zenith: RGB, horizon: RGB): Pick<PaletteParams, 'zenith' | 'horizon' | 'skyMid' | 'skyLow' | 'sunGlow' | 'glow' | 'waterSky'> {
+  const low = lerpRGB(zenith, horizon, 8 / 15);
+  return { zenith, horizon, skyMid: lerpRGB(zenith, horizon, 4 / 15), skyLow: low, sunGlow: DAYLIGHT_GLOW, glow: 0, waterSky: 0 };
+}
+/** plain sunlight's colour (plainSky sunGlow) */
+const DAYLIGHT_GLOW: RGB = [255, 246, 224];
+
 const NIGHT: PaletteParams = {
-  zenith: [4, 6, 16],
-  horizon: [12, 18, 36],
+  ...plainSky([4, 6, 16], [12, 18, 36]),
   lightMul: 0.22,
   tint: [0.55, 0.65, 1.0],
   saturation: 1,
 };
+/**
+ * Sunset and sunrise (sun on the horizon): a violet zenith, magenta-pink half-way down, coral
+ * orange above the horizon, gold around the sun; warm pink light on the ground, water mirroring the
+ * violet and pink sky. The haze is a dusky mauve, darker than the bright sky above the horizon, so
+ * fully fogged far ground (beyond the fog end, up to the true horizon from altitude) still reads as
+ * ground and the horizon stays a line.
+ */
 const DUSK: PaletteParams = {
-  zenith: [24, 28, 80],
-  horizon: [224, 120, 64],
-  lightMul: 0.55,
-  tint: [1.0, 0.72, 0.55],
-  saturation: 1,
+  zenith: [76, 36, 140],
+  skyMid: [226, 48, 140],
+  skyLow: [255, 112, 64],
+  sunGlow: [255, 168, 72],
+  horizon: [160, 72, 120],
+  glow: 1,
+  waterSky: 0.75,
+  lightMul: 0.58,
+  tint: [1.0, 0.66, 0.74],
+  saturation: 1.15,
 };
 /** daylight under a cloudy sky: the plain, even light */
 const DAY: PaletteParams = {
-  zenith: [32, 72, 192],
-  horizon: [168, 200, 232],
+  ...plainSky([32, 72, 192], [168, 200, 232]),
   lightMul: 1.0,
   tint: [1, 1, 1],
   saturation: 1,
@@ -215,8 +251,7 @@ const DAY: PaletteParams = {
  * brighter sunlight and livelier colours on the ground
  */
 const SUNNY_DAY: PaletteParams = {
-  zenith: [16, 88, 232],
-  horizon: [190, 222, 250],
+  ...plainSky([16, 88, 232], [190, 222, 250]),
   lightMul: 1.12,
   tint: [1.0, 0.97, 0.88],
   saturation: 1.4,
@@ -334,11 +369,21 @@ function lerpParams(a: PaletteParams, b: PaletteParams, t: number): PaletteParam
   return {
     zenith: lerpRGB(a.zenith, b.zenith, t),
     horizon: lerpRGB(a.horizon, b.horizon, t),
+    skyMid: lerpRGB(a.skyMid, b.skyMid, t),
+    skyLow: lerpRGB(a.skyLow, b.skyLow, t),
+    sunGlow: lerpRGB(a.sunGlow, b.sunGlow, t),
+    glow: lerp(a.glow, b.glow, t),
+    waterSky: lerp(a.waterSky, b.waterSky, t),
     lightMul: lerp(a.lightMul, b.lightMul, t),
     tint: lerpRGB(a.tint, b.tint, t),
     saturation: lerp(a.saturation, b.saturation, t),
   };
 }
+
+/** sun elevation from which the day palette is in full */
+const DUSK_DAY_DEG = 12;
+/** the haze's own dusk → day curve (the rest of the palette goes by k^1.5) */
+const HAZE_EXP = 0.5;
 
 /**
  * Palette keyframe for a sun elevation in degrees (Q7: day/dusk/night blend). `sunny` (0..1,
@@ -349,7 +394,14 @@ export function paletteAt(sunElevationDeg: number, sunny = 0): PaletteParams {
   const day = sunny > 0 ? lerpParams(DAY, SUNNY_DAY, Math.min(1, sunny)) : DAY;
   if (sunElevationDeg <= -8) return NIGHT;
   if (sunElevationDeg < 0) return lerpParams(NIGHT, DUSK, (sunElevationDeg + 8) / 8);
-  if (sunElevationDeg < 12) return lerpParams(DUSK, day, sunElevationDeg / 12);
+  // the sunset colours hold while the sun is low and give way to the day faster as it climbs
+  if (sunElevationDeg < DUSK_DAY_DEG) {
+    const k = sunElevationDeg / DUSK_DAY_DEG;
+    const p = lerpParams(DUSK, day, k ** 1.5);
+    // the haze turns to the day's earlier than the sky above it, so the two never meet in one
+    // colour on the way (the mauve dusk haze is darker than the sky band over it, the day's lighter)
+    return { ...p, horizon: lerpRGB(DUSK.horizon, day.horizon, k ** HAZE_EXP) };
+  }
   return day;
 }
 
@@ -384,6 +436,8 @@ export interface LightUniforms {
   haze: Float32Array;
   /** colour saturation of lit surfaces (PaletteParams.saturation) */
   saturation: number;
+  /** sky glow toward the sun, 0..1 (PaletteParams.glow, SKY_FS) */
+  sunGlow: number;
 }
 
 export function lightUniforms(p: PaletteParams): LightUniforms {
@@ -392,7 +446,7 @@ export function lightUniforms(p: PaletteParams): LightUniforms {
     const q = k === 0 ? p : glowParams(p, k);
     for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
   }
-  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation };
+  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow };
 }
 
 /** the crash flash: everything white */
@@ -400,6 +454,7 @@ export const FLASH_LIGHT: LightUniforms = {
   levels: new Float32Array((GLOW_LEVELS + 1) * 3).fill(1000),
   haze: new Float32Array([1, 1, 1]),
   saturation: 1,
+  sunGlow: 0,
 };
 
 /**
@@ -441,9 +496,14 @@ export function glowParams(p: PaletteParams, k: number): PaletteParams {
 
 function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_WINTER): void {
   const haze = p.horizon;
-  const writeMaterial = (ramp: number, m: MaterialRamp): void => {
-    const dark = scaleRGB(m.dark, p);
-    const light = scaleRGB(m.light, p);
+  const writeMaterial = (ramp: number, m: MaterialRamp, mirror = 0): void => {
+    let dark = scaleRGB(m.dark, p);
+    let light = scaleRGB(m.light, p);
+    if (mirror > 0) {
+      // open water mirrors the sky: dark toward the zenith, light toward the pink half-way band
+      dark = lerpRGB(dark, lerpRGB([0, 0, 0], p.zenith, WATER_MIRROR_DARK), mirror);
+      light = lerpRGB(light, lerpRGB([0, 0, 0], p.skyMid, WATER_MIRROR_LIGHT), mirror);
+    }
     for (let s = 0; s < RAMP_STEPS; s++) {
       const c =
         s < LIT_STEPS
@@ -454,11 +514,13 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
   };
 
   for (let r = 0; r < MATERIALS.length; r++) {
-    writeMaterial(r, surface.ice && r === WATER_INDEX ? ICE : MATERIALS[r]);
+    const water = r === WATER_INDEX && !surface.ice;
+    writeMaterial(r, surface.ice && r === WATER_INDEX ? ICE : MATERIALS[r], water ? p.waterSky : 0);
   }
 
   for (let s = 0; s < RAMP_STEPS; s++) {
-    writeEntry(lut, MAT.SKY * RAMP_STEPS + s, lerpRGB(p.zenith, p.horizon, s / (RAMP_STEPS - 1)));
+    writeEntry(lut, MAT.SKY * RAMP_STEPS + s, skyColour(p, s));
+    writeEntry(lut, MAT.SKY_GLOW * RAMP_STEPS + s, skyGlowColour(p, s));
   }
   for (const [ramp, m] of [
     [MAT.EMISSIVE, EMISSIVE],
@@ -469,7 +531,33 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
-  writeMaterial(MAT.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX]);
+  writeMaterial(MAT.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX], surface.ice ? 0 : p.waterSky);
+}
+
+/** water mirroring the sky: brightness of the mirrored zenith (dark end) and half-way band (light end) */
+const WATER_MIRROR_DARK = 0.5;
+const WATER_MIRROR_LIGHT = 0.85;
+
+/** the drawn sky bands are steps 0..SKY_BANDS-1 of the sky ramps */
+export const SKY_BANDS = 9;
+
+/**
+ * Sky ramp step s: the drawn bands 0..8 run zenith → skyMid (band 4) → skyLow (band 8); further
+ * steps toward the horizon haze, which step 15 is (fog runs into it). Steps 9..14 are overwritten
+ * by the fixed light colours (LIGHT).
+ */
+export function skyColour(p: PaletteParams, s: number): RGB {
+  const mid = (SKY_BANDS - 1) / 2;
+  if (s <= mid) return lerpRGB(p.zenith, p.skyMid, s / mid);
+  if (s <= SKY_BANDS - 1) return lerpRGB(p.skyMid, p.skyLow, (s - mid) / mid);
+  return lerpRGB(p.skyLow, p.horizon, (s - SKY_BANDS + 1) / (RAMP_STEPS - SKY_BANDS));
+}
+
+/** the sky toward a low sun, step s: zenith → skyLow (band 4) → sunGlow (band 8) */
+export function skyGlowColour(p: PaletteParams, s: number): RGB {
+  const mid = (SKY_BANDS - 1) / 2;
+  if (s <= mid) return lerpRGB(p.zenith, p.skyLow, s / mid);
+  return lerpRGB(p.skyLow, p.sunGlow, Math.min(1, (s - mid) / mid));
 }
 
 /**
@@ -480,8 +568,7 @@ export const LIGHT = {
   WINDOW_YELLOW: MAT.SKY * RAMP_STEPS + 10,
   WINDOW_WHITE: MAT.SKY * RAMP_STEPS + 11,
   RED: MAT.SKY * RAMP_STEPS + 12,
-  /** sun disc and its halo: white by day, yellow when low (applySunColors) */
-  SUN_HALO: MAT.SKY * RAMP_STEPS + 13,
+  /** the sun disc: white by day, yellow when low (applySunColors); step 13 is free */
   SUN: MAT.SKY * RAMP_STEPS + 14,
   /** blue taxiway edge lights (kept apart from the water ramp, which turns to ice in frost) */
   TAXI_BLUE: MAT.SKY * RAMP_STEPS + 9,
@@ -497,23 +584,19 @@ const LIGHT_COLORS: [number, RGB][] = [
 ];
 
 const SUN_DAY: RGB = [255, 255, 255];
-const SUN_HALO_DAY: RGB = [212, 224, 240];
-const SUN_LOW: RGB = [255, 224, 64];
-const SUN_HALO_LOW: RGB = [255, 160, 32];
+const SUN_LOW: RGB = [255, 232, 72];
 /** fully yellow up to this sun elevation, fully white from SUN_WHITE_DEG */
 const SUN_YELLOW_DEG = 10;
 const SUN_WHITE_DEG = 20;
 
-/** sun disc and halo colours: yellow in the morning and evening (low sun), white by day */
-export function sunColors(sunElevationDeg: number): { sun: RGB; halo: RGB } {
+/** sun disc colour: white by day, yellow in the morning and evening (low sun) */
+export function sunColour(sunElevationDeg: number): RGB {
   const t = Math.max(0, Math.min(1, (sunElevationDeg - SUN_YELLOW_DEG) / (SUN_WHITE_DEG - SUN_YELLOW_DEG)));
-  return { sun: lerpRGB(SUN_LOW, SUN_DAY, t), halo: lerpRGB(SUN_HALO_LOW, SUN_HALO_DAY, t) };
+  return lerpRGB(SUN_LOW, SUN_DAY, t);
 }
 
 export function applySunColors(lut: Uint8Array, sunElevationDeg: number): void {
-  const { sun, halo } = sunColors(sunElevationDeg);
-  writeEntry(lut, LIGHT.SUN, sun);
-  writeEntry(lut, LIGHT.SUN_HALO, halo);
+  writeEntry(lut, LIGHT.SUN, sunColour(sunElevationDeg));
 }
 
 /** LUT index of a material ramp (MAT id, or its face colour RAMP.*) at a step */

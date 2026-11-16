@@ -132,7 +132,13 @@ export class AircraftRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.live);
     renderer.drawWorld(this.mesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
+    // the flame lights itself (its normals face the sun): no rim, no two-sided flip
+    const rimWeight = renderer.rimWeight;
+    renderer.rimWeight = 0;
+    renderer.twoSided = false;
     this.drawFlame(renderer, model, view, proj, camPos, sunDir, throttle, time);
+    renderer.rimWeight = rimWeight;
+    renderer.twoSided = true;
   }
 
   private drawFlame(

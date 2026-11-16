@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
+import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
 /** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
@@ -51,6 +51,27 @@ vec3 shadeColour(uint packedRamp, float litStep, float fog) {
     return lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + s);
   }
   return shadeRgb(rgbOf(packedRamp), s, lvl);
+}
+`;
+
+/**
+ * Rim light (rim.ts): the edges of faces seen edge-on, turned toward a sun the eye looks into,
+ * light up in the rim colour. uRim: x strength (0: off), y edge power, z backlight power, w sun-side
+ * bias; uRimSteps: quantization levels (0: smooth). Faded with the fog.
+ */
+const RIM_GLSL = `
+uniform vec4 uRim;
+uniform float uRimSteps;
+uniform vec3 uRimColor;
+vec3 rimLight(vec3 n, vec3 wp, float fog) {
+  if (uRim.x <= 0.0) return vec3(0.0);
+  vec3 v = normalize(uCamPos - wp);
+  float edge = pow(1.0 - min(abs(dot(n, v)), 1.0), uRim.y);
+  float back = pow(max(dot(-v, uSunDir), 0.0), uRim.z);
+  float side = clamp((dot(n, uSunDir) + uRim.w) / (1.0 + uRim.w), 0.0, 1.0);
+  float r = clamp(uRim.x * edge * back * side, 0.0, 1.0);
+  if (uRimSteps > 0.0) r = floor(r * uRimSteps + 0.5) / uRimSteps;
+  return uRimColor * r * (1.0 - fog);
 }
 `;
 
@@ -103,21 +124,26 @@ uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
+uniform int uTwoSided;
 flat out vec3 vColor;
 out float vLogW;
-${GLOW_VS}
+${GLOW_VS}${RIM_GLSL}
 void main() {
   vec3 wp = toWorld(aPos);
   if ((int(aMorph.y) & uCoarse) != 0) wp.y += aMorph.x;
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  float diff = max(dot(normalize(toWorldDir(aNormal)), uSunDir), 0.0);
+  vec3 n = normalize(toWorldDir(aNormal));
+  // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
+  // by the normal of the side the eye sees, not the other side's
+  if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
+  float diff = max(dot(n, uSunDir), 0.0);
   float lit = 0.30 + 0.70 * diff;
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vColor = shadeColour(aRamp, litStep, fog);
+  vColor = min(shadeColour(aRamp, litStep, fog) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -153,22 +179,27 @@ uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform float uFogStart;
 uniform float uFogEnd;
+uniform int uTwoSided;
 flat out vec3 vColor;
 out float vLogW;
-${GLOW_VS}
+${GLOW_VS}${RIM_GLSL}
 void main() {
   vec3 wp = toWorld(aPos * aInstSR.x + aInstPos);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  float diff = max(dot(normalize(toWorldDir(aNormal)), uSunDir), 0.0);
+  vec3 n = normalize(toWorldDir(aNormal));
+  // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
+  // by the normal of the side the eye sees, not the other side's
+  if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
+  float diff = max(dot(n, uSunDir), 0.0);
   float lit = 0.30 + 0.70 * diff;
   float litStep = lit * 11.0;
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
-  vColor = shadeColour(packed, litStep, fog);
+  vColor = min(shadeColour(packed, litStep, fog) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -229,6 +260,10 @@ void main() {
 }
 `;
 
+/** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
+const GLOW_RADIUS = 0.5;
+const GLOW_RINGS = 4;
+
 export const SKY_FS = `#version 300 es
 precision highp float;
 in vec2 vNdc;
@@ -242,6 +277,8 @@ uniform uint uGroundRamp;
 uniform vec3 uLightDir;
 uniform float uFogStart;
 uniform float uFogEnd;
+// sky glow toward a low sun, 0..1 (palette.ts PaletteParams.glow)
+uniform float uSunGlow;
 out vec4 oColor;
 ${GLOW_VS}
 void main() {
@@ -263,8 +300,20 @@ void main() {
     }
   }
   float t = clamp(dir.y, 0.0, 1.0);
-  float band = floor(pow(1.0 - t, 1.6) * 9.0);
-  uint idx = 192u + uint(min(band, 8.0));
+  float h = pow(1.0 - t, 1.6) * ${SKY_BANDS}.0;
+  // Sunset glow: rings round the sun disc, by the angle from the sun (so they are circles centred
+  // on it), in steps like the sky bands: coral outside, gold at the disc. The inner rings cover the
+  // bands, the outer ones let them show through.
+  float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
+  float g = uSunGlow * clamp(1.0 - ang / ${GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
+  g = floor(g * ${GLOW_RINGS}.0 + 0.5) / ${GLOW_RINGS}.0;
+  uint band = uint(min(floor(h), ${SKY_BANDS - 1}.0));
+  vec3 col = lutColor(${MAT.SKY * 16}u + band);
+  if (g > 0.0) {
+    uint ring = ${SKY_BANDS - 1 - GLOW_RINGS}u + uint(g * ${GLOW_RINGS}.0 + 0.5);
+    col = mix(col, lutColor(${MAT.SKY_GLOW * 16}u + ring), min(1.0, g * 1.25));
+  }
+  uint idx = 0u;
   // moon: disc (exaggerated ~1.8 deg radius) lit by the sun; the dark limb stays sky-coloured
   float md = dot(dir, uMoonDir);
   if (md > 0.0) {
@@ -281,26 +330,86 @@ void main() {
       if (dot(n, uSunDir) > 0.0) idx = 208u + 13u;
     }
   }
-  float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
-  if (ang < 0.018) {
-    idx = ${LIGHT.SUN}u;
-  } else if (ang < 0.045) {
-    idx = ${LIGHT.SUN_HALO}u;
-  }
-  oColor = vec4(lutColor(idx), 1.0);
+  // the sun: one plain disc (~1.7 deg radius), white by day, yellow when low (applySunColors)
+  if (ang < 0.03) idx = ${LIGHT.SUN}u;
+  oColor = vec4(idx > 0u ? lutColor(idx) : col, 1.0);
 }
 `;
 
-/** 2x supersampled world → screen: the mean of each 2×2 block */
-export const DOWNSAMPLE_FS = `#version 300 es
+/**
+ * World → screen-sized colour (colorTex), run when the world needs a pass of its own: 2x
+ * supersampling (uScale 2: the mean of each 2×2 block) and/or the silhouette rim light.
+ *
+ * Silhouette rim (rim.ts, контровой свет по силуэту): a pixel lights up when, walking from it on
+ * the screen toward the sun, the depth jumps away within uOutline.y pixels (an edge with sky or far
+ * ground behind it on the sun's side); nearer the edge, brighter. uOutline: x strength (0: off),
+ * y width in world pixels, z the depth jump between neighbouring pixels that makes an edge (ratio),
+ * w backlight power (how much it needs the eye to look into the sun). Faded with the fog.
+ */
+export const WORLD_POST_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uWorldTex;
+uniform highp sampler2D uDepthTex;
+uniform int uScale;
+uniform vec4 uOutline;
+uniform float uRimSteps;
+uniform vec3 uRimColor;
+uniform vec3 uSunDir;
+uniform mat4 uViewProj;
+uniform mat4 uInvViewProj;
+uniform float uFogStart;
+uniform float uFogEnd;
 out vec4 oColor;
+const float LOG_FAR = ${Math.log2(DEPTH_FAR + 1).toFixed(8)};
+ivec2 worldSize;
+// distance to the eye from the log depth (LOG_DEPTH_FS); nothing drawn (sky) is far away
+float dist(ivec2 q) {
+  float d = texelFetch(uDepthTex, clamp(q, ivec2(0), worldSize - 1), 0).r;
+  return d >= 1.0 ? 1e9 : exp2(d * LOG_FAR) - 1.0;
+}
+vec3 outline(ivec2 p) {
+  float d0 = dist(p);
+  if (d0 >= 1e8) return vec3(0.0);
+  vec4 sc = uViewProj * vec4(uSunDir, 0.0);
+  if (sc.w <= 1e-4) return vec3(0.0); // the sun is behind the eye
+  vec2 size = vec2(worldSize);
+  vec2 here = vec2(p) + 0.5;
+  vec2 dir = (sc.xy / sc.w * 0.5 + 0.5) * size - here;
+  float len = length(dir);
+  if (len < 1.0) return vec3(0.0);
+  dir /= len;
+  vec2 ndc = here / size * 2.0 - 1.0;
+  vec4 a = uInvViewProj * vec4(ndc, -1.0, 1.0);
+  vec4 b = uInvViewProj * vec4(ndc, 1.0, 1.0);
+  vec3 ray = normalize(b.xyz / b.w - a.xyz / a.w);
+  float back = max(dot(ray, uSunDir), 0.0);
+  back = uOutline.w > 0.0 ? pow(back, uOutline.w) : 1.0;
+  if (back <= 0.0) return vec3(0.0);
+  float w = uOutline.y * float(uScale);
+  float prev = d0;
+  float hit = 0.0;
+  for (int k = 1; k <= 32; k++) {
+    if (float(k) > w) break;
+    float dk = dist(ivec2(here + dir * float(k)));
+    if (dk > prev * (1.0 + uOutline.z)) { hit = 1.0 - float(k - 1) / w; break; }
+    prev = dk;
+  }
+  float r = clamp(uOutline.x * hit * back, 0.0, 1.0);
+  if (uRimSteps > 0.0) r = floor(r * uRimSteps + 0.5) / uRimSteps;
+  float fog = clamp((d0 - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+  return uRimColor * r * (1.0 - fog);
+}
+vec3 px(ivec2 q) {
+  vec3 c = texelFetch(uWorldTex, q, 0).rgb;
+  if (uOutline.x > 0.0) c = min(c + outline(q), 1.0);
+  return c;
+}
 void main() {
-  ivec2 p = ivec2(gl_FragCoord.xy) * 2;
-  vec3 c = texelFetch(uWorldTex, p, 0).rgb + texelFetch(uWorldTex, p + ivec2(1, 0), 0).rgb
-    + texelFetch(uWorldTex, p + ivec2(0, 1), 0).rgb + texelFetch(uWorldTex, p + ivec2(1, 1), 0).rgb;
-  oColor = vec4(c * 0.25, 1.0);
+  worldSize = textureSize(uWorldTex, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy) * uScale;
+  vec3 c = px(p);
+  if (uScale == 2) c = (c + px(p + ivec2(1, 0)) + px(p + ivec2(0, 1)) + px(p + ivec2(1, 1))) * 0.25;
+  oColor = vec4(c, 1.0);
 }
 `;
 
@@ -310,6 +419,7 @@ uniform sampler2D uWorldTex;
 uniform highp usampler2D uOverlayTex;
 uniform sampler2D uColorTex;
 uniform sampler2D uLut;
+// 1: the world went through WORLD_POST_FS into uColorTex (supersampling or the silhouette rim)
 uniform int uMsaa;
 out vec4 oColor;
 void main() {

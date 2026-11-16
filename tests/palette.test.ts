@@ -77,6 +77,68 @@ describe('paletteAt', () => {
   });
 });
 
+describe('sunset sky', () => {
+  const hue = ([r, g, b]: readonly number[]) => {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    const h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    return (h * 60 + 360) % 360;
+  };
+
+  it('runs violet at the zenith, magenta half-way down, orange above the horizon, gold toward the sun', () => {
+    const lut = buildLUT(paletteAt(0));
+    const zenith = hue(entry(lut, rampIndex(RAMP.SKY, 0)));
+    const mid = hue(entry(lut, rampIndex(RAMP.SKY, 4)));
+    const low = hue(entry(lut, rampIndex(RAMP.SKY, 8)));
+    const glow = entry(lut, MAT.SKY_GLOW * RAMP_STEPS + 8);
+    expect(zenith).toBeGreaterThan(250);
+    expect(zenith).toBeLessThan(290);
+    expect(mid).toBeGreaterThan(310);
+    expect(low).toBeGreaterThan(10);
+    expect(low).toBeLessThan(30);
+    expect(hue(glow)).toBeGreaterThan(25);
+    expect(hue(glow)).toBeLessThan(55);
+    expect(lightUniforms(paletteAt(0)).sunGlow).toBe(1);
+  });
+
+  it('keeps the horizon a line: the haze (fully fogged ground) stands apart from the lowest sky band', () => {
+    // from civil twilight on (at night everything is dark anyway), cloudy and sunny
+    for (const sunny of [0, 1]) {
+      for (let el = -4; el <= 20; el += 0.5) {
+        const lut = buildLUT(paletteAt(el, sunny));
+        const sky = entry(lut, rampIndex(RAMP.SKY, 8)), haze = entry(lut, rampIndex(RAMP.SKY, 15));
+        expect(Math.hypot(sky[0] - haze[0], sky[1] - haze[1], sky[2] - haze[2]), `sun ${el}°, sunny ${sunny}`).toBeGreaterThan(40);
+      }
+    }
+  });
+
+  it('keeps the day and night skies as they were: a straight line from zenith to haze, no glow', () => {
+    for (const el of [45, -20]) {
+      const p = paletteAt(el, 1);
+      const lut = buildLUT(p);
+      for (let s = 0; s < 9; s++) {
+        const want = p.zenith.map((z, i) => Math.round(z + (p.horizon[i] - z) * (s / 15)));
+        expect(entry(lut, rampIndex(RAMP.SKY, s))).toEqual(want);
+      }
+      expect(lightUniforms(p).sunGlow).toBe(0);
+    }
+  });
+
+  it('water mirrors the violet-pink sky at sunset, and is plain blue by day', () => {
+    const blueish = (c: readonly number[]) => c[2] > c[0] && c[2] > c[1];
+    const dusk = buildLUT(paletteAt(0)), day = buildLUT(paletteAt(45));
+    const w = entry(dusk, rampIndex(RAMP.WATER, 9));
+    expect(w[0]).toBeGreaterThan(w[1]); // red over green: purple-pink, not blue-grey
+    expect(entry(dusk, rampIndex(RAMP.SEA, 9))).toEqual(w);
+    expect(blueish(entry(day, rampIndex(RAMP.WATER, 9)))).toBe(true);
+    // frozen water stays ice: it does not mirror the sky
+    const frost = { snow: true, ice: true };
+    for (const ramp of [RAMP.WATER, RAMP.SEA]) {
+      const ice = entry(buildLUT(paletteAt(0), frost), rampIndex(ramp, 9));
+      expect(ice).toEqual(entry(buildLUT({ ...paletteAt(0), waterSky: 0 }, frost), rampIndex(ramp, 9)));
+    }
+  });
+});
+
 describe('sunny weather', () => {
   const sat = (c: readonly number[]) => (Math.max(...c) - Math.min(...c)) / Math.max(...c);
   const lum = (c: readonly number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];

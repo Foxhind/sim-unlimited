@@ -1,7 +1,8 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { LUT_ENTRIES, type LightUniforms } from './palette';
-import { DOWNSAMPLE_FS, FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from './shaders';
+import { NO_RIM, type RimFrame } from './rim';
+import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -17,7 +18,8 @@ export class Renderer {
   private fbo: WebGLFramebuffer;
   /** the world in RGB (2x supersampled with msaa) */
   private worldTex: WebGLTexture;
-  private depthRb: WebGLRenderbuffer;
+  /** the world's depth (log depth, LOG_DEPTH_FS), a texture so the silhouette rim can read it */
+  private depthTex: WebGLTexture;
   private overlayFbo: WebGLFramebuffer;
   private overlayTex: WebGLTexture;
   private colorFbo: WebGLFramebuffer;
@@ -39,6 +41,12 @@ export class Renderer {
   private resolveU: Uniforms;
 
   private invViewProj = mat4.create();
+  private viewProj = mat4.create();
+  /** this frame's sun direction and fog (drawSky), for the silhouette rim */
+  private sunDir = vec3.create();
+  private fog = new Float32Array(2);
+  /** the world went through the post pass into colorTex this frame (beginOverlay) */
+  private posted = false;
   /** lighting of RGB face colours this frame (beginFrame) */
   private light: LightUniforms | undefined;
   /** night: faces whose ramp carries a glow level are drawn street-lit (palette.ts GLOW_*) */
@@ -47,6 +55,17 @@ export class Renderer {
   snow = false;
   /** far plane of an orthographic projection (near 0); 0 = perspective (see ORTHO_VS) */
   orthoFar = 0;
+  /** rim light this frame (rim.ts rimFrame) */
+  rim: RimFrame = NO_RIM;
+  /** weight of the rim light for what drawWorld draws next (rim.ts: terrain, objects, aircraft; 0: none) */
+  rimWeight = 1;
+  /** weight of the rim light for trees (drawTrees) */
+  rimTreeWeight = 1;
+  /**
+   * two-sided lighting for what drawWorld draws next: a face seen from behind is lit by its visible
+   * side's normal (false: the flame, whose normals are set toward the sun to keep it bright)
+   */
+  twoSided = true;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -59,7 +78,7 @@ export class Renderer {
     this.gl = gl;
 
     this.worldTex = must(gl.createTexture(), 'world texture');
-    this.depthRb = must(gl.createRenderbuffer(), 'depth renderbuffer');
+    this.depthTex = must(gl.createTexture(), 'depth texture');
     this.fbo = must(gl.createFramebuffer(), 'world framebuffer');
     this.overlayTex = must(gl.createTexture(), 'overlay texture');
     this.overlayFbo = must(gl.createFramebuffer(), 'overlay framebuffer');
@@ -71,6 +90,7 @@ export class Renderer {
       [this.overlayTex, gl.R8UI, gl.RED_INTEGER, gl.UNSIGNED_BYTE],
       [this.colorTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
       [this.lutTex, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE],
+      [this.depthTex, gl.DEPTH_COMPONENT24, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT],
     ] as [WebGLTexture, number, number, number][]) {
       gl.bindTexture(gl.TEXTURE_2D, tex);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -92,12 +112,12 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat',
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided',
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat',
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided',
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -106,11 +126,13 @@ export class Renderer {
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
-      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
+      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
       'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd',
     ]);
-    this.dsProg = createProgram(gl, FULLSCREEN_VS, DOWNSAMPLE_FS);
-    this.dsU = uniformMap(gl, this.dsProg, ['uWorldTex']);
+    this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
+    this.dsU = uniformMap(gl, this.dsProg, [
+      'uWorldTex', 'uDepthTex', 'uScale', 'uOutline', 'uRimSteps', 'uRimColor', 'uSunDir', 'uViewProj', 'uInvViewProj', 'uFogStart', 'uFogEnd',
+    ]);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
     this.resolveU = uniformMap(gl, this.resolveProg, ['uWorldTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
     // the LUT lives on its own texture unit for the whole frame
@@ -147,11 +169,11 @@ export class Renderer {
     const w = this.width * s, h = this.height * s;
     gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.bindRenderbuffer(gl.RENDERBUFFER, this.depthRb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.worldTex, 0);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.depthRb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.depthTex, 0);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
       throw new Error('World framebuffer incomplete');
     }
@@ -199,8 +221,11 @@ export class Renderer {
    */
   drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, moonDir: vec3, ground: BaseGround): void {
     const gl = this.gl;
-    mat4.multiply(this.invViewProj, proj, view);
-    mat4.invert(this.invViewProj, this.invViewProj);
+    mat4.multiply(this.viewProj, proj, view);
+    mat4.invert(this.invViewProj, this.viewProj);
+    vec3.copy(this.sunDir, sunDir);
+    this.fog[0] = ground.fogStart;
+    this.fog[1] = ground.fogEnd;
 
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
@@ -217,6 +242,7 @@ export class Renderer {
     gl.uniform1i(this.skyU.uGlow, 0);
     gl.uniform1i(this.skyU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.skyU);
+    gl.uniform1f(this.skyU.uSunGlow, this.light?.sunGlow ?? 0);
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -252,6 +278,8 @@ export class Renderer {
     gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.worldU);
+    this.setRim(this.worldU, this.rimWeight);
+    gl.uniform1i(this.worldU.uTwoSided, this.twoSided ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (!depthWrite) gl.depthMask(true);
@@ -287,6 +315,8 @@ export class Renderer {
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1i(this.treeU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.treeU);
+    this.setRim(this.treeU, this.rimTreeWeight);
+    gl.uniform1i(this.treeU.uTwoSided, 1);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
@@ -328,14 +358,34 @@ export class Renderer {
     gl.disable(gl.DEPTH_TEST);
     gl.depthMask(false);
     gl.viewport(0, 0, this.width, this.height);
-    if (this.msaa) {
+    // the silhouette rim reads perspective log depth: none in orthographic views
+    const outline = this.orthoFar === 0 && this.rim.outline[0] > 0;
+    this.posted = this.msaa || outline;
+    if (this.posted) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.colorFbo);
       gl.useProgram(this.dsProg);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
+      gl.activeTexture(gl.TEXTURE0);
       gl.uniform1i(this.dsU.uWorldTex, 0);
+      gl.uniform1i(this.dsU.uDepthTex, 1);
+      gl.uniform1i(this.dsU.uScale, this.msaa ? 2 : 1);
+      gl.uniform4fv(this.dsU.uOutline, outline ? this.rim.outline : NO_RIM.outline);
+      gl.uniform1f(this.dsU.uRimSteps, this.rim.steps);
+      gl.uniform3fv(this.dsU.uRimColor, this.rim.colour);
+      gl.uniform3fv(this.dsU.uSunDir, this.sunDir);
+      gl.uniformMatrix4fv(this.dsU.uViewProj, false, this.viewProj);
+      gl.uniformMatrix4fv(this.dsU.uInvViewProj, false, this.invViewProj);
+      gl.uniform1f(this.dsU.uFogStart, this.fog[0]);
+      gl.uniform1f(this.dsU.uFogEnd, this.fog[1]);
       gl.bindVertexArray(this.triVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      // the depth texture is the world's attachment again next frame: no sampler may keep it bound
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0);
     }
     // overlay index 0 is the "transparent" sentinel: HUD/menu ramps never use it
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.overlayFbo);
@@ -357,11 +407,22 @@ export class Renderer {
     gl.uniform1i(this.resolveU.uWorldTex, 0);
     gl.uniform1i(this.resolveU.uOverlayTex, 2);
     gl.uniform1i(this.resolveU.uColorTex, 3);
-    gl.uniform1i(this.resolveU.uMsaa, this.msaa ? 1 : 0);
+    gl.uniform1i(this.resolveU.uMsaa, this.posted ? 1 : 0);
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
     gl.activeTexture(gl.TEXTURE0);
+  }
+
+  private rimShape = new Float32Array(4);
+
+  private setRim(u: Uniforms, weight: number): void {
+    const r = this.rim;
+    this.rimShape.set(r.shape);
+    this.rimShape[0] *= weight;
+    this.gl.uniform4fv(u.uRim, this.rimShape);
+    this.gl.uniform1f(u.uRimSteps, r.steps);
+    this.gl.uniform3fv(u.uRimColor, r.colour);
   }
 
   private setLight(u: Uniforms): void {

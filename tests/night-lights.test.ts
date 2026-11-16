@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, GLOW_LEVELS, LIGHT, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColors, withGlow,
+  applySunColors, buildLUT, GLOW_LEVELS, LIGHT, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow,
 } from '../src/engine/palette';
 import { POINTS_FS, SKY_FS, TREE_VS, WORLD_VS } from '../src/engine/shaders';
 import { buildBuildingMesh, buildingNightLights, TALL_BUILDING_M } from '../src/world/building-mesher';
@@ -33,16 +33,17 @@ const quads = (a: Float32Array) => Array.from({ length: a.length / 4 }, (_, i) =
 
 describe('sun colour', () => {
   it('is white by day and yellow in the morning and evening', () => {
-    expect(sunColors(45).sun).toEqual([255, 255, 255]);
-    const low = sunColors(4).sun;
+    expect(sunColour(45)).toEqual([255, 255, 255]);
+    const low = sunColour(4);
     expect(low[0]).toBe(255);
     expect(low[2]).toBeLessThan(100); // yellow: little blue
-    expect(sunColors(10).sun).toEqual(low); // the "morning" preset puts the sun at +10°
+    expect(sunColour(10)).toEqual(low); // the "morning" preset puts the sun at +10°
   });
 
-  it('the sky shader draws the sun from the LUT entries applySunColors writes', () => {
+  it('the sky shader draws the sun as one plain disc from the LUT entry applySunColors writes', () => {
     expect(SKY_FS).toContain(`idx = ${LIGHT.SUN}u;`);
-    expect(SKY_FS).toContain(`idx = ${LIGHT.SUN_HALO}u;`);
+    expect(SKY_FS).not.toContain('halo');
+    expect(SKY_FS.match(/idx = \d+u;/g)?.filter((m) => m === `idx = ${LIGHT.SUN}u;`)).toHaveLength(1);
     const lut = buildLUT(paletteAt(45));
     applySunColors(lut, 45);
     expect(entry(lut, LIGHT.SUN)).toEqual([255, 255, 255]);

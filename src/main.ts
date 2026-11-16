@@ -6,7 +6,9 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, snowy, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, snowy, sunColour, sunniness } from './engine/palette';
+import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
+import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
@@ -168,7 +170,8 @@ function baseGround(lightDir: vec3): BaseGround {
 }
 /** day palette for the sun now and the weather in force: sunnier the clearer the sky */
 const dayPalette = () => paletteAt(sun.elevationDeg, sunniness(cloudsOverride ?? weatherInForce()?.cloudPct));
-let lut = buildLUT(dayPalette(), weather.surface);
+let palette = dayPalette();
+let lut = buildLUT(palette, weather.surface);
 let light = lightUniforms(dayPalette());
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
@@ -196,8 +199,9 @@ function updateLight(): void {
     );
     vec3.normalize(lightDir, lightDir);
   }
-  lut = buildLUT(dayPalette(), weather.surface);
-  light = lightUniforms(dayPalette());
+  palette = dayPalette();
+  lut = buildLUT(palette, weather.surface);
+  light = lightUniforms(palette);
   applySunColors(lut, sun.elevationDeg);
 }
 
@@ -293,10 +297,13 @@ if (import.meta.env.DEV) {
     renderer, chunks, osm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
     get state() { return state; },
     get simTime() { return simTime; },
+    get palette() { return palette; },
     get consent() { return consent; },
     respawn,
   };
 }
+
+if (rimLab.active) profiler.enable(gl);
 
 const camActions: [Action, CameraMode][] = [
   ['camCockpit', 'cockpit'], ['camOrbit', 'orbit'], ['camChase', 'chase'],
@@ -327,6 +334,8 @@ const menuTarget = vec3.create();
 
 function frame(now: number): void {
   requestAnimationFrame(frame); // scheduled first: a bad frame must not kill the loop
+  profiler.frameStart(now);
+  profiler.stage('управление и физика');
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   if (dt > 0) fpsAvg += (1 / dt - fpsAvg) * 0.05;
@@ -407,7 +416,12 @@ function frame(now: number): void {
     }
   }
 
-  if (state === 'flying' && spawned) {
+  if (rimLab.time) {
+    simTime = rimLab.time;
+    rimLab.time = undefined;
+    lastSunUpdate = 0;
+  }
+  if (state === 'flying' && spawned && !rimLab.frozen) {
     // feed the air model whenever new weather arrives; until then it is the calm standard atmosphere
     const wNow = weatherInForce();
     if (wNow !== airSource && (wNow !== undefined || !airForced)) {
@@ -495,10 +509,12 @@ function frame(now: number): void {
     camPos = rig.pos;
   }
 
+  profiler.stage('тайлы: выбор и загрузка');
   // a detailed (z14) tile is shown only once its OSM is ready; until then its coarse parent stands in
   chunks.update(camWorld, view, proj, now, (key) => osm.ready(key));
   osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
 
+  profiler.stage('солнце, погода, палитра');
   if (state === 'menu' && menu.screen === 'start') {
     // live backdrop follows the chosen place and time of day
     const ll = startLocation(menu.config);
@@ -527,21 +543,33 @@ function frame(now: number): void {
   }
   const flashing = state === 'crashed' && now - crashTime < 150;
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  profiler.stage('начало кадра: LUT, очистка');
   applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
   renderer.snow = surface.snow;
+  renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
+  profiler.stage('небо');
   renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir));
+  renderer.rimWeight = rim.terrain;
+  profiler.stage('рельеф');
   chunks.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
+  renderer.rimWeight = rim.objects;
+  renderer.rimTreeWeight = rim.trees;
+  profiler.stage('OSM: здания, дороги, вода, деревья, огни');
   osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
+  renderer.rimWeight = rim.aircraft;
+  profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }
 
+  profiler.stage('пост-проход: силуэт, MSAA');
   renderer.beginOverlay();
+  profiler.stage('HUD, меню, карта');
   const pad = 8 * u;
-  if (spawned && state === 'flying') {
+  if (spawned && state === 'flying' && rimLab.hud) {
     drawHud(font, vectors, renderer.width, renderer.height, u, {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound, autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined } : null,
       weather: { data: weatherInForce(), tempC: weather.tempC },
@@ -562,7 +590,7 @@ function frame(now: number): void {
   if (menu.screen !== 'none') {
     menu.draw(renderer.width, renderer.height, u, canvas.clientWidth, canvas.clientHeight, input, spawned ? camWorld.latLon : undefined);
   }
-  if (import.meta.env.DEV) {
+  if (import.meta.env.DEV && rimLab.hud) {
     const st = chunks.stats;
     const os = osm.stats;
     font.text(
@@ -574,10 +602,12 @@ function frame(now: number): void {
   font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
   font.flush();
   vectors.flush();
+  profiler.stage('вывод на экран');
   renderer.resolve();
+  profiler.end();
   telemetry.tick(now, fpsAvg, chunks.stats.drawCalls + osm.stats.drawCalls);
 
-  if (spawned && state === 'flying' && now - lastUrlUpdate > 1000) {
+  if (spawned && state === 'flying' && !rimLab.active && now - lastUrlUpdate > 1000) {
     lastUrlUpdate = now;
     const ll = camWorld.latLon;
     history.replaceState(
@@ -585,6 +615,7 @@ function frame(now: number): void {
       `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)}`,
     );
   }
+  profiler.frameEnd();
 }
 
 requestAnimationFrame(frame);
