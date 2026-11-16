@@ -7,7 +7,7 @@ Axes: Blender x left (seen from the cockpit), y aft, z up -> game x right, y up,
 Colour: each material's name ends in _<RRGGBB> (e.g. Hull_7D9EFF, or the older VGA_079_7D9EFF);
 that colour is the face colour, any RGB.
 
-Rigged models (tools/su27-rig.py) carry everything in the .blend:
+Rigged models (tools/su27-rig.py, tools/f117-rig.py on tools/aircraft_rig.py) carry everything in the .blend:
   * the airframe is the mesh with the `su_airframe` property; every mesh parented under it is exported too;
   * hinged objects (`su_joint`) turn about their local X axis by
         angle = clamp(su_bias + sum(gain * signal for signal, gain in su_terms), *su_limits)  [deg]
@@ -17,12 +17,12 @@ Rigged models (tools/su27-rig.py) carry everything in the .blend:
   * the separable part of a face: `su_part` on the object or an ancestor, else the hull's boolean face
     attribute `part_<id>`.
 The rest pose is exported (pitch/roll/yaw/flaps/speedbrake 0, gear 1 = down): every joint is at angle 0.
-Models without these (f117.blend) still get their parts from the coordinate rules in REGIONS.
+Models without these would still get their parts from the coordinate rules in REGIONS (the F-117's, from before it was rigged).
 """
 import bpy, re, sys, json, math
 
 PART_IDS = ['wingL', 'wingR', 'stabL', 'stabR', 'finL', 'finR']
-# input signals and their rest values; DERIVED must match tools/su27-rig.py and src/flight/articulation.ts
+# input signals and their rest values; DERIVED must match tools/aircraft_rig.py and src/flight/articulation.ts
 REST = {'pitch': 0.0, 'roll': 0.0, 'yaw': 0.0, 'flaps': 0.0, 'speedbrake': 0.0, 'gear': 1.0,
         'nav': 1.0, 'beacon': 1.0, 'landing': 1.0}
 DERIVED = {

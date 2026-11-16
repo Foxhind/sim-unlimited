@@ -1,27 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { vec3 } from 'gl-matrix';
-import { SU27, aircraftMesh, PART_IDS } from '../src/flight/aircraft';
+import { F117, SU27, aircraftMesh, PART_IDS, type AircraftMesh } from '../src/flight/aircraft';
 import { lightOn, newPoses, poseJoints, signals, type ControlInputs } from '../src/flight/articulation';
 import { FlightModel, PHYSICS_STEP, type FlightControls } from '../src/flight/model';
 
 const REST: ControlInputs = { pitch: 0, roll: 0, yaw: 0, flaps: 0, speedbrake: 0, gear: 1, nav: 1, beacon: 1, landing: 1 };
 const mesh = aircraftMesh('su27');
-const idOf = (name: string): number => {
-  const i = mesh.joints.findIndex((j) => j.name === name);
+const idOf = (name: string, m: AircraftMesh = mesh): number => {
+  const i = m.joints.findIndex((j) => j.name === name);
   expect(i, name).toBeGreaterThanOrEqual(0);
   return i;
 };
 
 /** centroid of a joint's vertices after posing */
-function centre(name: string, c: Partial<ControlInputs>): vec3 {
-  const j = idOf(name);
-  const poses = poseJoints(mesh.joints, signals({ ...REST, ...c }), newPoses(mesh.joints));
+function centre(name: string, c: Partial<ControlInputs>, m: AircraftMesh = mesh): vec3 {
+  const j = idOf(name, m);
+  const poses = poseJoints(m.joints, signals({ ...REST, ...c }), newPoses(m.joints));
   const out = vec3.create();
   const p = vec3.create();
   let n = 0;
-  for (let v = 0; v < mesh.joint.length; v++) {
-    if (mesh.joint[v] !== j + 1) continue;
-    vec3.set(p, mesh.vertices[v * 6], mesh.vertices[v * 6 + 1], mesh.vertices[v * 6 + 2]);
+  for (let v = 0; v < m.joint.length; v++) {
+    if (m.joint[v] !== j + 1) continue;
+    vec3.set(p, m.vertices[v * 6], m.vertices[v * 6 + 1], m.vertices[v * 6 + 2]);
     vec3.transformMat3(p, p, poses[j].rot);
     vec3.add(p, p, poses[j].off);
     vec3.add(out, out, p);
@@ -30,7 +30,8 @@ function centre(name: string, c: Partial<ControlInputs>): vec3 {
   expect(n).toBeGreaterThan(0);
   return vec3.scale(out, out, 1 / n);
 }
-const moved = (name: string, c: Partial<ControlInputs>): vec3 => vec3.sub(vec3.create(), centre(name, c), centre(name, {}));
+const moved = (name: string, c: Partial<ControlInputs>, m: AircraftMesh = mesh): vec3 =>
+  vec3.sub(vec3.create(), centre(name, c, m), centre(name, {}, m));
 
 describe('articulation signals', () => {
   it('struts move mid-cycle, doors are open only while the gear travels', () => {
@@ -132,6 +133,58 @@ describe('Su-27 rig exported from the .blend', () => {
     for (const n of ['NoseDoor_L', 'NoseDoor_R', 'MainDoor_L', 'MainDoor_R']) {
       expect(moved(n, { gear: 0.5 })[1]).toBeLessThan(-0.1);
       expect(vec3.length(moved(n, { gear: 0 }))).toBeLessThan(1e-6);
+    }
+  });
+});
+
+describe('F-117 rig exported from the .blend', () => {
+  const f = aircraftMesh('f117');
+  const mv = (name: string, c: Partial<ControlInputs>): vec3 => moved(name, c, f);
+
+  it('carries hinges, lights and break points', () => {
+    expect(f.joints.map((j) => j.name).sort()).toEqual([
+      'ElevonIn_L', 'ElevonIn_R', 'ElevonOut_L', 'ElevonOut_R', 'MainDoor_L', 'MainDoor_R', 'MainGear_L', 'MainGear_R',
+      'MainWheel_L', 'MainWheel_R', 'NoseDoor_L', 'NoseDoor_R', 'NoseGear', 'NoseWheel', 'Ruddervator_L', 'Ruddervator_R',
+    ]);
+    expect(f.lights.map((l) => l.kind).sort()).toEqual(['beacon', 'beacon', 'landing', 'nav', 'nav', 'nav']);
+    expect(F117.parts.map((p) => p.id).sort()).toEqual(['finL', 'finR', 'wingL', 'wingR']);
+    const finR = F117.parts.find((p) => p.id === 'finR')!;
+    expect(finR.maxLoad).toBe(140e3);
+    expect(finR.tip[0]).toBeCloseTo(1.5);
+    // the tail halves separate whole, with their hinges
+    for (const s of ['L', 'R']) {
+      const j = idOf(`Ruddervator_${s}`, f) + 1;
+      const tag = PART_IDS.indexOf(`fin${s}` as (typeof PART_IDS)[number]) + 1;
+      for (let v = 0; v < f.joint.length; v++) if (f.joint[v] === j) expect(f.parts[v]).toBe(tag);
+    }
+  });
+
+  it('surfaces move the right way', () => {
+    for (const n of ['ElevonIn_L', 'ElevonIn_R', 'ElevonOut_L', 'ElevonOut_R']) expect(mv(n, { pitch: 1 })[1]).toBeGreaterThan(0.02);
+    expect(mv('ElevonOut_R', { roll: 1 })[1]).toBeGreaterThan(0.02);
+    expect(mv('ElevonOut_L', { roll: 1 })[1]).toBeLessThan(-0.02);
+    // flaps droop the inboard elevons only
+    expect(mv('ElevonIn_L', { flaps: 1 })[1]).toBeLessThan(-0.02);
+    expect(vec3.length(mv('ElevonOut_L', { flaps: 1 }))).toBeLessThan(1e-6);
+    // butterfly tail: pull raises both trailing edges, right pedal moves both to the right
+    for (const s of ['L', 'R']) {
+      // (all-moving: the centroid sits near the pivot, so it moves only a few centimetres)
+      expect(mv(`Ruddervator_${s}`, { pitch: 1 })[1]).toBeGreaterThan(0.01);
+      expect(mv(`Ruddervator_${s}`, { yaw: 1 })[0]).toBeGreaterThan(0.01);
+    }
+  });
+
+  it('gear stows forward and hides, doors close behind it', () => {
+    for (const n of ['NoseGear', 'MainGear_L', 'MainGear_R']) {
+      const d = mv(n, { gear: 0.5 });
+      expect(d[2]).toBeLessThan(-0.1);
+      expect(d[1]).toBeGreaterThan(0.05);
+    }
+    const poses = poseJoints(f.joints, signals({ ...REST, gear: 0 }), newPoses(f.joints));
+    expect(poses[idOf('MainWheel_R', f)].visible).toBe(false);
+    for (const n of ['NoseDoor_L', 'MainDoor_R']) {
+      expect(mv(n, { gear: 0.5 })[1]).toBeLessThan(-0.1);
+      expect(vec3.length(mv(n, { gear: 0 }))).toBeLessThan(1e-6);
     }
   });
 });

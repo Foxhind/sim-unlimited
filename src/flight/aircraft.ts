@@ -255,13 +255,9 @@ export const F117: AircraftConfig = fromModel({
     { part: 'finL', pos: [-0.91, 1.59, 6.87], normal: [0.883, 0.469, 0], area: 4.6, cla: 2.5, stall: 18, k: 0.2, yaw: 20, pitch: 20, tau: 1, shield: 0.5 },
     { pos: [0, 1.04, -2.9], normal: SIDE, area: 1.75, cla: 0.5, stall: 12, k: 0.5 },
   ],
-  parts: [
-    // 6 g limit x 1.5 = 9 g ultimate, a panel carries ~37%
-    { id: 'wingR', tip: [6.6, 0.3, 7.2], maxLoad: 490e3 },
-    { id: 'wingL', tip: [-6.6, 0.3, 7.2], maxLoad: 490e3 },
-    { id: 'finR', tip: [1.5, 2.7, 10.09], maxLoad: 140e3 },
-    { id: 'finL', tip: [-1.5, 2.7, 10.09], maxLoad: 140e3 },
-  ],
+  // drawn in assets/models/f117.blend (BREAK_<part> empties): wings 6 g limit x 1.5 = 9 g ultimate, a panel
+  // carrying ~37% (490 kN); the butterfly tail halves 140 kN
+  parts: breakPoints(f117Model),
   nose: [0, 0.3, -10],
   tail: [0, 0.3, 7.2],
   // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model
