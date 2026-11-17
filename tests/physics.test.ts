@@ -373,6 +373,61 @@ describe('structure: overload, flutter, strikes, collisions', () => {
     expect(damageLine(new FlightModel(SU27), 'en')).toBe('');
   });
 
+  it('a lost wing takes its mass: the centre of gravity moves to the other side, roll inertia drops, the airframe stays put', () => {
+    const m = new FlightModel(SU27);
+    m.spawnAir(vec3.fromValues(0, 3000, 0), 0);
+    const pos = vec3.clone(m.pos);
+    m.detach('wingL', 'collision');
+    expect(m.mass).toBe(SU27.mass - SU27.partMass.wingL!);
+    expect(m.cgShift[0]).toBeGreaterThan(0.2); // towards the right wing
+    expect(m.inertia[2]).toBeLessThan(SU27.inertia[2] * 0.7);
+    // the reference point followed the centre of gravity: the drawing sits where it was
+    expect(m.pos[0] - pos[0]).toBeCloseTo(m.cgShift[0], 5);
+    expect(m.meshCg[0]).toBeCloseTo(SU27.cg[0] + m.cgShift[0], 5);
+    m.spawnAir(vec3.fromValues(0, 3000, 0), 0);
+    expect(m.mass).toBe(SU27.mass);
+    expect([...m.cgShift]).toEqual([0, 0, 0]);
+    expect(m.inertia).toEqual(SU27.inertia);
+  });
+
+  for (const cfg of [SU27, F117]) {
+    it(`${cfg.id}: the body loses the lift the wings carried over onto it, so a wingless fuselage cannot hold height slow`, () => {
+      // hands off, full power, 175 m/s: intact it holds or climbs; without wings it sinks (it used to climb)
+      const fly = (lose: boolean): number => {
+        const m = new FlightModel(cfg);
+        m.spawnAir(vec3.fromValues(0, 3000, 0), 0);
+        vec3.scale(m.vel, m.vel, 175 / m.speed);
+        if (lose) {
+          m.detach('wingL', 'overload');
+          m.detach('wingR', 'overload');
+        }
+        run(m, 20, { throttle: 1, gearDown: false });
+        return m.pos[1];
+      };
+      expect(fly(true)).toBeLessThan(Math.min(3000, fly(false)) - 150);
+    });
+  }
+
+  it('the pilot cannot hold a wingless Su-27 level at 120 m/s, but can at 220 m/s', () => {
+    const level = (v: number): number => {
+      const m = new FlightModel(SU27);
+      m.spawnAir(vec3.fromValues(0, 3000, 0), 0);
+      vec3.scale(m.vel, m.vel, v / m.speed);
+      m.detach('wingL', 'overload');
+      m.detach('wingR', 'overload');
+      let ip = 0;
+      const cl = (x: number): number => Math.max(-1, Math.min(1, x));
+      run(m, 30, () => {
+        const dh = m.pos[1] - 3000;
+        ip = cl(ip - 0.0005 * dh * PHYSICS_STEP);
+        return { gearDown: false, pitch: cl(-0.004 * dh - 0.03 * m.vel[1] + ip), roll: cl(-m.bankDeg / 20), throttle: cl(0.6 + 0.05 * (v - m.airspeed)) };
+      });
+      return m.pos[1];
+    };
+    expect(level(120)).toBeLessThan(2600);
+    expect(Math.abs(level(220) - 3000)).toBeLessThan(100);
+  });
+
   it('clipping a building with a wingtip tears the wing off and slews the aircraft; the fuselage flies on', () => {
     const m = new FlightModel(SU27);
     m.spawnAir(vec3.fromValues(0, 60, 0), 0);

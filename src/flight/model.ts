@@ -1,7 +1,7 @@
 import { mat3, quat, vec3 } from 'gl-matrix';
 import { G0 } from './atmosphere';
 import { CALM_AIR, newAirSample, type Air, type AirSample } from './air';
-import { PART_IDS, tableLookup, type AircraftConfig, type PartId } from './aircraft';
+import { PART_IDS, tableLookup, type AircraftConfig, type CarryDef, type PartId } from './aircraft';
 import type { ControlInputs } from './articulation';
 
 export const PHYSICS_STEP = 1 / 120;
@@ -94,7 +94,12 @@ const smooth = (x: number): number => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 
 /** a lifting surface as the integrator uses it: flat numbers, radians, signed control travels */
 interface Surf {
   part: number;
+  /** aerodynamic centre from the current centre of gravity (moves with damage) */
   px: number; py: number; pz: number;
+  /** as designed: from the intact aircraft's centre of gravity, and the intact lift curve */
+  bx: number; by: number; bz: number;
+  base: { cla: number; alpha0: number; stall: number; k: number };
+  carry: CarryDef | null;
   nx: number; ny: number;
   area: number;
   cla: number;
@@ -153,6 +158,11 @@ export class FlightModel {
   readonly lost: boolean[] = PART_IDS.map(() => false);
   readonly damage: DamageEvent[] = [];
   readonly debris: Debris[] = [];
+  /** mass and inertias as they are now: the separated parts took theirs with them */
+  mass: number;
+  readonly inertia: [number, number, number];
+  /** where the centre of gravity has moved since the parts came off, body axes, m */
+  readonly cgShift = vec3.create();
   /** model clock, s */
   time = 0;
   /**
@@ -171,7 +181,7 @@ export class FlightModel {
   private acc = 0;
   private readonly air = newAirSample();
   private readonly surfs: Surf[];
-  private readonly partSlots: { idx: number; tip: [number, number, number]; maxLoad: number }[];
+  private readonly partSlots: { idx: number; tip: [number, number, number]; maxLoad: number; mass: number; cm: [number, number, number] }[];
   private readonly load = PART_IDS.map(() => 0);
   private readonly loadF = PART_IDS.map(() => 0);
   /** whole-aircraft lift slope (per rad) and zero-alpha lift, for the fly-by-wire */
@@ -191,6 +201,8 @@ export class FlightModel {
   private probeTurn = 0;
 
   constructor(readonly cfg: AircraftConfig) {
+    this.mass = cfg.mass;
+    this.inertia = [...cfg.inertia];
     let cla = 0, cl0 = 0, flapSum = 0, pe = 0, re = 0, ye = 0, damp = 0;
     this.surfs = cfg.surfaces.map((d) => {
       const [px, py, pz] = d.pos;
@@ -204,6 +216,9 @@ export class FlightModel {
       const s: Surf = {
         part: d.part ? PART_IDS.indexOf(d.part) : -1,
         px, py, pz, nx, ny,
+        bx: px, by: py, bz: pz,
+        base: { cla: d.cla, alpha0: (d.alpha0 ?? 0) * D2R, stall: d.stall * D2R, k: d.k },
+        carry: d.carry ? { ...d.carry, stall: d.carry.stall * D2R } : null,
         area: d.area, cla: d.cla, alpha0: (d.alpha0 ?? 0) * D2R, stall: d.stall * D2R, k: d.k, tau,
         sp: travel(d.pitch, mx), // nose up = +x moment
         sr: travel(d.roll, -mz), // roll right = -z moment
@@ -233,7 +248,60 @@ export class FlightModel {
     this.rollEff = Math.max(re, 1e-3);
     this.yawEff = Math.max(ye, 1e-3);
     this.rollDamp = damp;
-    this.partSlots = cfg.parts.map((p) => ({ idx: PART_IDS.indexOf(p.id), tip: p.tip, maxLoad: p.maxLoad }));
+    this.partSlots = cfg.parts.map((p) => {
+      // the part's mass sits at the centroid of its surfaces
+      const own = cfg.surfaces.filter((s) => s.part === p.id);
+      const area = own.reduce((a, s) => a + s.area, 0);
+      const cm: [number, number, number] = [0, 0, 0];
+      for (const s of own) for (let i = 0; i < 3; i++) cm[i] += (s.pos[i] * s.area) / area;
+      return { idx: PART_IDS.indexOf(p.id), tip: p.tip, maxLoad: p.maxLoad, mass: cfg.partMass[p.id] ?? 0, cm };
+    });
+  }
+
+  /** the drawing's origin as it now sits on the airframe: mesh coordinates of the current centre of gravity */
+  get meshCg(): [number, number, number] {
+    const c = this.cfg.cg;
+    return [c[0] + this.cgShift[0], c[1] + this.cgShift[1], c[2] + this.cgShift[2]];
+  }
+
+  /**
+   * Puts every surface where it now is relative to the centre of gravity, and gives the fuselage the lift
+   * it has left with the wings it has left.
+   */
+  private refit(): void {
+    const iL = PART_IDS.indexOf('wingL');
+    const iR = PART_IDS.indexOf('wingR');
+    const [cx, cy, cz] = this.cgShift;
+    for (const s of this.surfs) {
+      const b = s.base;
+      s.cla = b.cla;
+      s.alpha0 = b.alpha0;
+      s.stall = b.stall;
+      s.k = b.k;
+      let shift = 0;
+      const c = s.carry;
+      if (c) {
+        // each wing carries over its half; what remains of that acts on its own side of the body
+        const cL = (c.share / 2) * (this.lost[iL] ? 0 : 1);
+        const cR = (c.share / 2) * (this.lost[iR] ? 0 : 1);
+        const keep = 1 - c.share + cL + cR;
+        const gone = 1 - (cL + cR) / c.share;
+        s.cla = b.cla * keep;
+        s.alpha0 = b.alpha0 * (1 - gone);
+        s.stall = b.stall + (c.stall - b.stall) * gone;
+        // induced drag of the remaining span: it grows as the lifting span shrinks to the body's
+        s.k = b.k + (c.k - b.k) * gone;
+        shift = (c.offset * (cR - cL)) / keep;
+      }
+      s.px = s.bx + shift - cx;
+      s.py = s.by - cy;
+      s.pz = s.bz - cz;
+    }
+  }
+
+  /** a design position (from the intact aircraft's centre of gravity) relative to the current one */
+  private here(out: vec3, p: readonly number[]): vec3 {
+    return vec3.set(out, p[0] - this.cgShift[0], p[1] - this.cgShift[1], p[2] - this.cgShift[2]);
   }
 
   /** speed over the ground (inertial), m/s */
@@ -294,6 +362,11 @@ export class FlightModel {
     this.lost.fill(false);
     this.damage.length = 0;
     this.debris.length = 0;
+    this.mass = this.cfg.mass;
+    this.inertia[0] = this.cfg.inertia[0];
+    this.inertia[1] = this.cfg.inertia[1];
+    this.inertia[2] = this.cfg.inertia[2];
+    vec3.zero(this.cgShift);
     this.load.fill(0);
     this.loadF.fill(0);
     this.fbwI = 0;
@@ -305,6 +378,7 @@ export class FlightModel {
       s.defl = 0;
       s.alpha = 0;
     }
+    this.refit();
   }
 
   spawnAir(position: vec3, headingDeg: number): void {
@@ -359,15 +433,15 @@ export class FlightModel {
     this.damage.push({ part, cause, time: this.time });
     this.basis();
     const R = this.rot;
-    const [tx, ty, tz] = slot.tip;
+    const [tx, ty, tz] = this.here(vec3.create(), slot.tip);
     if (impulse) {
-      const m = this.cfg.mass;
+      const m = this.mass;
       vec3.scaleAndAdd(this.vel, this.vel, impulse, 1 / m);
       // impulse into body axes, then the angular kick of r x J
       const jx = impulse[0] * R[0] + impulse[1] * R[1] + impulse[2] * R[2];
       const jy = impulse[0] * R[3] + impulse[1] * R[4] + impulse[2] * R[5];
       const jz = impulse[0] * R[6] + impulse[1] * R[7] + impulse[2] * R[8];
-      const I = this.cfg.inertia;
+      const I = this.inertia;
       this.omega[0] += (ty * jz - tz * jy) / I[0];
       this.omega[1] += (tz * jx - tx * jz) / I[1];
       this.omega[2] += (tx * jy - ty * jx) / I[2];
@@ -384,7 +458,41 @@ export class FlightModel {
       part: idx, rel, vel, quat: quat.clone(this.quat),
       omega: vec3.fromValues(2.5 + (idx % 3), 1.5 * side, -4 * side), age: 0,
     });
+    this.shed(slot.mass, slot.cm);
+    this.refit();
     return true;
+  }
+
+  /**
+   * `mp` kg leaves from `p` (design position): the centre of gravity moves away from it, the inertias lose
+   * the part's share (parallel axis, the part taken as a point mass) and the airframe stays where it was.
+   */
+  private shed(mp: number, p: readonly number[]): void {
+    if (mp <= 0) return;
+    const m = this.mass;
+    const rest = m - mp;
+    const c = this.cgShift;
+    const r = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+    const d = r.map((v) => (-mp * v) / rest);
+    const I = this.inertia;
+    const I0 = this.cfg.inertia;
+    // pitch about x, yaw about y, roll about z; never below a third of the intact value (the panels are not
+    // point masses, and the fuselage keeps most of its own)
+    const perp = (v: number[], i: number): number => v[(i + 1) % 3] ** 2 + v[(i + 2) % 3] ** 2;
+    for (let i = 0; i < 3; i++) I[i] = Math.max(I0[i] / 3, I[i] - mp * perp(r, i) - rest * perp(d, i));
+    this.mass = rest;
+    // the reference point follows the centre of gravity: move it in the world by the same amount
+    this.basis();
+    const R = this.rot;
+    for (let i = 0; i < 3; i++) {
+      const dw = R[i] * d[0] + R[3 + i] * d[1] + R[6 + i] * d[2];
+      this.pos[i] += dw;
+      // debris is kept relative to that point
+      for (const b of this.debris) b.rel[i] -= dw;
+    }
+    c[0] += d[0];
+    c[1] += d[1];
+    c[2] += d[2];
   }
 
   private stepDebris(dt: number): void {
@@ -428,7 +536,7 @@ export class FlightModel {
     this.basis();
     const R = this.rot; // columns are the body axes in world space
     const S = cfg.wingArea;
-    const W = cfg.mass * G0;
+    const W = this.mass * G0;
 
     const contact = probe(this.pos);
     const agl = this.pos[1] - contact.height;
@@ -481,20 +589,20 @@ export class FlightModel {
       const e = aCmd - alpha;
       // rate of change of alpha: pitch rate less the rate the flight path is already turning
       const alphaDot = wx - (G0 / Math.max(V, 40)) * (this.nz - R[4]);
-      const raw = ((FBW_WN2 * e - FBW_DAMP * alphaDot + this.fbwI) * cfg.inertia[0]) / (qf * this.pitchEff);
+      const raw = ((FBW_WN2 * e - FBW_DAMP * alphaDot + this.fbwI) * this.inertia[0]) / (qf * this.pitchEff);
       P = clamp(raw, -1, 1);
       if (P === raw || Math.sign(e) !== Math.sign(raw)) this.fbwI = clamp(this.fbwI + FBW_KI * e * dt, -8, 8);
       // roll: rate command; hands off and upright it eases the wings level
       const level = Math.max(0, 1 - Math.abs(c.roll) / 0.1);
       const pCmd = c.roll * f.rollRate - level * clamp(0.8 * Math.atan2(-R[1], R[4]), -0.6, 0.6);
       // the rate error, plus the aileron it takes to hold that rate against the wing's roll damping
-      Rc = clamp(((pCmd + wz) * FBW_ROLL * cfg.inertia[2] + (this.rollDamp * qbar * pCmd) / Math.max(V, 40)) / (qf * this.rollEff), -1, 1);
+      Rc = clamp(((pCmd + wz) * FBW_ROLL * this.inertia[2] + (this.rollDamp * qbar * pCmd) / Math.max(V, 40)) / (qf * this.rollEff), -1, 1);
       // yaw: pedals (load-limited at speed) plus sideslip suppression and a yaw damper around the turn rate
       const rTurn = (G0 * Math.sin(bank)) / Math.max(V, 40);
       const yAcc = 5 * beta - 2 * (-wy - rTurn);
       // (the damper's authority is limited, and it is scheduled out past the stall where it would only fight the pilot)
       const yLim = 0.5 * (1 - smooth((Math.abs(alpha) - 22 * D2R) / (15 * D2R)));
-      Y = clamp(c.yaw * Math.min(1, RUDDER_Q / qf) + clamp((yAcc * cfg.inertia[1]) / (qf * this.yawEff), -yLim, yLim), -1, 1);
+      Y = clamp(c.yaw * Math.min(1, RUDDER_Q / qf) + clamp((yAcc * this.inertia[1]) / (qf * this.yawEff), -yLim, yLim), -1, 1);
     }
 
     this.moveActuators(dt, c, P, Rc, Y);
@@ -578,7 +686,7 @@ export class FlightModel {
       // tens of m/s) any sideways motion of the nose and tail is resisted in proportion to that flow
       // (the aft station carries more of the side area and a longer arm, so the pair is stabilising)
       for (let i = 0; i < 2; i++) {
-        const z = i === 0 ? cfg.nose[2] * 0.5 : cfg.tail[2] * 0.75;
+        const z = (i === 0 ? cfg.nose[2] * 0.5 : cfg.tail[2] * 0.75) - this.cgShift[2];
         const k = 0.5 * rho * cfg.bodySide * (i === 0 ? 0.4 : 0.6);
         const vx = ub + wy * z;
         const vy = vb - wx * z;
@@ -610,12 +718,12 @@ export class FlightModel {
     this.spin = this.stall && Math.abs(this.alphaDeg) > cfg.stallAlpha && Math.abs(wy) > 0.7 && V < 130;
 
     const accel = this.tmpV;
-    accel[0] = (R[0] * Fx + R[3] * Fy + R[6] * Fz) / cfg.mass;
-    accel[1] = (R[1] * Fx + R[4] * Fy + R[7] * Fz) / cfg.mass - G0;
-    accel[2] = (R[2] * Fx + R[5] * Fy + R[8] * Fz) / cfg.mass;
+    accel[0] = (R[0] * Fx + R[3] * Fy + R[6] * Fz) / this.mass;
+    accel[1] = (R[1] * Fx + R[4] * Fy + R[7] * Fz) / this.mass - G0;
+    accel[2] = (R[2] * Fx + R[5] * Fy + R[8] * Fz) / this.mass;
 
     // Euler's equations: the gyroscopic terms are what flatten a spin
-    const [Ix, Iy, Iz] = cfg.inertia;
+    const [Ix, Iy, Iz] = this.inertia;
     let aaX = (Mx + (Iy - Iz) * wy * wz) / Ix;
     let aaY = (My + (Iz - Ix) * wz * wx) / Iy;
     const aaZ = (Mz + (Ix - Iy) * wx * wy) / Iz;
@@ -700,14 +808,14 @@ export class FlightModel {
       const slot = turn < this.partSlots.length ? this.partSlots[turn] : null;
       if (!slot || !this.lost[slot.idx]) {
         const t = slot ? slot.tip : turn === this.partSlots.length ? cfg.nose : cfg.tail;
-        const tip = vec3.set(vec3.create(), t[0], t[1], t[2]);
+        const tip = this.here(vec3.create(), t);
         vec3.transformMat3(tip, tip, R);
         vec3.add(tip, tip, this.pos);
         const hit = probe(tip);
         if (hit.building || tip[1] < hit.height - 0.2) {
           if (!slot) return this.destroy(hit.building ? 'BUILDING STRIKE' : hit.water ? 'WATER IMPACT' : 'TERRAIN IMPACT');
           // the part is torn off; the blow takes a little speed and slews the aircraft round the contact
-          const impulse = vec3.scale(vec3.create(), this.vel, -0.03 * cfg.mass);
+          const impulse = vec3.scale(vec3.create(), this.vel, -0.03 * this.mass);
           this.detach(PART_IDS[slot.idx], 'strike', impulse);
         }
       }

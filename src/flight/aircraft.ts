@@ -46,6 +46,24 @@ export interface SurfaceDef {
   flap?: boolean;
   /** share of dynamic pressure lost in the wing wake at high angle of attack (top-mounted fins) */
   shield?: number;
+  /**
+   * Wing-body interference, for a fuselage surface: the part of its lift the wings put there (their lift
+   * carried across the body, the leading-edge vortices working with the wing, the wing's incidence and
+   * camber). Each lost wing takes its half of that, and what is left acts on the surviving wing's side;
+   * with both gone the body flies as the slender, low-aspect-ratio shape it is.
+   */
+  carry?: CarryDef;
+}
+
+export interface CarryDef {
+  /** share of the surface's lift slope that the wings induce */
+  share: number;
+  /** induced drag factor of the body alone: its own area over pi * e * (body width)^2 */
+  k: number;
+  /** stall angle of the body alone, deg */
+  stall: number;
+  /** half the body width, m: where the lift carried over from one wing acts */
+  offset: number;
 }
 
 export interface PartDef {
@@ -83,6 +101,11 @@ export interface AircraftConfig {
   cg: V3;
   surfaces: SurfaceDef[];
   parts: PartDef[];
+  /**
+   * Mass of each separable part with what it carries (fuel in the wing tanks), kg. It leaves with the part
+   * from the centroid of the part's surfaces: the centre of gravity moves, the inertias drop.
+   */
+  partMass: Partial<Record<PartId, number>>;
   /** fuselage ends (from the CG), for collisions */
   nose: V3;
   tail: V3;
@@ -190,7 +213,9 @@ export const SU27: AircraftConfig = fromModel({
     // lifting body + leading-edge extensions: low aspect ratio, vortex lift that holds on to 30+ deg.
     // Its lift centre is set from the model's wing as on the real aircraft (1.4 m ahead of the inner panel):
     // the model's fuselage silhouette says little about where the vortex lift acts
-    { pos: [0, 0, -0.47], normal: UP, area: 21, cla: 3.0, alpha0: 2.9, stall: 30, k: 0.115 },
+    // Without the wings it keeps about half of that lift slope: a ~4.6 m wide body (slender-body lift
+    // pi/2 * A of its planform), none of the wing's incidence, the induced drag of its short span
+    { pos: [0, 0, -0.47], normal: UP, area: 21, cla: 3.0, alpha0: 2.9, stall: 30, k: 0.115, carry: { share: 0.5, k: 0.35, stall: 24, offset: 1.2 } },
     // wing panels: the swept outer part stalls first and sits aft, hence the pitch-up and wing drop
     ...pair({ pos: [3.41, 0, 0.93], normal: UP, area: 9.9, cla: 4.8, alpha0: 2.9, stall: 22, k: 0.115, flap: true }, 'wingR', 'wingL'),
     ...pair({ pos: [5.34, 0, 1.93], normal: UP, area: 13.1, cla: 4.8, alpha0: 2.9, stall: 19, k: 0.115, flap: true, roll: 20, tau: 0.45 }, 'wingR', 'wingL'),
@@ -207,6 +232,9 @@ export const SU27: AircraftConfig = fromModel({
   // tear the parts off. Wings: 9 g limit x 1.5 = 13.5 g ultimate, of which a panel carries ~40% (960 kN);
   // tails: full attached lift at ~60% of the limit dynamic pressure (stabilators 330 kN, fins 290 kN)
   parts: breakPoints(su27Model),
+  // estimates: a wing panel ~0.75 t of structure and control runs plus its share of the wing tank fuel at
+  // this mid-fuel weight; all-moving stabilators and fins as on aircraft of this class
+  partMass: { wingL: 1000, wingR: 1000, stabL: 250, stabR: 250, finL: 200, finR: 200 },
   nose: [0, -0.55, -10.6],
   tail: [0, 0, 10.6],
   // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model
@@ -245,8 +273,8 @@ export const F117: AircraftConfig = fromModel({
   // the model's belly is flat at y = 0: the CG sits 0.9 m above it; static margin kept at ~7% of the mean chord
   cg: [0, 0.9, 0.55],
   surfaces: [
-    // faceted lifting body
-    { pos: [0, 0.3, 0.44], normal: UP, area: 24.9, cla: 2.6, alpha0: 2.7, stall: 18, k: 0.16 },
+    // faceted lifting body; without the wings it is a ~4 m wide wedge that keeps a bit under half its lift slope
+    { pos: [0, 0.3, 0.44], normal: UP, area: 24.9, cla: 2.6, alpha0: 2.7, stall: 18, k: 0.16, carry: { share: 0.55, k: 0.55, stall: 16, offset: 1.0 } },
     // 67-degree swept wing: the tips are far aft and carry the elevons (pitch and roll); no tailplane
     ...pair({ pos: [2.59, 0.3, 0.47], normal: UP, area: 12.2, cla: 3.6, alpha0: 2.7, stall: 15, k: 0.16, flap: true }, 'wingR', 'wingL'),
     ...pair({ pos: [5.12, 0.4, 2.77], normal: UP, area: 10.2, cla: 3.6, alpha0: 2.7, stall: 14, k: 0.16, pitch: 25, roll: 18, tau: 0.5 }, 'wingR', 'wingL'),
@@ -258,6 +286,8 @@ export const F117: AircraftConfig = fromModel({
   // drawn in assets/models/f117.blend (BREAK_<part> empties): wings 6 g limit x 1.5 = 9 g ultimate, a panel
   // carrying ~37% (490 kN); the butterfly tail halves 140 kN
   parts: breakPoints(f117Model),
+  // estimates: wing panels with their fuel, the all-moving butterfly tail halves
+  partMass: { wingL: 800, wingR: 800, finL: 150, finR: 150 },
   nose: [0, 0.3, -10],
   tail: [0, 0.3, 7.2],
   // calibrated to the real aircraft's spin (the main yaw damping there), like cd0, not taken from the model

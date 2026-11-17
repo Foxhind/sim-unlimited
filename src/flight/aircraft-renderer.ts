@@ -132,7 +132,7 @@ export class AircraftRenderer {
     if (model.crashed) return;
     this.ensureMesh(model.cfg);
     mat3.fromQuat(this.rot, model.quat);
-    const cg = model.cfg.cg;
+    const cg = model.meshCg;
     const p = vec3.create();
     const n = vec3.create();
     // a separated part is drawn as debris while it lasts (its own attitude and offset), then not at all
@@ -205,7 +205,7 @@ export class AircraftRenderer {
     const verts: number[] = [];
     const ramps: number[] = [];
     const size = Math.max(LIGHT_SIZE, vec3.distance(camPos, model.pos) * LIGHT_ANGLE);
-    const cg = model.cfg.cg;
+    const cg = model.meshCg;
     const p = vec3.create();
     for (const l of this.lights) {
       if (state[l.part] !== 0 || !lightOn(l, sig, time)) continue;
@@ -246,7 +246,7 @@ export class AircraftRenderer {
     const src = flameMesh(model.cfg, throttle, time);
     if (src.ramps.length === 0) return;
     const out = new Float32Array(src.vertices.length);
-    const cg = model.cfg.cg;
+    const cg = model.meshCg;
     const p = vec3.create();
     for (let i = 0; i < out.length; i += 6) {
       vec3.set(p, src.vertices[i] - cg[0], src.vertices[i + 1] - cg[1], src.vertices[i + 2] - cg[2]);
