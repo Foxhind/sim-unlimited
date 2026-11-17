@@ -3,7 +3,7 @@ import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { LUT_ENTRIES, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
-import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -40,6 +40,8 @@ export class Renderer {
   private dsU: Uniforms;
   private resolveProg: WebGLProgram;
   private resolveU: Uniforms;
+  private veilProg: WebGLProgram;
+  private veilU: Uniforms;
 
   private invViewProj = mat4.create();
   private viewProj = mat4.create();
@@ -156,12 +158,14 @@ export class Renderer {
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
-      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', 'uSunEmit', ...GLITTER_UNIFORMS,
+      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
     this.dsU = uniformMap(gl, this.dsProg, [
       'uWorldTex', 'uDepthTex', 'uScale', 'uOutline', 'uRimSteps', 'uRimColor', 'uSunDir', 'uViewProj', 'uInvViewProj', 'uFogStart', 'uFogEnd',
     ]);
+    this.veilProg = createProgram(gl, FULLSCREEN_VS, VEIL_FS);
+    this.veilU = uniformMap(gl, this.veilProg, ['uDensity', 'uColor', 'uScale']);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
     this.resolveU = uniformMap(gl, this.resolveProg, ['uWorldTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
     // the LUT lives on its own texture unit for the whole frame
@@ -310,6 +314,9 @@ export class Renderer {
     gl.uniform3fv(this.skyU.uLightDir, ground.lightDir);
     gl.uniform1f(this.skyU.uFogStart, ground.fogStart);
     gl.uniform1f(this.skyU.uFogEnd, ground.fogEnd);
+    gl.uniform1f(this.skyU.uDeckUp, ground.deck?.up ?? 0);
+    gl.uniform1f(this.skyU.uDeckDown, ground.deck?.down ?? 0);
+    gl.uniform1ui(this.skyU.uDeckColour, (ground.deck?.colour ?? 0) >>> 0);
     gl.uniform1i(this.skyU.uGlow, 0);
     gl.uniform1i(this.skyU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.skyU);
@@ -434,6 +441,26 @@ export class Renderer {
     gl.depthMask(true);
   }
 
+  /**
+   * Inside a cloud (Q46): the world drawn so far whited out in `rgb` (0..1) by a dither of
+   * `density` 0..1, stepped in eighths (VEIL_FS). Call after the world passes, before beginOverlay.
+   */
+  drawVeil(density: number, rgb: ArrayLike<number>): void {
+    const d = Math.ceil(Math.max(0, Math.min(1, density)) * 8) / 8;
+    if (d <= 0) return;
+    const gl = this.gl;
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.useProgram(this.veilProg);
+    gl.uniform1f(this.veilU.uDensity, d);
+    gl.uniform3f(this.veilU.uColor, rgb[0], rgb[1], rgb[2]);
+    gl.uniform1f(this.veilU.uScale, this.msaa ? 2 : 1);
+    gl.bindVertexArray(this.triVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
   /** Overlay passes (font, vectors: 8-bit palette indices) run between drawWorld and resolve with depth disabled. */
   beginOverlay(): void {
     const gl = this.gl;
@@ -532,6 +559,12 @@ export interface BaseGround {
   lightDir: vec3;
   fogStart: number;
   fogEnd: number;
+  /**
+   * overcast decks (Q46) on to the horizon: `up` how far the base of the nearest one above is over
+   * the camera, `down` how far the camera is over the top of the nearest one below (0: none), m;
+   * `colour` their face colour
+   */
+  deck?: { up: number; down: number; colour: number };
 }
 
 /**

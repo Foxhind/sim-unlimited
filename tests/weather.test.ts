@@ -31,8 +31,10 @@ describe('Open-Meteo', () => {
     expect(u.searchParams.get('latitude')).toBe('55.750');
     const fields = u.searchParams.get('current')!.split(',');
     expect(fields.slice(0, 6)).toEqual(['temperature_2m', 'cloud_cover', 'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'surface_pressure']);
+    // the dew point and the cover of each cloud layer
+    expect(fields.slice(6, 10)).toEqual(['dew_point_2m', 'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high']);
     // five pressure levels, four values each: temperature, wind speed and direction, height
-    expect(fields).toHaveLength(6 + 5 * 4);
+    expect(fields).toHaveLength(10 + 5 * 4);
     for (const p of [850, 700, 500, 300, 200]) {
       for (const k of ['temperature', 'wind_speed', 'wind_direction', 'geopotential_height']) expect(fields).toContain(`${k}_${p}hPa`);
     }

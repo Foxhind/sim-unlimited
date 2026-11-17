@@ -372,6 +372,26 @@ void main() {
 }
 `;
 
+/**
+ * Cloud veil (Q46): inside a cloud the view whites out in the cloud's colour, a screen-door dither
+ * (4×4 Bayer) whose density steps with how deep in the cloud the eye is — no blending (§7). The
+ * pattern is in screen pixels (uScale: the supersampling of the world pass) so it stays crisp.
+ * Alpha 0 keeps the silhouette rim pass off its pixels.
+ */
+export const VEIL_FS = `#version 300 es
+precision highp float;
+uniform float uDensity;
+uniform vec3 uColor;
+uniform float uScale;
+out vec4 oColor;
+const float BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+void main() {
+  ivec2 p = ivec2(floor(gl_FragCoord.xy / uScale)) & 3;
+  if ((BAYER[p.y * 4 + p.x] + 0.5) / 16.0 >= uDensity) discard;
+  oColor = vec4(uColor, 0.0);
+}
+`;
+
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
 const GLOW_RINGS = 4;
@@ -401,11 +421,39 @@ uniform float uFogEnd;
 uniform float uSunGlow;
 // brightness of the sun disc × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uSunEmit;
+// an overcast deck (Q46): how far its base is above the camera / the camera above its top, m (0: none),
+// and its face colour. Like the base ground, it goes on to the horizon under the deck's tiles.
+uniform float uDeckUp;
+uniform float uDeckDown;
+uniform uint uDeckColour;
 out vec4 oColor;
 ${GLOW_VS}${GLITTER_GLSL}
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uCamPos);
+  // the curvature of the Earth along the ray: height gained at distance t is t·dir.y - t²·a/2
+  float ca = max(1.0 - dir.y * dir.y, 0.0) / ${EARTH_R.toFixed(1)};
+  if (uDeckDown > 0.0 && dir.y < 0.0) {
+    float disc = dir.y * dir.y - 2.0 * ca * uDeckDown;
+    if (disc >= 0.0) {
+      float t = ca > 1e-12 ? (-dir.y - sqrt(disc)) / ca : uDeckDown / -dir.y;
+      float fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
+      float lit = 0.30 + 0.70 * max(uLightDir.y, 0.0);
+      oColor = vec4(shadeColour(uDeckColour, lit * 11.0, fog), 1.0);
+      return;
+    }
+  }
+  if (uDeckUp > 0.0 && dir.y > 0.0) {
+    // the underside, unlit (its faces look down); a ray that passes under it sees the far haze
+    float disc = dir.y * dir.y - 2.0 * ca * uDeckUp;
+    float fog = 1.0;
+    if (disc >= 0.0) {
+      float t = ca > 1e-12 ? (dir.y - sqrt(disc)) / ca : uDeckUp / dir.y;
+      fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
+    }
+    oColor = vec4(shadeColour(uDeckColour, 0.30 * 11.0, fog), 1.0);
+    return;
+  }
   // Base ground: a flat face colour on the curved Earth below the camera (the world shader's
   // d^2 / 2R drop), out to the true horizon. Drawn here, under every tile, so the horizon and the
   // ground are there before (and between) the terrain tiles; loaded terrain simply covers it.

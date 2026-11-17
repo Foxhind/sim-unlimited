@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, type LightUniforms, type PaletteParams, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -19,6 +19,8 @@ import { GroundProbe, towerAnchor } from './world/ground';
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
+import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
+import { CloudField } from './world/cloud-field';
 import { AIRCRAFT } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
@@ -93,6 +95,7 @@ const aircraftRenderer = new AircraftRenderer(gl);
 const chunks = new ChunkManager(gl, start.latLon);
 const osm = new OsmManager(gl, start.latLon);
 const farOsm = new FarOsmManager(gl, start.latLon);
+const clouds = new CloudField(gl, start.latLon);
 const ground = new GroundProbe(() => chunks.origin);
 const camWorld: CameraWorld = {
   pos: model.pos, // shared reference: rebase zeroes the model position in place
@@ -115,12 +118,26 @@ const windOverride = ((): { from: number; ms: number; gust: number } | undefined
   if (!Number.isFinite(from) || !Number.isFinite(ms) || ms < 0) return undefined;
   return { from, ms, gust: Number.isFinite(gust) ? Math.max(ms, gust) : ms };
 })();
-/** ?clouds=80 forces the total cloud cover in % (how sunny the day looks, palette.ts sunniness) */
-const cloudsOverride = ((): number | undefined => {
+/**
+ * ?clouds=80 forces the total cloud cover in % (how sunny the day looks, palette.ts sunniness, and
+ * one low cloud layer of that cover); ?clouds=80,900 also puts its base 900 m above the ground
+ */
+const [cloudsOverride, cloudBaseOverride] = ((): [number | undefined, number | undefined] => {
   const raw = new URLSearchParams(window.location.search).get('clouds');
-  const v = raw === null || raw.trim() === '' ? NaN : Number(raw);
-  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : undefined;
+  if (raw === null || raw.trim() === '') return [undefined, undefined];
+  const [pct, base] = raw.split(',').map((v) => (v.trim() === '' ? NaN : Number(v)));
+  if (!Number.isFinite(pct)) return [undefined, undefined];
+  return [Math.max(0, Math.min(100, pct)), Number.isFinite(base) ? Math.max(50, base) : undefined];
 })();
+/** what the clouds are made from: the live weather's layers, or one forced layer (?clouds=) */
+function cloudInput(): CloudInput | undefined {
+  const w = weather.current;
+  const elevation = w?.elevation ?? Math.max(0, ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat) ?? 0);
+  if (cloudsOverride !== undefined) {
+    return { cloudPct: cloudsOverride, tempC: w?.tempC, dewPointC: w?.dewPointC, elevation, baseAgl: cloudBaseOverride };
+  }
+  return w ? { ...w, elevation } : undefined;
+}
 /** the weather in force: live data with the URL overrides applied (shown on the HUD, flown through) */
 let inForceFor: Weather | undefined | null = null;
 let inForce: Weather | undefined;
@@ -164,13 +181,23 @@ let baseSea = false;
  * camera, sea where that is at or below sea level, else land; it fills the view to the horizon
  * before the tiles load and wherever one is missing.
  */
-function baseGround(lightDir: vec3): BaseGround {
+function baseGround(lightDir: vec3, camY: number): BaseGround {
   const h = ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat);
   if (h !== undefined) {
     baseY = Math.max(0, h);
     baseSea = h <= 0;
   }
-  return { y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), lightDir, fogStart: FOG_START_M, fogEnd: FOG_END_M };
+  // the nearest overcast deck above and below the camera carries on past its tiles to the horizon
+  let up = 0, down = 0;
+  for (const l of clouds.current) {
+    if (l.kind !== 'deck') continue;
+    if (l.base > camY && (up === 0 || l.base - camY < up)) up = l.base - camY;
+    if (l.top < camY && (down === 0 || camY - l.top < down)) down = camY - l.top;
+  }
+  return {
+    y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), lightDir, fogStart: FOG_START_M, fogEnd: FOG_END_M,
+    deck: { up, down, colour: CLOUD_RGB },
+  };
 }
 let sunLoc: LatLon = start.latLon;
 /** the sun is rising (morning colours) when it stands higher a minute later */
@@ -307,7 +334,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, farOsm, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
+    renderer, chunks, osm, farOsm, clouds, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
     get state() { return state; },
     get simTime() { return simTime; },
     get palette() { return palette; },
@@ -529,6 +556,14 @@ function frame(now: number): void {
   const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
   farOsm.update(camWorld, view, proj, now, chunks.origin, farOsmTiles(camWorld.latLon, camWorld.alt, detailKeys), chunks.shownDetail);
 
+  profiler.stage('облака: тайлы');
+  clouds.setLayers(cloudLayers(cloudInput()));
+  // the clouds drift with the wind at their height (the clock runs as fast as the sim's)
+  const cloudDt = state === 'flying' && !rimLab.frozen ? dt * menu.config.timeAccel : state === 'menu' ? dt : 0;
+  if (cloudDt > 0) clouds.advance(cloudDt, (alt) => air.meanWind(alt, alt - air.surfaceElevation));
+  const camLatLon = enuToLatLon(chunks.origin, camPos[0], -camPos[2], camPos[1]);
+  clouds.update(camLatLon, chunks.origin, view, proj);
+
   profiler.stage('солнце, погода, палитра');
   if (state === 'menu' && menu.screen === 'start') {
     // live backdrop follows the chosen place and time of day
@@ -567,7 +602,7 @@ function frame(now: number): void {
   renderer.snow = surface.snow;
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
   profiler.stage('небо');
-  renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir));
+  renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir, camPos[1]));
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
   chunks.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
@@ -576,12 +611,22 @@ function frame(now: number): void {
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
   osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
   farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u);
+  profiler.stage('облака');
+  clouds.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
   renderer.rimWeight = rim.aircraft;
   profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }
 
+  // inside a cloud: white out (not in the menu backdrop, whose orbit may cut through one)
+  if (state !== 'menu' && !flashing) {
+    const veil = clouds.density(camLatLon, camPos[1]);
+    if (veil > 0) {
+      const c = shadeColour([(CLOUD_RGB >> 16) & 255, (CLOUD_RGB >> 8) & 255, CLOUD_RGB & 255], 8, palette);
+      renderer.drawVeil(veil, [c[0] / 255, c[1] / 255, c[2] / 255]);
+    }
+  }
   profiler.stage('пост-проход: силуэт, MSAA');
   renderer.beginOverlay();
   profiler.stage('HUD, меню, карта');
@@ -612,7 +657,7 @@ function frame(now: number): void {
     const os = osm.stats;
     const fs = farOsm.stats;
     font.text(
-      `FPS ${Math.round(fpsAvg)}  DRAW ${st.drawCalls + os.drawCalls + farOsm.drawCalls}  BUF ${st.gpuBuffers}  OSM ERR ${os.errors}  FAR ${fs.ready}/${fs.chunks}  ${state.toUpperCase()}`,
+      `FPS ${Math.round(fpsAvg)}  DRAW ${st.drawCalls + os.drawCalls + farOsm.drawCalls + clouds.drawCalls}  BUF ${st.gpuBuffers}  OSM ERR ${os.errors}  FAR ${fs.ready}/${fs.chunks}  ${state.toUpperCase()}`,
       // a row above the attribution (which fills the bottom row) and below the throttle readout
       pad, renderer.height - pad - 34 * u, u, HUD_GREEN,
     );

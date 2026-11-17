@@ -1,7 +1,8 @@
 /**
  * Live weather at the aircraft from Open-Meteo (https://open-meteo.com): free, no API key, CORS
- * enabled, data under CC BY 4.0. Only the current conditions are asked for: temperature at 2 m,
- * total cloud cover, wind at 10 m. The temperature decides the winter look of the ground (surfaceFor).
+ * enabled, data under CC BY 4.0. Only the current conditions are asked for: temperature and dew point
+ * at 2 m, total cloud cover and the cover of each layer, wind at 10 m. The temperature decides the
+ * winter look of the ground (surfaceFor); the clouds and the dew point shape the cloud layers (clouds.ts).
  */
 import type { Surface } from '../engine/palette';
 import type { LatLon } from './geodesy';
@@ -26,6 +27,12 @@ export interface Weather {
   tempC: number;
   /** total cloud cover, % */
   cloudPct: number;
+  /** cloud cover of the low (to ~2 km), mid (~2-6 km) and high layers, %, where the service gave them */
+  cloudLowPct?: number;
+  cloudMidPct?: number;
+  cloudHighPct?: number;
+  /** dew point at 2 m, °C: with the temperature it puts the base of the low clouds */
+  dewPointC?: number;
   /** wind at 10 m: direction it blows FROM (meteorological), degrees true */
   windFromDeg: number;
   windMs: number;
@@ -58,6 +65,7 @@ export function weatherUrl(at: LatLon): string {
     longitude: at.lon.toFixed(3),
     current: [
       'temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure',
+      'dew_point_2m,cloud_cover_low,cloud_cover_mid,cloud_cover_high',
       ...WEATHER_LEVELS_HPA.map((p) => `temperature_${p}hPa,wind_speed_${p}hPa,wind_direction_${p}hPa,geopotential_height_${p}hPa`),
     ].join(','),
     wind_speed_unit: 'ms',
@@ -94,6 +102,10 @@ export function parseWeather(json: unknown, at: LatLon): Weather | undefined {
     levels,
     tempC,
     cloudPct: num('cloud_cover') ?? 0,
+    cloudLowPct: num('cloud_cover_low'),
+    cloudMidPct: num('cloud_cover_mid'),
+    cloudHighPct: num('cloud_cover_high'),
+    dewPointC: num('dew_point_2m'),
     windFromDeg: num('wind_direction_10m') ?? 0,
     windMs,
     gustMs: Math.max(windMs, num('wind_gusts_10m') ?? windMs),
