@@ -81,6 +81,7 @@ const controls = new Controls();
 const audio = new FlightAudio();
 audio.setMuted(!settings.sound);
 renderer.setMsaa(settings.msaa);
+renderer.setHdr(settings.hdr);
 let consent = loadConsent();
 const telemetry = new Telemetry(() => consent === 'yes', renderer);
 
@@ -292,6 +293,7 @@ const menu = new Menu(font, vectors, settings, {
   onSettingsChanged: () => {
     audio.setMuted(!settings.sound);
     renderer.setMsaa(settings.msaa);
+    renderer.setHdr(settings.hdr);
   },
 });
 if (state === 'menu') menu.screen = consent === null ? 'consent' : 'start';

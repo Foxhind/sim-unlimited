@@ -8,6 +8,12 @@
 import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
+/**
+ * XDR: the brightest a light source's strongest channel gets, × SDR white in linear light (EMIT_GLSL).
+ * Browsers don't tell the display's headroom; a MacBook Pro XDR panel has ~3× at its default
+ * brightness, more when dimmer. Above the headroom the display clips each channel and colours wash out.
+ */
+export const HDR_PEAK = 3;
 /** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
 const EARTH_R = 6371000;
 /**
@@ -21,7 +27,24 @@ const EARTH_R = 6371000;
  * street-lit light. With uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp. A face flagged
  * SELF_LIT_FLAG (an aircraft light) is its own colour, unlit and unshaded.
  */
-const COLOUR_GLSL = `
+/**
+ * XDR emission (renderer.ts HDR_EMISSION): a light source's colour scaled in linear light, so its
+ * hue holds. Colours here are sRGB-encoded, and so is the half-float canvas (extended sRGB): scaling
+ * the encoded value would raise the weak channels too (0x22ff55 × 4 is ~21× green but ~2× blue in
+ * linear light), and once the display clips the strong one at its headroom a green light goes white.
+ * The display clips channel by channel too, so the gain stops where the strongest channel reaches
+ * HDR_PEAK: the whole colour scales together and keeps its hue.
+ */
+const EMIT_GLSL = `
+vec3 emitLight(vec3 c, float g) {
+  if (g == 1.0) return c;
+  vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  float top = max(max(lin.r, lin.g), max(lin.b, 1e-4));
+  lin *= clamp(${HDR_PEAK.toFixed(2)} / top, 1.0, g);
+  return mix(lin * 12.92, 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, lin));
+}
+`;
+const COLOUR_GLSL = `${EMIT_GLSL}
 uniform sampler2D uLut;
 uniform vec3 uLight[${GLOW_LEVELS + 1}];
 uniform vec3 uHaze;
@@ -205,8 +228,10 @@ in vec3 vRay;
 uniform vec3 uSunDir;
 // 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
 uniform float uSelfLit;
+// brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
+uniform float uEmit;
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${EMIT_GLSL}
 void main() {
   writeLogDepth();
   vec3 c = vColor;
@@ -214,6 +239,7 @@ void main() {
     vec4 g = glitter(normalize(vRay));
     if (g.a > 0.0) c = g.rgb;
   }
+  if (uSelfLit > 0.5) c = emitLight(c, uEmit);
   oColor = vec4(c, 1.0 - uSelfLit);
 }
 `;
@@ -288,6 +314,8 @@ uniform float uStackH;
  * from the DEM, the coarse terrain under it is a simplified TIN) no longer hides it.
  */
 uniform vec2 uPull;
+// brightness of the fixed light colours × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
+uniform float uEmit;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}
@@ -303,6 +331,11 @@ void main() {
   }
   // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
   vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
+  // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR
+  if (aIndex >= 0.0) {
+    uint li = uint(aIndex);
+    if ((li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u) vColor = emitLight(vColor, uEmit);
+  }
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
@@ -366,6 +399,8 @@ uniform float uFogStart;
 uniform float uFogEnd;
 // sky glow toward a low sun, 0..1 (palette.ts PaletteParams.glow)
 uniform float uSunGlow;
+// brightness of the sun disc × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
+uniform float uSunEmit;
 out vec4 oColor;
 ${GLOW_VS}${GLITTER_GLSL}
 void main() {
@@ -433,7 +468,7 @@ void main() {
   }
   // the sun: one plain disc (~1.7 deg radius), white by day, yellow when low (applySunColors)
   if (ang < 0.03) idx = ${LIGHT.SUN}u;
-  oColor = vec4(idx > 0u ? lutColor(idx) : col, 1.0);
+  oColor = vec4(idx > 0u ? emitLight(lutColor(idx), idx == ${LIGHT.SUN}u ? uSunEmit : 1.0) : col, 1.0);
 }
 `;
 
@@ -503,7 +538,8 @@ vec3 outline(ivec2 p) {
 vec3 px(ivec2 q) {
   vec4 t = texelFetch(uWorldTex, q, 0);
   // alpha 0: a self-lit face (WORLD_FS uSelfLit), no rim on it
-  if (uOutline.x > 0.0 && t.a > 0.5) return min(t.rgb + outline(q), 1.0);
+  // (the clamp to white keeps what an XDR light source already has above it)
+  if (uOutline.x > 0.0 && t.a > 0.5) return max(t.rgb, min(t.rgb + outline(q), 1.0));
   return t.rgb;
 }
 void main() {

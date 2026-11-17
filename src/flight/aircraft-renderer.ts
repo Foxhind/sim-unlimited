@@ -188,9 +188,12 @@ export class AircraftRenderer {
     renderer.drawWorld(this.mesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
     // the flame and the lights light themselves: no rim of either kind, no two-sided flip
     renderer.selfLit = true;
+    renderer.selfLitGain = renderer.emission('flame');
     this.drawFlame(renderer, model, view, proj, camPos, sunDir, throttle, time);
+    renderer.selfLitGain = renderer.emission('aircraftLights');
     this.drawLights(renderer, model, view, proj, camPos, sunDir, time, sig, state);
     renderer.selfLit = false;
+    renderer.selfLitGain = 1;
   }
 
   /** navigation lights, beacons and the landing light: small self-lit diamonds that keep a visible size */

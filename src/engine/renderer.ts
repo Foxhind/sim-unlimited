@@ -2,6 +2,7 @@ import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { LUT_ENTRIES, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
+import { XdrTrigger } from './xdr-trigger';
 import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -69,16 +70,41 @@ export class Renderer {
    * (the flame's normals are set toward the sun to keep it bright)
    */
   selfLit = false;
+  /**
+   * brightness of what drawWorld draws next while selfLit, × SDR white (HDR only: see emission).
+   * Set from emission('flame') / emission('aircraftLights').
+   */
+  selfLitGain = 1;
+  /**
+   * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
+   * extended drawingBufferToneMapping where the browser has it), the world and post targets are
+   * half-float, and light sources (aircraft lights, the exhaust flame, the sun, city lights) are
+   * written above 1.0 so an HDR display shows them brighter than paper white. Everything else stays
+   * in 0..1 and looks as before.
+   */
+  readonly hdrSupported: boolean;
+  /** XDR is on: buffers are half-float and light sources are written above 1.0 */
+  hdr = false;
+  private hdrWanted = false;
+  /** puts the page in HDR mode where WebGL has no extended tone mapping (xdr-trigger.ts) */
+  private trigger: XdrTrigger | null = null;
+  private triggerPending = false;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
       antialias: false,
-      alpha: false,
+      // drawingBufferStorage (XDR) needs an RGBA drawing buffer; the resolve pass writes alpha 1
+      alpha: true,
       depth: false,
       powerPreference: 'high-performance',
     });
     if (!gl) throw new Error('WebGL2 is not available');
     this.gl = gl;
+    const hdrGl = gl as HdrGl;
+    // drawingBufferToneMapping is optional: Chrome (156) has none on WebGL, yet shows an RGBA16F
+    // drawing buffer above SDR white on an XDR display
+    this.hdrSupported = typeof hdrGl.drawingBufferStorage === 'function'
+      && gl.getExtension('EXT_color_buffer_float') !== null;
 
     this.worldTex = must(gl.createTexture(), 'world texture');
     this.depthTex = must(gl.createTexture(), 'depth texture');
@@ -115,7 +141,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', ...GLITTER_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', ...GLITTER_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -125,12 +151,12 @@ export class Renderer {
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull',
-      'uLut', 'uLight', 'uHaze', 'uSat',
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
-      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', ...GLITTER_UNIFORMS,
+      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', 'uSunEmit', ...GLITTER_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
     this.dsU = uniformMap(gl, this.dsProg, [
@@ -155,6 +181,44 @@ export class Renderer {
     if (this.width > 0) this.alloc();
   }
 
+  /**
+   * Experimental XDR output (see hdr). No-op where the browser lacks drawingBufferStorage or
+   * float colour buffers. With WebGL drawingBufferToneMapping the canvas itself is put in extended
+   * mode; without it (Chrome) a tiny WebGPU canvas puts the page in HDR mode (xdr-trigger.ts), which
+   * takes a moment to set up: hdr turns on when it is ready, and stays off where WebGPU can't.
+   */
+  setHdr(enabled: boolean): void {
+    this.hdrWanted = enabled && this.hdrSupported;
+    const native = typeof (this.gl as HdrGl).drawingBufferToneMapping === 'function';
+    if (!this.hdrWanted || native) {
+      this.trigger?.destroy();
+      this.trigger = null;
+      this.applyHdr(this.hdrWanted);
+      return;
+    }
+    if (this.trigger || this.triggerPending) return;
+    this.triggerPending = true;
+    void XdrTrigger.create().then((t) => {
+      this.triggerPending = false;
+      if (!t) return;
+      if (!this.hdrWanted) { t.destroy(); return; }
+      this.trigger = t;
+      this.applyHdr(true);
+    });
+  }
+
+  private applyHdr(on: boolean): void {
+    if (on === this.hdr) return;
+    this.hdr = on;
+    (this.gl as HdrGl).drawingBufferToneMapping?.({ mode: on ? 'extended' : 'standard' });
+    if (this.width > 0) this.alloc();
+  }
+
+  /** brightness of a light source × SDR white: 1 without HDR */
+  emission(kind: keyof typeof HDR_EMISSION): number {
+    return this.hdr ? HDR_EMISSION[kind] : 1;
+  }
+
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
     const w = Math.max(1, Math.round(cssWidth * dpr));
     const h = Math.max(1, Math.round(cssHeight * dpr));
@@ -170,8 +234,12 @@ export class Renderer {
     const gl = this.gl;
     const s = this.msaa ? 2 : 1;
     const w = this.width * s, h = this.height * s;
+    // the canvas's own buffer: half-float for XDR, 8-bit otherwise (re-set on every resize)
+    const hgl = gl as HdrGl;
+    if (this.hdrSupported) hgl.drawingBufferStorage!(this.hdr ? gl.RGBA16F : gl.RGBA8, this.width, this.height);
+    const [cInternal, cType] = this.hdr ? [gl.RGBA16F, gl.HALF_FLOAT] : [gl.RGBA8, gl.UNSIGNED_BYTE];
     gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, cInternal, w, h, 0, gl.RGBA, cType, null);
     gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
@@ -190,7 +258,7 @@ export class Renderer {
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.colorTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texImage2D(gl.TEXTURE_2D, 0, cInternal, this.width, this.height, 0, gl.RGBA, cType, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.colorFbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.colorTex, 0);
     if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
@@ -246,6 +314,7 @@ export class Renderer {
     gl.uniform1i(this.skyU.uSnow, this.snow ? 1 : 0);
     this.setLight(this.skyU);
     gl.uniform1f(this.skyU.uSunGlow, this.light?.sunGlow ?? 0);
+    gl.uniform1f(this.skyU.uSunEmit, this.emission('sun'));
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
@@ -284,6 +353,7 @@ export class Renderer {
     this.setRim(this.worldU, this.selfLit ? 0 : this.rimWeight);
     gl.uniform1i(this.worldU.uTwoSided, this.selfLit ? 0 : 1);
     gl.uniform1f(this.worldU.uSelfLit, this.selfLit ? 1 : 0);
+    gl.uniform1f(this.worldU.uEmit, this.selfLit ? this.selfLitGain : 1);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (!depthWrite) gl.depthMask(true);
@@ -357,6 +427,7 @@ export class Renderer {
     gl.uniform3fv(this.pointsU.uCamPos, camPos);
     gl.uniform1f(this.pointsU.uPointSize, pointSize);
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
+    gl.uniform1f(this.pointsU.uEmit, this.emission('cityLights'));
     this.setLight(this.pointsU);
     gl.bindVertexArray(vao);
     gl.drawArrays(mode === 'points' ? gl.POINTS : gl.LINES, 0, count);
@@ -462,6 +533,28 @@ export interface BaseGround {
   fogStart: number;
   fogEnd: number;
 }
+
+/**
+ * XDR brightness of the light sources in linear light, × SDR white (shaders.ts emitLight: the hue
+ * holds), each capped where its strongest channel reaches shaders.ts HDR_PEAK. A saturated colour
+ * (a green navigation light) needs a high gain to get there; white reaches it at HDR_PEAK.
+ */
+export const HDR_EMISSION = {
+  /** navigation lights, beacons, landing light (aircraft-renderer drawLights) */
+  aircraftLights: 16,
+  /** the exhaust flame */
+  flame: 8,
+  /** the sun disc */
+  sun: 32,
+  /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours) */
+  cityLights: 12,
+} as const;
+
+/** WebGL drawing buffer storage and tone mapping (not yet in TypeScript's DOM lib) */
+type HdrGl = WebGL2RenderingContext & {
+  drawingBufferStorage?: (internalFormat: number, width: number, height: number) => void;
+  drawingBufferToneMapping?: (mapping: { mode: 'standard' | 'extended' }) => void;
+};
 
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime'];

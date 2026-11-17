@@ -270,6 +270,7 @@ export class Menu {
     onOff('mouseJoystick', () => s.mouseJoystick, (v) => { s.mouseJoystick = v; });
     onOff('sound', () => s.sound, (v) => { s.sound = v; });
     onOff('msaa', () => s.msaa, (v) => { s.msaa = v; });
+    onOff('hdr', () => s.hdr, (v) => { s.hdr = v; });
 
     // key bindings (Q37): two columns
     const kx = w * 0.46, kw = w * 0.49, colW = kw / 2, rowH = 24 * u;

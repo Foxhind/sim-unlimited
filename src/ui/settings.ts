@@ -8,6 +8,8 @@ export interface Settings {
   sound: boolean;
   /** Q12: MSAA off by default — jaggies are part of the style */
   msaa: boolean;
+  /** experimental XDR: light sources brighter than white on an HDR display (renderer.ts setHdr) */
+  hdr: boolean;
   /** action → KeyboardEvent.code overrides (Q37 remapping) */
   bindings: Record<string, string>;
 }
@@ -22,7 +24,7 @@ export function defaultLang(): Lang {
 }
 
 export function defaultSettings(): Settings {
-  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, msaa: false, bindings: {} };
+  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, msaa: false, hdr: true, bindings: {} };
 }
 
 export function loadSettings(): Settings {
