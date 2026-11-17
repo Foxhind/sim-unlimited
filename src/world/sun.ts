@@ -43,10 +43,15 @@ function sunEcliptic(n: number): { lambda: number; distAU: number } {
 }
 
 /** Equatorial (RA deg, Dec rad) → local horizontal at `loc`, optional parallax lowering of the altitude (rad). */
+/** Greenwich mean sidereal time, degrees 0..360, `n` days since J2000 */
+export function gmstDeg(n: number): number {
+  return ((18.697374558 + 24.06570982441908 * n) % 24 + 24) % 24 * 15;
+}
+
 function toHorizontal(
   raDeg: number, decRad: number, n: number, loc: LatLon, parallaxRad = 0,
 ): { dir: [number, number, number]; elevationDeg: number } {
-  const gmst = ((18.697374558 + 24.06570982441908 * n) % 24 + 24) % 24 * 15;
+  const gmst = gmstDeg(n);
   const H = (((gmst + loc.lon - raDeg) % 360 + 540) % 360 - 180) * D2R;
   const lat = loc.lat * D2R;
   let elevation = Math.asin(Math.sin(lat) * Math.sin(decRad) + Math.cos(lat) * Math.cos(decRad) * Math.cos(H));

@@ -521,6 +521,65 @@ void main() {
 `;
 
 /**
+ * The night sky (sky.ts): catalogue stars and planets as points, drawn after SKY_FS with additive
+ * blending, so they fade into the twilight sky by themselves. aDir is a J2000 equatorial unit vector,
+ * uSky turns it into a world direction. A point is dropped when it is fainter than uLimit (the
+ * limiting magnitude, after extinction toward the horizon), behind the sun or moon disc, or where
+ * SKY_FS drew the base ground or an overcast deck instead of sky. Brightness in quarter steps;
+ * size 1–3 px by magnitude, × uPx.
+ */
+export const STARS_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aDir;
+layout(location=1) in float aMag;
+layout(location=2) in vec3 aRgb;
+uniform mat3 uSky;
+uniform mat4 uViewProj;
+uniform vec3 uSunDir;
+uniform vec3 uMoonDir;
+uniform float uLimit;
+uniform float uPx;
+uniform float uGroundH;
+uniform float uDeckUp;
+uniform float uDeckDown;
+flat out vec3 vColor;
+// the ray meets a surface uH below the eye on the curved Earth (SKY_FS)
+bool hits(vec3 d, float uH) {
+  float a = max(1.0 - d.y * d.y, 0.0) / ${EARTH_R.toFixed(1)};
+  return d.y < 0.0 && d.y * d.y - 2.0 * a * uH >= 0.0;
+}
+void main() {
+  vec3 d = normalize(uSky * aDir);
+  // extinction: 0.2 mag per air mass (Kasten & Young air mass)
+  float h = max(d.y, 0.0);
+  float airmass = 1.0 / (h + 0.025 * exp(-11.0 * h));
+  float m = aMag + 0.2 * (airmass - 1.0);
+  bool hidden = m > uLimit || hits(d, uGroundH) || (uDeckDown > 0.0 && hits(d, uDeckDown))
+    || (uDeckUp > 0.0 && d.y > 0.0) || dot(d, uSunDir) > 0.99955 || dot(d, uMoonDir) > 0.99952;
+  if (hidden) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    gl_PointSize = 0.0;
+    vColor = vec3(0.0);
+    return;
+  }
+  float vis = ceil(clamp((uLimit - m) / 2.0 + 0.25, 0.0, 1.0) * 4.0) / 4.0;
+  vColor = aRgb * vis;
+  gl_Position = uViewProj * vec4(d, 0.0);
+  gl_Position.z = 0.0;
+  gl_PointSize = (aMag < -1.0 ? 3.0 : aMag < 1.5 ? 2.0 : 1.0) * uPx;
+}
+`;
+
+export const STARS_FS = `#version 300 es
+precision highp float;
+flat in vec3 vColor;
+out vec4 oColor;
+void main() {
+  oColor = vec4(vColor, 0.0);
+}
+`;
+
+/**
  * World → screen-sized colour (colorTex), run when the world needs a pass of its own: 2x
  * supersampling (uScale 2: the mean of each 2×2 block) and/or the silhouette rim light.
  *

@@ -16,6 +16,7 @@ import { FarOsmManager } from './world/far-osm-manager';
 import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
 import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geodesy';
 import { GroundProbe, towerAnchor } from './world/ground';
+import { buildSkyPoints, limitingMagnitude, PLANETS_OFFSET, planetPoints, skyMatrix, toGlMat3 } from './world/sky';
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
@@ -216,6 +217,11 @@ let light = lightOf(palette);
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
+/** stars and planets: J2000 → world directions this frame, and the planets refreshed with the light */
+const skyMat = new Float32Array(9);
+const planetBuf = planetPoints(simTime);
+renderer.setSkyPoints(buildSkyPoints());
+renderer.setSkyPoints(planetBuf, PLANETS_OFFSET);
 /** whether the current LUT was built with frozen water */
 let lutIce = weather.surface.ice;
 let previewKey = '';
@@ -238,6 +244,7 @@ function updateLight(): void {
     );
     vec3.normalize(lightDir, lightDir);
   }
+  renderer.setSkyPoints(planetPoints(simTime, planetBuf), PLANETS_OFFSET);
   palette = dayPalette();
   lut = buildLUT(palette, weather.surface);
   light = lightOf(palette);
@@ -603,6 +610,10 @@ function frame(now: number): void {
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
   profiler.stage('небо');
   renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir, camPos[1]));
+  if (!flashing) {
+    toGlMat3(skyMatrix(simTime, sunLoc), skyMat);
+    renderer.drawStars(skyMat, limitingMagnitude(sun.elevationDeg, moon.elevationDeg, moon.illumination), u);
+  }
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
   chunks.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);

@@ -3,7 +3,7 @@ import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { LUT_ENTRIES, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
-import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -42,6 +42,14 @@ export class Renderer {
   private resolveU: Uniforms;
   private veilProg: WebGLProgram;
   private veilU: Uniforms;
+  private starsProg: WebGLProgram;
+  private starsU: Uniforms;
+  private starsVao: WebGLVertexArrayObject;
+  private starsBuf: WebGLBuffer;
+  private starsCount = 0;
+  /** what drawSky drew this frame, for drawStars: moon, ground height, overcast decks above / below */
+  private skyMoon = vec3.create();
+  private skyCover = new Float32Array(3);
 
   private invViewProj = mat4.create();
   private viewProj = mat4.create();
@@ -166,6 +174,19 @@ export class Renderer {
     ]);
     this.veilProg = createProgram(gl, FULLSCREEN_VS, VEIL_FS);
     this.veilU = uniformMap(gl, this.veilProg, ['uDensity', 'uColor', 'uScale']);
+    this.starsProg = createProgram(gl, STARS_VS, STARS_FS);
+    this.starsU = uniformMap(gl, this.starsProg, [
+      'uSky', 'uViewProj', 'uSunDir', 'uMoonDir', 'uLimit', 'uPx', 'uGroundH', 'uDeckUp', 'uDeckDown',
+    ]);
+    this.starsVao = must(gl.createVertexArray(), 'stars VAO');
+    this.starsBuf = must(gl.createBuffer(), 'stars buffer');
+    gl.bindVertexArray(this.starsVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.starsBuf);
+    for (const [loc, size, at] of [[0, 3, 0], [1, 1, 3], [2, 3, 4]]) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 7 * 4, at * 4);
+    }
+    gl.bindVertexArray(null);
     this.resolveProg = createProgram(gl, FULLSCREEN_VS, RESOLVE_FS);
     this.resolveU = uniformMap(gl, this.resolveProg, ['uWorldTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
     // the LUT lives on its own texture unit for the whole frame
@@ -309,6 +330,10 @@ export class Renderer {
     gl.uniform3fv(this.skyU.uCamPos, camPos);
     gl.uniform3fv(this.skyU.uSunDir, sunDir);
     gl.uniform3fv(this.skyU.uMoonDir, moonDir);
+    vec3.copy(this.skyMoon, moonDir);
+    this.skyCover[0] = Math.max(1, camPos[1] - ground.y);
+    this.skyCover[1] = ground.deck?.up ?? 0;
+    this.skyCover[2] = ground.deck?.down ?? 0;
     gl.uniform1f(this.skyU.uGroundH, Math.max(1, camPos[1] - ground.y));
     gl.uniform1ui(this.skyU.uGroundRamp, ground.ramp >>> 0);
     gl.uniform3fv(this.skyU.uLightDir, ground.lightDir);
@@ -324,6 +349,46 @@ export class Renderer {
     gl.uniform1f(this.skyU.uSunEmit, this.emission('sun'));
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /** the sky points (sky.ts buildSkyPoints: 7 floats each); `at` > 0 replaces the floats from there on */
+  setSkyPoints(data: Float32Array, at = 0): void {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.starsBuf);
+    if (at === 0) {
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+      this.starsCount = data.length / 7;
+    } else {
+      gl.bufferSubData(gl.ARRAY_BUFFER, at * 4, data);
+    }
+  }
+
+  /**
+   * Stars and planets over the sky drawSky just drew (STARS_VS), added to its colour so they fade
+   * with the twilight. `sky`: J2000 → world directions (sky.ts skyMatrix, column-major); `limit`:
+   * the faintest magnitude shown; `px`: pixels of the smallest point (device pixel ratio).
+   */
+  drawStars(sky: Float32Array, limit: number, px: number): void {
+    if (this.starsCount === 0 || this.orthoFar > 0) return;
+    const gl = this.gl;
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    // add the colour, keep the sky's alpha (the silhouette pass reads it)
+    gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+    gl.useProgram(this.starsProg);
+    gl.uniformMatrix3fv(this.starsU.uSky, false, sky);
+    gl.uniformMatrix4fv(this.starsU.uViewProj, false, this.viewProj);
+    gl.uniform3fv(this.starsU.uSunDir, this.sunDir);
+    gl.uniform3fv(this.starsU.uMoonDir, this.skyMoon);
+    gl.uniform1f(this.starsU.uLimit, limit);
+    gl.uniform1f(this.starsU.uPx, px * (this.msaa ? 2 : 1));
+    gl.uniform1f(this.starsU.uGroundH, this.skyCover[0]);
+    gl.uniform1f(this.starsU.uDeckUp, this.skyCover[1]);
+    gl.uniform1f(this.starsU.uDeckDown, this.skyCover[2]);
+    gl.bindVertexArray(this.starsVao);
+    gl.drawArrays(gl.POINTS, 0, this.starsCount);
+    gl.disable(gl.BLEND);
   }
 
   drawWorld(
