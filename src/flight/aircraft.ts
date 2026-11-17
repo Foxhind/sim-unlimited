@@ -1,5 +1,6 @@
 import { PAYLOAD_MASK, RAMP } from '../engine/palette';
 import type { JointDef, LightDef } from './articulation';
+import an225Model from './models/an225.json';
 import f117Model from './models/f117.json';
 import su27Model from './models/su27.json';
 
@@ -87,8 +88,10 @@ export interface FbwDef {
   rollRate: number;
 }
 
+export type AircraftId = 'su27' | 'f117' | 'an225';
+
 export interface AircraftConfig {
-  id: 'su27' | 'f117';
+  id: AircraftId;
   name: string;
   hudLang: 'ru' | 'en';
   mass: number;
@@ -142,6 +145,11 @@ export interface AircraftConfig {
   stallAlpha: number;
   /** exhaust exits in mesh space (x right, y up, z aft) with radius */
   nozzles: { pos: [number, number, number]; r: number }[];
+  /**
+   * Cameras, for airframes much larger than a fighter: the pilot's eye in the mesh's coordinates and how many
+   * times further back the outside views stand. Without it: 5.5 m ahead of and 1.1 m above the centre of gravity.
+   */
+  view?: { eye: V3; scale: number };
 }
 
 const UP: V3 = [0, 1, 0];
@@ -193,6 +201,7 @@ function fromModel(cfg: AircraftConfig): AircraftConfig {
     parts: cfg.parts.map((p) => ({ ...p, tip: rel(p.tip) })),
     nose: rel(cfg.nose),
     tail: rel(cfg.tail),
+    view: cfg.view && { ...cfg.view, eye: rel(cfg.view.eye) },
   };
 }
 
@@ -315,7 +324,81 @@ export const F117: AircraftConfig = fromModel({
   nozzles: [{ pos: [0.4, 0.25, 7.1], r: 0.22 }, { pos: [-0.4, 0.25, 7.1], r: 0.22 }],
 });
 
-export const AIRCRAFT: Record<string, AircraftConfig> = { su27: SU27, f117: F117 };
+export const AN225: AircraftConfig = fromModel({
+  id: 'an225',
+  name: 'AN-225 MRIYA',
+  hudLang: 'ru',
+  // a mid weight: 285 t empty, 640 t at most
+  mass: 450000,
+  // estimates from radii of gyration typical of large transports: 14 m in pitch, 10.5 m in roll
+  inertia: [8.8e7, 1.3e8, 5.0e7],
+  wingArea: 905,
+  wingSpan: 88.4,
+  // the model's origin is at 27% of the mean chord; the centre of gravity is taken 1 m aft of it, still
+  // ahead of the middle main axle (1.8 m), which leaves the neutral point about 2.9 m behind
+  cg: [0, 0, 1.0],
+  surfaces: [
+    // (`stall` is where half the flow has separated: the lift curve starts to bend 8 deg before it, so the
+    // clean wing peaks at about 15 deg and CL 1.3, with the flaps at about 10 deg and CL 1.7)
+    // wing centre section across the fuselage: with both wings gone the body alone lifts very little
+    { pos: [0, 2.55, -6.85], normal: UP, area: 131, cla: 4.6, alpha0: 2.5, stall: 22, k: 0.046, carry: { share: 0.8, k: 0.5, stall: 14, offset: 2.5 } },
+    // wing panels, root to tip: the areas keep the model's proportions, scaled to the real 905 m2;
+    // both flap sections inboard, ailerons on the outer panel, which stalls first
+    ...pair({ pos: [8.29, 2.35, -4.81], normal: UP, area: 146, cla: 4.6, alpha0: 2.5, stall: 22, k: 0.046, flap: true }, 'wingR', 'wingL'),
+    ...pair({ pos: [20.27, 1.84, 1.41], normal: UP, area: 146, cla: 4.6, alpha0: 2.5, stall: 22, k: 0.046, flap: true }, 'wingR', 'wingL'),
+    ...pair({ pos: [35.1, 1.19, 9.98], normal: UP, area: 95.4, cla: 4.6, alpha0: 2.5, stall: 20, k: 0.046, roll: 25, tau: 0.5 }, 'wingR', 'wingL'),
+    // tailplane with elevators: its lift slope is what is left behind the wing's downwash, and it is set
+    // nose-down as a trimmed stabiliser is in cruise
+    ...pair({ pos: [7.75, 4.4, 35.8], normal: UP, area: 127.5, cla: 2.0, alpha0: -3, stall: 16, k: 0.1, pitch: 25, tau: 0.55 }, 'stabR', 'stabL'),
+    // twin fins on the tailplane tips, clear of the wing's wake
+    ...pair({ pos: [16.0, 7.3, 42.7], normal: SIDE, area: 59, cla: 2.5, stall: 18, k: 0.2, yaw: 25, tau: 0.4, shield: 0.3 }, 'finR', 'finL'),
+    // forebody side area
+    { pos: [0, 0, -20], normal: SIDE, area: 60, cla: 0.5, stall: 12, k: 0.5 },
+  ],
+  // drawn in assets/models/an225.blend (BREAK_<part> empties): a wing panel carries ~43% of the lift and lets
+  // go at 9.9 MN (3.6 g at the 640 t maximum weight, more at this one); tailplane halves 1.6 MN, fins 1.3 MN
+  parts: breakPoints(an225Model),
+  // estimates: a wing panel with three engines and its fuel at this weight; tailplane halves; fins
+  partMass: { wingL: 60000, wingR: 60000, stabL: 5000, stabR: 5000, finL: 3000, finR: 3000 },
+  nose: [0, -2.8, -36.8],
+  // probed against the ground: the underside where the fins' roots are, not the tip of the tail cone, which
+  // would touch at 12 deg of pitch (the model turns about its centre of gravity, not about the main gear)
+  tail: [0, 4.2, 38.0],
+  bodySide: 500,
+  // a transport: 2.3 g, no pulling through the limiter, a slow roll
+  fbw: { gMax: 2.3, gMin: 0, alphaLimit: 13, alphaOverride: 13, rollRate: 0.25 },
+  cd0: 0.022,
+  waveDrag: [[0, 1], [0.72, 1], [0.78, 1.8], [0.84, 3.5], [0.95, 6], [1.2, 8]],
+  inducedK: 0.046,
+  spinYaw: 0,
+  vne: 240,
+  // six D-18T of 229.5 kN
+  thrustDry: 1377000,
+  thrustAfterburner: 1377000,
+  // set for what the game derives from it: the air start at 70% and the autopilot's approach at 42%
+  // (80 m/s, the real 290 km/h); the real cruise is 222 m/s at altitude
+  cruiseSpeed: 190,
+  maxSpeed: 236,
+  // the tyres are 6.5 m below the model's origin
+  gearHeight: 6.5,
+  landingSinkLimit: 3.5,
+  landingBankLimit: 7,
+  flapClBonus: 0.9,
+  flapCd: 0.04,
+  gearCd: 0.025,
+  speedbrakeCd: 0.04,
+  brakeDecel: 2.5,
+  stallAlpha: 15,
+  nozzles: [-1, 1].flatMap((sg) => [
+    { pos: [sg * 11.5, -0.7, -5.8] as V3, r: 0.5 },
+    { pos: [sg * 18.9, -1.0, -1.1] as V3, r: 0.5 },
+    { pos: [sg * 26.5, -1.3, 3.8] as V3, r: 0.5 },
+  ]),
+  // the flight deck is 31 m ahead of the wing; outside views stand four times further back
+  view: { eye: [0, 1.9, -30.8], scale: 4 },
+});
+
+export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225 };
 
 export function tableLookup(table: AeroTable, x: number): number {
   if (x <= table[0][0]) return table[0][1];
@@ -409,7 +492,7 @@ class MeshBuilder {
   }
 }
 
-const MODELS: Record<AircraftConfig['id'], ModelJson> = { su27: su27Model, f117: f117Model };
+const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model };
 
 /** Flat-shaded mesh of an exported model; each face keeps its RGB colour (lit in the shader). */
 function loadModel(json: ModelJson): AircraftMesh {
@@ -431,7 +514,7 @@ function loadModel(json: ModelJson): AircraftMesh {
 
 const meshCache = new Map<string, AircraftMesh>();
 
-export function aircraftMesh(id: 'su27' | 'f117'): AircraftMesh {
+export function aircraftMesh(id: AircraftId): AircraftMesh {
   let mesh = meshCache.get(id);
   if (!mesh) {
     mesh = loadModel(MODELS[id]);

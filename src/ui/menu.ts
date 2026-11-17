@@ -8,12 +8,13 @@ import { AIRFIELDS, Minimap } from './minimap';
 import { MAP_SOURCE_NAME, parseMapLink } from './map-links';
 import type { LatLon } from '../world/geodesy';
 import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
+import type { AircraftId } from '../flight/aircraft';
 import { DEFAULT_BINDINGS, type Action } from '../flight/controls';
 
 export type MenuScreen = 'consent' | 'start' | 'settings' | 'pause' | 'crashed' | 'none';
 
 export interface FlightConfig {
-  aircraft: 'su27' | 'f117';
+  aircraft: AircraftId;
   location: 'LTBS' | 'LOWI' | 'custom';
   customPoint: LatLon | null;
   startMode: 'runway' | 'air';
@@ -201,6 +202,7 @@ export class Menu {
     row([
       ['SU-27 FLANKER', () => { cfg.aircraft = 'su27'; }, cfg.aircraft === 'su27'],
       ['F-117A NIGHTHAWK', () => { cfg.aircraft = 'f117'; }, cfg.aircraft === 'f117'],
+      ['AN-225 MRIYA', () => { cfg.aircraft = 'an225'; }, cfg.aircraft === 'an225'],
     ]);
     label('location');
     row([

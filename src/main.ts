@@ -21,7 +21,7 @@ import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
 import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
-import { AIRCRAFT } from './flight/aircraft';
+import { AIRCRAFT, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
 import { Air } from './flight/air';
@@ -41,7 +41,7 @@ interface Start {
   /** undefined = Q41 air start; 0 = ground spawn; >0 = MSL altitude */
   alt?: number;
   hdg: number;
-  aircraft: 'su27' | 'f117';
+  aircraft: AircraftId;
   time?: Date;
 }
 
@@ -67,7 +67,7 @@ function parseStart(): Start {
     latLon: { lat, lon },
     alt: alt !== undefined && Number.isFinite(alt) ? Math.max(0, alt) : undefined,
     hdg: Number.isFinite(hdg) ? hdg : 0,
-    aircraft: parts[4] === 'f117' ? 'f117' : 'su27',
+    aircraft: parts[4] in AIRCRAFT ? (parts[4] as AircraftId) : 'su27',
     time,
   };
 }

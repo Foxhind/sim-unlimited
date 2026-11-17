@@ -37,9 +37,10 @@ export class CameraRig {
   }
 
   private chaseTarget(model: FlightModel): vec3 {
+    const k = model.cfg.view?.scale ?? 1;
     const out = vec3.clone(model.pos);
-    vec3.scaleAndAdd(out, out, this.bodyDir(model, 0, 0, 1, this.tmp), 38);
-    vec3.scaleAndAdd(out, out, this.bodyDir(model, 0, 1, 0, this.tmp), 9);
+    vec3.scaleAndAdd(out, out, this.bodyDir(model, 0, 0, 1, this.tmp), 38 * k);
+    vec3.scaleAndAdd(out, out, this.bodyDir(model, 0, 1, 0, this.tmp), 9 * k);
     return out;
   }
 
@@ -48,12 +49,13 @@ export class CameraRig {
     const wheel = input.consumeWheel();
     const fwd = this.bodyDir(model, 0, 0, -1, vec3.create());
     const up = this.bodyDir(model, 0, 1, 0, vec3.create());
+    // outside views stand back in proportion to the airframe
+    const k = model.cfg.view?.scale ?? 1;
 
     switch (this.mode) {
       case 'cockpit': {
-        vec3.copy(this.pos, model.pos);
-        vec3.scaleAndAdd(this.pos, this.pos, up, 1.1);
-        vec3.scaleAndAdd(this.pos, this.pos, fwd, 5.5);
+        const eye = model.cfg.view?.eye ?? [0, 1.1, -5.5];
+        vec3.add(this.pos, model.pos, this.bodyDir(model, eye[0], eye[1], eye[2], this.tmp));
         vec3.add(this.target, this.pos, fwd);
         mat4.lookAt(this.view, this.pos, this.target, up);
         return;
@@ -63,11 +65,12 @@ export class CameraRig {
         this.orbitPitch = Math.max(-1.4, Math.min(1.4, this.orbitPitch + mdy * 0.005));
         this.orbitDist = Math.max(15, Math.min(300, this.orbitDist * (1 + wheel * 0.001)));
         const cp = Math.cos(this.orbitPitch);
+        const dist = this.orbitDist * k;
         vec3.set(
           this.pos,
-          model.pos[0] + Math.sin(this.orbitYaw) * cp * this.orbitDist,
-          model.pos[1] + Math.sin(this.orbitPitch) * this.orbitDist,
-          model.pos[2] + Math.cos(this.orbitYaw) * cp * this.orbitDist,
+          model.pos[0] + Math.sin(this.orbitYaw) * cp * dist,
+          model.pos[1] + Math.sin(this.orbitPitch) * dist,
+          model.pos[2] + Math.cos(this.orbitYaw) * cp * dist,
         );
         mat4.lookAt(this.view, this.pos, model.pos, UP);
         return;
@@ -82,10 +85,10 @@ export class CameraRig {
       }
       case 'flyby': {
         // camera parks ahead on the flight path; the jet roars past, then it repositions
-        if (!this.anchorSet || vec3.dist(this.anchor, model.pos) < 25) {
+        if (!this.anchorSet || vec3.dist(this.anchor, model.pos) < 25 * k) {
           vec3.copy(this.anchor, model.pos);
           vec3.scaleAndAdd(this.anchor, this.anchor, fwd, 220);
-          vec3.scaleAndAdd(this.anchor, this.anchor, up, 4);
+          vec3.scaleAndAdd(this.anchor, this.anchor, up, 4 * k);
           this.anchorSet = true;
         }
         vec3.copy(this.pos, this.anchor);
@@ -101,11 +104,11 @@ export class CameraRig {
       case 'target': {
         // slow cinematic auto-orbit
         this.orbitYaw += dt * 0.15;
-        const d = 70;
+        const d = 70 * k;
         vec3.set(
           this.pos,
           model.pos[0] + Math.sin(this.orbitYaw) * d,
-          model.pos[1] + 18,
+          model.pos[1] + 18 * k,
           model.pos[2] + Math.cos(this.orbitYaw) * d,
         );
         mat4.lookAt(this.view, this.pos, model.pos, UP);
