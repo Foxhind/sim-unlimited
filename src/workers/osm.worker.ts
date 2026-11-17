@@ -171,7 +171,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
     };
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false });
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
     const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });

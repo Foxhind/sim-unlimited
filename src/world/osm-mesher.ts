@@ -1,5 +1,6 @@
 import earcut from 'earcut';
-import { LIGHT, RAMP, rampIndex, snowy, withGlow } from '../engine/palette';
+import { colourOf, isMaterial, LIGHT, RAMP, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
+import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
@@ -22,6 +23,11 @@ export interface OsmMeshOptions {
    * lies on its face; without it they are draped on `sampleHeight` (subdivided to maxEdgeMeters).
    */
   tin?: TerrainTin;
+  /**
+   * Imagery colour of a TIN face (the terrain mesh's own). With it, filtered areas (AreaStyle.filter)
+   * take the colour of the face under each piece in soft light with their filter colour.
+   */
+  faceColor?: FaceColor;
 }
 
 type P2 = [number, number];
@@ -129,10 +135,26 @@ interface AreaStyle {
   ramp: number;
   bias: number;
   water: boolean;
+  /**
+   * A colour filter instead of a solid fill: each piece takes the imagery colour of the terrain face
+   * under it in soft light with this colour (palette softLight), so the ground keeps its own
+   * pattern. Where the face has no imagery colour (or no faceColor is given), `ramp` is drawn.
+   */
+  filter?: RGB;
 }
 
 /** open ground (fields, parks, beaches...): snow covers it in winter */
-const ground = (ramp: number, bias: number): AreaStyle => ({ ramp: snowy(ramp), bias, water: false });
+const ground = (ramp: number, bias: number, filter?: RGB): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter });
+
+/** soft-light filter colours of open ground: channels above mid grey lighten the imagery, below darken */
+const FILTER = {
+  SCRUB: [72, 120, 56] as RGB,
+  FIELD: [128, 200, 72] as RGB,
+  GRASS: [104, 192, 80] as RGB,
+  WETLAND: [88, 144, 112] as RGB,
+  SAND: [224, 204, 150] as RGB,
+  ROCK: [150, 138, 122] as RGB,
+};
 
 function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
   const natural = tags.natural;
@@ -147,15 +169,15 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
     return { ramp: RAMP.ASPHALT, bias: 1.0, water: false };
   }
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
-  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6);
-  if (natural === 'beach') return ground(RAMP.SAND, 0.6);
-  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6);
-  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6);
+  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, FILTER.SCRUB);
+  if (natural === 'beach') return ground(RAMP.SAND, 0.6, FILTER.SAND);
+  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, FILTER.ROCK);
+  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, FILTER.FIELD);
   if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course' || leisure === 'pitch') {
-    return ground(RAMP.GRASS, 0.6);
+    return ground(RAMP.GRASS, 0.6, FILTER.GRASS);
   }
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
-  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5);
+  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5, FILTER.WETLAND);
   return undefined;
 }
 
@@ -327,15 +349,27 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
     return [(((lon + 180) / 360) * n - tile.x) * g, (merc * n - tile.y) * g];
   };
+  /** imagery colour of a face, once per face (undefined: none, a material ramp) */
+  const faceRgb = new Map<(typeof faces)[number], RGB | undefined>();
+  const imageryOf = (f: (typeof faces)[number]): RGB | undefined => {
+    if (!opts.faceColor) return undefined;
+    if (faceRgb.has(f)) return faceRgb.get(f);
+    const packed = opts.faceColor(f.c[0][0], f.c[0][1], f.c[1][0], f.c[1][1], f.c[2][0], f.c[2][1]);
+    const rgb = isMaterial(packed) ? undefined : rgbOf(packed);
+    faceRgb.set(f, rgb);
+    return rgb;
+  };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main): void => {
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: RGB): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
       const piece = clipToTriangle(tri, f.c);
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
-      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], ramp, out);
+      const under = filter && imageryOf(f);
+      const col = under ? snowy(colourOf(softLight(under, filter))) : ramp;
+      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out);
     }
   };
   /** a segment cut by the terrain faces it crosses: GL line pairs lying on them */
@@ -401,7 +435,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       // cut by the terrain's faces: a piece is coplanar with the face under it, so the terrain
       // cannot show through (a draped triangle spans its creases and it did, in saw-teeth)
       const lp = lls.map(toLattice);
-      for (let i = 0; i < tris.length; i += 3) onFaces([lp[tris[i]], lp[tris[i + 1]], lp[tris[i + 2]]], style.ramp, style.bias);
+      for (let i = 0; i < tris.length; i += 3) onFaces([lp[tris[i]], lp[tris[i + 1]], lp[tris[i + 2]]], style.ramp, style.bias, main, style.filter);
       return;
     }
     const pts = lls.map(([lon, lat]) => makePt(lon, lat, groundY(lon, lat, style.bias)));

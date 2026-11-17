@@ -176,7 +176,7 @@ const MATERIALS: MaterialRamp[] = [
   { dark: [48, 40, 32], light: [148, 132, 112] }, // rock
   { dark: [56, 60, 64], light: [188, 192, 196] }, // hull light
   { dark: [20, 24, 28], light: [88, 96, 104] }, // hull dark
-  { dark: [72, 64, 24], light: [164, 148, 72] }, // field
+  { dark: [48, 84, 24], light: [140, 188, 80] }, // field
 ];
 
 /** frozen inland water: light grey ice */
@@ -439,6 +439,21 @@ export function saturate(c: RGB, k: number): RGB {
   const y = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
   const f = (v: number) => Math.max(0, Math.min(255, y + (v - y) * k));
   return [f(c[0]), f(c[1]), f(c[2])];
+}
+
+/**
+ * A filter colour over a base colour in soft-light mode (W3C compositing): each channel of the
+ * filter above mid grey lightens the base, below it darkens, so the base keeps its own contrast.
+ * `strength` 0..1 lerps from the base to the full blend.
+ */
+export function softLight(base: RGB, filter: RGB, strength = 1): RGB {
+  const ch = (b255: number, s255: number): number => {
+    const b = b255 / 255, s = s255 / 255;
+    const d = b <= 0.25 ? ((16 * b - 12) * b + 4) * b : Math.sqrt(b);
+    const r = s <= 0.5 ? b - (1 - 2 * s) * b * (1 - b) : b + (2 * s - 1) * (d - b);
+    return (b + (r - b) * strength) * 255;
+  };
+  return [ch(base[0], filter[0]), ch(base[1], filter[1]), ch(base[2], filter[2])];
 }
 
 function scaleRGB(c: RGB, p: PaletteParams): RGB {
