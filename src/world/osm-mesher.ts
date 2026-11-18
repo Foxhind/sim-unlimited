@@ -1,7 +1,7 @@
 import earcut from 'earcut';
-import { colourOf, isMaterial, LIGHT, RAMP, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LIGHT, RAMP, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
 import type { FaceColor } from './landsat';
-import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
@@ -229,6 +229,39 @@ function classifyLine(tags: Record<string, string>): LineStyle | undefined {
   if (tags.aeroway === 'runway' || tags.aeroway === 'taxiway') return { ramp: RAMP.ASPHALT, width: 30 };
   return undefined;
 }
+
+/**
+ * A road or railway under the ground: no ribbon over the hill above it, only its portals.
+ * `building_passage` runs under a building and is open to the sky on both sides of it.
+ */
+export function isTunnel(tags: Record<string, string>): boolean {
+  const t = tags.tunnel;
+  return !!t && t !== 'no' && t !== 'building_passage' && (tags.highway !== undefined || tags.railway !== undefined);
+}
+
+/** shape of a tunnel portal: an arch tube from the mouth into the hill, metres */
+const PORTAL = {
+  /** between the carriageway's edge and the wall */
+  CLEARANCE: 1,
+  /** the shell's thickness */
+  WALL: 1.2,
+  /** walls rise this high above the road before the arch springs */
+  SPRING: 2.5,
+  /** the arch's rise over the springing line at most (a wide road gets a flat arch, not a dome) */
+  RISE: 5,
+  /** walls reach this far below the road, so no gap opens on a slope */
+  FOOT: 1.5,
+  /** tube rings this far apart along the tunnel */
+  STEP: 6,
+  /** the tube ends where the hill buries it, at most this long (and half the tunnel) */
+  MAX: 120,
+  /** sides of the arch */
+  SIDES: 10,
+};
+/** the tube's inside and its far cap: the dark of a tunnel seen from outside */
+const TUNNEL_DARK = colour(16, 16, 18);
+/** the tube's outside when there is no imagery under it */
+const TUNNEL_EARTH = colour(112, 94, 70);
 
 export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const { tile, sampleHeight } = opts;
@@ -498,7 +531,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /** how a line is drawn: undefined when it is not drawn at all */
   const lineLook = (line: OsmLine) => {
     const style = classifyLine(line.tags);
-    if (!style || line.points.length < 2) return undefined;
+    if (!style || line.points.length < 2 || isTunnel(line.tags)) return undefined;
     const road = !!line.tags.highway;
     const lit = road && isLitRoad(line.tags);
     return {
@@ -635,10 +668,180 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     emitTri(a, d, e, RAMP.ASPHALT);
   };
 
+  /** colour of the terrain's imagery at a point (a face colour, snow-capable); earth without imagery */
+  const groundColourAt = (lon: number, lat: number): number => {
+    if (tin && opts.faceColor) {
+      const [x, y] = toLattice([lon, lat]);
+      for (const f of facesNear(x - 1e-6, y - 1e-6, x + 1e-6, y + 1e-6)) {
+        const w1 = ((x - f.c[0][0]) * (f.c[2][1] - f.c[0][1]) - (f.c[2][0] - f.c[0][0]) * (y - f.c[0][1])) / f.det;
+        const w2 = ((f.c[1][0] - f.c[0][0]) * (y - f.c[0][1]) - (x - f.c[0][0]) * (f.c[1][1] - f.c[0][1])) / f.det;
+        if (w1 < -1e-9 || w2 < -1e-9 || w1 + w2 > 1 + 1e-9) continue;
+        const rgb = imageryOf(f);
+        if (rgb) return snowy(colourOf(rgb));
+        break;
+      }
+    }
+    return snowy(TUNNEL_EARTH);
+  };
+
+  /** a segment of a drawn road or railway, ENU metres, with its half width */
+  interface Over { a: [number, number]; b: [number, number]; half: number }
+  /** where segment pq crosses segment ab, as a fraction of pq; undefined when they do not cross */
+  const crossAt = (p: [number, number], q: [number, number], a: [number, number], b: [number, number]): number | undefined => {
+    const rx = q[0] - p[0], rz = q[1] - p[1], sx = b[0] - a[0], sz = b[1] - a[1];
+    const den = rx * sz - rz * sx;
+    if (Math.abs(den) < 1e-9) return undefined;
+    const t = ((a[0] - p[0]) * sz - (a[1] - p[1]) * sx) / den;
+    const u = ((a[0] - p[0]) * rz - (a[1] - p[1]) * rx) / den;
+    return t > 0 && t < 1 && u >= 0 && u <= 1 ? t : undefined;
+  };
+
+  /**
+   * A tunnel's mouth: a dark arched opening at the road, framed by a tube of the ground's colour
+   * that runs on along the tunnel's line, level with the road at the mouth, until the hill buries
+   * it. `points` start at the portal and run into the tunnel.
+   */
+  const buildPortal = (points: LonLat[], half: number, over: Over[]): void => {
+    const pe = points.map(([lon, lat]) => enu(lon, lat));
+    const cum = [0];
+    for (let i = 1; i < pe.length; i++) cum.push(cum[i - 1] + Math.hypot(pe[i][0] - pe[i - 1][0], pe[i][1] - pe[i - 1][1]));
+    const total = cum[cum.length - 1];
+    if (total < 1) return;
+    const along = (s: number): [number, number] => {
+      s = Math.max(0, Math.min(total, s));
+      let i = 0;
+      while (i < pe.length - 2 && cum[i + 1] < s) i++;
+      const t = cum[i + 1] > cum[i] ? (s - cum[i]) / (cum[i + 1] - cum[i]) : 0;
+      return [pe[i][0] + (pe[i + 1][0] - pe[i][0]) * t, pe[i][1] + (pe[i + 1][1] - pe[i][1]) * t];
+    };
+    /** position and sideways unit vector of the tube's cross-section at `s` metres in */
+    const frame = (s: number) => {
+      const [x, z] = along(s);
+      const [ax, az] = along(s - PORTAL.STEP / 2), [bx, bz] = along(s + PORTAL.STEP / 2);
+      const tl = Math.hypot(bx - ax, bz - az) || 1;
+      const tx = (bx - ax) / tl, tz = (bz - az) / tl;
+      return { x, z, tx, tz, lx: -tz, lz: tx };
+    };
+    type Frame = ReturnType<typeof frame>;
+
+    const wi = half + PORTAL.CLEARANCE, risei = Math.min(PORTAL.RISE, wi * 0.6);
+    const wo = wi + PORTAL.WALL, riseo = risei + PORTAL.WALL;
+    const [lon0, lat0] = points[0];
+    const floor = Math.max(sampleHeight(lon0, lat0), 0) + LINE_BIAS * biasScale;
+    const crown = floor + PORTAL.SPRING + riseo;
+    const heightAt = (x: number, z: number): number => {
+      const ll = enuToLatLon(center, x, -z, 0);
+      return sampleHeight(ll.lon, ll.lat);
+    };
+
+    // a road or railway over the tunnel is its cover (an underpass under an embankment the DEM does
+    // not have): the tube stops short of it instead of rising over it
+    let length = Math.min(PORTAL.MAX, total / 2);
+    for (const r of over) {
+      for (let i = 0; i + 1 < pe.length; i++) {
+        const t = crossAt(pe[i], pe[i + 1], r.a, r.b);
+        if (t !== undefined) length = Math.min(length, cum[i] + t * (cum[i + 1] - cum[i]) - r.half - PORTAL.WALL);
+      }
+    }
+    // the mouth itself is under that road: the tunnel just goes in beneath it
+    if (length < 2) return;
+    // rings every STEP until the hill covers the tube's crown and both its sides
+    const rings: Frame[] = [];
+    for (let s = 0; ; s += PORTAL.STEP) {
+      const f = frame(Math.min(s, length));
+      rings.push(f);
+      if (s >= length) break;
+      if (s > 0 && [0, -wo, wo].every((u) => heightAt(f.x + f.lx * u, f.z + f.lz * u) >= crown)) break;
+    }
+
+    /** cross-section from the left foot up the wall, over the arch and down to the right foot */
+    const profile = (w: number, rise: number): P2[] => {
+      const p: P2[] = [[-w, -PORTAL.FOOT], [-w, PORTAL.SPRING]];
+      for (let k = 1; k < PORTAL.SIDES; k++) {
+        const a = Math.PI * (1 - k / PORTAL.SIDES);
+        p.push([w * Math.cos(a), PORTAL.SPRING + rise * Math.sin(a)]);
+      }
+      p.push([w, PORTAL.SPRING], [w, -PORTAL.FOOT]);
+      return p;
+    };
+    const inner = profile(wi, risei), outer = profile(wo, riseo);
+    const at = (f: Frame, [u, y]: P2): number[] => [f.x + f.lx * u, floor + y, f.z + f.lz * u];
+    const tri = (a: number[], b: number[], c: number[], n: number[], ramp: number): void => {
+      for (const q of [a, b, c]) {
+        roads.verts.push(q[0], q[1], q[2], n[0], n[1], n[2]);
+        roads.ramps.push(ramp);
+      }
+    };
+    const quad = (a: number[], b: number[], c: number[], d: number[], n: number[], ramp: number): void => {
+      tri(a, b, c, n, ramp);
+      tri(a, c, d, n, ramp);
+    };
+    /** a surface swept along the profile from ring a to ring b; `out` 1 faces away from the axis */
+    const sweep = (prof: P2[], a: Frame, b: Frame, out: 1 | -1, ramp: number): void => {
+      for (let j = 0; j + 1 < prof.length; j++) {
+        const du = prof[j + 1][0] - prof[j][0], dy = prof[j + 1][1] - prof[j][1], len = Math.hypot(du, dy) || 1;
+        const nu = (-dy / len) * out, ny = (du / len) * out;
+        quad(at(a, prof[j]), at(b, prof[j]), at(b, prof[j + 1]), at(a, prof[j + 1]), [a.lx * nu, ny, a.lz * nu], ramp);
+      }
+    };
+    /** the profile's area filled at a ring, facing along `sign` × the tunnel's direction */
+    const cap = (prof: P2[], f: Frame, sign: 1 | -1, ramp: number): void => {
+      const c = at(f, [0, PORTAL.SPRING]);
+      for (let j = 0; j + 1 < prof.length; j++) tri(c, at(f, prof[j]), at(f, prof[j + 1]), [f.tx * sign, 0, f.tz * sign], ramp);
+      tri(c, at(f, prof[prof.length - 1]), at(f, prof[0]), [f.tx * sign, 0, f.tz * sign], ramp);
+    };
+
+    const last = rings[rings.length - 1];
+    const lastLl = enuToLatLon(center, last.x, -last.z, 0);
+    // the hillside the tube runs into, not the road cut at the mouth
+    const earth = groundColourAt(lastLl.lon, lastLl.lat);
+    for (let i = 0; i + 1 < rings.length; i++) sweep(outer, rings[i], rings[i + 1], 1, earth);
+    // the far end, in case the hill leaves it open
+    cap(outer, last, 1, earth);
+    // the mouth: the shell's cut end around the opening
+    const m = rings[0];
+    for (let j = 0; j + 1 < inner.length; j++) {
+      quad(at(m, inner[j]), at(m, outer[j]), at(m, outer[j + 1]), at(m, inner[j + 1]), [-m.tx, 0, -m.tz], earth);
+    }
+    // the opening: a short dark reveal and the dark beyond it (the hill inside the tube stays hidden)
+    const recess = frame(Math.min(1.5, length / 2));
+    sweep(inner, m, recess, -1, TUNNEL_DARK);
+    cap(inner, recess, -1, TUNNEL_DARK);
+  };
+
+  /** every way end of a tunnel that no other tunnel way continues from, inside this tile */
+  const buildPortals = (): void => {
+    const tunnels = opts.data.lines.filter((l) => l.points.length >= 2 && isTunnel(l.tags));
+    if (!tunnels.length) return;
+    const key = (p: LonLat): string => `${p[0]},${p[1]}`;
+    const ends = new Map<string, number>();
+    for (const l of tunnels) for (const e of [l.points[0], l.points[l.points.length - 1]]) ends.set(key(e), (ends.get(key(e)) ?? 0) + 1);
+    const b = tileBounds(tile);
+    const inTile = ([lon, lat]: LonLat): boolean => lon >= b.west && lon < b.east && lat >= b.south && lat < b.north;
+    let over: Over[] | undefined;
+    for (const l of tunnels) {
+      const style = classifyLine(l.tags);
+      if (!style) continue;
+      const first = l.points[0], lastPt = l.points[l.points.length - 1];
+      const atFirst = inTile(first) && ends.get(key(first)) === 1, atLast = inTile(lastPt) && ends.get(key(lastPt)) === 1;
+      if (!atFirst && !atLast) continue;
+      over ??= opts.data.lines.flatMap((r) => {
+        if ((!r.tags.highway && !r.tags.railway) || isTunnel(r.tags)) return [];
+        const rs = classifyLine(r.tags);
+        if (!rs) return [];
+        const pts = r.points.map(([lon, lat]) => enu(lon, lat));
+        return pts.slice(1).map((b, i) => ({ a: pts[i], b, half: rs.width / 2 }));
+      });
+      if (atFirst) buildPortal(l.points, style.width / 2, over);
+      if (atLast) buildPortal([...l.points].reverse(), style.width / 2, over);
+    }
+  };
+
   for (const area of data.areas) buildArea(area);
   for (const line of data.lines) buildLine(line);
   if (tin) for (const line of opts.data.lines) buildRibbon(line);
   for (const p of data.points) buildPoint(p);
+  buildPortals();
 
   if (opts.buildings !== false && data.buildings.length) {
     const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight });

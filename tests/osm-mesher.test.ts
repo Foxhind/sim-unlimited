@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, snowy, withGlow } from '../src/engine/palette';
+import { colour, RAMP, snowy, withGlow } from '../src/engine/palette';
 import { enuToLatLon, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
-import { buildOsmMesh, osmWidthM } from '../src/world/osm-mesher';
+import { buildOsmMesh, isTunnel, osmWidthM } from '../src/world/osm-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
@@ -366,5 +366,112 @@ describe('line widths from OSM', () => {
     const fetched = (v: string) => sel.some((s) => s.type === 'way' && s.clauses.some((c) => c.key === 'waterway' && c.re?.test(v)));
     for (const ww of ['river', 'riverbank', 'canal', 'stream', 'brook', 'ditch', 'drain']) expect(fetched(ww)).toBe(true);
     expect(fetched('dam')).toBe(false);
+  });
+});
+
+describe('tunnels', () => {
+  const b = tileBounds(TILE);
+  const center = tileCenter(TILE);
+  const lat = (b.north + b.south) / 2;
+  const lonA = b.west + (b.east - b.west) * 0.3, lonB = b.west + (b.east - b.west) * 0.7;
+  const tags = { highway: 'trunk', tunnel: 'yes', layer: '-1', lit: 'yes', lanes: '2' };
+  /** a ridge between the portals: 100 m outside, up to 400 m over the middle */
+  const ridge = (lon: number) => 100 + (lon > lonA && lon < lonB ? 300 * Math.sin((Math.PI * (lon - lonA)) / (lonB - lonA)) : 0);
+  const DARK = colour(16, 16, 18);
+  const data = (lines: OsmTileData['lines']): OsmTileData => ({ areas: [], lines, points: [], buildings: [] });
+  const xOf = (lon: number) => {
+    const ll = enuToLatLon(center, 0, 0, 0);
+    return ((lon - ll.lon) / (b.east - b.west)) * tileSizeMeters(TILE);
+  };
+
+  it('tunnel=yes is a tunnel; building_passage and tunnel=no are not', () => {
+    expect(isTunnel({ highway: 'primary', tunnel: 'yes' })).toBe(true);
+    expect(isTunnel({ railway: 'rail', tunnel: 'yes' })).toBe(true);
+    expect(isTunnel({ highway: 'service', tunnel: 'building_passage' })).toBe(false);
+    expect(isTunnel({ highway: 'primary', tunnel: 'no' })).toBe(false);
+    expect(isTunnel({ waterway: 'stream', tunnel: 'culvert' })).toBe(false);
+  });
+
+  it('no ribbon, line or lamps over the hill: only a portal at each end, buried before the crest', () => {
+    const m = mesh(data([{ points: [[lonA, lat], [lonB, lat]], tags }]), (lon) => ridge(lon));
+    expect(m.roadLines.length).toBe(0);
+    expect(m.lamps.length).toBe(0);
+    expect(m.roads.vertexCount).toBeGreaterThan(0);
+    const xa = xOf(lonA), xb = xOf(lonB);
+    let dark = 0;
+    for (let i = 0; i < m.roads.vertexCount; i++) {
+      const x = m.roads.vertices[i * 6], y = m.roads.vertices[i * 6 + 1];
+      // within a short tube of one of the mouths, never up on the ridge
+      expect(Math.min(Math.abs(x - xa), Math.abs(x - xb))).toBeLessThan(60);
+      expect(y).toBeLessThan(120);
+      if (m.roads.ramps[i] === DARK) dark++;
+    }
+    expect(dark).toBeGreaterThan(0);
+  });
+
+  it('the dark opening faces out of the tunnel, back along the road', () => {
+    const m = mesh(data([{ points: [[lonA, lat], [lonB, lat]], tags }]), (lon) => ridge(lon));
+    const xa = xOf(lonA);
+    let facing = 0;
+    for (let i = 0; i < m.roads.vertexCount; i++) {
+      if (m.roads.ramps[i] !== DARK || Math.abs(m.roads.vertices[i * 6] - xa) > 60) continue;
+      // the western mouth looks west (-x); its reveal walls look sideways or down
+      if (Math.abs(m.roads.vertices[i * 6 + 3]) > 0.5) { expect(m.roads.vertices[i * 6 + 3]).toBeLessThan(0); facing++; }
+    }
+    expect(facing).toBeGreaterThan(0);
+  });
+
+  it('a tunnel split into two ways keeps two portals, none at the joint', () => {
+    const mid = (lonA + lonB) / 2;
+    const whole = mesh(data([{ points: [[lonA, lat], [mid, lat], [lonB, lat]], tags }]), (lon) => ridge(lon));
+    const split = mesh(data([
+      { points: [[lonA, lat], [mid, lat]], tags },
+      { points: [[mid, lat], [lonB, lat]], tags },
+    ]), (lon) => ridge(lon));
+    expect(split.roads.vertexCount).toBe(whole.roads.vertexCount);
+  });
+
+  it("a portal outside the tile is the neighbour's", () => {
+    const outside = b.east + (b.east - b.west) * 0.1;
+    const m = mesh(data([{ points: [[lonB, lat], [outside, lat]], tags }]), () => 100);
+    const xb = xOf(lonB);
+    for (let i = 0; i < m.roads.vertexCount; i++) expect(Math.abs(m.roads.vertices[i * 6] - xb)).toBeLessThan(130);
+  });
+
+  it('under a road the tube stops short of it instead of rising over it', () => {
+    const mid = (lonA + lonB) / 2;
+    const dLat = (b.north - b.south) * 0.2;
+    const short: OsmTileData['lines'] = [{ points: [[mid - 0.0002, lat], [mid + 0.0002, lat]], tags: { highway: 'tertiary', tunnel: 'yes', layer: '-1' } }];
+    const road = { points: [[mid, lat - dLat], [mid, lat + dLat]] as [number, number][], tags: { highway: 'trunk', lanes: '2' } };
+    const m = mesh(data([...short, road]), flat);
+    // the trunk road's own ribbon (1.4 m over the ground) gives its line in the mesh's metres
+    let sum = 0, n = 0;
+    for (let i = 0; i < m.roads.vertexCount; i++) if (Math.abs(m.roads.vertices[i * 6 + 1] - 101.4) < 0.01 && m.roads.ramps[i] !== DARK) { sum += m.roads.vertices[i * 6]; n++; }
+    const xm = sum / n;
+    // its 3.5 m half plus the wall stay clear of the portals' geometry
+    for (let i = 0; i < m.roads.vertexCount; i++) {
+      // (its street lamps are HULL_DARK boxes beside it)
+      if (m.roads.vertices[i * 6 + 1] > 101.5 && m.roads.ramps[i] !== RAMP.HULL_DARK) expect(Math.abs(m.roads.vertices[i * 6] - xm)).toBeGreaterThan(3.5 + 1.2 - 0.01);
+    }
+  });
+
+  it('no portal where the road over the tunnel covers the mouth itself', () => {
+    const dLon = (b.east - b.west) * 0.2;
+    const tunnel = { points: [[lonA, lat - 0.0002], [lonA, lat + 0.0002]] as [number, number][], tags: { highway: 'tertiary', tunnel: 'yes' } };
+    // a 20 m road 3 m off the northern mouth, crossing the tunnel
+    const off = 0.0002 - 3 / 111_320;
+    const road = { points: [[lonA - dLon, lat + off], [lonA + dLon, lat + off]] as [number, number][], tags: { highway: 'trunk', lit: 'no' } };
+    const both = mesh(data([tunnel, road]), flat);
+    const alone = mesh(data([tunnel]), flat);
+    const darkOf = (m: typeof both) => Array.from(m.roads.ramps).filter((r) => r === DARK).length;
+    // one mouth's worth of dark: the southern one; the northern is under the road
+    expect(darkOf(alone)).toBeGreaterThan(0);
+    expect(darkOf(both)).toBe(darkOf(alone) / 2);
+  });
+
+  it('a building passage is still drawn as a road', () => {
+    const m = mesh(data([{ points: [[lonA, lat], [lonB, lat]], tags: { highway: 'service', tunnel: 'building_passage' } }]), flat);
+    expect(m.roadLines.length).toBeGreaterThan(0);
+    for (let i = 0; i < m.roads.vertexCount; i++) expect(m.roads.ramps[i]).not.toBe(DARK);
   });
 });

@@ -19,7 +19,7 @@ import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 26;
+export const OSM_MESH_SCHEMA = 27;
 
 export interface OsmRequest {
   type: 'osm';
