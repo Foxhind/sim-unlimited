@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -61,24 +61,64 @@ vec3 shadeRgb(vec3 c, uint s, uint lvl) {
   return mix(imageryShade(c, 11.0, lvl), uHaze, float(s - 11u) / 4.0);
 }
 `;
+/**
+ * The light on a face (palette.ts sunlight, lightUniforms): skylight from every side in the sky's
+ * hue, plus direct light from the sun and the moon by Lambert. The sunlight's colour comes from
+ * the air it crosses (SUN_TAU, the Kasten & Young air mass) to the face's own height, over the
+ * horizon as seen from there: a low sun lights the faces turned to it yellow to red while the
+ * shade stays blue or violet, and peaks and clouds keep the red light after the ground lost it.
+ * uSun / uMoon: the true directions; uSky rgb the skylight's hue, a its share; uDirect x the sun's
+ * strength through the weather, y the moon's, z how strongly the colours tint the faces.
+ * sceneLight → rgb the tint (luminance 1), a the brightness 0..1 (the lighting step / 11).
+ */
+const SUNLIGHT_GLSL = `
+uniform vec3 uSun;
+uniform vec3 uMoon;
+uniform vec4 uSky;
+uniform vec4 uDirect;
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+vec4 sunlightAt(float height) {
+  float h = max(height, 0.0);
+  float e = asin(clamp(uSun.y, -1.0, 1.0)) + sqrt(2.0 * h / ${EARTH_R.toFixed(1)});
+  float vis = smoothstep(-0.01, 0.02, e);
+  if (vis <= 0.0) return vec4(1.0, 1.0, 1.0, 0.0);
+  float ed = max(degrees(e), -0.5);
+  float m = exp(-h / 8000.0) / (sin(radians(ed)) + 0.50572 * pow(ed + 6.07995, -1.6364));
+  vec3 t = exp(-vec3(${SUN_TAU.map((v) => v.toFixed(3)).join(', ')}) * max(m - 1.0, 0.0));
+  return vec4(t / t.r, vis * (0.8 + 0.2 * dot(t, LUMA)));
+}
+vec4 sceneLight(vec3 n, float height) {
+  vec4 sun = sunlightAt(height);
+  float a = uSky.a;
+  float ds = (1.0 - a) * max(dot(n, uSun), 0.0) * sun.a * uDirect.x;
+  float dm = (1.0 - a) * max(dot(n, uMoon), 0.0) * uDirect.y;
+  // the hue goes from the sky's (shade) to the direct light's as a face turns to it
+  vec3 dir = (ds * sun.rgb + vec3(dm)) / max(ds + dm, 1e-4);
+  dir /= max(dot(dir, LUMA), 1e-3);
+  vec3 c = mix(uSky.rgb, dir, sqrt(clamp((ds + dm) / (1.0 - a), 0.0, 1.0)));
+  return vec4(mix(vec3(1.0), c, uDirect.z), min(a + ds + dm, 1.0));
+}
+`;
 const GLOW_VS = `
 uniform int uGlow;
 uniform int uSnow;
 ${COLOUR_GLSL}
-vec3 shadeColour(uint packedRamp, float litStep, float fog) {
+// tint: the colour of the light on the face (sceneLight), faded out with the fog; street-lit faces keep their own light
+vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint) {
   // a light source: its own colour at full strength, seen through half the haze
   if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), uHaze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));
+  vec3 k = lvl > 0u ? vec3(1.0) : mix(tint, vec3(1.0), clamp((float(s) - 11.0) / 4.0, 0.0, 1.0));
   bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;
   if (snow || (packedRamp & ${MATERIAL_FLAG}u) != 0u) {
     uint ramp = snow ? ${MAT.SNOW}u : packedRamp & ${PAYLOAD_MASK}u;
-    return lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + s);
+    return min(lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + s) * k, 1.0);
   }
-  return shadeRgb(rgbOf(packedRamp), s, lvl);
+  return min(shadeRgb(rgbOf(packedRamp), s, lvl) * k, 1.0);
 }
-`;
+${SUNLIGHT_GLSL}`;
 
 /**
  * Rim light (rim.ts): the edges of faces seen edge-on, turned toward a sun the eye looks into,
@@ -205,12 +245,10 @@ void main() {
   // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
   // by the normal of the side the eye sees, not the other side's
   if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
-  float diff = max(dot(n, uSunDir), 0.0);
-  float lit = 0.30 + 0.70 * diff;
-  float litStep = lit * 11.0;
+  vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vColor = min(shadeColour(aRamp, litStep, fog) + rimLight(n, wp, fog), 1.0);
+  vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb) + rimLight(n, wp, fog), 1.0);
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   vWater = water && !(uSnow == 1 && (aRamp & ${SNOW_FLAG}u) != 0u) ? 1.0 : 0.0;
@@ -280,14 +318,12 @@ void main() {
   // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
   // by the normal of the side the eye sees, not the other side's
   if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
-  float diff = max(dot(n, uSunDir), 0.0);
-  float lit = 0.30 + 0.70 * diff;
-  float litStep = lit * 11.0;
+  vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
-  vColor = min(shadeColour(packed, litStep, fog) + rimLight(n, wp, fog), 1.0);
+  vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -411,10 +447,9 @@ uniform mat4 uInvViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
-// base ground (horizon): camera height above it in m, its face colour, the terrain's light and fog
+// base ground (horizon): camera height above it in m, its face colour and fog
 uniform float uGroundH;
 uniform uint uGroundRamp;
-uniform vec3 uLightDir;
 uniform float uFogStart;
 uniform float uFogEnd;
 // sky glow toward a low sun, 0..1 (palette.ts PaletteParams.glow)
@@ -438,8 +473,8 @@ void main() {
     if (disc >= 0.0) {
       float t = ca > 1e-12 ? (-dir.y - sqrt(disc)) / ca : uDeckDown / -dir.y;
       float fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
-      float lit = 0.30 + 0.70 * max(uLightDir.y, 0.0);
-      oColor = vec4(shadeColour(uDeckColour, lit * 11.0, fog), 1.0);
+      vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uDeckDown);
+      oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb), 1.0);
       return;
     }
   }
@@ -451,7 +486,8 @@ void main() {
       float t = ca > 1e-12 ? (dir.y - sqrt(disc)) / ca : uDeckUp / dir.y;
       fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
     }
-    oColor = vec4(shadeColour(uDeckColour, 0.30 * 11.0, fog), 1.0);
+    vec4 lit = sceneLight(vec3(0.0, -1.0, 0.0), uCamPos.y + uDeckUp);
+    oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb), 1.0);
     return;
   }
   // Base ground: a flat face colour on the curved Earth below the camera (the world shader's
@@ -464,8 +500,8 @@ void main() {
       float t = a > 1e-12 ? (-dir.y - sqrt(disc)) / a : uGroundH / -dir.y;
       float fog = clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
       fog = floor(fog * 12.0) / 12.0;
-      float lit = 0.30 + 0.70 * max(uLightDir.y, 0.0);
-      oColor = vec4(shadeColour(uGroundRamp, lit * 11.0, fog), 1.0);
+      vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
+      oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb), 1.0);
       if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) {
         vec4 g = glitter(dir);
         if (g.a > 0.0) oColor = vec4(g.rgb, 1.0);

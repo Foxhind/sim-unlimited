@@ -207,6 +207,11 @@ export interface PaletteParams {
   tint: RGB;
   /** colour saturation of lit surfaces (1 = as they are), applied before the light */
   saturation: number;
+  /**
+   * colour of the skylight that lights the faces turned away from the sun (any brightness: only
+   * its hue counts, SUNLIGHT_GLSL): blue under a clear sky, violet at dusk, plain under cloud
+   */
+  ambient: RGB;
 }
 
 /**
@@ -227,6 +232,7 @@ const NIGHT: PaletteParams = {
   lightMul: 0.22,
   tint: [0.55, 0.65, 1.0],
   saturation: 1,
+  ambient: [1, 1, 1],
 };
 /**
  * Sunset and sunrise (sun on the horizon): a violet zenith, magenta-pink half-way down, coral
@@ -246,6 +252,7 @@ const DUSK: PaletteParams = {
   lightMul: 0.58,
   tint: [1.0, 0.66, 0.74],
   saturation: 1.15,
+  ambient: [0.8, 0.78, 1.3],
 };
 /**
  * Sunrise (sun on the horizon, rising): the same glow as the sunset in the cool colours of a
@@ -264,6 +271,7 @@ const DAWN: PaletteParams = {
   lightMul: 0.62,
   tint: [0.82, 0.92, 1.06],
   saturation: 1.1,
+  ambient: [0.82, 0.92, 1.25],
 };
 /** daylight under a cloudy sky: the plain, even light */
 const DAY: PaletteParams = {
@@ -271,6 +279,7 @@ const DAY: PaletteParams = {
   lightMul: 1.0,
   tint: [1, 1, 1],
   saturation: 1,
+  ambient: [0.97, 0.99, 1.04],
 };
 /**
  * daylight in good weather (sunniness 1): a deep blue zenith over a bright clear horizon, warm
@@ -281,6 +290,7 @@ const SUNNY_DAY: PaletteParams = {
   lightMul: 1.12,
   tint: [1.0, 0.97, 0.88],
   saturation: 1.4,
+  ambient: [0.86, 0.95, 1.18],
 };
 
 /** total cloud cover up to this is fully sunny weather, from SUNNY_OVERCAST_PCT on none */
@@ -403,6 +413,7 @@ function lerpParams(a: PaletteParams, b: PaletteParams, t: number): PaletteParam
     lightMul: lerp(a.lightMul, b.lightMul, t),
     tint: lerpRGB(a.tint, b.tint, t),
     saturation: lerp(a.saturation, b.saturation, t),
+    ambient: lerpRGB(a.ambient, b.ambient, t),
   };
 }
 
@@ -486,15 +497,75 @@ export interface LightUniforms {
    * e.g. frozen water), then rgb 0..1 of its core (next to the sun's line) and of its edges
    */
   glitter: Float32Array;
+  /** skylight (SUNLIGHT_GLSL uSky): rgb its hue (luminance 1), a its share of a face's light 0..1 */
+  sky: Float32Array;
+  /**
+   * direct light (SUNLIGHT_GLSL uDirect): x the sun's strength through the weather 0..1, y the
+   * moon's (its elevation and phase, set per frame by the caller, 0 by default), z how much the
+   * light's colour tints faces 0..1, w unused
+   */
+  direct: Float32Array;
 }
 
-export function lightUniforms(p: PaletteParams): LightUniforms {
+/** the skylight's share of a face's light under a clear sky and under overcast */
+const AMBIENT_CLEAR = 0.3;
+const AMBIENT_OVERCAST = 0.55;
+/** how far the light's colour tints faces (1: the full colour of the sun and the sky) */
+const LIGHT_TINT = 0.7;
+const LUMA: RGB = [0.299, 0.587, 0.114];
+const luma = (c: RGB): number => c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
+
+/**
+ * `sunny` (0..1, sunniness): a clear sky gives hard sunlight and dark shade, overcast soft even
+ * light, mostly from the sky.
+ */
+export function lightUniforms(p: PaletteParams, sunny = 1): LightUniforms {
   const levels = new Float32Array((GLOW_LEVELS + 1) * 3);
   for (let k = 0; k <= GLOW_LEVELS; k++) {
     const q = k === 0 ? p : glowParams(p, k);
     for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
   }
-  return { levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p) };
+  const clear = Math.max(0, Math.min(1, sunny));
+  const y = luma(p.ambient);
+  return {
+    levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p),
+    sky: Float32Array.from([p.ambient[0] / y, p.ambient[1] / y, p.ambient[2] / y, lerp(AMBIENT_OVERCAST, AMBIENT_CLEAR, clear)]),
+    direct: Float32Array.from([0.5 + 0.5 * clear, 0, LIGHT_TINT, 0]),
+  };
+}
+
+/**
+ * Optical depth of the clear air toward the zenith from sea level at red, green and blue
+ * (Rayleigh + a little haze): low sunlight crosses more air, loses its blue and green first and
+ * turns yellow, orange, then red (SUNLIGHT_GLSL).
+ */
+export const SUN_TAU: RGB = [0.08, 0.14, 0.26];
+/** scale height of the air, m: the air mass above a point falls off with its height */
+const AIR_SCALE_H = 8000;
+const EARTH_R = 6371000;
+
+/**
+ * Sunlight reaching a point `heightM` above sea level while the sun stands `sinElev` (sine of its
+ * elevation over the sea-level horizon) — the CPU mirror of SUNLIGHT_GLSL sunlightAt. A raised
+ * point sees over the curve of the Earth (the horizon dips by sqrt(2h/R)), so peaks and clouds
+ * keep the low red sun a while after the ground below has lost it, and crosses less air.
+ * rgb: its colour, 0..1, the strongest channel 1 (white with the sun high); strength 0..1.
+ */
+export function sunlight(sinElev: number, heightM = 0): { rgb: RGB; strength: number } {
+  const h = Math.max(0, heightM);
+  const e = Math.asin(Math.max(-1, Math.min(1, sinElev))) + Math.sqrt((2 * h) / EARTH_R);
+  const vis = smoothstep(-0.01, 0.02, e);
+  if (vis <= 0) return { rgb: [1, 1, 1], strength: 0 };
+  const ed = Math.max((e * 180) / Math.PI, -0.5);
+  // Kasten & Young (1989) air mass, thinned with the height
+  const m = (1 / (Math.sin((ed * Math.PI) / 180) + 0.50572 * (ed + 6.07995) ** -1.6364)) * Math.exp(-h / AIR_SCALE_H);
+  const t = SUN_TAU.map((tau) => Math.exp(-tau * Math.max(m - 1, 0))) as unknown as RGB;
+  return { rgb: [1, t[1] / t[0], t[2] / t[0]], strength: vis * (0.8 + 0.2 * luma(t)) };
+}
+
+function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
 }
 
 /** glitter colours: a pale gold core lit by the sun's glow, edges between the glow and the mid sky */
@@ -511,6 +582,8 @@ export const FLASH_LIGHT: LightUniforms = {
   saturation: 1,
   sunGlow: 0,
   glitter: new Float32Array(7),
+  sky: new Float32Array([1, 1, 1, 1]),
+  direct: new Float32Array(4),
 };
 
 /**

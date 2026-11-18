@@ -15,6 +15,9 @@ import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsa
 import { deleteCachedMeshes, isTileMeshKey } from '../world/tile-cache';
 import { PRESETS, SOURCE } from './presets';
 
+/** the relief view is lit by the sun alone */
+const NO_MOON = new Float32Array([0, -1, 0]);
+
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const D2R = Math.PI / 180;
 
@@ -191,6 +194,7 @@ function frame(now: number): void {
   renderer.snow = checked('snow');
   renderer.nightGlow = night;
   renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
+  renderer.setSunMoon(sunDir, NO_MOON);
   // no fog: the view has no single distance to the ground
   chunks.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9);
   if (osmOn) osm.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9, night, POINT_SIZE * dpr);

@@ -151,12 +151,12 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', ...GLITTER_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -166,7 +166,7 @@ export class Renderer {
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
-      'uGroundH', 'uGroundRamp', 'uLightDir', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS,
+      'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
     this.dsU = uniformMap(gl, this.dsProg, [
@@ -315,6 +315,15 @@ export class Renderer {
    * colour at height `ground.y`, shaded and fogged like terrain, so there is a horizon and a ground
    * whether or not the tiles have loaded. Terrain drawn afterwards covers it.
    */
+  /**
+   * The true sun and moon directions the world passes light faces by (SUNLIGHT_GLSL) this frame;
+   * drawSky sets them, a view without a sky sets them itself before drawing.
+   */
+  setSunMoon(sunDir: vec3, moonDir: vec3): void {
+    vec3.copy(this.sunDir, sunDir);
+    vec3.copy(this.skyMoon, moonDir);
+  }
+
   drawSky(view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, moonDir: vec3, ground: BaseGround): void {
     const gl = this.gl;
     mat4.multiply(this.viewProj, proj, view);
@@ -336,7 +345,6 @@ export class Renderer {
     this.skyCover[2] = ground.deck?.down ?? 0;
     gl.uniform1f(this.skyU.uGroundH, Math.max(1, camPos[1] - ground.y));
     gl.uniform1ui(this.skyU.uGroundRamp, ground.ramp >>> 0);
-    gl.uniform3fv(this.skyU.uLightDir, ground.lightDir);
     gl.uniform1f(this.skyU.uFogStart, ground.fogStart);
     gl.uniform1f(this.skyU.uFogEnd, ground.fogEnd);
     gl.uniform1f(this.skyU.uDeckUp, ground.deck?.up ?? 0);
@@ -604,6 +612,12 @@ export class Renderer {
     this.gl.uniform3fv(u.uLight, this.light.levels);
     this.gl.uniform3fv(u.uHaze, this.light.haze);
     this.gl.uniform1f(u.uSat, this.light.saturation);
+    if (u.uSky !== undefined) {
+      this.gl.uniform3fv(u.uSun, this.sunDir);
+      this.gl.uniform3fv(u.uMoon, this.skyMoon);
+      this.gl.uniform4fv(u.uSky, this.light.sky);
+      this.gl.uniform4fv(u.uDirect, this.light.direct);
+    }
     if (u.uGlitter === undefined) return;
     const g = this.light.glitter;
     this.gl.uniform1f(u.uGlitter, g[0]);
@@ -620,8 +634,6 @@ export interface BaseGround {
   y: number;
   /** face colour (palette.ts): sea, or land (with the snow flag) */
   ramp: number;
-  /** direction the terrain is lit from */
-  lightDir: vec3;
   fogStart: number;
   fogEnd: number;
   /**
@@ -656,6 +668,8 @@ type HdrGl = WebGL2RenderingContext & {
 
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime'];
+/** the light on faces (shaders.ts SUNLIGHT_GLSL) */
+const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect'];
 
 /** texture unit the LUT stays bound to */
 const LUT_UNIT = 5;

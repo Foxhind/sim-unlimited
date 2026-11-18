@@ -35,7 +35,7 @@ describe('base ground (horizon without tiles)', () => {
     const { SKY_FS } = await import('../src/engine/shaders');
     expect(WORLD_VS).toContain('wp.y -= (d * d) / (2.0 * 6371000.0);');
     expect(SKY_FS).toContain('max(1.0 - dir.y * dir.y, 0.0) / 6371000.0');
-    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit * 11.0, fog)');
+    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb)');
     expect(SKY_FS).toContain('fog = floor(fog * 12.0) / 12.0;');
   });
 

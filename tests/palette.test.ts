@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, LIGHT, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
-  material, OVERLAY_LUT_BASE, paletteAt, saturate, sunniness, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
+  material, OVERLAY_LUT_BASE, paletteAt, saturate, sunlight, sunniness, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
 } from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
 
@@ -360,5 +360,53 @@ describe('land palette generator', () => {
     expect(p.filter(([r, g, b]) => r === g && g === b).length).toBeGreaterThanOrEqual(16);
     expect(p.some(([r, g, b]) => r > b + 5 && r >= g)).toBe(true); // a warm one
     expect(p.some(([r, g, b]) => g > r + 5 && g > b + 5)).toBe(true); // a green one
+  });
+});
+
+describe('sunlight and skylight', () => {
+  const sumOf = (c: readonly number[]) => c[0] + c[1] + c[2];
+  it('the sun is white high up and turns yellow, orange, then red toward the horizon', () => {
+    const at = (deg: number, h = 0) => sunlight(Math.sin((deg * Math.PI) / 180), h);
+    const noon = at(60);
+    expect(noon.rgb[1]).toBeGreaterThan(0.95);
+    expect(noon.rgb[2]).toBeGreaterThan(0.9);
+    expect(noon.strength).toBeGreaterThan(0.95);
+    let prev = noon;
+    for (const deg of [30, 15, 8, 4, 1]) {
+      const s = at(deg);
+      expect(s.rgb[0]).toBe(1);
+      expect(s.rgb[2]).toBeLessThan(prev.rgb[2]);
+      expect(s.rgb[1]).toBeLessThan(prev.rgb[1]);
+      expect(s.rgb[2]).toBeLessThan(s.rgb[1]); // warm: blue goes first
+      expect(s.strength).toBeLessThanOrEqual(prev.strength);
+      prev = s;
+    }
+    expect(at(1).rgb[1]).toBeLessThan(0.3); // red near the horizon
+    expect(at(-3).strength).toBe(0); // set
+  });
+
+  it('a raised point sees over the curve: clouds and peaks keep a set sun, and through less air', () => {
+    const s = Math.sin((-1.5 * Math.PI) / 180);
+    expect(sunlight(s, 0).strength).toBe(0);
+    expect(sunlight(s, 5000).strength).toBeGreaterThan(0); // dip at 5 km ~2.3°
+    const low = Math.sin((5 * Math.PI) / 180);
+    expect(sumOf(sunlight(low, 8000).rgb)).toBeGreaterThan(sumOf(sunlight(low, 0).rgb));
+  });
+
+  it('a clear sky gives hard light, overcast soft light mostly from the sky', () => {
+    const p = paletteAt(45, 1);
+    const clear = lightUniforms(p, 1), overcast = lightUniforms(p, 0);
+    expect(clear.sky[3]).toBeLessThan(overcast.sky[3]);
+    expect(clear.direct[0]).toBeGreaterThan(overcast.direct[0]);
+  });
+
+  it('shade is blue under a clear sky and violet at dusk; the skylight hue has luminance 1', () => {
+    const lum = (u: Float32Array) => 0.299 * u[0] + 0.587 * u[1] + 0.114 * u[2];
+    const day = lightUniforms(paletteAt(45, 1), 1).sky, dusk = lightUniforms(paletteAt(0, 1), 1).sky;
+    expect(lum(day)).toBeCloseTo(1, 5);
+    expect(lum(dusk)).toBeCloseTo(1, 5);
+    expect(day[2]).toBeGreaterThan(day[0]);
+    expect(dusk[2]).toBeGreaterThan(dusk[1]);
+    expect(dusk[0]).toBeGreaterThan(dusk[1] * 0.95); // violet: red holds against green
   });
 });

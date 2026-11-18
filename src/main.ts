@@ -187,7 +187,7 @@ let baseSea = false;
  * camera, sea where that is at or below sea level, else land; it fills the view to the horizon
  * before the tiles load and wherever one is missing.
  */
-function baseGround(lightDir: vec3, camY: number): BaseGround {
+function baseGround(camY: number): BaseGround {
   const h = ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat);
   if (h !== undefined) {
     baseY = Math.max(0, h);
@@ -201,18 +201,24 @@ function baseGround(lightDir: vec3, camY: number): BaseGround {
     if (l.top < camY && (down === 0 || camY - l.top < down)) down = camY - l.top;
   }
   return {
-    y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), lightDir, fogStart: FOG_START_M, fogEnd: FOG_END_M,
+    y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), fogStart: FOG_START_M, fogEnd: FOG_END_M,
     deck: { up, down, colour: CLOUD_RGB },
   };
 }
 let sunLoc: LatLon = start.latLon;
 /** the sun is rising (morning colours) when it stands higher a minute later */
 const sunRising = (): boolean => sunPosition(new Date(simTime.getTime() + 60000), sunLoc).elevationDeg > sun.elevationDeg;
+/** how sunny the weather in force is (palette.ts sunniness) */
+const sunnyNow = () => sunniness(cloudsOverride ?? weatherInForce()?.cloudPct);
 /** day palette for the sun now and the weather in force: sunnier the clearer the sky, cool colours in the morning */
-const dayPalette = () => paletteAt(sun.elevationDeg, sunniness(cloudsOverride ?? weatherInForce()?.cloudPct), sunRising());
+const dayPalette = () => paletteAt(sun.elevationDeg, sunnyNow(), sunRising());
+/** the moon's light on faces: by its elevation and phase, once the sun no longer lights them */
+const moonLight = (): number =>
+  Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
 /** light uniforms of a palette; frozen water has no glitter path */
 function lightOf(p: PaletteParams): LightUniforms {
-  const l = lightUniforms(p);
+  const l = lightUniforms(p, sunnyNow());
+  l.direct[1] = moonLight();
   if (weather.surface.ice) l.glitter[0] = 0;
   return l;
 }
@@ -614,7 +620,7 @@ function frame(now: number): void {
   renderer.snow = surface.snow;
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
   profiler.stage('небо');
-  renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(lightDir, camPos[1]));
+  renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(camPos[1]));
   if (!flashing) {
     toGlMat3(skyMatrix(simTime, sunLoc), skyMat);
     renderer.drawStars(skyMat, limitingMagnitude(sun.elevationDeg, moon.elevationDeg, moon.illumination), u);

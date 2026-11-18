@@ -58,7 +58,7 @@ describe('rim light', () => {
       expect(vs).toContain('+ rimLight(n, wp, fog)');
       // lit, and rim-lit, by the side the eye sees: the far side of a thin fin does not light this one
       expect(vs).toContain('if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;');
-      expect(vs.indexOf('n = -n;')).toBeLessThan(vs.indexOf('float diff'));
+      expect(vs.indexOf('n = -n;')).toBeLessThan(vs.indexOf('vec4 light = sceneLight(n'));
     }
     expect(WORLD_POST_FS).toContain(`const float LOG_FAR = ${Math.log2(DEPTH_FAR + 1).toFixed(8)};`);
     expect(WORLD_POST_FS).toContain('exp2(d * LOG_FAR) - 1.0');
