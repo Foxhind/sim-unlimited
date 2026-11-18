@@ -1,4 +1,5 @@
 import { tileBounds, type Tile } from './geodesy';
+import { isAntenna } from './mast-mesher';
 import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
@@ -18,6 +19,7 @@ const FULL_FILTER = `
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
+  way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
 `;
 
 const LARGE_FILTER = `
@@ -189,6 +191,14 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     const geom = wayGeom(w);
     if (geom.length < 2) continue;
     const closed = geom.length > 3 && geom[0][0] === geom[geom.length - 1][0] && geom[0][1] === geom[geom.length - 1][1];
+    // a mast mapped by its footprint (often the guyed giants, e.g. the 442 m Balashikha mast) stands at its vertex mean
+    if (!usedWays.has(w.id) && !hasBuildingTags(tags) && isAntenna(tags)) {
+      const n = closed ? geom.length - 1 : geom.length;
+      let lon = 0, lat = 0;
+      for (let i = 0; i < n; i++) { lon += geom[i][0]; lat += geom[i][1]; }
+      points.push({ at: [lon / n, lat / n], tags });
+      continue;
+    }
     if (closed && !usedWays.has(w.id)) {
       if (hasBuildingTags(tags)) {
         if (buildingVisible(tags)) buildings.push({ rings: [geom], tags });

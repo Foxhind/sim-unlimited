@@ -63,6 +63,24 @@ describe('parseOverpass', () => {
     expect(d.points[0].tags.aeroway).toBe('helipad');
   });
 
+  it('turns a mast mapped as a footprint way into a point at its vertex mean', () => {
+    const d = parseOverpass({
+      elements: [
+        { type: 'node', id: 1, lat: 55.79280, lon: 37.89165 },
+        { type: 'node', id: 2, lat: 55.79283, lon: 37.89170 },
+        { type: 'node', id: 3, lat: 55.79283, lon: 37.89165 },
+        { type: 'way', id: 10, nodes: [1, 2, 3, 1], tags: { man_made: 'mast', height: '442' } },
+        { type: 'way', id: 11, nodes: [1, 2, 3, 1], tags: { man_made: 'mast', building: 'yes' } },
+      ],
+    });
+    expect(d.points).toHaveLength(1);
+    expect(d.points[0].tags.height).toBe('442');
+    expect(d.points[0].at[0]).toBeCloseTo((37.89165 + 37.8917 + 37.89165) / 3, 8);
+    expect(d.points[0].at[1]).toBeCloseTo((55.7928 + 55.79283 * 2) / 3, 8);
+    expect(d.areas).toHaveLength(0);
+    expect(d.buildings).toHaveLength(1);
+  });
+
   it('assembles multipolygon outer segments and attaches inner holes', () => {
     const d = parseOverpass(json());
     const water = d.areas.filter((a) => a.tags.natural === 'water');
