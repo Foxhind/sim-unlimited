@@ -152,16 +152,17 @@ vec3 rimLight(vec3 n, vec3 wp, float fog) {
  */
 const GLITTER_GLSL = `
 uniform float uTime;
-uniform float uGlitter;
+// x: the dusk glow 0..1 (glitter path, synthwave look), y: 1 open water, 0 frozen (no effects)
+uniform vec2 uGlitter;
 uniform vec3 uGlitterSun;
 uniform vec3 uGlitterCore;
 uniform vec3 uGlitterEdge;
 float glitterHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 // the glitter colour along the view ray d (unit, from the eye), alpha 1 where it lights the water
 vec4 glitter(vec3 d) {
-  if (uGlitter <= 0.0 || d.y >= 0.0) return vec4(0.0);
+  if (uGlitter.x * uGlitter.y <= 0.0 || d.y >= 0.0) return vec4(0.0);
   vec3 sun = uGlitterSun;
-  float k = uGlitter * clamp((sun.y + 0.02) / 0.03, 0.0, 1.0);
+  float k = uGlitter.x * uGlitter.y * clamp((sun.y + 0.02) / 0.03, 0.0, 1.0);
   if (k <= 0.0 || dot(d.xz, sun.xz) <= 0.0) return vec4(0.0);
   vec2 dh = normalize(d.xz), sh = normalize(sun.xz);
   float lat = abs(dh.x * sh.y - dh.y * sh.x);
@@ -176,6 +177,106 @@ vec4 glitter(vec3 d) {
   float wi = w * (0.35 + 0.9 * glitterHash(vec2(floor(u), floor(uTime * 7.0))));
   if (lat > wi) return vec4(0.0);
   return vec4(lat < wi * 0.4 ? uGlitterCore : uGlitterEdge, 1.0);
+}
+`;
+
+
+/**
+ * The water surface (WORLD_FS water faces, SKY_FS base sea), over its flat lit colour:
+ * - waves: a few swells and chop moving at their deep-water speed (sqrt(g/k)), each faded out once
+ *   its wavelength nears a pixel, tilt the normal; the sky's reflection (uHaze) lightens the faces
+ *   turned from the eye in 3 steps (Fresnel), so the surface moves.
+ * - glints: the sun (and the moon at night) mirrored by those normals: a stepped hot spot, and
+ *   twinkling cells, world-anchored, each lit for a moment, densest round the mirrored sun.
+ *   Under overcast the sun's glints dim but stay.
+ * - dusk (uGlitter.x, the sky glow): synthwave: the sky's bands mirrored, wobbling with the waves,
+ *   then the glitter path.
+ * d: unit ray from the eye; p: the point's world xz; fw: fwidth(p), taken by the caller outside any
+ * branch; dist: the point's distance; c: the flat lit colour.
+ * Needs uCamPos, uFogStart/End, uHaze, uMoon, uDirect, lutColor, uTime, uGlitter*.
+ */
+const WATER_GLSL = `
+uint waterHash(uvec3 v) {
+  v = v * 1664525u + 1013904223u;
+  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+  v ^= v >> 16u;
+  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+  return v.x ^ v.y ^ v.z;
+}
+float waterRand(vec2 cell, float salt) {
+  return float(waterHash(uvec3(ivec3(ivec2(cell), int(salt)))) & 0xffffu) / 65535.0;
+}
+// slope (d height / d xz) of the waves at p, the swells' wavelengths over fp (m per pixel)
+vec2 waterSlope(vec2 p, float fp) {
+  const vec4 L = vec4(71.0, 29.0, 11.0, 4.3);
+  const vec4 A = vec4(0.07, 0.06, 0.07, 0.08);
+  vec2 dirs[4] = vec2[4](vec2(0.8, 0.6), vec2(-0.45, 0.89), vec2(0.97, -0.24), vec2(0.2, 0.98));
+  vec2 g = vec2(0.0);
+  for (int i = 0; i < 4; i++) {
+    float k = 6.2832 / L[i];
+    float fade = clamp(L[i] / (fp * 8.0) - 1.0, 0.0, 1.0);
+    if (fade <= 0.0) continue;
+    float ph = dot(dirs[i], p) * k - sqrt(9.81 * k) * uTime;
+    g += dirs[i] * (A[i] * fade * cos(ph + 1.7 * float(i)));
+  }
+  return g;
+}
+vec3 waterSurface(vec3 d, vec2 p, vec2 fw, float dist, vec3 c) {
+  if (uGlitter.y <= 0.0 || d.y >= 0.0) return c;
+  float fog = clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+  fog = floor(fog * 12.0) / 12.0;
+  float near = 1.0 - fog;
+  if (near <= 0.0) return c;
+  // metres per pixel along the ground here
+  float fp = max(length(fw), 1e-3);
+  vec2 g = waterSlope(p, fp);
+  vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+  vec3 r = reflect(d, n);
+  r.y = abs(r.y);
+  float dusk = uGlitter.x * clamp((uGlitterSun.y + 0.12) / 0.1, 0.0, 1.0);
+
+  // the sky mirrored: at dusk its bands (the wavy synthwave gradient), by day the haze in 3 steps
+  float fres = pow(1.0 - clamp(dot(-d, n), 0.0, 1.0), 4.0);
+  float fq = floor(fres * 3.0 + 0.5) / 3.0;
+  c = mix(c, uHaze, fq * 0.3 * near);
+  if (dusk > 0.0) {
+    float h = pow(1.0 - clamp(r.y, 0.0, 1.0), 1.6) * ${SKY_BANDS}.0;
+    vec3 sky = lutColor(${MAT.SKY * 16}u + uint(min(floor(h), ${SKY_BANDS - 1}.0)));
+    c = mix(c, sky * 0.8, 0.75 * dusk);
+  }
+
+  // glints: the sun, else the moon, mirrored in the waves
+  vec3 sun = uGlitterSun;
+  float sunUp = clamp((sun.y + 0.01) / 0.05, 0.0, 1.0);
+  float sunny = mix(0.35, 1.0, clamp((uDirect.x - 0.5) * 2.0, 0.0, 1.0)) * sunUp;
+  vec3 src = sunUp > 0.0 ? sun : uMoon;
+  float power = sunUp > 0.0 ? sunny : uDirect.y * 0.8;
+  vec3 hot = sunUp > 0.0 ? uGlitterCore : vec3(0.82, 0.88, 1.0);
+  if (power > 0.0 && src.y > -0.02) {
+    float m = max(dot(r, src), 0.0);
+    float spot = pow(m, 600.0) * power;
+    float sheen = pow(m, 60.0) * power;
+    // twinkles: world cells about 2 px across on each axis (long toward the horizon, as the
+    // pixels are), each lit for a moment now and then
+    vec2 cell = exp2(ceil(log2(max(fw * 2.0, vec2(0.6)))));
+    vec2 ci = floor(p / cell) + vec2(0.0, 4096.0 * log2(cell.x));
+    float rate = 3.0 + 4.0 * waterRand(ci, 7.0);
+    float tick = floor(uTime * rate + 13.0 * waterRand(ci, 3.0));
+    float tw = waterRand(ci + vec2(tick, 0.0), 11.0);
+    // none near the horizon, where a pixel is many times longer than wide and so would the cell be
+    float chance = (0.004 * near + 0.5 * sheen) * smoothstep(0.06, 0.14, -d.y);
+    if (spot > 0.35) c = hot;
+    else if (tw < chance * 0.5) c = hot;
+    else if (spot > 0.08 || tw < chance) c = mix(c, hot, 0.55);
+    else if (sheen > 0.25) c = mix(c, hot, 0.2);
+  }
+
+  // dusk: the glitter path over it all
+  if (dusk > 0.0) {
+    vec4 gp = glitter(d);
+    if (gp.a > 0.0) c = gp.rgb;
+  }
+  return c;
 }
 `;
 
@@ -268,14 +369,26 @@ uniform vec3 uSunDir;
 uniform float uSelfLit;
 // brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uEmit;
+// the water surface's inputs (WATER_GLSL), shared with WORLD_VS
+uniform vec3 uCamPos;
+uniform float uFogStart;
+uniform float uFogEnd;
+uniform vec3 uHaze;
+uniform vec3 uMoon;
+uniform vec4 uDirect;
+uniform sampler2D uLut;
+vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${EMIT_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}
 void main() {
   writeLogDepth();
   vec3 c = vColor;
+  // the derivative is taken on every fragment: fwidth is undefined in non-uniform control flow
+  vec2 wxz = uCamPos.xz + vRay.xz;
+  vec2 fw = fwidth(wxz);
   if (vWater > 0.5) {
-    vec4 g = glitter(normalize(vRay));
-    if (g.a > 0.0) c = g.rgb;
+    float dist = length(vRay);
+    c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
   }
   if (uSelfLit > 0.5) c = emitLight(c, uEmit);
   oColor = vec4(c, 1.0 - uSelfLit);
@@ -462,7 +575,7 @@ uniform float uDeckUp;
 uniform float uDeckDown;
 uniform uint uDeckColour;
 out vec4 oColor;
-${GLOW_VS}${GLITTER_GLSL}
+${GLOW_VS}${GLITTER_GLSL}${WATER_GLSL}
 void main() {
   vec4 p = uInvViewProj * vec4(vNdc, 1.0, 1.0);
   vec3 dir = normalize(p.xyz / p.w - uCamPos);
@@ -490,6 +603,16 @@ void main() {
     oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb), 1.0);
     return;
   }
+  // the base sea's point in world xz and its footprint, taken here where every fragment runs
+  // (fwidth is undefined in non-uniform control flow); a ray over the horizon gets a far point
+  vec2 seaXZ;
+  {
+    float a = max(1.0 - dir.y * dir.y, 0.0) / ${EARTH_R.toFixed(1)};
+    float disc = dir.y * dir.y - 2.0 * a * uGroundH;
+    float t = dir.y < 0.0 && disc >= 0.0 ? (a > 1e-12 ? (-dir.y - sqrt(disc)) / a : uGroundH / -dir.y) : uFogEnd;
+    seaXZ = uCamPos.xz + dir.xz * t;
+  }
+  vec2 seaFw = fwidth(seaXZ);
   // Base ground: a flat face colour on the curved Earth below the camera (the world shader's
   // d^2 / 2R drop), out to the true horizon. Drawn here, under every tile, so the horizon and the
   // ground are there before (and between) the terrain tiles; loaded terrain simply covers it.
@@ -502,10 +625,7 @@ void main() {
       fog = floor(fog * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
       oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb), 1.0);
-      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) {
-        vec4 g = glitter(dir);
-        if (g.a > 0.0) oColor = vec4(g.rgb, 1.0);
-      }
+      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) oColor.rgb = waterSurface(dir, seaXZ, seaFw, t, oColor.rgb);
       return;
     }
   }

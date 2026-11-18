@@ -620,7 +620,7 @@ export class Renderer {
     }
     if (u.uGlitter === undefined) return;
     const g = this.light.glitter;
-    this.gl.uniform1f(u.uGlitter, g[0]);
+    this.gl.uniform2f(u.uGlitter, g[0], g[7]);
     this.gl.uniform3fv(u.uGlitterSun, this.sunDir);
     this.gl.uniform3f(u.uGlitterCore, g[1], g[2], g[3]);
     this.gl.uniform3f(u.uGlitterEdge, g[4], g[5], g[6]);

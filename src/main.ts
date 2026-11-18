@@ -215,11 +215,11 @@ const dayPalette = () => paletteAt(sun.elevationDeg, sunnyNow(), sunRising());
 /** the moon's light on faces: by its elevation and phase, once the sun no longer lights them */
 const moonLight = (): number =>
   Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
-/** light uniforms of a palette; frozen water has no glitter path */
+/** light uniforms of a palette; frozen water has no waves, glints or glitter path */
 function lightOf(p: PaletteParams): LightUniforms {
   const l = lightUniforms(p, sunnyNow());
   l.direct[1] = moonLight();
-  if (weather.surface.ice) l.glitter[0] = 0;
+  if (weather.surface.ice) l.glitter[0] = l.glitter[7] = 0;
   return l;
 }
 let palette = dayPalette();

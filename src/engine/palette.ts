@@ -493,8 +493,10 @@ export interface LightUniforms {
   /** sky glow toward the sun, 0..1 (PaletteParams.glow, SKY_FS) */
   sunGlow: number;
   /**
-   * the glitter path on water under a low sun (GLITTER_GLSL): x strength 0..1 (the sky glow; 0 off,
-   * e.g. frozen water), then rgb 0..1 of its core (next to the sun's line) and of its edges
+   * the water surface (GLITTER_GLSL, WATER_GLSL): [0] the dusk look's strength 0..1 (the sky glow:
+   * the glitter path, the mirrored sky bands, the neon grid), [1..3] rgb 0..1 of the glitter's core
+   * (next to the sun's line, also the glints' colour) and [4..6] of its edges, [7] 1 open water,
+   * 0 frozen (no waves, glints or dusk look)
    */
   glitter: Float32Array;
   /** skylight (SUNLIGHT_GLSL uSky): rgb its hue (luminance 1), a its share of a face's light 0..1 */
@@ -572,7 +574,7 @@ function smoothstep(a: number, b: number, x: number): number {
 function glitterOf(p: PaletteParams): Float32Array {
   const core = lerpRGB(p.sunGlow, [255, 246, 176], 0.6);
   const edge = lerpRGB(p.sunGlow, p.skyMid, 0.5);
-  return Float32Array.from([p.glow, ...core.map((v) => v / 255), ...edge.map((v) => v / 255)]);
+  return Float32Array.from([p.glow, ...core.map((v) => v / 255), ...edge.map((v) => v / 255), 1]);
 }
 
 /** the crash flash: everything white */
@@ -581,7 +583,7 @@ export const FLASH_LIGHT: LightUniforms = {
   haze: new Float32Array([1, 1, 1]),
   saturation: 1,
   sunGlow: 0,
-  glitter: new Float32Array(7),
+  glitter: new Float32Array(8),
   sky: new Float32Array([1, 1, 1, 1]),
   direct: new Float32Array(4),
 };
