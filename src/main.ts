@@ -14,7 +14,12 @@ import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
 import { FarOsmManager } from './world/far-osm-manager';
 import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
-import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from './world/geodesy';
+import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon, type Tile } from './world/geodesy';
+import { runwayStart } from './world/runway';
+import { getOsmRaw } from './world/tile-cache';
+import { OSM_SCHEMA_VERSION } from './world/osm-source';
+import { parseOverpass, type OverpassJson } from './world/overpass';
+import type { OsmLine } from './world/osm-types';
 import { GroundProbe, towerAnchor } from './world/ground';
 import { buildSkyPoints, limitingMagnitude, PLANETS_OFFSET, planetPoints, skyMatrix, toGlMat3 } from './world/sky';
 import { moonPosition, sunPosition } from './world/sun';
@@ -286,15 +291,73 @@ const unlock = (): void => audio.unlock();
 window.addEventListener('keydown', unlock);
 window.addEventListener('mousedown', unlock);
 
+/** where the aircraft is put: the start point, or for a ground start the nearest OSM runway's takeoff end */
+const spawnAt = { lat: start.latLon.lat, lon: start.latLon.lon, hdg: start.hdg };
+/** a ground start waits (at most RUNWAY_WAIT_MS) for the OSM around the start point to find a runway on it */
+let runwaySnap: 'waiting' | 'busy' | 'done' = start.alt === 0 ? 'waiting' : 'done';
+let runwaySnapSince = 0;
+const RUNWAY_WAIT_MS = 20000;
+
+function tilesAround(ll: LatLon): Tile[] {
+  const c = tileForLatLon(ll.lat, ll.lon, 14);
+  const out: Tile[] = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) out.push({ z: 14, x: c.x + dx, y: c.y + dy });
+  return out;
+}
+
+async function cachedRunwayLines(tiles: Tile[]): Promise<OsmLine[]> {
+  const lines: OsmLine[] = [];
+  await Promise.all(tiles.map(async (tile) => {
+    const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
+    if (!raw) return;
+    try {
+      for (const l of parseOverpass(JSON.parse(raw.json) as OverpassJson).lines) if (l.tags.aeroway === 'runway') lines.push(l);
+    } catch {
+      // a broken cache entry: no runway from this tile
+    }
+  }));
+  return lines;
+}
+
+/** once the OSM tiles around the start have arrived (or failed, or the wait ran out), move the start onto the runway */
+function snapToRunway(now: number): void {
+  if (runwaySnap !== 'waiting') return;
+  runwaySnapSince ||= now;
+  const tiles = tilesAround(start.latLon);
+  const settled = tiles.every((t) => {
+    const st = osm.chunks.get(`${t.z}/${t.x}/${t.y}`)?.status;
+    return st === 'ready' || st === 'error';
+  });
+  if (!settled && now - runwaySnapSince < RUNWAY_WAIT_MS) return;
+  runwaySnap = 'busy';
+  void cachedRunwayLines(tiles)
+    .then((lines) => {
+      const rw = runwayStart(lines, start.latLon);
+      if (!rw) return;
+      Object.assign(spawnAt, rw);
+      // the terrain and ground probe load around the aircraft: bring them to the runway before the spawn
+      const [e, n] = latLonToEnu(chunks.origin, rw.lat, rw.lon, 0);
+      model.pos[0] = e;
+      model.pos[2] = -n;
+    })
+    .catch(() => undefined)
+    .finally(() => { runwaySnap = 'done'; });
+}
+
 function spawn(): void {
-  const groundH = Math.max(0, ground.heightAt(start.latLon.lon, start.latLon.lat) ?? 0);
-  const [e, n] = latLonToEnu(chunks.origin, start.latLon.lat, start.latLon.lon, 0);
+  const groundH = Math.max(0, ground.heightAt(spawnAt.lon, spawnAt.lat) ?? 0);
+  const [e, n] = latLonToEnu(chunks.origin, spawnAt.lat, spawnAt.lon, 0);
   if (start.alt === 0) {
-    model.spawnGround(vec3.fromValues(e, groundH + cfg.gearHeight, -n), start.hdg, groundH);
+    model.spawnGround(vec3.fromValues(e, groundH + cfg.gearHeight, -n), spawnAt.hdg, groundH);
   } else {
     const alt = start.alt ?? groundH + 1500;
-    model.spawnAir(vec3.fromValues(e, alt, -n), start.hdg);
+    model.spawnAir(vec3.fromValues(e, alt, -n), spawnAt.hdg);
   }
+  // an air start begins clean: gear up (the model snaps its actuators to this on the first step)
+  controls.gearDown = start.alt === 0;
+  controls.flaps = false;
+  prevGear = controls.gearDown;
+  prevFlaps = controls.flaps;
   camWorld.alt = model.pos[1];
   rig.setMode('cockpit', model);
   spawned = true;
@@ -312,8 +375,18 @@ function respawn(): void {
 const menu = new Menu(font, vectors, settings, {
   onFly: (fc) => {
     const af = AIRFIELDS.find((a) => a.icao === fc.location);
-    const ll = startLocation(fc);
-    const alt = fc.startMode === 'runway' ? '0' : '';
+    const onRunway = fc.startMode === 'runway';
+    let ll = startLocation(fc);
+    if (onRunway && af && fc.location !== 'custom') {
+      // the start of the takeoff runway, a little in from its end so the gear stands on the pavement
+      const H = (af.hdg * Math.PI) / 180;
+      const inset = 60;
+      ll = {
+        lat: af.rwyLat + (inset * Math.cos(H)) / 111320,
+        lon: af.rwyLon + (inset * Math.sin(H)) / (111320 * Math.cos((af.rwyLat * Math.PI) / 180)),
+      };
+    }
+    const alt = onRunway ? '0' : '';
     // 'real' leaves the time field empty so a reload always starts at the current clock
     const when = fc.timeOfDay === 'real' ? '' : Math.floor(timeForPreset(fc.timeOfDay, ll, new Date()).getTime() / 1000);
     window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when},${fc.insignia},${fc.loadout}`;
@@ -530,8 +603,9 @@ function frame(now: number): void {
   }
   ground.update(camWorld.latLon, now);
 
-  // OSM is not a spawn gate: an Overpass outage must not ground the sim
-  if (state === 'loading' && !spawned && chunks.nearReady(camWorld.latLon, 3000) && ground.ready) {
+  // OSM is not a spawn gate: an Overpass outage must not ground the sim (a runway start waits for it a little)
+  if (state === 'loading' && !spawned) snapToRunway(now);
+  if (state === 'loading' && !spawned && runwaySnap === 'done' && chunks.nearReady(camWorld.latLon, 3000) && ground.ready) {
     spawn();
     state = 'flying';
   }
@@ -696,9 +770,10 @@ function frame(now: number): void {
   if (spawned && state === 'flying' && !rimLab.active && now - lastUrlUpdate > 1000) {
     lastUrlUpdate = now;
     const ll = camWorld.latLon;
+    // on the ground the link is a ground start (alt 0), not an air start at ground level
     history.replaceState(
       null, '',
-      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)},${cfg.insigniaId ?? ''},${cfg.loadoutId ?? ''}`,
+      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${model.onGround ? 0 : Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)},${cfg.insigniaId ?? ''},${cfg.loadoutId ?? ''}`,
     );
   }
   profiler.frameEnd();

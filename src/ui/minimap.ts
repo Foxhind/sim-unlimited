@@ -10,9 +10,13 @@ import { fetchOverpassQuery } from '../world/osm-source';
 import { getOsmRaw, putOsmRaw } from '../world/tile-cache';
 
 /** Q22: fixed reference airfields until the M6 global index. */
+/**
+ * Reference airfields: lat/lon is the aerodrome reference point (mid-runway), hdg the true heading
+ * of the takeoff runway, rwyLat/rwyLon the start of that runway (its OSM centreline end) for a runway start.
+ */
 export const AIRFIELDS = [
-  { icao: 'LTBS', name: 'DALAMAN', lat: 36.7131, lon: 28.7925, hdg: 15 },
-  { icao: 'LOWI', name: 'INNSBRUCK', lat: 47.2603, lon: 11.3439, hdg: 260 },
+  { icao: 'LTBS', name: 'DALAMAN', lat: 36.7131, lon: 28.7925, hdg: 15, rwyLat: 36.70021, rwyLon: 28.78807 },
+  { icao: 'LOWI', name: 'INNSBRUCK', lat: 47.2603, lon: 11.3439, hdg: 261, rwyLat: 47.26161, rwyLon: 11.35703 },
 ] as const;
 
 const N = 96; // map cells per side
