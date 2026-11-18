@@ -2,6 +2,7 @@ import { PAYLOAD_MASK, RAMP } from '../engine/palette';
 import type { JointDef, LightDef } from './articulation';
 import an225Model from './models/an225.json';
 import f117Model from './models/f117.json';
+import f16Model from './models/f16.json';
 import su27Model from './models/su27.json';
 
 /** [x, y] rows — linear interpolation, clamped outside. */
@@ -88,7 +89,28 @@ export interface FbwDef {
   rollRate: number;
 }
 
-export type AircraftId = 'su27' | 'f117' | 'an225';
+export type AircraftId = 'su27' | 'f117' | 'an225' | 'f16';
+
+/**
+ * National markings: the colours the model's roundel slots are painted in (tools/export-aircraft.py: the faces
+ * whose material is Insignia1_/2_/3_), outer ring, middle ring and centre, 0xRRGGBB.
+ */
+export interface Insignia {
+  id: string;
+  name: string;
+  rings: [number, number, number];
+}
+
+/** What hangs on the airframe: the store meshes drawn (`su_store` in the .blend), what they weigh and drag. */
+export interface Loadout {
+  id: string;
+  name: string;
+  stores: string[];
+  /** kg */
+  mass: number;
+  /** zero-lift drag they add, on the wing area */
+  cd: number;
+}
 
 export interface AircraftConfig {
   id: AircraftId;
@@ -145,6 +167,13 @@ export interface AircraftConfig {
   stallAlpha: number;
   /** exhaust exits in mesh space (x right, y up, z aft) with radius */
   nozzles: { pos: [number, number, number]; r: number }[];
+  /** the national markings the model can wear; the first is its default */
+  insignia?: Insignia[];
+  /** what it can carry; the first is its default */
+  loadouts?: Loadout[];
+  /** the markings and loadout this config was fitted with (fitAircraft) */
+  insigniaId?: string;
+  loadoutId?: string;
   /**
    * Cameras, for airframes much larger than a fighter: the pilot's eye in the mesh's coordinates and how many
    * times further back the outside views stand. Without it: 5.5 m ahead of and 1.1 m above the centre of gravity.
@@ -169,6 +198,11 @@ interface ModelJson {
   lights?: LightDef[];
   /** where each separable part breaks off: its tip and the load that does it */
   breaks?: { id: string; tip: number[]; maxLoad: number }[];
+  /** roundel slot of each triangle: 0 = none, 1 outer ring, 2 middle ring, 3 centre */
+  decal?: number[];
+  /** store each triangle belongs to: 0 = the airframe, otherwise index into storeNames + 1 */
+  store?: number[];
+  storeNames?: string[];
 }
 
 /** the separable parts as the model draws them */
@@ -398,7 +432,80 @@ export const AN225: AircraftConfig = fromModel({
   view: { eye: [0, 1.9, -30.8], scale: 4 },
 });
 
-export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225 };
+export const F16: AircraftConfig = fromModel({
+  id: 'f16',
+  name: 'F-16AM FALCON',
+  hudLang: 'en',
+  // F-16AM Block 15 MLU, as the Ukrainian Air Force flies it: clean, half fuel
+  mass: 10200,
+  // the published F-16 inertias (9.3 t), scaled to this weight
+  inertia: [85500, 96600, 14500],
+  wingArea: 27.87,
+  wingSpan: 9.45,
+  // the model's origin is at 35% of the mean chord: relaxed static stability, a small positive margin left
+  cg: [0, 0, 0],
+  surfaces: [
+    // fuselage and strakes: the strake vortices keep this lifting to well past 30 deg; without the wings it
+    // is a ~1.6 m wide body with the strakes' slender-wing lift
+    { pos: [0, 0, -1.0], normal: UP, area: 10, cla: 3.0, alpha0: 1.5, stall: 34, k: 0.12, carry: { share: 0.5, k: 0.4, stall: 30, offset: 0.8 } },
+    // inner wing with the flaperons (roll and landing flap), outer wing with the leading-edge flaps;
+    // the areas keep the model's proportions, the total the real 27.87 m2
+    ...pair({ pos: [1.65, 0, -0.4], normal: UP, area: 6.2, cla: 3.6, alpha0: 1.5, stall: 32, k: 0.12, flap: true, roll: 21, tau: 0.35 }, 'wingR', 'wingL'),
+    ...pair({ pos: [3.45, 0, 0.72], normal: UP, area: 3.93, cla: 3.6, alpha0: 1.5, stall: 31, k: 0.12, flap: true }, 'wingR', 'wingL'),
+    // all-moving stabilators with 10 deg of anhedral: pitch together, roll differentially
+    ...pair({ pos: [1.75, -0.19, 3.21], normal: UP, area: 2.96, cla: 3.0, stall: 26, k: 0.13, pitch: 25, roll: 8, tau: 1 }, 'stabR', 'stabL'),
+    // the single fin: blanketed by the fuselage at high angle of attack, which is what the ventrals are for
+    { pos: [0, 1.7, 3.0], normal: SIDE, area: 5.1, cla: 2.6, stall: 18, k: 0.2, yaw: 30, tau: 0.45, shield: 0.6 },
+    { pos: [0, -0.8, 1.6], normal: SIDE, area: 1.4, cla: 1.5, stall: 18, k: 0.3 },
+    // forebody side area
+    { pos: [0, 0, -5.5], normal: SIDE, area: 2.2, cla: 0.6, stall: 12, k: 0.5 },
+  ],
+  // drawn in assets/models/f16.blend (BREAK_<part> empties): wings 9 g x 1.5 = 13.5 g ultimate, a panel
+  // carrying ~37% (520 kN); stabilator halves 170 kN. The single fin stays with the fuselage
+  parts: breakPoints(f16Model),
+  // estimates: a wing panel with its fuel and launch rail; the stabilator halves
+  partMass: { wingL: 580, wingR: 580, stabL: 140, stabR: 140 },
+  nose: [0, -0.05, -10.6],
+  // the ventral fins and the nozzle's underside: what touches first when the nose comes up on the runway
+  tail: [0, -0.4, 4.2],
+  bodySide: 26,
+  // the limiter holds 25 deg and 9 g, and cannot be pulled through
+  fbw: { gMax: 9, gMin: -3, alphaLimit: 25, alphaOverride: 25, rollRate: 3.5 },
+  cd0: 0.019,
+  waveDrag: [[0, 1], [0.85, 1], [0.98, 1.7], [1.1, 2.4], [1.4, 2.1], [2.0, 1.8], [2.4, 1.8]],
+  inducedK: 0.12,
+  spinYaw: 0.03,
+  vne: 410,
+  // F100-PW-220E
+  thrustDry: 64900,
+  thrustAfterburner: 105700,
+  cruiseSpeed: 240,
+  maxSpeed: 590,
+  gearHeight: 1.7,
+  landingSinkLimit: 4.0,
+  landingBankLimit: 12,
+  flapClBonus: 0.3,
+  flapCd: 0.02,
+  gearCd: 0.02,
+  speedbrakeCd: 0.06,
+  brakeDecel: 4.5,
+  stallAlpha: 28,
+  nozzles: [{ pos: [0, 0, 4.2], r: 0.45 }],
+  // the pilot sits under the bubble canopy 6 m ahead of the centre of gravity
+  view: { eye: [0, 0.9, -6.0], scale: 1 },
+  // Ukraine's, and the markings of the air forces its F-16s came from (in full colour, where theirs are mostly
+  // low-visibility greys), on the same roundel positions
+  insignia: [
+    { id: 'ua', name: 'UKRAINE', rings: [0x2457b8, 0xf2c21a, 0xf2c21a] },
+    { id: 'dk', name: 'DENMARK', rings: [0xc8102e, 0xffffff, 0xc8102e] },
+    { id: 'nl', name: 'NETHERLANDS', rings: [0xae1c28, 0xffffff, 0x21468b] },
+    { id: 'be', name: 'BELGIUM', rings: [0xef3340, 0xfdda24, 0x111111] },
+  ],
+  // the model carries nothing yet; a loadout lists the store meshes it hangs on (su_store in the .blend)
+  loadouts: [{ id: 'clean', name: 'CLEAN', stores: [], mass: 0, cd: 0 }],
+});
+
+export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225, f16: F16 };
 
 export function tableLookup(table: AeroTable, x: number): number {
   if (x <= table[0][0]) return table[0][1];
@@ -492,17 +599,30 @@ class MeshBuilder {
   }
 }
 
-const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model };
+const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model, f16: f16Model };
 
-/** Flat-shaded mesh of an exported model; each face keeps its RGB colour (lit in the shader). */
-function loadModel(json: ModelJson): AircraftMesh {
+/** what a model is drawn with: the colours of its roundel slots, the stores it carries */
+export interface ModelLook {
+  rings?: [number, number, number];
+  stores?: string[];
+}
+
+/**
+ * Flat-shaded mesh of an exported model; each face keeps its RGB colour (lit in the shader), the roundel slots
+ * take the markings' colours, and a store's faces are left out unless the loadout carries it.
+ */
+export function modelMesh(json: ModelJson, look: ModelLook = {}): AircraftMesh {
   const m = new MeshBuilder();
   const P = json.positions;
   for (let t = 0; t < json.rgb.length; t++) {
+    const s = json.store?.[t] ?? 0;
+    if (s && !look.stores?.includes(json.storeNames?.[s - 1] ?? '')) continue;
     const v = (k: number): V3 => [P[t * 9 + k * 3], P[t * 9 + k * 3 + 1], P[t * 9 + k * 3 + 2]];
     const tag = json.parts[t];
     m.jointTag = json.joint?.[t] ?? 0;
-    const add = (): void => m.tri(v(0), v(1), v(2), json.rgb[t] & PAYLOAD_MASK);
+    const slot = json.decal?.[t] ?? 0;
+    const rgb = slot && look.rings ? look.rings[slot - 1] : json.rgb[t];
+    const add = (): void => m.tri(v(0), v(1), v(2), rgb & PAYLOAD_MASK);
     if (tag) m.part(PART_IDS[tag - 1], add);
     else add();
   }
@@ -514,13 +634,42 @@ function loadModel(json: ModelJson): AircraftMesh {
 
 const meshCache = new Map<string, AircraftMesh>();
 
-export function aircraftMesh(id: AircraftId): AircraftMesh {
-  let mesh = meshCache.get(id);
+/** the markings and loadout a config wears: the ones it was fitted with, else its defaults */
+export function lookOf(cfg: AircraftConfig): { insignia?: Insignia; loadout?: Loadout } {
+  return {
+    insignia: cfg.insignia?.find((i) => i.id === cfg.insigniaId) ?? cfg.insignia?.[0],
+    loadout: cfg.loadouts?.find((l) => l.id === cfg.loadoutId) ?? cfg.loadouts?.[0],
+  };
+}
+
+/** the drawing of an aircraft as a config wears it (a bare id: its default markings and loadout) */
+export function aircraftMesh(a: AircraftId | AircraftConfig): AircraftMesh {
+  const cfg = typeof a === 'string' ? AIRCRAFT[a] : a;
+  const { insignia, loadout } = lookOf(cfg);
+  const key = `${cfg.id}|${insignia?.id ?? ''}|${loadout?.id ?? ''}`;
+  let mesh = meshCache.get(key);
   if (!mesh) {
-    mesh = loadModel(MODELS[id]);
-    meshCache.set(id, mesh);
+    mesh = modelMesh(MODELS[cfg.id], { rings: insignia?.rings, stores: loadout?.stores ?? [] });
+    meshCache.set(key, mesh);
   }
   return mesh;
+}
+
+/**
+ * An aircraft with the markings and loadout chosen in the menu (unknown or missing ids: its defaults): the stores
+ * add their mass and drag.
+ */
+export function fitAircraft(base: AircraftConfig, insignia?: string, loadout?: string): AircraftConfig {
+  const look = lookOf({ ...base, insigniaId: insignia, loadoutId: loadout });
+  if (!look.insignia && !look.loadout) return base;
+  const lo = look.loadout;
+  return {
+    ...base,
+    insigniaId: look.insignia?.id,
+    loadoutId: lo?.id,
+    mass: base.mass + (lo?.mass ?? 0),
+    cd0: base.cd0 + (lo?.cd ?? 0),
+  };
 }
 
 /**

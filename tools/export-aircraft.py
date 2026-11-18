@@ -15,7 +15,12 @@ Rigged models (tools/su27-rig.py, tools/f117-rig.py on tools/aircraft_rig.py) ca
     same: the exporter drives SU27_Controls through sample values and compares, and stops on a mismatch;
   * lights (`su_light`), break points (`su_break` empties with max_load, N);
   * the separable part of a face: `su_part` on the object or an ancestor, else the hull's boolean face
-    attribute `part_<id>`.
+    attribute `part_<id>`;
+  * swappable national markings: faces whose material is named Insignia<k>_<RRGGBB> (k = 1 outer ring,
+    2 middle ring, 3 centre) are written with their slot (`decal`), and the game paints them with the
+    markings chosen in its menu;
+  * swappable stores: meshes with `su_store` (a store name) on them or an ancestor are written with that
+    store (`store`, an index into `storeNames`); the game draws a store only when the chosen loadout lists it.
 The rest pose is exported (pitch/roll/yaw/flaps/speedbrake 0, gear 1 = down): every joint is at angle 0.
 Models without these would still get their parts from the coordinate rules in REGIONS (the F-117's, from before it was rigged).
 """
@@ -161,7 +166,15 @@ def own_joint(o):
     return 0
 
 
-pos, rgb, part, joint = [], [], [], []
+def own_store(o):
+    while o is not None:
+        if o.get('su_store'):
+            return o['su_store']
+        o = o.parent
+    return None
+
+
+pos, rgb, part, joint, decal, store, store_names = [], [], [], [], [], [], []
 for o in tree:
     if o.type != 'MESH':
         continue
@@ -170,6 +183,10 @@ for o in tree:
     me.calc_loop_triangles()
     mw = ev.matrix_world
     opart, ojoint = own_part(o), own_joint(o)
+    ostore = own_store(o)
+    if ostore and ostore not in store_names:
+        store_names.append(ostore)
+    sidx = store_names.index(ostore) + 1 if ostore else 0
     attrs = {p: me.attributes.get('part_' + p) for p in PART_IDS} if rigged else {}
     for t in me.loop_triangles:
         mat = o.material_slots[t.material_index].material
@@ -195,9 +212,16 @@ for o in tree:
         rgb.append(int(m.group(1), 16))
         part.append(tag)
         joint.append(ojoint)
+        d = re.match(r'Insignia([1-3])_', mat.name)
+        decal.append(int(d.group(1)) if d else 0)
+        store.append(sidx)
     ev.to_mesh_clear()
 
 model = {'source': f'assets/models/{ident}.blend', 'positions': pos, 'rgb': rgb, 'parts': part}
+if any(decal):
+    model['decal'] = decal
+if store_names:
+    model.update({'store': store, 'storeNames': store_names})
 
 if rigged:
     jl = []
@@ -233,5 +257,7 @@ if rigged:
 with open(out, 'w') as f:
     json.dump(model, f, separators=(',', ':'))
 print('exported', ident, len(rgb), 'triangles', {PART_IDS[i - 1]: part.count(i) for i in set(part) if i},
+      {f'insignia{k}': decal.count(k) for k in (1, 2, 3) if k in decal},
+      {n: store.count(i + 1) for i, n in enumerate(store_names)},
       (f'{len(model["joints"])} joints, {sum(1 for j in joint if j)} articulated triangles, '
        f'{len(model["lights"])} lights, {len(model["breaks"])} break points') if rigged else '')

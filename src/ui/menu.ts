@@ -8,13 +8,16 @@ import { AIRFIELDS, Minimap } from './minimap';
 import { MAP_SOURCE_NAME, parseMapLink } from './map-links';
 import type { LatLon } from '../world/geodesy';
 import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
-import type { AircraftId } from '../flight/aircraft';
+import { AIRCRAFT, type AircraftId } from '../flight/aircraft';
 import { DEFAULT_BINDINGS, type Action } from '../flight/controls';
 
 export type MenuScreen = 'consent' | 'start' | 'settings' | 'pause' | 'crashed' | 'none';
 
 export interface FlightConfig {
   aircraft: AircraftId;
+  /** national markings and loadout of that aircraft ('' = its defaults) */
+  insignia: string;
+  loadout: string;
   location: 'LTBS' | 'LOWI' | 'custom';
   customPoint: LatLon | null;
   startMode: 'runway' | 'air';
@@ -54,7 +57,7 @@ const DIM = rampIndex(RAMP.HUD_GREEN, 6);
 
 export class Menu {
   screen: MenuScreen = 'none';
-  config: FlightConfig = { aircraft: 'su27', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1, timeOfDay: 'real' };
+  config: FlightConfig = { aircraft: 'su27', insignia: '', loadout: '', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1, timeOfDay: 'real' };
   readonly minimap = new Minimap();
   crashReason = '';
   /** sim clock / sun / moon summary shown on the pause screen */
@@ -199,11 +202,23 @@ export class Menu {
     };
 
     label('aircraft');
-    row([
-      ['SU-27 FLANKER', () => { cfg.aircraft = 'su27'; }, cfg.aircraft === 'su27'],
-      ['F-117A NIGHTHAWK', () => { cfg.aircraft = 'f117'; }, cfg.aircraft === 'f117'],
-      ['AN-225 MRIYA', () => { cfg.aircraft = 'an225'; }, cfg.aircraft === 'an225'],
-    ]);
+    const pick = (id: AircraftId, name: string): [string, () => void, boolean] => [name, () => {
+      if (cfg.aircraft !== id) Object.assign(cfg, { aircraft: id, insignia: '', loadout: '' });
+    }, cfg.aircraft === id];
+    row([pick('su27', 'SU-27 FLANKER'), pick('f117', 'F-117A NIGHTHAWK')]);
+    row([pick('f16', 'F-16AM FALCON'), pick('an225', 'AN-225 MRIYA')]);
+    // the chosen aircraft's markings and loadouts, when it has a choice of them (the first is its default)
+    const ac = AIRCRAFT[cfg.aircraft];
+    const choose = (key: StringKey, items: { id: string; name: string }[] | undefined, field: 'insignia' | 'loadout'): void => {
+      if (!items || items.length < 2) return;
+      label(key);
+      const current = cfg[field] || items[0].id;
+      for (let i = 0; i < items.length; i += 4) {
+        row(items.slice(i, i + 4).map((it) => [it.name, () => { cfg[field] = it.id; }, it.id === current]));
+      }
+    };
+    choose('insignia', ac.insignia, 'insignia');
+    choose('loadout', ac.loadouts, 'loadout');
     label('location');
     row([
       ['LTBS', () => { cfg.location = 'LTBS'; }, cfg.location === 'LTBS'],

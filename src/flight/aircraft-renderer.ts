@@ -101,9 +101,10 @@ export class AircraftRenderer {
   }
 
   private ensureMesh(cfg: AircraftConfig): void {
-    if (this.cfgId === cfg.id) return;
-    this.cfgId = cfg.id;
-    const src = aircraftMesh(cfg.id);
+    const key = `${cfg.id}|${cfg.insigniaId ?? ''}|${cfg.loadoutId ?? ''}`;
+    if (this.cfgId === key) return;
+    this.cfgId = key;
+    const src = aircraftMesh(cfg);
     this.base = src.vertices;
     this.parts = src.parts;
     this.joint = src.joint;

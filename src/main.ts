@@ -22,7 +22,7 @@ import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
 import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
-import { AIRCRAFT, type AircraftId } from './flight/aircraft';
+import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { Autopilot } from './flight/autopilot';
 import { Air } from './flight/air';
@@ -44,9 +44,12 @@ interface Start {
   hdg: number;
   aircraft: AircraftId;
   time?: Date;
+  /** national markings and loadout ids (empty: the aircraft's defaults) */
+  insignia?: string;
+  loadout?: string;
 }
 
-/** Q18: #lat,lon,alt,hdg,aircraft,time — alt may be omitted for air start. */
+/** Q18: #lat,lon,alt,hdg,aircraft,time,insignia,loadout — alt may be omitted for air start, the last three left empty. */
 function parseStart(): Start {
   const fallback: Start = { latLon: { lat: 47.2603, lon: 11.3439 }, hdg: 0, aircraft: 'su27' };
   const hash = window.location.hash.slice(1);
@@ -70,6 +73,8 @@ function parseStart(): Start {
     hdg: Number.isFinite(hdg) ? hdg : 0,
     aircraft: parts[4] in AIRCRAFT ? (parts[4] as AircraftId) : 'su27',
     time,
+    insignia: parts[6] || undefined,
+    loadout: parts[7] || undefined,
   };
 }
 
@@ -89,7 +94,7 @@ let consent = loadConsent();
 const telemetry = new Telemetry(() => consent === 'yes', renderer);
 
 const start = parseStart();
-const cfg = AIRCRAFT[start.aircraft];
+const cfg = fitAircraft(AIRCRAFT[start.aircraft], start.insignia, start.loadout);
 const model = new FlightModel(cfg);
 const rig = new CameraRig();
 const aircraftRenderer = new AircraftRenderer(gl);
@@ -305,7 +310,7 @@ const menu = new Menu(font, vectors, settings, {
     const alt = fc.startMode === 'runway' ? '0' : '';
     // 'real' leaves the time field empty so a reload always starts at the current clock
     const when = fc.timeOfDay === 'real' ? '' : Math.floor(timeForPreset(fc.timeOfDay, ll, new Date()).getTime() / 1000);
-    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when}`;
+    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when},${fc.insignia},${fc.loadout}`;
     window.location.reload();
   },
   onConsent: (allow) => {
@@ -687,7 +692,7 @@ function frame(now: number): void {
     const ll = camWorld.latLon;
     history.replaceState(
       null, '',
-      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)}`,
+      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)},${cfg.insigniaId ?? ''},${cfg.loadoutId ?? ''}`,
     );
   }
   profiler.frameEnd();
