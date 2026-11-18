@@ -146,7 +146,7 @@ export function drawHud(
   // Q28: external cameras carry only a minimal data line
   if (camera !== 'cockpit') {
     const line =
-      `V ${Math.round(speedValue(model.airspeed, units))} ${speedUnit(units)}   ` +
+      `V ${Math.round(speedValue(model.indicatedSpeed, units))} ${speedUnit(units)}   ` +
       `H ${Math.round(altValue(model.pos[1], units))} ${altUnit(units)}   ` +
       `${L.hdg} ${String(Math.round(model.headingDeg) % 360).padStart(3, '0')}`;
     font.text(line, (w - font.measure(line, u)) / 2, 8 * u, u, green);
@@ -226,9 +226,9 @@ export function drawHud(
         font.text(String(Math.abs(deg)), lx, ly, u, green);
       }
     }
-    // flight path marker at the velocity vector
-    const fpmX = cx + model.betaDeg * pxPerDeg;
-    const fpmY = cy + model.alphaDeg * pxPerDeg;
+    // flight path marker at the velocity vector over the ground
+    const fpmX = cx + model.pathBetaDeg * pxPerDeg;
+    const fpmY = cy + model.pathAlphaDeg * pxPerDeg;
     const [fx, fy] = rotate(fpmX, fpmY, cx, cy, bank);
     const r = 8 * u;
     vec.circle(fx, fy, r, lw * 1.5, amber, 16);
@@ -247,7 +247,7 @@ export function drawHud(
   const tapeH = 40 * u;
   const leftX = cx - Math.min(w, h) * 0.34 - tapeW;
   const rightX = cx + Math.min(w, h) * 0.34;
-  const spd = Math.round(speedValue(model.airspeed, units));
+  const spd = Math.round(speedValue(model.indicatedSpeed, units));
   const alt = Math.round(altValue(model.pos[1], units));
   vec.rect(leftX, tapeY, tapeW, tapeH, lw, green);
   vec.rect(rightX, tapeY, tapeW, tapeH, lw, green);
@@ -260,7 +260,7 @@ export function drawHud(
   const vs = model.verticalSpeed;
   const vsStr = `${L.vs} ${vs >= 0 ? '+' : ''}${Math.round(units === 'metric' ? vs : vs * 196.85)} ${units === 'metric' ? 'M/S' : 'FT/M'}`;
   font.text(vsStr, rightX, tapeY - 22 * u, u, green);
-  const aoa = `A ${model.alphaDeg.toFixed(1)}  G ${model.gLoad.toFixed(1)}`;
+  const aoa = `A ${model.airDataValid ? model.alphaDeg.toFixed(1) : '--'}  G ${model.gLoad.toFixed(1)}`;
   font.text(aoa, leftX, tapeY - 22 * u, u, green);
 
   // heading strip (bottom center)

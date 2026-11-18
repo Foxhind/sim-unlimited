@@ -526,3 +526,34 @@ describe('structure: overload, flutter, strikes, collisions', () => {
     expect(perStep).toBeLessThan(0.1);
   });
 });
+
+describe('instruments at a standstill in gusty air', () => {
+  it('parked in a light gusting wind: speed reads 0, no angle of attack, the path marker stays caged', () => {
+    // 1 m/s gusting 5: the air past a parked aircraft swings 1-3 m/s in every direction
+    const air = new Air({ elevation: 0, tempC: 17, windFromDeg: 106, windMs: 1, gustMs: 5, lat: 37 });
+    const m = new FlightModel(F117);
+    m.spawnGround(vec3.fromValues(0, 0, 0), 15, 0);
+    let maxIas = 0;
+    let maxPath = 0;
+    run(m, 20, { gearDown: true, brakes: true }, air, undefined, () => {
+      maxIas = Math.max(maxIas, m.indicatedSpeed);
+      maxPath = Math.max(maxPath, Math.hypot(m.pathAlphaDeg, m.pathBetaDeg));
+    });
+    expect(m.crashed).toBe(false);
+    expect(m.airspeed).toBeGreaterThan(0); // the air is moving; the instruments just cannot tell
+    expect(maxIas).toBe(0);
+    expect(m.airDataValid).toBe(false);
+    expect(maxPath).toBe(0);
+  });
+
+  it('in flight the path marker follows the velocity over the ground, the speed follows the air', () => {
+    const m = new FlightModel(F117);
+    m.spawnAir(vec3.fromValues(0, 2000, 0), 0);
+    run(m, 1, { throttle: 0.7 });
+    expect(m.airDataValid).toBe(true);
+    expect(m.indicatedSpeed).toBeGreaterThan(m.airspeed * 0.95);
+    // calm air: the velocity over the ground is the velocity through the air
+    expect(m.pathAlphaDeg).toBeCloseTo(m.alphaDeg, 0);
+    expect(m.pathBetaDeg).toBeCloseTo(m.betaDeg, 0);
+  });
+});

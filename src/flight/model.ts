@@ -36,6 +36,13 @@ const SURFACE_RATE = 4;
 const GEAR_TIME = 6;
 const FLAP_TIME = 4;
 const AIRBRAKE_TIME = 2;
+/** the pitot reads nothing below this true airspeed, m/s (~20 kt): the dynamic pressure is a few pascals */
+const PITOT_MIN_SPEED = 10;
+/** time constant of the airspeed indication, s: the pressure lines smooth out the gusts */
+const PITOT_LAG = 0.6;
+/** below this ground speed the flight path marker is caged at the boresight; it is fully free by PATH_FREE_SPEED, m/s */
+const PATH_CAGE_SPEED = 2;
+const PATH_FREE_SPEED = 8;
 
 export interface FlightControls {
   pitch: number; // -1 push .. +1 pull
@@ -149,6 +156,16 @@ export class FlightModel {
   airspeed = 0;
   /** equivalent airspeed, m/s: what the wing feels */
   eas = 0;
+  /** airspeed as an instrument shows it, m/s: lagged, zero below the pitot's threshold */
+  indicatedSpeed = 0;
+  /** the air data (indicated speed, angle of attack) is meaningful: the pitot reads */
+  airDataValid = false;
+  /**
+   * direction of travel over the ground relative to the nose, degrees, alpha/beta convention, for the
+   * flight path marker; caged toward 0 at a standstill, where the direction of a crawl means nothing
+   */
+  pathAlphaDeg = 0;
+  pathBetaDeg = 0;
   mach = 0;
   /** air velocity at the aircraft, world axes, m/s */
   readonly wind = vec3.create();
@@ -373,6 +390,10 @@ export class FlightModel {
     this.nz = 1;
     this.flutter = 0;
     this.touchdownTimer = 0;
+    this.indicatedSpeed = 0;
+    this.airDataValid = false;
+    this.pathAlphaDeg = 0;
+    this.pathBetaDeg = 0;
     this.snapActuators = true;
     for (const s of this.surfs) {
       s.defl = 0;
@@ -388,6 +409,8 @@ export class FlightModel {
     const f = this.forward(vec3.create());
     vec3.scale(this.vel, f, this.cfg.cruiseSpeed * 0.7);
     this.airspeed = this.speed;
+    this.indicatedSpeed = this.speed;
+    this.airDataValid = true;
     this.onGround = false;
   }
 
@@ -561,6 +584,27 @@ export class FlightModel {
     this.mach = V / A.speedOfSound;
     this.alphaDeg = alpha * R2D;
     this.betaDeg = beta * R2D;
+    const pitot = V >= PITOT_MIN_SPEED ? V : 0;
+    this.indicatedSpeed += (pitot - this.indicatedSpeed) * Math.min(1, dt / PITOT_LAG);
+    if (pitot === 0 && this.indicatedSpeed < 0.5) this.indicatedSpeed = 0;
+    this.airDataValid = this.indicatedSpeed > 0;
+
+    // flight path over the ground, body axes: where the aircraft is actually going
+    {
+      const gv = this.vel;
+      const gs = Math.hypot(gv[0], gv[1], gv[2]);
+      const free = smooth((gs - PATH_CAGE_SPEED) / (PATH_FREE_SPEED - PATH_CAGE_SPEED));
+      if (free > 0) {
+        const gu = gv[0] * R[0] + gv[1] * R[1] + gv[2] * R[2];
+        const gvb = gv[0] * R[3] + gv[1] * R[4] + gv[2] * R[5];
+        const gw = gv[0] * R[6] + gv[1] * R[7] + gv[2] * R[8];
+        this.pathAlphaDeg = Math.atan2(-gvb, -gw) * R2D * free;
+        this.pathBetaDeg = Math.asin(clamp(gu / gs, -1, 1)) * R2D * free;
+      } else {
+        this.pathAlphaDeg = 0;
+        this.pathBetaDeg = 0;
+      }
+    }
 
     const wx = this.omega[0];
     const wy = this.omega[1];
