@@ -11,9 +11,12 @@ export const DEPTH_FAR = 200000;
 /**
  * XDR: the brightest a light source's strongest channel gets, × SDR white in linear light (EMIT_GLSL).
  * Browsers don't tell the display's headroom; a MacBook Pro XDR panel has ~3× at its default
- * brightness, more when dimmer. Above the headroom the display clips each channel and colours wash out.
+ * brightness, more when dimmer. Above the headroom the display clips each channel: white just stays
+ * at the panel's peak, a saturated colour loses a little hue as its weak channels catch up. 12× keeps
+ * lights bright up to the panel's full headroom (~16× when dimmed), at the cost of that wash on a
+ * bright panel.
  */
-export const HDR_PEAK = 3;
+export const HDR_PEAK = 12;
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
 const GLOW_RINGS = 4;

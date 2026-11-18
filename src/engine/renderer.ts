@@ -653,13 +653,13 @@ export interface BaseGround {
  */
 export const HDR_EMISSION = {
   /** navigation lights, beacons, landing light (aircraft-renderer drawLights) */
-  aircraftLights: 16,
+  aircraftLights: 64,
   /** the exhaust flame */
-  flame: 8,
+  flame: 32,
   /** the sun disc */
-  sun: 32,
+  sun: 128,
   /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours) */
-  cityLights: 12,
+  cityLights: 48,
 } as const;
 
 /** WebGL drawing buffer storage and tone mapping (not yet in TypeScript's DOM lib) */
