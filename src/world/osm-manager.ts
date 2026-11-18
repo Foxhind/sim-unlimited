@@ -4,6 +4,7 @@ import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
+import { WINDOW_ATTR_FLOATS } from './building-mesher';
 import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
@@ -43,8 +44,8 @@ interface OsmChunk {
   /** one set per tree type present */
   trees?: TreeSet[];
   lights?: PropSet;
-  /** night: lit windows (near), building lights (far), mast beacons (any distance) */
-  windows?: PropSet;
+  /** night: roof obstruction lights (near; the lit windows are on the walls), building lights (far), mast beacons (any distance) */
+  roofLights?: PropSet;
   nightDots?: PropSet;
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
@@ -66,10 +67,11 @@ interface MeshPayload {
   ramps: ArrayBuffer;
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
+  bWindows: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
-  windows: ArrayBuffer;
+  roofLights: ArrayBuffer;
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
@@ -139,9 +141,9 @@ export class OsmManager {
         if (msg.type === 'mesh') {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
-            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), dots: buf(msg.dots),
+            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), dots: buf(msg.dots),
             trees: buf(msg.trees), lights: buf(msg.lights),
-            windows: buf(msg.windows), nightDots: buf(msg.nightDots),
+            roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
             glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), roadLines: buf(msg.roadLines),
@@ -169,7 +171,7 @@ export class OsmManager {
     }
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
-        (c.windows || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
+        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -261,8 +263,11 @@ export class OsmManager {
     });
   }
 
-  /** interleaved pos+normal (stride 24) with Uint32 face colours, as the world shader expects */
-  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer): Mesh | undefined {
+  /**
+   * interleaved pos+normal (stride 24) with Uint32 face colours, as the world shader expects; for
+   * buildings also the facade window attributes (WORLD_VS aWinUV, aWinEdge)
+   */
+  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer, windows?: ArrayBuffer): Mesh | undefined {
     if (ramps.byteLength === 0) return undefined;
     const gl = this.gl;
     const vao = must(gl.createVertexArray(), 'osm VAO');
@@ -279,8 +284,19 @@ export class OsmManager {
     gl.bufferData(gl.ARRAY_BUFFER, ramps, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, 0); // Uint32 face colours (palette.ts)
-    gl.bindVertexArray(null);
     chunk.buffers.push(vb, rb);
+    if (windows && windows.byteLength / (WINDOW_ATTR_FLOATS * 4) === ramps.byteLength / 4) {
+      const wb = must(gl.createBuffer(), 'osm windows');
+      gl.bindBuffer(gl.ARRAY_BUFFER, wb);
+      gl.bufferData(gl.ARRAY_BUFFER, windows, gl.STATIC_DRAW);
+      const stride = WINDOW_ATTR_FLOATS * 4;
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 0);
+      gl.enableVertexAttribArray(4);
+      gl.vertexAttribPointer(4, 3, gl.FLOAT, false, stride, 8);
+      chunk.buffers.push(wb);
+    }
+    gl.bindVertexArray(null);
     chunk.vaos.push(vao);
     return { vao, vertexCount: ramps.byteLength / 4 };
   }
@@ -309,10 +325,10 @@ export class OsmManager {
     this.dispose(chunk);
     const gl = this.gl;
     chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps);
-    chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps);
+    chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
     chunk.dots = this.points(chunk, data.dots);
     chunk.lights = this.points(chunk, data.lights);
-    chunk.windows = this.points(chunk, data.windows);
+    chunk.roofLights = this.points(chunk, data.roofLights);
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
@@ -377,7 +393,7 @@ export class OsmManager {
     chunk.vaos = [];
     chunk.mesh = chunk.bmesh = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
-    chunk.windows = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
+    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
     chunk.glow = chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.lamps = undefined;
   }
@@ -408,12 +424,17 @@ export class OsmManager {
       const slant = Math.hypot(dx, dz, camPos[1]);
       if (slant < HOUSE_RADIUS_M) {
         if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
-        if (c.bmesh) renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        if (c.bmesh) {
+          // windows on the facades: glass by day, about a third of them lit at night (no window points near)
+          renderer.windows = lightsOn ? 'lit' : 'glass';
+          renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.windows = 'off';
+        }
         if (c.lamps && lightsOn) {
           renderer.drawLights(c.lamps.vao, c.lamps.count, c.offset, view, proj, camPos, lampSize(pointSize), true);
         }
-        if (c.windows && lightsOn) {
-          renderer.drawLights(c.windows.vao, c.windows.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
+        if (c.roofLights && lightsOn) {
+          renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
       } else {
         // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one; by night only

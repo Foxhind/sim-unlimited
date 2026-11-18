@@ -1,16 +1,55 @@
 import earcut from 'earcut';
-import { colourOf, LIGHT, pointValue, snowy, type RGB } from '../engine/palette';
+import { colourOf, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
-import type { LonLat, OsmBuilding } from './osm-types';
+import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofModel, type XZ } from './roof-shapes';
+
+/** floats per vertex of BuildingMeshData.windows */
+export const WINDOW_ATTR_FLOATS = 5;
+
+/**
+ * The building mesh, and per vertex where it is on a windowed facade (WORLD_VS aWinUV, aWinEdge):
+ * u metres along the wall edge from its start, v metres above the wall base, the edge's length,
+ * the wall height (0: no windows on this face) and the edge's code: a 20-bit seed (which windows are
+ * lit, which slots carry balconies) plus the FACADE style and flags (palette.ts FACADE_SEED_BITS).
+ */
+export interface BuildingMeshData extends TerrainMeshData {
+  windows: Float32Array;
+}
 
 export interface BuildingMeshOptions {
   tile: Tile;
   buildings: OsmBuilding[];
   sampleHeight: HeightSampler;
+  /** OSM points: those tagged `entrance` on a building's outline become doors in its wall */
+  points?: OsmPoint[];
 }
+
+/** a wall edge at least this long may carry balconies (one slot of WINDOWS.SPACING_M) */
+const BALCONY_MIN_EDGE_M = 4;
+/** building types whose walls may carry balconies; an untagged `yes` from this many metres of facade */
+const BALCONY_TYPES = new Set(['apartments', 'residential', 'dormitory', 'hotel']);
+const BALCONY_YES_MIN_WALL_M = 12;
+/** shares of the balconied edges of such a building: glazed, then open (the rest plain windows) */
+const GLAZED_SHARE = 0.3;
+const OPEN_SHARE = 0.25;
+
+export function hasBalconies(tags: Record<string, string>, wall: number): boolean {
+  const type = tags['building:part'] || tags.building || 'yes';
+  return BALCONY_TYPES.has(type) || (type === 'yes' && wall >= BALCONY_YES_MIN_WALL_M);
+}
+
+/** an entrance node this close to a wall edge (it is usually a vertex of the outline) is on it */
+const ENTRANCE_SNAP_M = 1.5;
+/** doors: width × height by the entrance tag, and the leaf colours (picked per door by its hash) */
+const DOOR_SIZE: Record<string, [number, number]> = { main: [1.9, 2.4], garage: [2.6, 2.3], default: [1.1, 2.1] };
+const DOOR_FRAME_RGB: RGB = [58, 56, 54];
+const DOOR_LEAF_RGB: RGB[] = [[104, 70, 44], [70, 74, 80], [48, 82, 60], [96, 44, 40]];
+const GARAGE_DOOR_RGB: RGB = [150, 152, 150];
+/** standoff of the door layers from the wall (window cover, frame, leaf), so the depth test keeps the order */
+const DOOR_LAYERS_M = [0.03, 0.06, 0.09];
 
 
 /** the CSS colour names OSM colour tags may use (the real CSS values: muting happens later) */
@@ -336,16 +375,18 @@ function normalizeRing(ring: XZ[], ccw: boolean): XZ[] {
   return ring;
 }
 
-export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
+export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const { tile, buildings, sampleHeight } = opts;
   const center = tileCenter(tile);
   const verts: number[] = [];
   const ramps: number[] = [];
+  const win: number[] = [];
 
   const toXZ = (ll: LonLat): XZ => {
     const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
     return [e, -n];
   };
+  const entrances = entranceGrid((opts.points ?? []).filter((p) => p.tags.entrance !== undefined && p.tags.entrance !== 'no'), toXZ, sampleHeight);
   const emitTri = (a: V3, b: V3, c: V3, ramp: number, up: boolean): void => {
     const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
     const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
@@ -359,6 +400,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     for (const p of [a, b, c]) {
       verts.push(p[0], p[1], p[2], nx, ny, nz);
       ramps.push(ramp);
+      win.push(0, 0, 0, 0, 0);
     }
   };
 
@@ -389,12 +431,22 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
     const centroid = areaCentroid(outer);
+    // windows on the facades of buildings people live or work in, below the roof (not in gables)
+    const windowed = isLitBuilding(tags) && h.wall >= WINDOWS.MIN_WALL_M;
+    // residential: balconies on some edges, rare signs on the ground floor
+    const balconies = windowed && hasBalconies(tags, h.wall);
 
     // walls up to the roof profile (gable ends close themselves); none under a canopy
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? h.wall : 0, balconies);
+        }
+      }
+      // doors where OSM marks entrances on the outline, on walls standing on the ground
+      if (h.min < 0.5 && h.wall >= 2.4) {
+        for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
+          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? h.wall : 0, balconies);
         }
       }
     }
@@ -418,15 +470,27 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     }
   }
 
-  function wallUnderRoof(p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ): void {
+  /** windowH: the facade height that has windows (0: none); balconies: some edges may carry them */
+  function wallUnderRoof(
+    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, balconies: boolean,
+  ): void {
     const field = roof.kind === 'planar' ? roof.field : () => 0;
     const ts = [0, ...crossings(p, q, creases), 1];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const wallH = len >= WINDOWS.MIN_EDGE_M ? windowH : 0;
+    // stable across rebuilds: from the edge's start in tile-centre ENU; the code is an integer below 2^24, exact in a float
+    const seed = wallH > 0 ? edgeCode(p, yBase, len, balconies) : 0;
     for (let k = 0; k + 1 < ts.length; k++) {
       const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
       const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
       const ya = yTop + field(a), yc = yTop + field(c);
       if (ya - yBase < 0.01 && yc - yBase < 0.01) continue;
       emitWallQuad([a[0], yBase, a[1]], [a[0], ya, a[1]], [c[0], yc, c[1]], [c[0], yBase, c[1]], ramp, centroid);
+      // where each of the six vertices is on the facade (emitWallQuad order: a0, c0, c1, a0, c1, a1)
+      const ua = ts[k] * len, uc = ts[k + 1] * len;
+      for (const [u, v] of [[ua, 0], [uc, 0], [uc, yc - yBase], [ua, 0], [uc, yc - yBase], [ua, ya - yBase]]) {
+        win.push(u, v, len, wallH, seed);
+      }
     }
   }
 
@@ -483,6 +547,74 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
     }
   }
 
+  /** a vertical rectangle on the wall: u0..u1 along p→q, y0..y1, `off` metres out along the outward normal n */
+  /**
+   * facade: [edge length, wall height, code, wall base] to carry the facade attributes (u along the
+   * edge, v above the wall base) as the wall under it does; without, no windows on the rectangle
+   */
+  function wallRect(
+    p: XZ, dir: XZ, n: XZ, u0: number, u1: number, y0: number, y1: number, off: number, ramp: number, facade?: [number, number, number, number],
+  ): void {
+    const at = (u: number, y: number): [number, number] => [u, y];
+    for (const [u, y] of [at(u0, y0), at(u1, y0), at(u1, y1), at(u0, y0), at(u1, y1), at(u0, y1)]) {
+      verts.push(p[0] + dir[0] * u + n[0] * off, y, p[1] + dir[1] * u + n[1] * off, n[0], 0, n[1]);
+      ramps.push(ramp);
+      if (facade) win.push(u, y - facade[3], facade[0], facade[1], facade[2]);
+      else win.push(0, 0, 0, 0, 0);
+    }
+  }
+
+  /**
+   * A door at entrance e on the nearest wall edge of the rings (outer ccw, holes cw: (dz, -dx) is
+   * outward for both) that it fits on. It is moved to the centre of the nearest window slot, and
+   * that slot's ground floor is covered by a blind patch of the wall (the edge's facade code with
+   * FACADE_BLIND: the ground floor's tint, no openings), so no pane or shop window shows round the door.
+   */
+  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, residential: boolean): void {
+    const [w, hgt] = DOOR_SIZE[e.kind] ?? DOOR_SIZE.default;
+    let best: { p: XZ; dir: XZ; len: number; u: number; d: number } | undefined;
+    for (const ring of rings) {
+      for (let i = 0; i < ring.length; i++) {
+        const p = ring[i], q = ring[(i + 1) % ring.length];
+        const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (len < w + 0.4) continue;
+        const dir: XZ = [(q[0] - p[0]) / len, (q[1] - p[1]) / len];
+        const u = Math.max(0, Math.min(len, (e.at[0] - p[0]) * dir[0] + (e.at[1] - p[1]) * dir[1]));
+        const d = Math.hypot(p[0] + dir[0] * u - e.at[0], p[1] + dir[1] * u - e.at[1]);
+        // on a corner vertex, the longer of its two edges
+        if (d <= ENTRANCE_SNAP_M && (!best || d < best.d - 0.05 || (Math.abs(d - best.d) <= 0.05 && len > best.len))) best = { p, dir, len, u, d };
+      }
+    }
+    if (!best) return;
+    const { p, dir, len } = best;
+    const n: XZ = [dir[1], -dir[0]];
+    const slots = Math.max(1, Math.floor(len / WINDOWS.SPACING_M));
+    const cw = len / slots;
+    const k = Math.max(0, Math.min(slots - 1, Math.floor(best.u / cw)));
+    const u = Math.max(w / 2 + 0.2, Math.min(len - w / 2 - 0.2, (k + 0.5) * cw));
+    // the ground under the entrance, never below the foundation
+    const y0 = Math.max(wallBase, e.ground);
+    const top = Math.min(wallTop - 0.1, y0 + hgt);
+    if (top - y0 < 1.8) return;
+    const wallH = len >= WINDOWS.MIN_EDGE_M ? windowH : 0;
+    if (wallH > 0) {
+      // the slot's whole ground floor (wallUnderRoof gives the edge the same code)
+      const fh = wallH / Math.max(1, Math.floor(wallH / WINDOWS.FLOOR_M));
+      const code = edgeCode(p, wallBase, len, residential) + FACADE_BLIND;
+      wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, wallBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, wallBase]);
+    }
+    const garage = e.kind === 'garage';
+    wallRect(p, dir, n, u - w / 2 - 0.1, u + w / 2 + 0.1, y0, top + 0.1, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
+    const leaf = garage ? GARAGE_DOOR_RGB : DOOR_LEAF_RGB[Math.floor(hash01(e.at[0], y0, e.at[1]) * DOOR_LEAF_RGB.length)];
+    if (e.kind === 'main') {
+      // double door: two leaves with a frame line between
+      wallRect(p, dir, n, u - w / 2, u - 0.03, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
+      wallRect(p, dir, n, u + 0.03, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
+    } else {
+      wallRect(p, dir, n, u - w / 2, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
+    }
+  }
+
   function capRing(outer: XZ[], holes: XZ[][], y: number, ramp: number, up: boolean): void {
     const flat: number[] = [];
     const holeIdx: number[] = [];
@@ -500,7 +632,57 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): TerrainMeshData {
   }
 
   const vertexCount = ramps.length;
-  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), vertexCount };
+  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), vertexCount, windows: new Float32Array(win) };
+}
+
+/**
+ * The code of a windowed wall edge (BuildingMeshData.windows): a seed from its start and, on a
+ * residential building, FACADE_RESIDENTIAL and (on an edge long enough) maybe a balcony style.
+ */
+function edgeCode(p: XZ, yBase: number, len: number, residential: boolean): number {
+  const seed = Math.floor(hash01(p[0], yBase, p[1]) * (1 << FACADE_SEED_BITS));
+  let style: number = FACADE.WINDOWS;
+  if (residential && len >= BALCONY_MIN_EDGE_M) {
+    const r = hash01(p[1], p[0], yBase + 17);
+    style = r < GLAZED_SHARE ? FACADE.GLAZED_BALCONIES : r < GLAZED_SHARE + OPEN_SHARE ? FACADE.OPEN_BALCONIES : FACADE.WINDOWS;
+  }
+  return (residential ? FACADE_RESIDENTIAL : 0) + style * (1 << FACADE_SEED_BITS) + seed;
+}
+
+interface Entrance {
+  at: XZ;
+  /** the entrance tag: main, garage, service, … */
+  kind: string;
+  /** terrain height under it */
+  ground: number;
+}
+
+/** entrance nodes in tile-centre metres, bucketed in a grid for the per-building lookup */
+function entranceGrid(points: OsmPoint[], toXZ: (ll: LonLat) => XZ, sampleHeight?: HeightSampler): { near(b: ReturnType<typeof bbox>, pad: number): Entrance[] } {
+  const CELL = 25;
+  const cells = new Map<string, Entrance[]>();
+  for (const pt of points) {
+    const at = toXZ(pt.at);
+    const e: Entrance = { at, kind: pt.tags.entrance, ground: sampleHeight ? Math.max(0, sampleHeight(pt.at[0], pt.at[1])) : -Infinity };
+    const key = `${Math.floor(at[0] / CELL)},${Math.floor(at[1] / CELL)}`;
+    const list = cells.get(key);
+    if (list) list.push(e);
+    else cells.set(key, [e]);
+  }
+  return {
+    near(b, pad) {
+      const out: Entrance[] = [];
+      if (!cells.size) return out;
+      for (let i = Math.floor((b.minX - pad) / CELL); i <= Math.floor((b.maxX + pad) / CELL); i++) {
+        for (let j = Math.floor((b.minZ - pad) / CELL); j <= Math.floor((b.maxZ + pad) / CELL); j++) {
+          for (const e of cells.get(`${i},${j}`) ?? []) {
+            if (e.at[0] >= b.minX - pad && e.at[0] <= b.maxX + pad && e.at[1] >= b.minZ - pad && e.at[1] <= b.maxZ + pad) out.push(e);
+          }
+        }
+      }
+      return out;
+    },
+  };
 }
 
 /**
@@ -539,15 +721,6 @@ export function isLitBuilding(tags: Record<string, string>): boolean {
 
 /** taller than this (top above ground), a building carries red obstruction lights on its roof */
 export const TALL_BUILDING_M = 50;
-const WINDOW_SPACING_M = 4;
-const FLOOR_M = 3;
-const WINDOW_LIT_SHARE = 0.3;
-const WINDOW_YELLOW_SHARE = 0.7;
-/** windows stand off the wall so the depth test keeps them in front of it */
-const WINDOW_OFFSET_M = 0.4;
-const MAX_WINDOWS_PER_BUILDING = 600;
-const MAX_WINDOWS_PER_TILE = 80000;
-
 /** deterministic 0..1 hash of a position (lights do not reshuffle when a tile is rebuilt) */
 function hash01(x: number, y: number, z: number): number {
   let h = Math.imul(Math.round(x * 10) | 0, 73856093) ^ Math.imul(Math.round(y * 10) | 0, 19349663) ^ Math.imul(Math.round(z * 10) | 0, 83492791);
@@ -556,28 +729,26 @@ function hash01(x: number, y: number, z: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-const windowColour = (r: number) => (r < WINDOW_YELLOW_SHARE ? LIGHT.WINDOW_YELLOW : LIGHT.WINDOW_WHITE);
+const windowColour = (r: number) => (r < WINDOWS.YELLOW_SHARE ? LIGHT.WINDOW_YELLOW : LIGHT.WINDOW_WHITE);
 
 export interface NightLights {
-  /** near (with the building mesh): lit windows on the walls, red lights on the roof corners of tall buildings */
-  windows: Float32Array;
+  /** near (with the building mesh): red lights on the roof corners of tall buildings; the windows are on the walls (WORLD_FS) */
+  roofLights: Float32Array;
   /** far (instead of the roof-coloured dots): one yellow or white dot per building, red at roof height for tall ones */
   dots: Float32Array;
 }
 
 /**
- * Night lights of buildings; per point x, y, z (tile-centre ENU), palette index, like buildingDots.
- * Windows: every 4 m along each outer wall on every 3 m floor, about a third of them lit, mostly yellow.
+ * Night lights of buildings as points; per point x, y, z (tile-centre ENU), palette index, like
+ * buildingDots. Near buildings show lit windows on their walls instead of points (WORLD_FS).
  */
 export function buildingNightLights(
   buildings: OsmBuilding[],
   tile: Tile,
   sampleHeight: HeightSampler,
-  /** false: only the far dots (the far OSM ring has no near mesh to put windows on) */
-  withWindows = true,
 ): NightLights {
   const center = tileCenter(tile);
-  const windows: number[] = [];
+  const roofLights: number[] = [];
   const dots: number[] = [];
   const toXZ = (ll: LonLat): XZ => {
     const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
@@ -611,34 +782,6 @@ export function buildingNightLights(
     }
     if (tall) dots.push(cx, roofTop, cz, LIGHT.RED);
 
-    if (withWindows && lit && h.wall >= 2.5 && windows.length / 4 < MAX_WINDOWS_PER_TILE) {
-      const floors = Math.max(1, Math.floor(h.wall / FLOOR_M));
-      let count = 0;
-      for (let i = 0; i < ring.length && count < MAX_WINDOWS_PER_BUILDING; i++) {
-        const a = ring[i];
-        const c = ring[(i + 1) % ring.length];
-        const ex = c[0] - a[0], ez = c[1] - a[1];
-        const len = Math.hypot(ex, ez);
-        if (len < WINDOW_SPACING_M * 0.75) continue;
-        // outward normal: away from the centroid
-        let nx = ez / len, nz = -ex / len;
-        if (nx * ((a[0] + c[0]) / 2 - cx) + nz * ((a[1] + c[1]) / 2 - cz) < 0) { nx = -nx; nz = -nz; }
-        const slots = Math.max(1, Math.floor(len / WINDOW_SPACING_M));
-        for (let f = 0; f < floors && count < MAX_WINDOWS_PER_BUILDING; f++) {
-          const y = wallBase + (f + 0.5) * (h.wall / floors);
-          for (let k = 0; k < slots && count < MAX_WINDOWS_PER_BUILDING; k++) {
-            const t = (k + 0.5) / slots;
-            const x = a[0] + ex * t + nx * WINDOW_OFFSET_M;
-            const z = a[1] + ez * t + nz * WINDOW_OFFSET_M;
-            const r = hash01(x, y, z);
-            if (r >= WINDOW_LIT_SHARE) continue;
-            windows.push(x, y, z, windowColour(r / WINDOW_LIT_SHARE));
-            count++;
-          }
-        }
-      }
-    }
-
     if (tall) {
       // the outermost corners of the footprint, just above the roof
       const ext = new Set<XZ>();
@@ -651,8 +794,8 @@ export function buildingNightLights(
         ext.add(best);
       }
       // on the eaves of a pitched roof (its ridge is not at the corners)
-      for (const p of ext) windows.push(p[0], wallBase + h.wall + 0.5, p[1], LIGHT.RED);
+      for (const p of ext) roofLights.push(p[0], wallBase + h.wall + 0.5, p[1], LIGHT.RED);
     }
   }
-  return { windows: new Float32Array(windows), dots: new Float32Array(dots) };
+  return { roofLights: new Float32Array(roofLights), dots: new Float32Array(dots) };
 }

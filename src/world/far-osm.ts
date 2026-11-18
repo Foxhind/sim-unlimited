@@ -121,7 +121,7 @@ export function buildFarOsm(mvt: Uint8Array, tile: Tile, sampleHeight: HeightSam
 
   return {
     dots: buildingDots(buildings, tile, sampleHeight),
-    nightDots: buildingNightLights(buildings, tile, sampleHeight, false).dots,
+    nightDots: buildingNightLights(buildings, tile, sampleHeight).dots,
     roadLines: new Float32Array(lines),
   };
 }

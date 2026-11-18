@@ -17,12 +17,13 @@ export interface CachedMesh {
   morph?: ArrayBuffer;
   trees?: ArrayBuffer;
   lights?: ArrayBuffer;
-  /** OSM tiles: building mesh (vertices, ramps) and far building dots */
+  /** OSM tiles: building mesh (vertices, ramps, facade window attributes) and far building dots */
   bVertices?: ArrayBuffer;
   bRamps?: ArrayBuffer;
+  bWindows?: ArrayBuffer;
   dots?: ArrayBuffer;
-  /** OSM tiles, night: lit windows (near), building night dots (far), mast lines (far), mast beacons */
-  windows?: ArrayBuffer;
+  /** OSM tiles, night: roof obstruction lights (near), building night dots (far), mast lines (far), mast beacons */
+  roofLights?: ArrayBuffer;
   nightDots?: ArrayBuffer;
   glowVertices?: ArrayBuffer;
   glowRamps?: ArrayBuffer;
@@ -39,11 +40,11 @@ export interface CachedMesh {
   lamps?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'dots' | 'windows' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps' | 'rVertices' | 'rRamps' | 'wVertices' | 'wRamps' | 'roadLines' | 'lamps';
+type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'glowVertices' | 'glowRamps' | 'rVertices' | 'rRamps' | 'wVertices' | 'wRamps' | 'roadLines' | 'lamps';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength + (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
-    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
-    (m.windows?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
+    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
+    (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.glowVertices?.byteLength ?? 0) + (m.glowRamps?.byteLength ?? 0) +
     (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0) +
     (m.wVertices?.byteLength ?? 0) + (m.wRamps?.byteLength ?? 0) +

@@ -86,6 +86,11 @@ export class Renderer {
    */
   selfLitGain = 1;
   /**
+   * windows on what drawWorld draws next (a building mesh with facade attributes, WORLD_FS):
+   * 'glass' dark panes, 'lit' at night with some of them lit, 'off' for every other mesh
+   */
+  windows: 'off' | 'glass' | 'lit' = 'off';
+  /**
    * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
    * extended drawingBufferToneMapping where the browser has it), the world and post targets are
    * half-float, and light sources (aircraft lights, the exhaust flame, the sun, city lights) are
@@ -151,7 +156,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uWindows', 'uWinEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -434,6 +439,8 @@ export class Renderer {
     gl.uniform1i(this.worldU.uTwoSided, this.selfLit ? 0 : 1);
     gl.uniform1f(this.worldU.uSelfLit, this.selfLit ? 1 : 0);
     gl.uniform1f(this.worldU.uEmit, this.selfLit ? this.selfLitGain : 1);
+    gl.uniform1i(this.worldU.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
+    gl.uniform1f(this.worldU.uWinEmit, this.emission('cityLights'));
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (!depthWrite) gl.depthMask(true);
@@ -658,7 +665,7 @@ export const HDR_EMISSION = {
   flame: 32,
   /** the sun disc */
   sun: 128,
-  /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours) */
+  /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours; lit windows on the walls) */
   cityLights: 48,
 } as const;
 

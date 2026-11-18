@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, GLOW_LEVELS, LIGHT, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow,
+  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow,
 } from '../src/engine/palette';
-import { POINTS_FS, SKY_FS, TREE_VS, WORLD_VS } from '../src/engine/shaders';
-import { buildBuildingMesh, buildingNightLights, TALL_BUILDING_M } from '../src/world/building-mesher';
+import { POINTS_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
+import { buildBuildingMesh, buildingNightLights, hasBalconies, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
@@ -68,32 +68,118 @@ describe('building night lights', () => {
   const tower: OsmBuilding = { rings: [rect(0.0002, 0.0002)], tags: { building: 'office', height: '80' } };
   const garage: OsmBuilding = { rings: [rect(0.0001, 0.0001)], tags: { building: 'garage' } };
 
-  it('lights some windows on the walls in yellow and white, between the floors', () => {
-    const { windows } = buildingNightLights([house], TILE, flat);
-    const w = quads(windows);
-    expect(w.length).toBeGreaterThan(20);
-    const colours = new Set(w.map((q) => q[3]));
-    expect(colours).toEqual(new Set([LIGHT.WINDOW_YELLOW, LIGHT.WINDOW_WHITE]));
-    for (const [, y] of w) {
-      expect(y).toBeGreaterThan(GROUND);
-      expect(y).toBeLessThan(GROUND + 15);
+  it('near: no window points; windows are facade attributes on the walls of lit buildings only', () => {
+    expect(quads(buildingNightLights([house], TILE, flat).roofLights)).toHaveLength(0);
+    const m = buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat });
+    expect(m.windows.length).toBe(m.vertexCount * WINDOW_ATTR_FLOATS);
+    const attrs = Array.from({ length: m.vertexCount }, (_, i) => Array.from(m.windows.subarray(i * WINDOW_ATTR_FLOATS, (i + 1) * WINDOW_ATTR_FLOATS)));
+    const walls = attrs.filter((a) => a[3] > 0);
+    expect(walls.length).toBeGreaterThan(0);
+    for (const [u, v, len, wallH, seed] of walls) {
+      expect(wallH).toBeCloseTo(15, 3); // 5 levels
+      expect(u).toBeGreaterThanOrEqual(0);
+      expect(u).toBeLessThanOrEqual(len + 1e-3);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(Number.isInteger(seed)).toBe(true);
     }
+    // roofs carry no windows
+    expect(attrs.some((a) => a[3] === 0)).toBe(true);
     // deterministic
-    expect(buildingNightLights([house], TILE, flat).windows).toEqual(windows);
+    expect(buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat }).windows).toEqual(m.windows);
+    const g = buildBuildingMesh({ tile: TILE, buildings: [garage], sampleHeight: flat });
+    expect(g.windows.filter((_, i) => i % WINDOW_ATTR_FLOATS === 3).every((h) => h === 0)).toBe(true); // wall height 0: no windows
+  });
+
+  it('the world shader lights a share of the windows at night in the window colours', () => {
+    expect(WORLD_FS).toContain('bool windowAt(');
+    expect(WORLD_FS).toContain(`${LIGHT.WINDOW_YELLOW}u`);
+    expect(WORLD_FS).toContain(`${LIGHT.WINDOW_WHITE}u`);
+    expect(WORLD_FS).toContain(`r < ${WINDOWS.LIT_SHARE}`);
+    expect(WORLD_VS).toContain('layout(location=3) in vec2 aWinUV;');
+    expect(TREE_VS).toContain('vWinEdge = vec3(0.0);');
+  });
+
+  it('balconies: only on residential buildings, glazed or open on some edges, the rest plain windows', () => {
+    const styles = (b: OsmBuilding) => {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [b], sampleHeight: flat });
+      const out = new Set<number>();
+      for (let i = 0; i < m.vertexCount; i++) {
+        if (m.windows[i * WINDOW_ATTR_FLOATS + 3] > 0) out.add((m.windows[i * WINDOW_ATTR_FLOATS + 4] >> FACADE_SEED_BITS) & 3);
+      }
+      return out;
+    };
+    const all = new Set<number>();
+    for (let i = 0; i < 40; i++) {
+      const block: OsmBuilding = { rings: [rect(0.0003 + i * 0.00001)], tags: { building: 'apartments', 'building:levels': '9' } };
+      for (const st of styles(block)) all.add(st);
+    }
+    expect(all).toEqual(new Set([FACADE.WINDOWS, FACADE.GLAZED_BALCONIES, FACADE.OPEN_BALCONIES]));
+    expect(styles({ rings: [rect()], tags: { building: 'office', 'building:levels': '9' } })).toEqual(new Set([FACADE.WINDOWS]));
+    expect(hasBalconies({ building: 'yes' }, 15)).toBe(true);
+    expect(hasBalconies({ building: 'yes' }, 6)).toBe(false);
+    expect(WORLD_FS).toContain(`uint style = (code >> ${FACADE_SEED_BITS}u) & 3u;`);
+  });
+
+  it('doors where OSM entrances lie on the outline: on the wall, facing out, at the ground', () => {
+    const ring = rect();
+    const [lon0, lat0] = ring[0], [lon1] = ring[1];
+    const plain = buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: flat });
+    // on the south wall, a third of the way along; and one far from any building
+    const at: [number, number] = [lon0 + (lon1 - lon0) / 3, lat0];
+    const withDoor = buildBuildingMesh({
+      tile: TILE, buildings: [house], sampleHeight: flat,
+      points: [{ at, tags: { entrance: 'staircase' } }, { at: [lon0 - 0.01, lat0], tags: { entrance: 'yes' } }, { at, tags: { entrance: 'no' } }],
+    });
+    const extra = withDoor.vertexCount - plain.vertexCount;
+    expect(extra).toBe(3 * 6); // blind patch over the slot's ground floor, frame, leaf
+    const c = tileCenter(TILE);
+    const [ex, en] = latLonToEnu(c, at[1], at[0], 0);
+    // the door goes in after the walls: the first vertex that differs from the plain mesh
+    let first = 0;
+    while (first < plain.vertexCount && plain.vertices[first * 6] === withDoor.vertices[first * 6] && plain.vertices[first * 6 + 1] === withDoor.vertices[first * 6 + 1]) first++;
+    for (let i = first; i < first + extra; i++) {
+      const o = i * 6;
+      const [x, y, z, , ny, nz] = Array.from(withDoor.vertices.subarray(o, o + 6));
+      expect(ny).toBe(0);
+      expect(nz).toBeCloseTo(1, 3); // the south wall faces south (+z)
+      expect(z).toBeGreaterThan(-en);
+      expect(Math.abs(x - ex)).toBeLessThan(WINDOWS.SPACING_M + 1.5);
+      expect(y).toBeGreaterThanOrEqual(GROUND - 1e-3);
+      expect(y).toBeLessThan(GROUND + 3.01);
+    }
+    // the blind patch carries the facade attributes of its edge, flagged blind; frame and leaf none
+    const patch = Array.from({ length: 6 }, (_, i) => Array.from(withDoor.windows.subarray((first + i) * WINDOW_ATTR_FLOATS, (first + i + 1) * WINDOW_ATTR_FLOATS)));
+    for (const [, v, , wallH, code] of patch) {
+      expect(wallH).toBeCloseTo(15, 3);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(3);
+      expect(code & FACADE_BLIND).toBe(FACADE_BLIND);
+      expect(code & FACADE_RESIDENTIAL).toBe(FACADE_RESIDENTIAL); // apartments
+    }
+    for (let i = first + 6; i < first + extra; i++) expect(withDoor.windows[i * WINDOW_ATTR_FLOATS + 3]).toBe(0);
+  });
+
+  it('the ground floor differs: its own shade, shop windows or full glazing, signs only on residential', () => {
+    expect(WORLD_FS).toContain('bool groundFloorAt(');
+    expect(WORLD_FS).toContain('bool ground = f == 0.0 && floors >= 2.0;');
+    expect(WORLD_FS).toMatch(/if \(resid && winRand\(/);
+    expect(WORLD_FS).toContain(`bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;`);
+    expect(WORLD_VS).toContain('flat out vec3 vRef;');
+    expect(TREE_VS).toContain('vRef = vec3(0.0);');
+    const office = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect()], tags: { building: 'office', 'building:levels': '5' } }], sampleHeight: flat });
+    for (let i = 0; i < office.vertexCount; i++) expect(office.windows[i * WINDOW_ATTR_FLOATS + 4] & FACADE_RESIDENTIAL).toBe(0);
   });
 
   it('far: one yellow or white dot per lit building; garages stay dark', () => {
-    const { dots, windows } = buildingNightLights([house, garage], TILE, flat);
+    const { dots } = buildingNightLights([house, garage], TILE, flat);
     const d = quads(dots);
     expect(d).toHaveLength(1);
     expect([LIGHT.WINDOW_YELLOW, LIGHT.WINDOW_WHITE]).toContain(d[0][3]);
-    expect(buildingNightLights([garage], TILE, flat).windows.length).toBe(0);
-    expect(windows.length).toBeGreaterThan(0);
   });
 
   it(`buildings over ${TALL_BUILDING_M} m get red lights on the roof (near) and in the air at roof height (far)`, () => {
-    const { windows, dots } = buildingNightLights([tower], TILE, flat);
-    const nearRed = quads(windows).filter((q) => q[3] === LIGHT.RED);
+    const { roofLights, dots } = buildingNightLights([tower], TILE, flat);
+    const nearRed = quads(roofLights).filter((q) => q[3] === LIGHT.RED);
     expect(nearRed.length).toBe(4);
     for (const q of nearRed) expect(q[1]).toBeCloseTo(GROUND + 80.5, 3);
     const farRed = quads(dots).filter((q) => q[3] === LIGHT.RED);

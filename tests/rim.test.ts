@@ -65,7 +65,9 @@ describe('rim light', () => {
   });
 
   it('leaves self-lit faces (exhaust flame, aircraft lights) without the silhouette rim', () => {
-    expect(WORLD_FS).toContain('oColor = vec4(c, 1.0 - uSelfLit);');
+    expect(WORLD_FS).toContain('float alpha = 1.0 - uSelfLit;');
+    expect(WORLD_FS).toContain('if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;');
+    expect(WORLD_FS).toContain('oColor = vec4(c, alpha);');
     expect(WORLD_POST_FS).toContain('if (uOutline.x > 0.0 && t.a > 0.5) return max(t.rgb, min(t.rgb + outline(q), 1.0));');
   });
 });

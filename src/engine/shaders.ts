@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -388,11 +388,133 @@ uniform highp float uOrthoFar;
 float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * uOrthoFar : max(clip.w, 0.0)); }
 `;
 
+/**
+ * Windows on the near building facades (WORLD_FS; building-mesher BuildingMeshData.windows). Each
+ * wall edge is cut into slots every WINDOWS.SPACING_M and floors every WINDOWS.FLOOR_M (both
+ * stretched to fit); a pane sits in each, a little above the middle of the floor. A pane never gets
+ * smaller than about a pixel (fw: the metres one pixel spans along u and v), so far windows do not
+ * flicker away. By day panes are dark glass in the wall's light; at night (uWindows 2) the slot's
+ * hash lights WINDOWS.LIT_SHARE of them, mostly yellow, the rest white, like the far building dots.
+ *
+ * The edge code (edge.z) carries a building-mesher FACADE style above its seed: on a balconied edge
+ * some slot columns (by the slot's hash, the same on every floor) carry balconies from the first
+ * floor up — glazed (a parapet panel under a lighter glazing with mullions) or open (a railing in
+ * front of a dark recess with the balcony door, which lights like a window). Returns true on a lit pane.
+ */
+const WINDOW_GLSL = `
+uint winHash(uint x) {
+  x ^= x >> 16u; x *= 0x7feb352du;
+  x ^= x >> 15u; x *= 0x846ca68bu;
+  x ^= x >> 16u;
+  return x;
+}
+float winRand(uint x) { return float(winHash(x)) / 4294967296.0; }
+// the ground floor of a building of two floors and more (windowAt)
+bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh, vec2 uv, vec3 edge, uint seed, bool resid, float r, vec2 fw, float fog) {
+  // rare pastel signs over the shop windows of residential buildings
+  if (resid && winRand(seed ^ winHash(uint(k) + 0x51u)) < 0.14) {
+    float sw = max(min(0.36 * cw, 1.6), 0.6 * fw.x);
+    if (abs(du) < sw && dv > 0.86 * fh && dv < 0.97 * fh) {
+      vec3 pastel = 0.74 + 0.26 * cos(6.2832 * (winRand(seed + uint(k) * 13u) + vec3(0.0, 0.33, 0.67)));
+      c = vRef * mix(pastel, vec3(1.0), fog);
+      return false;
+    }
+  }
+  // shops are lit more often than flats, mostly white
+  bool lit = uWindows == 2 && r < 0.5;
+  vec3 shop = emitLight(mix(lutColor(r < 0.15 ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
+  vec3 glass = c * mix(vec3(0.42, 0.48, 0.6), vec3(1.0), fog);
+  if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
+    // the whole floor glazed along the edge, mullions every half slot
+    if (dv < 0.06 * fh || dv > 0.84 * fh || uv.x < 0.25 || uv.x > edge.x - 0.25) return false;
+    float m = abs(fract(uv.x / (0.5 * cw) + 0.5) - 0.5) * 0.5 * cw;
+    if (fw.x < 0.25 && m < 0.05) { c *= mix(vec3(0.6), vec3(1.0), fog); return false; }
+    if (lit) { c = shop; return true; }
+    c = glass;
+    return false;
+  }
+  // shop windows: wider and taller than the windows above
+  float hw = min(max(min(1.25, 0.4 * cw), 0.6 * fw.x), 0.46 * cw);
+  if (abs(du) > hw || dv < 0.12 * fh || dv > 0.8 * fh) return false;
+  if (lit) { c = shop; return true; }
+  c = glass;
+  return false;
+}
+bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
+  float floors = max(1.0, floor(edge.y / ${WINDOWS.FLOOR_M.toFixed(1)}));
+  float fh = edge.y / floors;
+  float f = floor(uv.y / fh);
+  if (uv.y < 0.0 || f >= floors) return false;
+  float slots = max(1.0, floor(edge.x / ${WINDOWS.SPACING_M.toFixed(1)}));
+  float cw = edge.x / slots;
+  float k = clamp(floor(uv.x / cw), 0.0, slots - 1.0);
+  uint code = uint(edge.z);
+  uint seed = code & ${(1 << FACADE_SEED_BITS) - 1}u;
+  uint style = (code >> ${FACADE_SEED_BITS}u) & 3u;
+  bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;
+  bool blind = (code & ${FACADE_BLIND}u) != 0u;
+  float du = uv.x - (k + 0.5) * cw;
+  float dv = uv.y - f * fh;
+  float r = winRand(seed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));
+  bool ground = f == 0.0 && floors >= 2.0;
+  if (ground) {
+    // the ground floor in its own shade, per edge: darker, warm stone, lighter or cool grey
+    uint gt = winHash(seed * 7u + 3u) & 3u;
+    vec3 tint = gt == 0u ? vec3(0.74) : gt == 1u ? vec3(0.86, 0.8, 0.72) : gt == 2u ? vec3(1.14) : vec3(0.7, 0.73, 0.8);
+    c = min(c * mix(tint, vec3(1.0), fog), 1.0);
+  }
+  // the wall round a door: no openings
+  if (blind) return false;
+  if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, r, fw, fog);
+  bool lit = uWindows == 2 && r < ${WINDOWS.LIT_SHARE};
+  vec3 light = emitLight(mix(lutColor(r < ${(WINDOWS.LIT_SHARE * WINDOWS.YELLOW_SHARE).toFixed(3)} ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
+  // shades of the wall's own light, fading into the haze with it
+  vec3 glass = c * mix(vec3(0.4, 0.45, 0.55), vec3(1.0), fog);
+  if (style > 0u && f >= 1.0 && winRand(seed * 31u + uint(k) * 0x9e3779b9u) < 0.6) {
+    float bw = min(max(min(1.5, 0.42 * cw), 0.6 * fw.x), 0.47 * cw);
+    if (abs(du) > bw || dv < 0.04 * fh || dv > 0.92 * fh) return false;
+    float rail = 0.04 * fh + 0.36 * fh;
+    if (dv < rail) {
+      // the parapet: a lighter panel under glazing, a darker railing on an open balcony
+      c *= mix(style == 1u ? vec3(1.12) : vec3(0.72), vec3(1.0), fog);
+      return false;
+    }
+    if (style == 1u) {
+      if (lit) { c = light; return true; }
+      // glazing lighter than a window, with mullions where they are wider than a pixel
+      c *= mix(vec3(0.58, 0.64, 0.74), vec3(1.0), fog);
+      float m = abs(fract((du + bw) / 0.75 + 0.5) - 0.5) * 0.75;
+      if (fw.x < 0.25 && (m < 0.04 || dv < rail + 0.05)) c *= 0.8;
+      return false;
+    }
+    // open: the balcony door in the dark recess
+    if (abs(du) < min(0.45, 0.35 * bw) + 0.3 * fw.x && dv > rail + 0.02 * fh) {
+      if (lit) { c = light; return true; }
+      c = glass;
+      return false;
+    }
+    c *= mix(vec3(0.32), vec3(1.0), fog);
+    return false;
+  }
+  float hw = min(max(min(0.7, 0.3 * cw), 0.6 * fw.x), 0.45 * cw);
+  float hh = min(max(min(0.75, 0.27 * fh), 0.6 * fw.y), 0.4 * fh);
+  if (abs(du) > hw || abs(dv - 0.55 * fh) > hh) return false;
+  if (lit) { c = light; return true; }
+  c = glass;
+  return false;
+}
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNormal;
 layout(location=2) in uint aRamp;
+// buildings only (zero elsewhere): where the vertex is on a windowed facade (building-mesher
+// BuildingMeshData.windows): u along the wall edge, v above the wall base; the edge's length, the
+// wall height (0: no windows) and the edge's seed
+layout(location=3) in vec2 aWinUV;
+layout(location=4) in vec3 aWinEdge;
 // terrain tiles only (zero elsewhere): x metres up to the border line of a coarser neighbour,
 // y the tile edges (bits) it applies to; uCoarse: the edges whose neighbour is coarser now
 layout(location=5) in vec2 aMorph;
@@ -411,8 +533,16 @@ out float vLogW;
 // water (WATER, SEA material ramps, not snowed over) and the ray from the eye: the glitter path
 flat out float vWater;
 out vec3 vRay;
+out vec2 vWinUV;
+flat out vec3 vWinEdge;
+// buildings with windows: a near-white RGB face shaded in this face's light (glow level kept), for
+// what the facade paints in its own colours (WORLD_FS windowAt: the signs)
+flat out vec3 vRef;
+uniform highp int uWindows;
 ${GLOW_VS}${RIM_GLSL}
 void main() {
+  vWinUV = aWinUV;
+  vWinEdge = aWinEdge;
   vec3 wp = toWorld(aPos);
   if ((int(aMorph.y) & uCoarse) != 0) wp.y += aMorph.x;
   vec3 rel = wp - uCamPos;
@@ -426,6 +556,9 @@ void main() {
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
   vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
+  vRef = uWindows > 0 && aWinEdge.y > 0.0
+    ? shadeColour((aRamp & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | 0xf0f0f0u, light.a * 11.0, fog, light.rgb, hazeAt(rel))
+    : vec3(0.0);
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   vWater = water && !(uSnow == 1 && (aRamp & ${SNOW_FLAG}u) != 0u) ? 1.0 : 0.0;
@@ -440,7 +573,14 @@ precision highp float;
 flat in vec3 vColor;
 flat in float vWater;
 in vec3 vRay;
+in vec2 vWinUV;
+flat in vec3 vWinEdge;
+flat in vec3 vRef;
 uniform vec3 uSunDir;
+// windows on building facades (renderer.windows): 0 none, 1 glass, 2 glass with some lit (night)
+uniform highp int uWindows;
+// brightness of a lit window × SDR white (renderer.ts HDR_EMISSION cityLights)
+uniform float uWinEmit;
 // 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
 uniform float uSelfLit;
 // brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
@@ -455,19 +595,27 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}
 void main() {
   writeLogDepth();
   vec3 c = vColor;
   // the derivative is taken on every fragment: fwidth is undefined in non-uniform control flow
   vec2 wxz = uCamPos.xz + vRay.xz;
   vec2 fw = fwidth(wxz);
+  vec2 winFw = fwidth(vWinUV);
   if (vWater > 0.5) {
     float dist = length(vRay);
     c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
   }
+  float alpha = 1.0 - uSelfLit;
+  if (uWindows > 0 && vWinEdge.y > 0.0) {
+    float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    fog = floor(fog * 12.0) / 12.0;
+    // a lit window is a light source: alpha 0 keeps the silhouette rim pass off it
+    if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;
+  }
   if (uSelfLit > 0.5) c = emitLight(c, uEmit);
-  oColor = vec4(c, 1.0 - uSelfLit);
+  oColor = vec4(c, alpha);
 }
 `;
 
@@ -495,8 +643,15 @@ flat out vec3 vColor;
 out float vLogW;
 flat out float vWater;
 out vec3 vRay;
+// no windows on trees (WORLD_FS reads them)
+out vec2 vWinUV;
+flat out vec3 vWinEdge;
+flat out vec3 vRef;
 ${GLOW_VS}${RIM_GLSL}
 void main() {
+  vWinUV = vec2(0.0);
+  vWinEdge = vec3(0.0);
+  vRef = vec3(0.0);
   vec3 wp = toWorld(aPos * aInstSR.x + aInstPos);
   vWater = 0.0;
   vRay = vec3(0.0, 1.0, 0.0);

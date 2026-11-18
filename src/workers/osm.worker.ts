@@ -2,7 +2,7 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
-import { buildBuildingMesh, buildingDots, buildingNightLights } from '../world/building-mesher';
+import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOATS } from '../world/building-mesher';
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
@@ -19,7 +19,7 @@ import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 27;
+export const OSM_MESH_SCHEMA = 29;
 
 export interface OsmRequest {
   type: 'osm';
@@ -36,14 +36,15 @@ export interface OsmMeshResponse {
   /** drape: areas, roads, points */
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
-  /** buildings (near) and their dots (far: x, y, z, palette index) */
+  /** buildings (near), their facade window attributes (building-mesher BuildingMeshData.windows) and their dots (far: x, y, z, palette index) */
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
+  bWindows: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
-  /** night: lit windows and roof obstruction lights (near), building lights (far), mast beacons (any distance) */
-  windows: ArrayBuffer;
+  /** night: roof obstruction lights (near; lit windows are on the walls), building lights (far), mast beacons (any distance) */
+  roofLights: ArrayBuffer;
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
@@ -125,8 +126,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
-      res.vertices, res.ramps, res.bVertices, res.bRamps, res.dots, res.trees, res.lights,
-      res.windows, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
+      res.vertices, res.ramps, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
+      res.roofLights, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
       res.rVertices, res.rRamps, res.wVertices, res.wRamps, res.roadLines, res.lamps,
     ]);
   };
@@ -136,9 +137,10 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (cached) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
-        bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), dots: cached.dots ?? empty(),
+        bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
+        dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
-        windows: cached.windows ?? empty(), nightDots: cached.nightDots ?? empty(),
+        roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), roadLines: cached.roadLines ?? empty(),
@@ -174,12 +176,15 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
-    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape });
+    // entrances from the whole fetch, not only the tile's own share: one by the border may belong to an own building
+    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points });
     // antenna trusses are drawn with the buildings (near), as lines far away
     const masts = buildMasts(clipped.points, tile, drape);
     const bmesh = {
       vertices: concatF32(houses.vertices, masts.vertices),
       ramps: concatU32(houses.ramps, masts.ramps),
+      // masts have no windows
+      windows: concatF32(houses.windows, new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
     };
     const dotData = buildingDots(own, tile, drape);
     const night = buildingNightLights(own, tile, drape);
@@ -194,9 +199,10 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     applyGlowToTrees(props.trees, tile, locate, levels);
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
-      bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, dots: dotData.slice().buffer,
+      bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
+      dots: dotData.slice().buffer,
       trees: props.trees.slice().buffer, lights: props.lights.slice().buffer,
-      windows: night.windows.slice().buffer, nightDots: night.dots.slice().buffer,
+      roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
       glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer,

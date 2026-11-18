@@ -844,7 +844,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   buildPortals();
 
   if (opts.buildings !== false && data.buildings.length) {
-    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight });
+    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points });
     for (let i = 0; i < bm.vertices.length; i++) verts.push(bm.vertices[i]);
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);
   }

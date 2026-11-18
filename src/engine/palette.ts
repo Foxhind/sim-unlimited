@@ -706,6 +706,31 @@ export const LIGHT = {
   /** street lighting: lamp heads and far lit roads at night (sodium orange); a free step of the HUD amber ramp (3, 11, 13 are used) */
   STREET: MAT.HUD_AMBER * RAMP_STEPS + 14,
 } as const;
+/**
+ * Windows of the near buildings (building-mesher wall attributes, drawn in WORLD_FS): a slot every
+ * SPACING_M along each wall on every FLOOR_M floor; at night LIT_SHARE of them lit, YELLOW_SHARE of
+ * those yellow, the rest white (the same rule the far building dots follow).
+ */
+export const WINDOWS = {
+  SPACING_M: 4,
+  FLOOR_M: 3,
+  /** a wall lower than this, or an edge shorter, has no windows */
+  MIN_WALL_M: 2.5,
+  MIN_EDGE_M: 2.5,
+  LIT_SHARE: 0.3,
+  YELLOW_SHARE: 0.7,
+} as const;
+/** facade styles of a wall edge (WORLD_FS windowAt): plain windows, glazed or open balconies */
+export const FACADE = { WINDOWS: 0, GLAZED_BALCONIES: 1, OPEN_BALCONIES: 2 } as const;
+/**
+ * A wall edge's code (building-mesher BuildingMeshData.windows), an integer below 2^24 (exact in a
+ * float): FACADE_SEED_BITS of seed, the FACADE style in the next two bits, then the flags.
+ */
+export const FACADE_SEED_BITS = 20;
+/** the edge is on a residential building (balconies above, rare pastel signs on the ground floor) */
+export const FACADE_RESIDENTIAL = 1 << 22;
+/** a blind patch (the wall round a door): the ground floor's tint, no openings or signs */
+export const FACADE_BLIND = 1 << 23;
 const LIGHT_COLORS: [number, RGB][] = [
   [LIGHT.TAXI_BLUE, [64, 128, 255]],
   [LIGHT.WINDOW_YELLOW, [255, 204, 72]],
