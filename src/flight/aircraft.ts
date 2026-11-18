@@ -165,8 +165,11 @@ export interface AircraftConfig {
   brakeDecel: number;
   /** angle of attack of the stall warning, deg */
   stallAlpha: number;
-  /** exhaust exits in mesh space (x right, y up, z aft) with radius */
-  nozzles: { pos: [number, number, number]; r: number }[];
+  /**
+   * exhaust exits in mesh space (x right, y up, z aft) with radius; `part` is the separable part the engine
+   * hangs on (PART_IDS index + 1, 0 = the fuselage), found on the model by fromModel
+   */
+  nozzles: { pos: [number, number, number]; r: number; part?: number }[];
   /** the national markings the model can wear; the first is its default */
   insignia?: Insignia[];
   /** what it can carry; the first is its default */
@@ -222,6 +225,69 @@ function pair(def: Omit<SurfaceDef, 'part'>, right: PartId, left: PartId): Surfa
   ];
 }
 
+/** the exported models by aircraft id */
+const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model, f16: f16Model };
+
+/**
+ * The separable part (PART_IDS index + 1, 0 = the fuselage) of the model's surface nearest to a point in mesh
+ * space: what a light or an engine mounted there comes off with.
+ */
+export function partAt(json: ModelJson, q: readonly number[]): number {
+  const P = json.positions;
+  let best = Infinity;
+  let tag = 0;
+  const c: V3 = [0, 0, 0];
+  for (let t = 0; t < json.parts.length; t++) {
+    const o = t * 9;
+    closestOnTriangle(c, q, P, o, o + 3, o + 6);
+    const d = (c[0] - q[0]) ** 2 + (c[1] - q[1]) ** 2 + (c[2] - q[2]) ** 2;
+    if (d < best) {
+      best = d;
+      tag = json.parts[t];
+    }
+  }
+  return tag;
+}
+
+/** closest point to `p` on the triangle with corners at P[a], P[b], P[c] (Ericson, Real-Time Collision Detection 5.1.5) */
+function closestOnTriangle(out: V3, p: readonly number[], P: readonly number[], a: number, b: number, c: number): V3 {
+  const abx = P[b] - P[a], aby = P[b + 1] - P[a + 1], abz = P[b + 2] - P[a + 2];
+  const acx = P[c] - P[a], acy = P[c + 1] - P[a + 1], acz = P[c + 2] - P[a + 2];
+  const set = (x: number, y: number, z: number): V3 => ((out[0] = x), (out[1] = y), (out[2] = z), out);
+  const at = (i: number): V3 => set(P[i], P[i + 1], P[i + 2]);
+  const apx = p[0] - P[a], apy = p[1] - P[a + 1], apz = p[2] - P[a + 2];
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) return at(a);
+  const bpx = p[0] - P[b], bpy = p[1] - P[b + 1], bpz = p[2] - P[b + 2];
+  const d3 = abx * bpx + aby * bpy + abz * bpz;
+  const d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) return at(b);
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    return set(P[a] + abx * v, P[a + 1] + aby * v, P[a + 2] + abz * v);
+  }
+  const cpx = p[0] - P[c], cpy = p[1] - P[c + 1], cpz = p[2] - P[c + 2];
+  const d5 = abx * cpx + aby * cpy + abz * cpz;
+  const d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) return at(c);
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    return set(P[a] + acx * w, P[a + 1] + acy * w, P[a + 2] + acz * w);
+  }
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+    return set(P[b] + (P[c] - P[b]) * w, P[b + 1] + (P[c + 1] - P[b + 1]) * w, P[b + 2] + (P[c + 2] - P[b + 2]) * w);
+  }
+  const den = 1 / (va + vb + vc);
+  const v = vb * den;
+  const w = vc * den;
+  return set(P[a] + abx * v + acx * w, P[a + 1] + aby * v + acy * w, P[a + 2] + abz * v + acz * w);
+}
+
 /**
  * The configs below give every position (surfaces, part tips, nose and tail) in the model's own
  * coordinates, as measured on assets/models/<id>.blend; this moves them to the centre of gravity,
@@ -229,8 +295,11 @@ function pair(def: Omit<SurfaceDef, 'part'>, right: PartId, left: PartId): Surfa
  */
 function fromModel(cfg: AircraftConfig): AircraftConfig {
   const rel = (p: V3): V3 => [p[0] - cfg.cg[0], p[1] - cfg.cg[1], p[2] - cfg.cg[2]];
+  const json = MODELS[cfg.id];
   return {
     ...cfg,
+    // an engine goes with the part it hangs on (the An-225's six with its wing panels)
+    nozzles: cfg.nozzles.map((n) => ({ ...n, part: n.part ?? partAt(json, n.pos) })),
     surfaces: cfg.surfaces.map((s) => ({ ...s, pos: rel(s.pos) })),
     parts: cfg.parts.map((p) => ({ ...p, tip: rel(p.tip) })),
     nose: rel(cfg.nose),
@@ -599,8 +668,6 @@ class MeshBuilder {
   }
 }
 
-const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model, f16: f16Model };
-
 /** what a model is drawn with: the colours of its roundel slots, the stores it carries */
 export interface ModelLook {
   rings?: [number, number, number];
@@ -629,7 +696,10 @@ export function modelMesh(json: ModelJson, look: ModelLook = {}): AircraftMesh {
   const joints = json.joints ?? [];
   if (joints.length > 255) throw new Error('more than 255 joints');
   for (const j of m.joint) if (j > joints.length) throw new Error(`triangle on joint ${j} of ${joints.length}`);
-  return m.build(joints, json.lights ?? []);
+  // the exporter leaves a light on the hull at part 0 even where the hull face under it is a wing's: a wingtip
+  // light goes with its wing (a light on a gear strut stays with its joint)
+  const lights = (json.lights ?? []).map((l) => (l.part || l.joint ? l : { ...l, part: partAt(json, l.pos) }));
+  return m.build(joints, lights);
 }
 
 const meshCache = new Map<string, AircraftMesh>();
@@ -677,7 +747,7 @@ export function fitAircraft(base: AircraftConfig, insignia?: string, loadout?: s
  * stretches and flickers with throttle; afterburner adds a long tail.
  * Normals are filled by the renderer (flame is self-lit).
  */
-export function flameMesh(cfg: AircraftConfig, throttle: number, t: number): AircraftMesh {
+export function flameMesh(cfg: AircraftConfig, throttle: number, t: number, lost: readonly boolean[] = []): AircraftMesh {
   const m = new MeshBuilder();
   if (throttle < 0.04) return m.build();
   const ab = cfg.thrustAfterburner > cfg.thrustDry ? Math.max(0, (throttle - 0.85) / 0.15) : 0;
@@ -691,6 +761,8 @@ export function flameMesh(cfg: AircraftConfig, throttle: number, t: number): Air
     return pts;
   };
   cfg.nozzles.forEach((n, k) => {
+    // an engine that went with its wing burns no more
+    if (n.part && lost[n.part - 1]) return;
     const [cx, cy, z0] = n.pos;
     const flick = 1 + 0.10 * Math.sin(t * 47 + k * 2.1) + 0.07 * Math.sin(t * 91 + k * 0.7);
     const len = n.r * (1.0 + 3.0 * throttle + 7.0 * ab) * flick;

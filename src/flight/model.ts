@@ -316,6 +316,13 @@ export class FlightModel {
     }
   }
 
+  /** share of the engines still on the airframe, 0..1 */
+  get engineShare(): number {
+    const noz = this.cfg.nozzles;
+    if (noz.length === 0) return 1;
+    return noz.filter((n) => !n.part || !this.lost[n.part - 1]).length / noz.length;
+  }
+
   /** a design position (from the intact aircraft's centre of gravity) relative to the current one */
   private here(out: vec3, p: readonly number[]): vec3 {
     return vec3.set(out, p[0] - this.cgShift[0], p[1] - this.cgShift[1], p[2] - this.cgShift[2]);
@@ -754,7 +761,21 @@ export class FlightModel {
       cfg.thrustDry * (1 - 0.12 * Math.min(this.mach, 1.5)) +
       (cfg.thrustAfterburner - cfg.thrustDry) * abFrac * (1 + 0.25 * this.mach * this.mach)
     );
-    Fz -= thrust;
+    // an engine that went with its wing gives nothing, and the ones left push off the centre line: the
+    // missing engines' share comes off the total, and its moment about the centre of gravity with it (only
+    // the lost ones', so an intact aircraft trims exactly as before)
+    const noz = cfg.nozzles;
+    let live = noz.length;
+    for (const n of noz) {
+      if (!n.part || !this.lost[n.part - 1]) continue;
+      live--;
+      const each = thrust / noz.length;
+      const [rx, ry] = this.here(this.tmpV, [n.pos[0] - cfg.cg[0], n.pos[1] - cfg.cg[1], n.pos[2] - cfg.cg[2]]);
+      // take away r x F of F = (0, 0, -each), the push along the body's forward axis
+      Mx += ry * each;
+      My -= rx * each;
+    }
+    Fz -= noz.length ? (thrust * live) / noz.length : thrust;
 
     this.nz = Fy / W;
     this.gLoad = this.onGround ? 1 : this.nz;

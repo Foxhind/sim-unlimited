@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { vec3 } from 'gl-matrix';
-import { AIRCRAFT, AN225, aircraftMesh, PART_IDS } from '../src/flight/aircraft';
+import { AIRCRAFT, AN225, aircraftMesh, flameMesh, PART_IDS } from '../src/flight/aircraft';
 import { newPoses, poseJoints, signals, type ControlInputs } from '../src/flight/articulation';
 import { Autopilot } from '../src/flight/autopilot';
 import { CameraRig } from '../src/flight/cameras';
@@ -205,5 +205,47 @@ describe('cameras scale with the airframe', () => {
     rig.setMode('chase', m);
     rig.update(m, 0.016, input, vec3.create());
     expect(rig.pos[2] - m.pos[2]).toBeGreaterThan(100);
+  });
+});
+
+describe('engines and lights go with their wing', () => {
+  const wing = (id: 'wingL' | 'wingR'): number => PART_IDS.indexOf(id) + 1;
+
+  it('finds the part each engine and light is mounted on', () => {
+    expect(AN225.nozzles.filter((n) => n.part === wing('wingL')).length).toBe(3);
+    expect(AN225.nozzles.filter((n) => n.part === wing('wingR')).length).toBe(3);
+    for (const id of ['su27', 'f16', 'f117'] as const) {
+      for (const n of AIRCRAFT[id].nozzles) expect(n.part, id).toBe(0);
+    }
+    for (const id of ['an225', 'f117'] as const) {
+      const lights = aircraftMesh(id).lights;
+      const of = (name: string): number => lights.find((l) => l.name === name)?.part ?? -1;
+      expect(of('NavLight_L'), id).toBe(wing('wingL'));
+      expect(of('NavLight_R'), id).toBe(wing('wingR'));
+      for (const n of ['Beacon_Top', 'Beacon_Bottom', 'NavLight_Tail', 'LandingLight']) expect(of(n), `${id} ${n}`).toBe(0);
+    }
+    for (const id of ['su27', 'f16'] as const) {
+      for (const l of aircraftMesh(id).lights) expect(l.part, `${id} ${l.name}`).toBe(0);
+    }
+  });
+
+  it('a lost wing takes its three engines: half the thrust, the rest yawing the nose toward the loss', () => {
+    // the same airframe with the engines fixed to the fuselage, to set the engines' part apart from the wing's
+    const glued = { ...AN225, nozzles: AN225.nozzles.map((n) => ({ ...n, part: 0 })) };
+    const fly = (cfg: typeof AN225): FlightModel => {
+      const m = new FlightModel(cfg);
+      m.spawnAir(vec3.fromValues(0, 3000, 0), 0);
+      m.detach('wingL', 'overload');
+      for (let t = 0; t < 1.5; t += PHYSICS_STEP) m.update(PHYSICS_STEP, { ...idle, throttle: 1 });
+      return m;
+    };
+    const m = fly(AN225);
+    const g = fly(glued);
+    expect(m.engineShare).toBe(0.5);
+    expect(g.engineShare).toBe(1);
+    expect(m.speed).toBeLessThan(g.speed);
+    // +y body rate turns the nose left: the right engines push it toward the missing left wing
+    expect(m.omega[1] - g.omega[1]).toBeGreaterThan(0.005);
+    expect(flameMesh(AN225, 1, 0, m.lost).ramps.length * 2).toBe(flameMesh(AN225, 1, 0).ramps.length);
   });
 });

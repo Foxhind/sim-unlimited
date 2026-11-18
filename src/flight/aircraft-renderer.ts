@@ -244,7 +244,7 @@ export class AircraftRenderer {
   private drawFlame(
     renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, throttle: number, time: number,
   ): void {
-    const src = flameMesh(model.cfg, throttle, time);
+    const src = flameMesh(model.cfg, throttle, time, model.lost);
     if (src.ramps.length === 0) return;
     const out = new Float32Array(src.vertices.length);
     const cg = model.meshCg;

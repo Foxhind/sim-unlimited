@@ -102,10 +102,12 @@ export class FlightAudio {
     const thr = c.throttle;
     const ab = model.cfg.thrustAfterburner > model.cfg.thrustDry && thr > 0.85;
     const running = !model.crashed;
+    // the engines that went with a wing are silent
+    const eng = model.engineShare;
     this.engineOsc.frequency.setTargetAtTime(42 + thr * 90 + speed * 0.04, t, 0.1);
     this.engineOsc2.frequency.setTargetAtTime((42 + thr * 90 + speed * 0.04) * 2.02, t, 0.1);
-    this.engineGain.gain.setTargetAtTime(running ? 0.05 + thr * 0.16 + (ab ? 0.1 : 0) : 0, t, 0.15);
-    this.rumbleGain.gain.setTargetAtTime(running ? 0.04 + thr * 0.12 + (ab ? 0.16 : 0) : 0, t, 0.15);
+    this.engineGain.gain.setTargetAtTime(running ? (0.05 + thr * 0.16 + (ab ? 0.1 : 0)) * eng : 0, t, 0.15);
+    this.rumbleGain.gain.setTargetAtTime(running ? (0.04 + thr * 0.12 + (ab ? 0.16 : 0)) * eng : 0, t, 0.15);
     const wind = Math.min(0.3, (speed / 300) ** 2 * 0.3);
     this.windGain.gain.setTargetAtTime(running && !model.onGround ? wind : wind * 0.25, t, 0.2);
     this.windFilter.frequency.setTargetAtTime(350 + speed * 3, t, 0.2);
