@@ -14,6 +14,20 @@ export const DEPTH_FAR = 200000;
  * brightness, more when dimmer. Above the headroom the display clips each channel and colours wash out.
  */
 export const HDR_PEAK = 3;
+/** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
+const GLOW_RADIUS = 0.5;
+const GLOW_RINGS = 4;
+/**
+ * the sky on the side away from the sun (SKY_FS): how far it goes toward ANTISUN_TINT (a darker,
+ * bluer copy of the band, the Earth's shadow) by day and at dusk, and in how many steps
+ */
+const ANTISUN_DAY = 0.25;
+const ANTISUN_DUSK = 1.0;
+const ANTISUN_STEPS = 4;
+const ANTISUN_TINT = 'vec3(0.42, 0.48, 0.72)';
+
+/** how far the dusk haze is lifted from the sky's colour toward white (hazeAt) */
+const HAZE_LIFT = 0.3;
 /** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
 const EARTH_R = 6371000;
 /**
@@ -99,26 +113,81 @@ vec4 sceneLight(vec3 n, float height) {
   return vec4(mix(vec3(1.0), c, uDirect.z), min(a + ds + dm, 1.0));
 }
 `;
+/**
+ * The drawn sky in direction dir (SKY_FS), the sun toward sun: its bands, the sunset glow's rings
+ * round the sun, the far side darker and bluer. uSunGlow: the glow's strength (palette.ts glow).
+ */
+const SKY_COLOUR_GLSL = `
+uniform float uSunGlow;
+vec3 skyAt(vec3 dir, vec3 sun) {
+  float t = clamp(dir.y, 0.0, 1.0);
+  float h = pow(1.0 - t, 1.6) * ${SKY_BANDS}.0;
+  // Sunset glow: rings round the sun disc, by the angle from the sun (so they are circles centred
+  // on it), in steps like the sky bands: coral outside, gold at the disc. The inner rings cover the
+  // bands, the outer ones let them show through.
+  float ang = acos(clamp(dot(dir, sun), -1.0, 1.0));
+  float g = uSunGlow * clamp(1.0 - ang / ${GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
+  g = floor(g * ${GLOW_RINGS}.0 + 0.5) / ${GLOW_RINGS}.0;
+  uint band = uint(min(floor(h), ${SKY_BANDS - 1}.0));
+  vec3 col = lutColor(${MAT.SKY * 16}u + band);
+  if (g > 0.0) {
+    uint ring = ${SKY_BANDS - 1 - GLOW_RINGS}u + uint(g * ${GLOW_RINGS}.0 + 0.5);
+    col = mix(col, lutColor(${MAT.SKY_GLOW * 16}u + ring), min(1.0, g * 1.25));
+  }
+  // The far side: the sky turns darker and bluer the further round from the sun's azimuth, most
+  // low down (the zenith stays as it is), strongest at dusk, in steps like the bands.
+  vec2 dh = dir.xz, sh = sun.xz;
+  if (dot(dh, dh) > 1e-8 && dot(sh, sh) > 1e-8) {
+    float away = smoothstep(0.2, 1.0, 0.5 - 0.5 * dot(normalize(dh), normalize(sh)));
+    float most = mix(${ANTISUN_DAY.toFixed(2)}, ${ANTISUN_DUSK.toFixed(2)}, uSunGlow) * clamp((sun.y + 0.1) / 0.1, 0.0, 1.0);
+    float d = away * pow(1.0 - t, 0.8);
+    d = floor(d * ${ANTISUN_STEPS}.0 + 0.5) / ${ANTISUN_STEPS}.0 * most;
+    col = mix(col, col * ${ANTISUN_TINT}, d);
+  }
+  return col;
+}
+`;
+/**
+ * The haze fog runs into, seen along dir: the palette's horizon haze (uHaze), turning with the
+ * sunset glow (uSunGlow) into the sky's own colour at the horizon in that direction, so far
+ * terrain at dusk fades into the orange toward the sun, not into one lilac all round; lifted
+ * HAZE_LIFT of the way to white, so the haze stands out lighter than the sky behind it.
+ */
 const GLOW_VS = `
 uniform int uGlow;
 uniform int uSnow;
-${COLOUR_GLSL}
-// tint: the colour of the light on the face (sceneLight), faded out with the fog; street-lit faces keep their own light
-vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint) {
+${COLOUR_GLSL}${SUNLIGHT_GLSL}${SKY_COLOUR_GLSL}
+vec3 hazeAt(vec3 dir) {
+  if (uSunGlow <= 0.0) return uHaze;
+  vec2 dh = dir.xz;
+  if (dot(dh, dh) < 1e-10) return uHaze;
+  vec3 sky = skyAt(vec3(normalize(dh), 0.0).xzy, uSun);
+  // lighter than the sky behind it: the air in front glows
+  sky += (1.0 - sky) * ${HAZE_LIFT.toFixed(2)};
+  return mix(uHaze, sky, uSunGlow);
+}
+// tint: the colour of the light on the face (sceneLight), faded out with the fog; street-lit faces
+// keep their own light; haze: the haze along the ray (hazeAt)
+vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze) {
   // a light source: its own colour at full strength, seen through half the haze
-  if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), uHaze, 0.5 * fog);
+  if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), haze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));
   vec3 k = lvl > 0u ? vec3(1.0) : mix(tint, vec3(1.0), clamp((float(s) - 11.0) / 4.0, 0.0, 1.0));
   bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;
+  // the fog steps 12..15 run from the lit step 11 into the haze (as the LUT ramps do into uHaze)
+  float f = clamp((float(s) - 11.0) / 4.0, 0.0, 1.0);
+  uint sl = min(s, 11u);
+  vec3 lit;
   if (snow || (packedRamp & ${MATERIAL_FLAG}u) != 0u) {
     uint ramp = snow ? ${MAT.SNOW}u : packedRamp & ${PAYLOAD_MASK}u;
-    return min(lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + s) * k, 1.0);
+    lit = lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + sl);
+  } else {
+    lit = shadeRgb(rgbOf(packedRamp), sl, lvl);
   }
-  return min(shadeRgb(rgbOf(packedRamp), s, lvl) * k, 1.0);
-}
-${SUNLIGHT_GLSL}`;
+  return min(mix(lit, haze, f) * k, 1.0);
+}`;
 
 /**
  * Rim light (rim.ts): the edges of faces seen edge-on, turned toward a sun the eye looks into,
@@ -195,6 +264,10 @@ vec4 glitter(vec3 d) {
  * branch; dist: the point's distance; c: the flat lit colour.
  * Needs uCamPos, uFogStart/End, uHaze, uMoon, uDirect, lutColor, uTime, uGlitter*.
  */
+/** how far a water glint goes from the water's colour toward the glint colour, by step (WATER_GLSL) */
+const GLINT_CORE = 0.6;
+const GLINT_MID = 0.3;
+const GLINT_SHEEN = 0.1;
 const WATER_GLSL = `
 uint waterHash(uvec3 v) {
   v = v * 1664525u + 1013904223u;
@@ -265,10 +338,10 @@ vec3 waterSurface(vec3 d, vec2 p, vec2 fw, float dist, vec3 c) {
     float tw = waterRand(ci + vec2(tick, 0.0), 11.0);
     // none near the horizon, where a pixel is many times longer than wide and so would the cell be
     float chance = (0.004 * near + 0.5 * sheen) * smoothstep(0.06, 0.14, -d.y);
-    if (spot > 0.35) c = hot;
-    else if (tw < chance * 0.5) c = hot;
-    else if (spot > 0.08 || tw < chance) c = mix(c, hot, 0.55);
-    else if (sheen > 0.25) c = mix(c, hot, 0.2);
+    // stepped, never the full glint colour: the brightest step ${GLINT_CORE}, then ${GLINT_MID}, ${GLINT_SHEEN}
+    if (spot > 0.35 || tw < chance * 0.5) c = mix(c, hot, ${GLINT_CORE});
+    else if (spot > 0.08 || tw < chance) c = mix(c, hot, ${GLINT_MID});
+    else if (sheen > 0.25) c = mix(c, hot, ${GLINT_SHEEN});
   }
 
   // dusk: the glitter path over it all
@@ -349,7 +422,7 @@ void main() {
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb) + rimLight(n, wp, fog), 1.0);
+  vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   vWater = water && !(uSnow == 1 && (aRamp & ${SNOW_FLAG}u) != 0u) ? 1.0 : 0.0;
@@ -436,7 +509,7 @@ void main() {
   fog = floor(fog * 12.0) / 12.0;
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
-  vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb) + rimLight(n, wp, fog), 1.0);
+  vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
 }
@@ -541,18 +614,6 @@ void main() {
 }
 `;
 
-/** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
-const GLOW_RADIUS = 0.5;
-const GLOW_RINGS = 4;
-/**
- * the sky on the side away from the sun (SKY_FS): how far it goes toward ANTISUN_TINT (a darker,
- * bluer copy of the band, the Earth's shadow) by day and at dusk, and in how many steps
- */
-const ANTISUN_DAY = 0.25;
-const ANTISUN_DUSK = 1.0;
-const ANTISUN_STEPS = 4;
-const ANTISUN_TINT = 'vec3(0.42, 0.48, 0.72)';
-
 export const SKY_FS = `#version 300 es
 precision highp float;
 in vec2 vNdc;
@@ -565,8 +626,6 @@ uniform float uGroundH;
 uniform uint uGroundRamp;
 uniform float uFogStart;
 uniform float uFogEnd;
-// sky glow toward a low sun, 0..1 (palette.ts PaletteParams.glow)
-uniform float uSunGlow;
 // brightness of the sun disc × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uSunEmit;
 // an overcast deck (Q46): how far its base is above the camera / the camera above its top, m (0: none),
@@ -587,7 +646,7 @@ void main() {
       float t = ca > 1e-12 ? (-dir.y - sqrt(disc)) / ca : uDeckDown / -dir.y;
       float fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uDeckDown);
-      oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb), 1.0);
+      oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
       return;
     }
   }
@@ -600,7 +659,7 @@ void main() {
       fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
     }
     vec4 lit = sceneLight(vec3(0.0, -1.0, 0.0), uCamPos.y + uDeckUp);
-    oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb), 1.0);
+    oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
     return;
   }
   // the base sea's point in world xz and its footprint, taken here where every fragment runs
@@ -624,35 +683,13 @@ void main() {
       float fog = clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
       fog = floor(fog * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
-      oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb), 1.0);
+      oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
       if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) oColor.rgb = waterSurface(dir, seaXZ, seaFw, t, oColor.rgb);
       return;
     }
   }
-  float t = clamp(dir.y, 0.0, 1.0);
-  float h = pow(1.0 - t, 1.6) * ${SKY_BANDS}.0;
-  // Sunset glow: rings round the sun disc, by the angle from the sun (so they are circles centred
-  // on it), in steps like the sky bands: coral outside, gold at the disc. The inner rings cover the
-  // bands, the outer ones let them show through.
+  vec3 col = skyAt(dir, uSunDir);
   float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
-  float g = uSunGlow * clamp(1.0 - ang / ${GLOW_RADIUS.toFixed(2)}, 0.0, 1.0);
-  g = floor(g * ${GLOW_RINGS}.0 + 0.5) / ${GLOW_RINGS}.0;
-  uint band = uint(min(floor(h), ${SKY_BANDS - 1}.0));
-  vec3 col = lutColor(${MAT.SKY * 16}u + band);
-  if (g > 0.0) {
-    uint ring = ${SKY_BANDS - 1 - GLOW_RINGS}u + uint(g * ${GLOW_RINGS}.0 + 0.5);
-    col = mix(col, lutColor(${MAT.SKY_GLOW * 16}u + ring), min(1.0, g * 1.25));
-  }
-  // The far side: the sky turns darker and bluer the further round from the sun's azimuth, most
-  // low down (the zenith stays as it is), strongest at dusk, in steps like the bands.
-  vec2 dh = dir.xz, sh = uSunDir.xz;
-  if (dot(dh, dh) > 1e-8 && dot(sh, sh) > 1e-8) {
-    float away = smoothstep(0.2, 1.0, 0.5 - 0.5 * dot(normalize(dh), normalize(sh)));
-    float most = mix(${ANTISUN_DAY.toFixed(2)}, ${ANTISUN_DUSK.toFixed(2)}, uSunGlow) * clamp((uSunDir.y + 0.1) / 0.1, 0.0, 1.0);
-    float d = away * pow(1.0 - t, 0.8);
-    d = floor(d * ${ANTISUN_STEPS}.0 + 0.5) / ${ANTISUN_STEPS}.0 * most;
-    col = mix(col, col * ${ANTISUN_TINT}, d);
-  }
   uint idx = 0u;
   // moon: disc (exaggerated ~1.8 deg radius) lit by the sun; the dark limb stays sky-coloured
   float md = dot(dir, uMoonDir);

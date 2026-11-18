@@ -165,7 +165,7 @@ export class Renderer {
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
-      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow', 'uSunGlow',
+      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
       'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
@@ -617,6 +617,8 @@ export class Renderer {
       this.gl.uniform3fv(u.uMoon, this.skyMoon);
       this.gl.uniform4fv(u.uSky, this.light.sky);
       this.gl.uniform4fv(u.uDirect, this.light.direct);
+      // the sunset glow turns the fog's haze toward the sky's colour (shaders.ts hazeAt)
+      this.gl.uniform1f(u.uSunGlow, this.light.sunGlow);
     }
     if (u.uGlitter === undefined) return;
     const g = this.light.glitter;
@@ -669,7 +671,7 @@ type HdrGl = WebGL2RenderingContext & {
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime'];
 /** the light on faces (shaders.ts SUNLIGHT_GLSL) */
-const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect'];
+const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow'];
 
 /** texture unit the LUT stays bound to */
 const LUT_UNIT = 5;

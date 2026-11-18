@@ -35,7 +35,7 @@ describe('base ground (horizon without tiles)', () => {
     const { SKY_FS } = await import('../src/engine/shaders');
     expect(WORLD_VS).toContain('wp.y -= (d * d) / (2.0 * 6371000.0);');
     expect(SKY_FS).toContain('max(1.0 - dir.y * dir.y, 0.0) / 6371000.0');
-    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb)');
+    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir))');
     expect(SKY_FS).toContain('fog = floor(fog * 12.0) / 12.0;');
   });
 
@@ -63,7 +63,7 @@ describe('aircraft lights', () => {
     expect(c & 0xffffff).toBe(0xff2a1a);
     expect(c & SELF_LIT_FLAG).not.toBe(0);
     expect(new Uint32Array([c])[0]).toBe(c);
-    expect(WORLD_VS).toContain(`if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), uHaze, 0.5 * fog);`);
+    expect(WORLD_VS).toContain(`if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), haze, 0.5 * fog);`);
     // checked before the glow level and the lit step are applied
     expect(WORLD_VS.indexOf(`${SELF_LIT_FLAG}u`)).toBeLessThan(WORLD_VS.indexOf('litStep = max(litStep'));
   });
