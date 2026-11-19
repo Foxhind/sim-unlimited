@@ -1,5 +1,6 @@
 import { PAYLOAD_MASK, RAMP } from '../engine/palette';
 import type { JointDef, LightDef } from './articulation';
+import type { PropDef } from './propeller';
 import an225Model from './models/an225.json';
 import c150Model from './models/c150.json';
 import f117Model from './models/f117.json';
@@ -158,7 +159,7 @@ export interface AircraftConfig {
    * propeller's efficiency, gives less (efficiency x power / airspeed); the power falls with air density.
    * A fixed-pitch propeller works best at its cruise: its efficiency is `efficiency` x (1 - exp(-V / effSpeed)).
    */
-  prop?: { power: number; efficiency: number; effSpeed: number };
+  prop?: { power: number; efficiency: number; effSpeed: number } & PropDef;
   /** the gear does not retract: always down, the gear key does nothing */
   fixedGear?: boolean;
   /** m/s at altitude, used for Q41 air start (70% of cruise) */
@@ -634,7 +635,8 @@ export const C150: AircraftConfig = fromModel({
   thrustDry: 1700,
   thrustAfterburner: 1700,
   // its efficiency 0.70 at the best climb speed, 0.78 flat out: 3.4 m/s climb, 109 kt
-  prop: { power: 74600, efficiency: 0.865, effSpeed: 24 },
+  // drawn: the hub in the model (tools/c150-build.py PROP_S, PROP_R), a McCauley 69 x 48 in (1.22 m pitch)
+  prop: { power: 74600, efficiency: 0.865, effSpeed: 24, hub: [0, -0.1, -1.95], radius: 0.875, pitch: 1.22 },
   fixedGear: true,
   // set for what the game derives from it: the air start at 70% (52 m/s, 100 kt, a cruise) and the
   // autopilot's approach at 42% (31 m/s, 60 kt); the real 75% cruise is 55 m/s

@@ -421,6 +421,7 @@ function spawn(): void {
   prevFlaps = controls.flaps;
   camWorld.alt = model.pos[1];
   rig.setMode('cockpit', model);
+  aircraftRenderer.startPropeller(model, start.alt !== 0);
   spawned = true;
 }
 
@@ -486,7 +487,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, farOsm, clouds, font, vectors, model, rig, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
+    renderer, chunks, osm, farOsm, clouds, font, vectors, model, rig, aircraftRenderer, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
     get state() { return state; },
     get simTime() { return simTime; },
     get palette() { return palette; },
@@ -794,6 +795,7 @@ function frame(now: number): void {
     }
   }
   if (spawned) audio.update(model, flight, now / 1000);
+  if (spawned) aircraftRenderer.spin(model, flight.throttle, state === 'paused' ? 0 : dt);
 
   camWorld.latLon = enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], model.pos[1]);
   camWorld.alt = model.pos[1];

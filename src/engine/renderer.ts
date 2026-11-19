@@ -86,6 +86,13 @@ export class Renderer {
    */
   selfLitGain = 1;
   /**
+   * what drawWorld draws next is see-through (a turning propeller's disc): blended over what is behind
+   * at this opacity, leaving no depth. The target's alpha (the silhouette pass's marks) is kept.
+   */
+  opacity = 1;
+  /** what drawWorld draws next adds its light to what is behind (glints), leaving no depth */
+  additive = false;
+  /**
    * windows on what drawWorld draws next (a building mesh with facade attributes, WORLD_FS):
    * 'glass' dark panes, 'lit' at night with some of them lit, 'off' for every other mesh
    */
@@ -156,7 +163,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uWindows', 'uWinEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -245,6 +252,18 @@ export class Renderer {
   }
 
   /** brightness of a light source × SDR white: 1 without HDR */
+  /**
+   * The sun as a glint off a shiny surface sees it this frame: its direction, its strength through the
+   * weather 0..1 (none below the horizon) and the glint's colour 0..255 (the water glitter's core, paler).
+   */
+  sunGlint(): { dir: vec3; strength: number; rgb: [number, number, number] } {
+    const l = this.light;
+    const up = Math.min(1, Math.max(0, (this.sunDir[1] + 0.01) / 0.06));
+    const g = l?.glitter;
+    const rgb: [number, number, number] = g ? [255 * (0.5 + 0.5 * g[1]), 255 * (0.5 + 0.5 * g[2]), 255 * (0.5 + 0.5 * g[3])] : [255, 250, 235];
+    return { dir: this.sunDir, strength: l ? l.direct[0] * up : 0, rgb };
+  }
+
   emission(kind: keyof typeof HDR_EMISSION): number {
     return this.hdr ? HDR_EMISSION[kind] : 1;
   }
@@ -439,11 +458,21 @@ export class Renderer {
     gl.uniform1i(this.worldU.uTwoSided, this.selfLit ? 0 : 1);
     gl.uniform1f(this.worldU.uSelfLit, this.selfLit ? 1 : 0);
     gl.uniform1f(this.worldU.uEmit, this.selfLit ? this.selfLitGain : 1);
+    const blend = this.additive || this.opacity < 1;
+    gl.uniform1f(this.worldU.uClear, this.additive ? 0 : 1 - this.opacity);
+    if (blend) {
+      gl.enable(gl.BLEND);
+      // colour blended or added; the destination's alpha (silhouette marks) left as it is
+      if (this.additive) gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+      else gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+      gl.depthMask(false);
+    }
     gl.uniform1i(this.worldU.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
     gl.uniform1f(this.worldU.uWinEmit, this.emission('cityLights'));
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
-    if (!depthWrite) gl.depthMask(true);
+    if (blend) gl.disable(gl.BLEND);
+    if (!depthWrite || blend) gl.depthMask(true);
   }
 
   /** Q36: instanced trees of one type: its `vertexCount` geometry vertices from `first`, `count` instances. */
@@ -667,6 +696,8 @@ export const HDR_EMISSION = {
   sun: 128,
   /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours; lit windows on the walls) */
   cityLights: 48,
+  /** the sun's glints off a turning propeller */
+  glint: 64,
 } as const;
 
 /** WebGL drawing buffer storage and tone mapping (not yet in TypeScript's DOM lib) */

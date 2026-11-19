@@ -585,6 +585,8 @@ uniform float uWinEmit;
 uniform float uSelfLit;
 // brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uEmit;
+// > 0: see-through (1 - renderer.opacity; 0, the default, in every other pass), the blend's source alpha
+uniform float uClear;
 // the water surface's inputs (WATER_GLSL), shared with WORLD_VS
 uniform vec3 uCamPos;
 uniform float uFogStart;
@@ -615,6 +617,8 @@ void main() {
     if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;
   }
   if (uSelfLit > 0.5) c = emitLight(c, uEmit);
+  // see-through: the blend's source alpha (the target's own alpha is kept, renderer.drawWorld)
+  if (uClear > 0.0) alpha = 1.0 - uClear;
   oColor = vec4(c, alpha);
 }
 `;

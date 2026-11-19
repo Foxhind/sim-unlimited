@@ -1,6 +1,7 @@
 import type { AircraftConfig } from './aircraft';
 import type { FlightModel } from './model';
 import type { FlightControls } from './model';
+import { pistonRpm } from './propeller';
 
 /**
  * The kind of engine an airframe has, which sets its voice:
@@ -183,7 +184,7 @@ class PistonVoice implements Voice {
 
   set(n: number, speed: number, _ab: boolean, t: number): void {
     // fixed pitch: the airstream turns the propeller faster too (O-200: ~700 idle, 2750 at full and cruise)
-    const rpm = Math.min(3000, 700 + 1750 * n + 6 * speed) * this.detune;
+    const rpm = pistonRpm(n, speed) * this.detune;
     const f = (rpm / 60) * 2;
     this.fire.frequency.setTargetAtTime(f, t, 0.06);
     this.pulse.frequency.setTargetAtTime(f, t, 0.06);
