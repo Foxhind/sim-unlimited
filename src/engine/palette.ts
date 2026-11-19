@@ -708,8 +708,9 @@ export const LIGHT = {
 } as const;
 /**
  * Windows of the near buildings (building-mesher wall attributes, drawn in WORLD_FS): a slot every
- * SPACING_M along each wall on every FLOOR_M floor; at night LIT_SHARE of them lit, YELLOW_SHARE of
- * those yellow, the rest white (the same rule the far building dots follow).
+ * SPACING_M along each wall on every FLOOR_M floor; at night litShare(hour) of them lit (LIT_SHARE at
+ * the evening peak), YELLOW_SHARE of those yellow, the rest white (the far building dots follow the
+ * same share). Hospitals and supermarkets (FACADE_ALL_NIGHT) keep ALL_NIGHT_SHARE lit, mostly white.
  */
 export const WINDOWS = {
   SPACING_M: 4,
@@ -717,20 +718,50 @@ export const WINDOWS = {
   /** a wall lower than this, or an edge shorter, has no windows */
   MIN_WALL_M: 2.5,
   MIN_EDGE_M: 2.5,
-  LIT_SHARE: 0.3,
+  LIT_SHARE: 0.45,
   YELLOW_SHARE: 0.7,
+  ALL_NIGHT_SHARE: 0.6,
 } as const;
+/**
+ * The share of windows lit by the local solar hour: [hour, share] keys, eased between them and round
+ * midnight: the evening peak 19-21 h, a few left at 1 h, the fewest before dawn, people up at 7-8 h.
+ */
+const LIT_KEYS: [number, number][] = [
+  [1, 0.12], [4.5, 0.03], [6.5, 0.08], [8, 0.3], [12, 0.15], [17, 0.3], [19, WINDOWS.LIT_SHARE], [21, WINDOWS.LIT_SHARE],
+];
+export function litShare(hour: number): number {
+  const h = ((hour % 24) + 24) % 24;
+  const n = LIT_KEYS.length;
+  for (let i = 0; i < n; i++) {
+    const [h0, s0] = LIT_KEYS[i];
+    const [h1raw, s1] = LIT_KEYS[(i + 1) % n];
+    const h1 = h1raw <= h0 ? h1raw + 24 : h1raw;
+    const t = h >= h0 ? h : h + 24;
+    if (t >= h0 && t <= h1) {
+      const x = (t - h0) / (h1 - h0);
+      return s0 + (s1 - s0) * x * x * (3 - 2 * x);
+    }
+  }
+  return WINDOWS.LIT_SHARE;
+}
+/** the local solar hour at a longitude (no time zones: noon is when the sun is due south) */
+export function solarHour(time: Date, lonDeg: number): number {
+  const utc = time.getUTCHours() + time.getUTCMinutes() / 60 + time.getUTCSeconds() / 3600;
+  return (((utc + lonDeg / 15) % 24) + 24) % 24;
+}
 /** facade styles of a wall edge (WORLD_FS windowAt): plain windows, glazed or open balconies */
 export const FACADE = { WINDOWS: 0, GLAZED_BALCONIES: 1, OPEN_BALCONIES: 2 } as const;
 /**
  * A wall edge's code (building-mesher BuildingMeshData.windows), an integer below 2^24 (exact in a
  * float): FACADE_SEED_BITS of seed, the FACADE style in the next two bits, then the flags.
  */
-export const FACADE_SEED_BITS = 20;
+export const FACADE_SEED_BITS = 19;
 /** the edge is on a residential building (balconies above, rare pastel signs on the ground floor) */
-export const FACADE_RESIDENTIAL = 1 << 22;
+export const FACADE_RESIDENTIAL = 1 << 21;
 /** a blind patch (the wall round a door): the ground floor's tint, no openings or signs */
-export const FACADE_BLIND = 1 << 23;
+export const FACADE_BLIND = 1 << 22;
+/** the edge is on a building lit all night (hospital, supermarket): its windows ignore litShare */
+export const FACADE_ALL_NIGHT = 1 << 23;
 const LIGHT_COLORS: [number, RGB][] = [
   [LIGHT.TAXI_BLUE, [64, 128, 255]],
   [LIGHT.WINDOW_YELLOW, [255, 204, 72]],

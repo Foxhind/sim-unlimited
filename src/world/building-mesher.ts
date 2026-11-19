@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { colourOf, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -634,18 +634,20 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges, rare signs on the ground floor
     const balconies = windowed && hasBalconies(tags, winH);
+    // hospitals and supermarkets keep their lights on all night
+    const flags = isAllNight(tags) ? FACADE_ALL_NIGHT : 0;
 
     // walls up to the roof profile (gable ends close themselves); none under a canopy
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags);
         }
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
-          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies);
+          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags);
         }
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH);
@@ -686,14 +688,14 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * measured from there: the plinth under it is negative, no windows); balconies: some edges may carry them
    */
   function wallUnderRoof(
-    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean,
+    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number,
   ): void {
     const field = roof.kind === 'planar' ? roof.field : () => 0;
     const ts = [0, ...crossings(p, q, creases), 1];
     const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
     const wallH = len >= WINDOWS.MIN_EDGE_M ? windowH : 0;
     // stable across rebuilds: from the edge's start in tile-centre ENU; the code is an integer below 2^24, exact in a float
-    const seed = wallH > 0 ? edgeCode(p, yBase, len, balconies) : 0;
+    const seed = wallH > 0 ? edgeCode(p, yBase, len, balconies) + flags : 0;
     for (let k = 0; k + 1 < ts.length; k++) {
       const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
       const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
@@ -785,7 +787,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * that slot's ground floor is covered by a blind patch of the wall (the edge's facade code with
    * FACADE_BLIND: the ground floor's tint, no openings), so no pane or shop window shows round the door.
    */
-  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean): void {
+  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean, flags: number): void {
     const [w, hgt] = DOOR_SIZE[e.kind] ?? DOOR_SIZE.default;
     let best: { p: XZ; dir: XZ; len: number; u: number; d: number } | undefined;
     for (const ring of rings) {
@@ -815,7 +817,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (wallH > 0) {
       // the slot's whole ground floor (wallUnderRoof gives the edge the same code)
       const fh = wallH / Math.max(1, Math.floor(wallH / WINDOWS.FLOOR_M));
-      const code = edgeCode(p, wallBase, len, residential) + FACADE_BLIND;
+      const code = edgeCode(p, wallBase, len, residential) + flags + FACADE_BLIND;
       wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, winBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, winBase]);
     }
     const garage = e.kind === 'garage';
@@ -1031,6 +1033,13 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring))));
   }
   return new Float32Array(out);
+}
+
+/** hospitals and supermarkets: lit all night (FACADE_ALL_NIGHT) */
+export function isAllNight(tags: Record<string, string>): boolean {
+  const b = tags['building:part'] || tags.building;
+  return b === 'hospital' || b === 'supermarket' || tags.amenity === 'hospital' || tags.healthcare === 'hospital'
+    || tags.shop === 'supermarket' || tags.shop === 'hypermarket';
 }
 
 /** buildings that nobody lives or works in stay dark at night */

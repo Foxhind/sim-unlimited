@@ -95,7 +95,7 @@ describe('building night lights', () => {
     expect(WORLD_FS).toContain('bool windowAt(');
     expect(WORLD_FS).toContain(`${LIGHT.WINDOW_YELLOW}u`);
     expect(WORLD_FS).toContain(`${LIGHT.WINDOW_WHITE}u`);
-    expect(WORLD_FS).toContain(`r < ${WINDOWS.LIT_SHARE}`);
+    expect(WORLD_FS).toContain('bool lit = uWindows == 2 && r < share;');
     expect(WORLD_VS).toContain('layout(location=3) in vec2 aWinUV;');
     expect(TREE_VS).toContain('vWinEdge = vec3(0.0);');
   });

@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -394,7 +394,8 @@ float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * u
  * stretched to fit); a pane sits in each, a little above the middle of the floor. A pane never gets
  * smaller than about a pixel (fw: the metres one pixel spans along u and v), so far windows do not
  * flicker away. By day panes are dark glass in the wall's light; at night (uWindows 2) the slot's
- * hash lights WINDOWS.LIT_SHARE of them, mostly yellow, the rest white, like the far building dots.
+ * hash lights uLitShare of them (palette.ts litShare by the hour; ALL_NIGHT_SHARE on hospitals and
+ * supermarkets), mostly yellow, the rest white, like the far building dots.
  *
  * The edge code (edge.z) carries a building-mesher FACADE style above its seed: on a balconied edge
  * some slot columns (by the slot's hash, the same on every floor) carry balconies from the first
@@ -453,7 +454,7 @@ vec3 frameColour(uint fs) {
     : t == 3u ? vec3(0.56, 0.39, 0.23) : vec3(0.64, 0.65, 0.67);
 }
 // the ground floor of a building of two floors and more (windowAt)
-bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh, vec2 uv, vec3 edge, uint seed, bool resid, float r, vec2 fw, float fog) {
+bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh, vec2 uv, vec3 edge, uint seed, bool resid, bool allNight, float r, vec2 fw, float fog) {
   // rare pastel signs over the shop windows of residential buildings
   if (resid && winRand(seed ^ winHash(uint(k) + 0x51u)) < 0.14) {
     float sw = max(min(0.36 * cw, 1.6), 0.6 * fw.x);
@@ -463,8 +464,8 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
       return false;
     }
   }
-  // shops are lit more often than flats, mostly white
-  bool lit = uWindows == 2 && r < 0.5;
+  // shops are lit more often than flats, mostly white; they close at night with the flats going dark
+  bool lit = uWindows == 2 && r < (allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)});
   vec3 shop = emitLight(mix(lutColor(r < 0.15 ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
   vec3 glass = paneGlass(c, seed, r, fog);
   if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
@@ -496,6 +497,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   uint style = (code >> ${FACADE_SEED_BITS}u) & 3u;
   bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;
   bool blind = (code & ${FACADE_BLIND}u) != 0u;
+  bool allNight = (code & ${FACADE_ALL_NIGHT}u) != 0u;
   float du = uv.x - (k + 0.5) * cw;
   float dv = uv.y - f * fh;
   float r = winRand(seed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));
@@ -508,9 +510,11 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   }
   // the wall round a door: no openings
   if (blind) return false;
-  if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, r, fw, fog);
-  bool lit = uWindows == 2 && r < ${WINDOWS.LIT_SHARE};
-  vec3 light = emitLight(mix(lutColor(r < ${(WINDOWS.LIT_SHARE * WINDOWS.YELLOW_SHARE).toFixed(3)} ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
+  if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, allNight, r, fw, fog);
+  float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} : uLitShare;
+  bool lit = uWindows == 2 && r < share;
+  bool yellow = r < share * (allNight ? 0.2 : ${WINDOWS.YELLOW_SHARE.toFixed(2)});
+  vec3 light = emitLight(mix(lutColor(yellow ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
   // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
   // changed by its owner (residential only), so frames and glass vary up a wall and along it
   uint ws = seed;
@@ -643,6 +647,8 @@ uniform vec3 uSunDir;
 uniform highp int uWindows;
 // brightness of a lit window × SDR white (renderer.ts HDR_EMISSION cityLights)
 uniform float uWinEmit;
+// the share of windows lit now (renderer.litShare, palette.ts litShare by the local hour)
+uniform float uLitShare;
 // 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
 uniform float uSelfLit;
 // brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
@@ -772,6 +778,8 @@ uniform float uStackH;
 uniform vec2 uPull;
 // brightness of the fixed light colours × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uEmit;
+// the share of windows lit now (renderer.litShare): far building window dots go dark with it
+uniform float uLitShare;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}
@@ -795,6 +803,11 @@ void main() {
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
+  // a far building's window dot: lit while its hash is under the share of the evening peak
+  if (aIndex == ${LIGHT.WINDOW_YELLOW}.0 || aIndex == ${LIGHT.WINDOW_WHITE}.0) {
+    float h = fract(sin(dot(floor(aPos.xz), vec2(12.9898, 78.233))) * 43758.5453);
+    if (h >= uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)}) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; }
+  }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }
 `;

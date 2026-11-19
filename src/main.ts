@@ -6,7 +6,7 @@ import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, litShare, solarHour, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -892,6 +892,7 @@ function frame(now: number): void {
   renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
+  renderer.litShare = litShare(solarHour(simTime, sunLoc.lon));
   renderer.time = now / 1000;
   renderer.snow = surface.snow;
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);

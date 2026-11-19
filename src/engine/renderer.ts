@@ -1,6 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
-import { LUT_ENTRIES, type LightUniforms } from './palette';
+import { LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
 import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
@@ -97,6 +97,8 @@ export class Renderer {
    * 'glass' dark panes, 'lit' at night with some of them lit, 'off' for every other mesh
    */
   windows: 'off' | 'glass' | 'lit' = 'off';
+  /** the share of windows lit at night now (palette.ts litShare by the local hour) */
+  litShare: number = WINDOWS.LIT_SHARE;
   /**
    * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
    * extended drawingBufferToneMapping where the browser has it), the world and post targets are
@@ -163,7 +165,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -172,7 +174,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
@@ -469,6 +471,7 @@ export class Renderer {
     }
     gl.uniform1i(this.worldU.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
     gl.uniform1f(this.worldU.uWinEmit, this.emission('cityLights'));
+    gl.uniform1f(this.worldU.uLitShare, this.litShare);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (blend) gl.disable(gl.BLEND);
@@ -544,6 +547,7 @@ export class Renderer {
     gl.uniform1f(this.pointsU.uPointSize, pointSize);
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
     gl.uniform1f(this.pointsU.uEmit, this.emission('cityLights'));
+    gl.uniform1f(this.pointsU.uLitShare, this.litShare);
     this.setLight(this.pointsU);
     gl.bindVertexArray(vao);
     gl.drawArrays(mode === 'points' ? gl.POINTS : gl.LINES, 0, count);
