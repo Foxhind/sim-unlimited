@@ -3,10 +3,14 @@ import { colour, isMaterial, rgbOf, SNOW_FLAG } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import {
   buildBuildingMesh,
+  buildingHeights,
   buildingSeed,
+  buildingTags,
+  footprintHeight,
   computeHeights,
   parseColor,
   parseLength,
+  pastelColour,
   roofRamp,
   wallRamp,
 } from '../src/world/building-mesher';
@@ -30,6 +34,59 @@ function ys(m: { vertices: Float32Array; vertexCount: number }): number[] {
   return out;
 }
 
+describe('default height and roof', () => {
+  it('height without height/levels is the mean bbox side, at least 2.5 m', () => {
+    expect(footprintHeight([[0, 0], [10, 0], [10, 6], [0, 6]])).toBe(8);
+    expect(footprintHeight([[0, 0], [2, 0], [2, 1], [0, 1]])).toBe(2.5);
+    // bbox of a rotated square in the local axes, not its sides
+    expect(footprintHeight([[5, 0], [10, 5], [5, 10], [0, 5]])).toBe(10);
+  });
+
+  it('building=residential without height/levels: footprint facade, roof on top', () => {
+    const big: OsmBuilding = { rings: [rect()], tags: { building: 'residential' } }; // ~50 m mean side
+    const t = buildingTags(big);
+    const h = buildingHeights(big);
+    expect(t.height).toBeUndefined();
+    expect(t['roof:shape']).toBeUndefined(); // not low-rise
+    expect(h.roof).toBe(0);
+    expect(h.wall).toBeCloseTo(Number(t['sim:footprint_wall']), 6);
+    const small: OsmBuilding = { rings: [rect(0.00005, 0.00004)], tags: { building: 'residential' } };
+    const ts = buildingTags(small);
+    const hs = buildingHeights(small);
+    expect(ts['roof:shape']).toBe('hipped');
+    expect(hs.roof).toBeGreaterThan(0);
+    expect(hs.wall).toBeCloseTo(Number(ts['sim:footprint_wall']), 6);
+    expect(hs.wall).toBeGreaterThanOrEqual(2.5);
+  });
+
+  it('other types without height/levels: 2 floors, whatever the footprint', () => {
+    for (const building of ['yes', 'house', 'industrial', 'garage']) {
+      const b: OsmBuilding = { rings: [rect()], tags: { building } };
+      expect(buildingTags(b)['sim:footprint_wall']).toBeUndefined();
+      expect(buildingHeights(b).wall).toBe(6);
+    }
+    // yes: 2 floors are low-rise → a hipped roof on top of the 6 m facade
+    const yes: OsmBuilding = { rings: [rect(0.00005, 0.00004)], tags: { building: 'yes' } };
+    expect(buildingTags(yes)['roof:shape']).toBe('hipped');
+    expect(buildingHeights(yes).wall).toBe(6);
+    expect(buildingHeights(yes).roof).toBeGreaterThan(0);
+  });
+
+  it('default hipped only for low-rise yes/residential; OSM tags, other types and parts stay as they are', () => {
+    const ring = rect(0.00005, 0.00004);
+    const roof = (tags: Record<string, string>) => buildingTags({ rings: [ring], tags })['roof:shape'];
+    expect(buildingTags({ rings: [ring], tags: { building: 'yes', 'building:levels': '2' } })).toEqual({ building: 'yes', 'building:levels': '2', 'roof:shape': 'hipped' });
+    expect(roof({ building: 'residential', 'building:levels': '3' })).toBe('hipped');
+    expect(roof({ building: 'yes', 'building:levels': '5' })).toBeUndefined();
+    expect(roof({ building: 'yes', height: '20' })).toBeUndefined();
+    expect(roof({ building: 'yes', height: '7', 'roof:shape': 'flat' })).toBe('flat');
+    for (const building of ['house', 'detached', 'apartments', 'industrial', 'school', 'garage']) {
+      expect(roof({ building, 'building:levels': '2' })).toBeUndefined();
+    }
+    expect(roof({ 'building:part': 'yes', building: 'yes', height: '7' })).toBeUndefined();
+  });
+});
+
 describe('parseLength', () => {
   it('parses meters, feet and feet-inches', () => {
     expect(parseLength('12')).toBe(12);
@@ -45,12 +102,13 @@ describe('parseLength', () => {
 });
 
 describe('computeHeights', () => {
-  it('prefers height, then levels, then type defaults', () => {
+  it('prefers height, then levels, then 2 floors', () => {
     expect(computeHeights({ height: '20', building: 'house' })).toEqual({ min: 0, wall: 20, roof: 0 });
     expect(computeHeights({ 'building:levels': '4', building: 'house' }).wall).toBe(12);
     expect(computeHeights({ building: 'house' }).wall).toBe(6);
-    expect(computeHeights({ building: 'garage' }).wall).toBe(3);
-    expect(computeHeights({}).wall).toBe(9);
+    expect(computeHeights({ building: 'garage' }).wall).toBe(6);
+    expect(computeHeights({ building: 'apartments' }).wall).toBe(6);
+    expect(computeHeights({}).wall).toBe(6);
   });
 
   it('splits roof height off pitched roofs and honors min_height', () => {
@@ -92,7 +150,7 @@ describe('colors', () => {
 
   it('takes roof colour, then roof material, from OSM', () => {
     const gabled = { 'roof:shape': 'gabled' };
-    expect(roofRamp({ ...gabled, 'roof:colour': '#ff0000' })).toBe(colour(255, 0, 0));
+    expect(roofRamp({ ...gabled, 'roof:colour': '#a06858' })).toBe(colour(0xa0, 0x68, 0x58));
     expect(roofRamp({ ...gabled, 'roof:material': 'slate' })).toBe(colour(72, 76, 84));
     expect(roofRamp({ ...gabled, 'roof:colour': 'red', 'roof:material': 'slate' })).toBe(roofRamp({ ...gabled, 'roof:colour': 'red' }));
   });
@@ -112,9 +170,37 @@ describe('colors', () => {
     expect(rgb(wallRamp({ 'building:colour': 'white' }))[0]).toBeLessThan(255);
     expect(rgb(wallRamp({ 'building:colour': 'black' }))[0]).toBeGreaterThan(0);
     expect(rgb(wallRamp({ 'building:colour': 'white' }))[0]).toBeGreaterThan(rgb(wallRamp({ 'building:colour': 'black' }))[0]);
-    // hex is exact, even a loud one
-    expect(roofRamp({ 'roof:colour': '#ff0000' })).toBe(colour(255, 0, 0));
-    expect(sat(wallRamp({ 'building:colour': '#00ff00' }))).toBe(1);
+    // a loud bright hex becomes a light pastel of its hue; a loud dark one only loses saturation
+    for (const hex of ['#ff0000', '#00ff00', '#0000ff', '#ffff00']) {
+      const r = rgb(wallRamp({ 'building:colour': hex }));
+      expect(sat(wallRamp({ 'building:colour': hex }))).toBeLessThanOrEqual(0.31);
+      expect(Math.max(...r)).toBeGreaterThanOrEqual(224);
+    }
+    expect(hue(wallRamp({ 'building:colour': '#00ff00' }))).toBe('g');
+    expect(pastelColour([128, 0, 0])[0]).toBe(128);
+    expect(sat(colour(...pastelColour([128, 0, 0])))).toBeLessThanOrEqual(0.5);
+    expect(pastelColour([0x7a, 0x5c, 0x3d])).toEqual([0x7a, 0x5c, 0x3d]);
+  });
+
+  it('untagged walls: a palette per building type, picked by seed', () => {
+    const seeds = Array.from({ length: 200 }, (_, i) => (i + 0.5) / 200);
+    const colours = (tags: Record<string, string>) => new Set(seeds.map((x) => wallRamp(tags, x)));
+    const warm = ([r, , b]: readonly number[]) => r - b > 25;
+    const brick = ([r, g, b]: readonly number[]) => r - b > 50 && r < 170 && g < 110;
+    for (const type of ['house', 'apartments', 'industrial', 'warehouse', 'retail', 'office', 'school', 'kindergarten', 'yes', 'church']) {
+      const set = colours({ building: type });
+      expect(set.size).toBeGreaterThan(2);
+      for (const c of set) expect(sat(c)).toBeLessThanOrEqual(0.5);
+      expect(wallRamp({ building: type }, 0.3)).toBe(wallRamp({ building: type }, 0.3));
+    }
+    for (const c of colours({ building: 'industrial' })) expect(warm(rgb(c))).toBe(false);
+    for (const c of colours({ building: 'commercial' })) expect(brick(rgb(c))).toBe(false);
+    for (const c of colours({ building: 'school' })) { const [r, , b] = rgb(c); expect(b).toBeGreaterThanOrEqual(r); }
+    const house = [...colours({ building: 'house' })].map(rgb);
+    expect(house.filter(warm).length).toBeGreaterThan(house.length / 2);
+    expect(house.some(brick)).toBe(true);
+    // OSM material still wins over the palette
+    expect(wallRamp({ building: 'school', 'building:material': 'brick' }, 0.1)).toBe(colour(156, 88, 64));
   });
 
   const isGrey = (ramp: number) => {

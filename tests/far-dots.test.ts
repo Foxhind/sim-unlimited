@@ -16,7 +16,7 @@ describe('far building dots', () => {
     const d = Array.from(buildingDots([house], TILE, () => 100));
     expect(d).toHaveLength(8);
     expect(d.slice(0, 3)).toEqual(d.slice(4, 7));
-    expect(d[3]).toBe(pointValue(wallRamp(house.tags)));
+    expect(d[3]).toBe(pointValue(wallRamp(house.tags, buildingSeed(ring))));
     expect(d[7]).toBe(pointValue(roofRamp(house.tags, buildingSeed(ring))));
     expect(d[3]).not.toBe(d[7]);
   });

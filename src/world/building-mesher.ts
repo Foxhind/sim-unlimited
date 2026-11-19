@@ -95,12 +95,8 @@ export function parseLength(v: string | undefined): number | undefined {
   return n;
 }
 
-const TYPE_HEIGHT: Record<string, number> = {
-  house: 6, detached: 6, residential: 9, apartments: 12, garage: 3, garages: 3,
-  industrial: 8, warehouse: 8, commercial: 9, retail: 6, office: 12, church: 12,
-  cathedral: 15, chapel: 6, hospital: 12, school: 9, university: 12, hotel: 12,
-  roof: 3, shed: 3, hut: 3, cabin: 3, barn: 6, farm: 6,
-};
+/** facade levels of a building with no height, no building:levels and no footprint rule (withDefaultTags) */
+export const DEFAULT_LEVELS = 2;
 
 /** S3DB: a level without height tags is 3 m */
 export const LEVEL_M = 3;
@@ -112,10 +108,11 @@ const DEFAULT_PITCH_DEG = 30;
  * `height` runs from the ground to the roof top; the facade is height − roof:height. The roof height is
  * roof:height, else from roof:angle over `run` (the horizontal run of a slope: roofRun), else
  * roof:levels × 3 m, else a default for the shape (30° pitch, a hemisphere for a dome). Without
- * `height`: building:levels × 3 m plus that roof; without levels either, a default by building type.
+ * `height`: building:levels × 3 m plus that roof; without levels either, the facade from the footprint
+ * (FOOTPRINT_WALL_TAG, set by withDefaultTags for building=residential) plus that roof; else
+ * DEFAULT_LEVELS (2) × 3 m plus that roof.
  */
 export function computeHeights(tags: Record<string, string>, run?: number): { min: number; wall: number; roof: number } {
-  const type = tags['building:part'] || tags.building || 'yes';
   const shape = roofShape(tags);
 
   let roof = 0;
@@ -133,9 +130,10 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
     const levels = parseLength(tags['building:levels']);
     // roof levels under a flat roof are still storeys on top of the facade levels
     const flatRoofLevels = shape === 'flat' ? (parseLength(tags['roof:levels']) ?? 0) * LEVEL_M : 0;
+    const footprintWall = parseLength(tags[FOOTPRINT_WALL_TAG]);
     if (levels !== undefined) height = levels * LEVEL_M + roof + flatRoofLevels;
+    else height = (footprintWall ?? DEFAULT_LEVELS * LEVEL_M) + roof + flatRoofLevels;
   }
-  if (height === undefined) height = TYPE_HEIGHT[type] ?? 9;
 
   let min = parseLength(tags.min_height) ?? 0;
   const minLevel = parseLength(tags['building:min_level']);
@@ -163,13 +161,73 @@ function localXZ(ring: LonLat[]): XZ[] {
   return ring.map(([lo, la]) => [(lo - lon0) * k * c, -(la - lat0) * k]);
 }
 
+/** a facade with neither height nor building:levels is at least this tall */
+export const MIN_FOOTPRINT_HEIGHT_M = 2.5;
+/** internal tag (not OSM): the facade height from the footprint, the roof goes on top of it */
+export const FOOTPRINT_WALL_TAG = 'sim:footprint_wall';
+/** a building up to this height (facade, without the roof) is low-rise: a hipped roof when OSM gives none */
+export const LOW_RISE_FACADE_M = 12;
+
+/**
+ * Facade height (without the roof) of a building with neither `height` nor `building:levels`: the mean
+ * of the width and length of the footprint's bounding rectangle in the local axes (x east, z south),
+ * but at least 2.5 m.
+ */
+export function footprintHeight(outer: XZ[]): number {
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [x, z] of outer) {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }
+  if (!Number.isFinite(minX)) return MIN_FOOTPRINT_HEIGHT_M;
+  return Math.max(MIN_FOOTPRINT_HEIGHT_M, (maxX - minX + (maxZ - minZ)) / 2);
+}
+
+/** building values that get a hipped roof by default when low-rise */
+const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
+
+/**
+ * The tags a building is drawn with: OSM tags plus the defaults it lacks. A building=residential
+ * without `height` and `building:levels` has the footprint height as its facade (FOOTPRINT_WALL_TAG;
+ * the roof goes on top); others get DEFAULT_LEVELS in computeHeights. Without `roof:shape`, a low-rise
+ * building=yes or building=residential (facade from height, else building:levels × 3 m, else the
+ * default, up to 12 m) gets a `hipped` roof; every other type and building:part areas stay flat.
+ */
+export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | undefined): Record<string, string> {
+  const out = { ...tags };
+  const levels = parseLength(tags['building:levels']);
+  if (tags.building === 'residential' && parseLength(tags.height) === undefined && levels === undefined && outer && outer.length >= 3) {
+    out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
+  }
+  const isPart = tags['building:part'] !== undefined && tags['building:part'] !== 'no';
+  if (tags['roof:shape'] === undefined && !isPart && HIPPED_DEFAULT_TYPES.has(tags.building)) {
+    const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
+      ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
+    if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = 'hipped';
+  }
+  return out;
+}
+
+const defaultTagsCache = new WeakMap<OsmBuilding, Record<string, string>>();
+/** withDefaultTags of a building, its footprint in metres about its first vertex (stable across tiles) */
+export function buildingTags(b: OsmBuilding): Record<string, string> {
+  let t = defaultTagsCache.get(b);
+  if (!t) {
+    const ring = b.rings[0];
+    t = withDefaultTags(b.tags, ring && ring.length >= 3 ? localXZ(ring) : undefined);
+    defaultTagsCache.set(b, t);
+  }
+  return t;
+}
+
 /** computeHeights with the roof run taken from the footprint (dots, collision, lit windows) */
 export function buildingHeights(b: OsmBuilding): { min: number; wall: number; roof: number } {
+  const tags = buildingTags(b);
   const ring = b.rings[0];
-  if (!ring || ring.length < 3 || roofShape(b.tags) === 'flat') return computeHeights(b.tags);
+  if (!ring || ring.length < 3 || roofShape(tags) === 'flat') return computeHeights(tags);
   const outer = localXZ(ring);
-  const shape = roofShape(b.tags);
-  return computeHeights(b.tags, roofRun(shape, roofFrame(outer, b.tags)));
+  const shape = roofShape(tags);
+  return computeHeights(tags, roofRun(shape, roofFrame(outer, tags)));
 }
 
 /** typical colour of an OSM material value (building:material / roof:material) */
@@ -187,20 +245,61 @@ const MATERIAL_RGB: Record<string, RGB> = {
   grass: [70, 140, 60], gravel: [140, 136, 130], roofing_felt: [60, 62, 66],
 };
 
-const BRICK_RGB: RGB = [156, 88, 64];
-const SAND_RGB: RGB = [210, 195, 160];
-const CONCRETE_RGB: RGB = [150, 150, 150];
-const DARK_RGB: RGB = [112, 116, 122];
-const GLASS_RGB: RGB = [170, 195, 210];
-
-/** wall colour of a building with no colour and no material in OSM */
-const TYPE_WALL_RGB: Record<string, RGB> = {
-  house: BRICK_RGB, detached: BRICK_RGB, residential: SAND_RGB, apartments: CONCRETE_RGB,
-  garage: CONCRETE_RGB, garages: CONCRETE_RGB, industrial: DARK_RGB, warehouse: DARK_RGB,
-  commercial: CONCRETE_RGB, retail: BRICK_RGB, office: GLASS_RGB, church: SAND_RGB,
-  cathedral: SAND_RGB, chapel: SAND_RGB, hospital: CONCRETE_RGB, school: BRICK_RGB,
-  hotel: SAND_RGB, roof: DARK_RGB, shed: DARK_RGB, barn: BRICK_RGB,
+/**
+ * Wall colours of a building with no colour and no material in OSM: a palette per kind of building, each
+ * entry [colour, weight], all of low saturation. Industrial: greys, whites, grey-blues. Residential:
+ * warm (beige, sand, cream, brick), rarely grey or white. Commercial: anything but brick. Schools and
+ * kindergartens: pale blue and white.
+ */
+type Palette = [RGB, number][];
+const WALL_PALETTES: Record<string, Palette> = {
+  residential: [
+    [[222, 205, 175], 3], [[210, 195, 160], 3], [[235, 225, 200], 2], [[225, 190, 160], 2], [[220, 192, 140], 1],
+    [[150, 96, 76], 3], [[128, 82, 66], 1], [[170, 170, 168], 1], [[236, 234, 228], 1],
+  ],
+  industrial: [
+    [[175, 175, 175], 3], [[140, 142, 145], 3], [[112, 116, 122], 1], [[232, 232, 228], 2],
+    [[150, 165, 180], 3], [[185, 198, 210], 2], [[120, 135, 150], 1],
+  ],
+  commercial: [
+    [[238, 236, 230], 3], [[180, 180, 178], 2], [[222, 205, 175], 2], [[210, 195, 160], 1], [[170, 195, 210], 2],
+    [[190, 210, 225], 1], [[190, 210, 185], 1], [[235, 222, 170], 1], [[225, 185, 165], 1], [[150, 165, 180], 1],
+    [[100, 104, 110], 1],
+  ],
+  school: [[[185, 210, 230], 3], [[160, 195, 225], 2], [[234, 237, 240], 3], [[215, 225, 235], 2]],
+  civic: [[[238, 236, 230], 3], [[200, 200, 198], 2], [[235, 225, 200], 2], [[210, 195, 160], 1], [[235, 222, 170], 1]],
+  religious: [[[240, 238, 232], 3], [[210, 195, 160], 2], [[235, 222, 170], 2], [[235, 225, 200], 2]],
+  agricultural: [[[130, 100, 75], 3], [[150, 96, 76], 2], [[160, 160, 158], 2], [[200, 185, 155], 1]],
+  mixed: [
+    [[222, 205, 175], 2], [[210, 195, 160], 2], [[236, 234, 228], 2], [[180, 180, 178], 2], [[150, 96, 76], 2],
+    [[225, 190, 160], 1], [[150, 165, 180], 1], [[235, 225, 200], 1],
+  ],
 };
+const PALETTE_OF_TYPE: Record<string, string> = {};
+for (const [palette, types] of Object.entries({
+  residential: 'house detached semidetached_house terrace residential apartments bungalow dormitory cabin hut farm static_caravan',
+  industrial: 'industrial warehouse manufacture factory hangar storage_tank silo service transformer_tower garage garages shed roof carport bunker digester',
+  commercial: 'commercial retail office supermarket kiosk hotel shop mall train_station transportation parking',
+  school: 'school kindergarten',
+  civic: 'hospital university college public civic government townhall fire_station sports_hall',
+  religious: 'church cathedral chapel mosque temple synagogue religious monastery',
+  agricultural: 'barn farm_auxiliary stable cowshed sty',
+})) for (const t of types.split(' ')) PALETTE_OF_TYPE[t] = palette;
+
+/** the palette for a building type (unknown and `yes`: mixed) */
+export function wallPalette(type: string): Palette {
+  return WALL_PALETTES[PALETTE_OF_TYPE[type] ?? 'mixed'];
+}
+
+function pickWeighted(p: Palette, t: number): RGB {
+  const total = p.reduce((s, [, w]) => s + w, 0);
+  let x = t * total;
+  for (const [c, w] of p) {
+    if (x < w) return c;
+    x -= w;
+  }
+  return p[p.length - 1][0];
+}
 
 /** any colour as it is: lit and fogged in the shader like the terrain (palette.ts) */
 const rgbRamp = (c: RGB) => colourOf(c);
@@ -250,28 +349,49 @@ function mutedRamp(c: RGB): number {
   return colourOf(mutedColour(c));
 }
 
+/** a tagged colour with more saturation than this is toned down (pastelColour) */
+const TAGGED_MAX_SATURATION = 0.5;
+/** a loud colour this bright (HSV value) or brighter becomes a pastel; darker ones only lose saturation */
+const PASTEL_MIN_VALUE = 0.6;
+const PASTEL_SATURATION = 0.3;
+const PASTEL_VALUE = 0.88;
+
+/**
+ * A too saturated colour as a building shade, hue kept: a bright one (#ff0000, #00ff00) → a pastel of
+ * it (saturation 0.3, light), a dark one (#800000) → its saturation capped at 0.5. Others as they are.
+ */
+export function pastelColour(c: RGB): RGB {
+  const [h, s, v] = hsv(c);
+  if (s <= TAGGED_MAX_SATURATION) return c;
+  if (v >= PASTEL_MIN_VALUE) return fromHsv(h, PASTEL_SATURATION, Math.max(v, PASTEL_VALUE));
+  // a little under the cap, so rounding to 8 bits per channel stays within it
+  return fromHsv(h, TAGGED_MAX_SATURATION - 0.005, v);
+}
+
 /**
  * Ramp of the first usable colour among the colour tags (a CSS name muted, a hex or rgb() value
- * exact), else of the material's colour.
+ * as tagged unless too saturated: pastelColour), else of the material's colour.
  */
 function taggedRamp(tags: Record<string, string>, colourKeys: string[], materialKey: string): number | undefined {
   for (const k of colourKeys) {
     const c = parseColor(tags[k]);
-    if (c) return isNamedColor(tags[k]) ? mutedRamp(c) : rgbRamp(c);
+    if (c) return isNamedColor(tags[k]) ? mutedRamp(c) : rgbRamp(pastelColour(c));
   }
   const mat = tags[materialKey]?.split(';')[0].trim().toLowerCase();
   return mat && MATERIAL_RGB[mat] ? rgbRamp(MATERIAL_RGB[mat]) : undefined;
 }
 
 /**
- * Wall colour from OSM (Simple 3D Buildings: building:colour, then building:material), else by building type.
- * A hex or rgb() value is taken exactly; a CSS colour name as a muted shade of it.
+ * Wall colour from OSM (Simple 3D Buildings: building:colour, then building:material), else one of
+ * the type's palette (wallPalette), deterministic by the building seed. A hex or rgb() value is taken
+ * as tagged unless too saturated (pastelColour); a CSS colour name as a muted shade of it.
  */
-export function wallRamp(tags: Record<string, string>): number {
+export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
   const tagged = taggedRamp(tags, ['building:colour', 'building:color', 'colour', 'color'], 'building:material');
   if (tagged !== undefined) return tagged;
   const type = tags['building:part'] || tags.building || 'yes';
-  return rgbRamp(TYPE_WALL_RGB[type] ?? BRICK_RGB);
+  const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
+  return rgbRamp(pickWeighted(wallPalette(type), t));
 }
 
 /** the pitched roof of a building up to this height (wall + roof, above its base) may be orange */
@@ -405,7 +525,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   };
 
   for (const b of buildings) {
-    const tags = b.tags;
+    const tags = buildingTags(b);
     if (!b.rings.length || !b.rings[0].length) continue;
     const outerLL = b.rings[0];
     const rawOuter = dedupe(outerLL.map(toXZ));
@@ -425,7 +545,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const h = computeHeights(tags, roofRun(shape, frame));
     const wallBase = base + h.min;
     const wallTop = wallBase + h.wall;
-    const wRamp = wallRamp(tags);
+    const wRamp = wallRamp(tags, buildingSeed(outerLL));
     const rRamp = roofRamp(tags, buildingSeed(outerLL));
     const isCanopy = tags.building === 'roof';
     const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
@@ -704,8 +824,8 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     const y = Math.max(0, sampleHeight(lon, lat)) + h.min + (h.wall + h.roof) * 0.5;
-    out.push(e, y, -n, pointValue(wallRamp(b.tags)));
-    out.push(e, y, -n, pointValue(roofRamp(b.tags, buildingSeed(ring))));
+    out.push(e, y, -n, pointValue(wallRamp(b.tags, buildingSeed(ring))));
+    out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring))));
   }
   return new Float32Array(out);
 }
