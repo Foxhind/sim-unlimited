@@ -8,6 +8,7 @@ import {
   buildingTags,
   footprintHeight,
   PARAPET,
+  ROOFTOP,
   computeHeights,
   parseColor,
   parseLength,
@@ -16,6 +17,7 @@ import {
   wallRamp,
 } from '../src/world/building-mesher';
 import type { OsmBuilding } from '../src/world/osm-types';
+import { AC_SIZE, INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -27,6 +29,14 @@ function rect(w = 0.0004, h = 0.0003): [number, number][] {
 
 function build(buildings: OsmBuilding[], sample: (lon: number, lat: number) => number = () => 100) {
   return buildBuildingMesh({ tile: TILE, buildings, sampleHeight: sample });
+}
+
+/** the top of the outline (walls, parapet) at the footprint's east edge: rooftop structures stay off it */
+function edgeTop(m: { vertices: Float32Array; vertexCount: number }): number {
+  let maxX = -Infinity, top = -Infinity;
+  for (let i = 0; i < m.vertexCount; i++) maxX = Math.max(maxX, m.vertices[i * 6]);
+  for (let i = 0; i < m.vertexCount; i++) if (m.vertices[i * 6] > maxX - 0.01) top = Math.max(top, m.vertices[i * 6 + 1]);
+  return top;
 }
 
 function ys(m: { vertices: Float32Array; vertexCount: number }): number[] {
@@ -103,7 +113,7 @@ describe('parapet', () => {
 
   it('a flat roof sits 50 cm under the wall top behind a parapet 20 cm wide; the top stays at height', () => {
     const m = build([{ rings: [rect()], tags: { building: 'industrial', height: '10' } }]);
-    expect(Math.max(...ys(m))).toBeCloseTo(110, 4);
+    expect(edgeTop(m)).toBeCloseTo(110, 4);
     const maxX = Math.max(...Array.from({ length: m.vertexCount }, (_, i) => m.vertices[i * 6]));
     // parapet top: from the wall face to 20 cm inside; the roof surface ends 20 cm inside, 50 cm lower
     expect(Math.min(...upAt(m, 110).filter((x) => x > maxX - 1))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
@@ -122,7 +132,73 @@ describe('parapet', () => {
     const m = build([{ rings: [rect(), hole], tags: { building: 'apartments', height: '10' } }]);
     const flat = build([{ rings: [rect()], tags: { building: 'apartments', height: '10' } }]);
     expect(m.vertexCount).toBeGreaterThan(flat.vertexCount);
-    expect(Math.max(...ys(m))).toBeCloseTo(110, 4);
+    expect(edgeTop(m)).toBeCloseTo(110, 4);
+  });
+});
+
+describe('rooftop structures and air conditioners', () => {
+  const tops = (m: ReturnType<typeof build>, roofY: number) => {
+    // distinct heights of up-facing faces above the roof surface, below the parapet top excluded
+    const s = new Set<number>();
+    for (let i = 0; i < m.vertexCount; i++) {
+      const y = m.vertices[i * 6 + 1];
+      if (m.vertices[i * 6 + 4] > 0.99 && y > roofY + 0.6) s.add(Math.round((y - roofY) * 10) / 10);
+    }
+    return s;
+  };
+
+  it('a large flat roof carries grey structures of the four kinds; a small one none', () => {
+    const big = build([{ rings: [rect()], tags: { building: 'industrial', height: '10' } }]);
+    const heights = tops(big, 109.5);
+    expect(heights.size).toBeGreaterThan(0);
+    for (const h of heights) expect(ROOFTOP.UNITS.map((u) => u[2])).toContain(h);
+    for (const [, , , [r, g, b]] of ROOFTOP.UNITS) expect(Math.max(r, g, b) - Math.min(r, g, b)).toBeLessThanOrEqual(6);
+    const small = build([{ rings: [rect(0.0001, 0.00008)], tags: { building: 'industrial', height: '10' } }]); // ~ 13 × 18 m
+    expect(tops(small, 109.5).size).toBe(0);
+    // deterministic
+    expect(build([{ rings: [rect()], tags: { building: 'industrial', height: '10' } }]).vertices).toEqual(big.vertices);
+  });
+
+  it('structures stand inside the parapet', () => {
+    const m = build([{ rings: [rect()], tags: { building: 'industrial', height: '10' } }]);
+    let minX = Infinity, maxX = -Infinity;
+    for (let i = 0; i < m.vertexCount; i++) { minX = Math.min(minX, m.vertices[i * 6]); maxX = Math.max(maxX, m.vertices[i * 6]); }
+    for (let i = 0; i < m.vertexCount; i++) {
+      if (m.vertices[i * 6 + 1] > 110.01) {
+        expect(m.vertices[i * 6]).toBeGreaterThan(minX + PARAPET.WIDTH_M + ROOFTOP.MARGIN_M - 0.01);
+        expect(m.vertices[i * 6]).toBeLessThan(maxX - PARAPET.WIDTH_M - ROOFTOP.MARGIN_M + 0.01);
+      }
+    }
+  });
+
+  it('air conditioners: instances on the walls of homes, turned to face out; none on industry', () => {
+    const tall = { building: 'apartments', 'building:levels': '9' };
+    const m = build([{ rings: [rect()], tags: tall }]);
+    const n = m.acs.length / TREE_STRIDE;
+    expect(n).toBeGreaterThan(0);
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < m.vertexCount; i++) {
+      minX = Math.min(minX, m.vertices[i * 6]); maxX = Math.max(maxX, m.vertices[i * 6]);
+      minZ = Math.min(minZ, m.vertices[i * 6 + 2]); maxZ = Math.max(maxZ, m.vertices[i * 6 + 2]);
+    }
+    for (let i = 0; i < n; i++) {
+      const [x, y, z, scale, , type, , yaw] = m.acs.subarray(i * TREE_STRIDE, (i + 1) * TREE_STRIDE);
+      expect(type).toBe(INSTANCE.AC);
+      expect(scale).toBe(1);
+      expect(y).toBeGreaterThanOrEqual(100);
+      expect(y + AC_SIZE.HEIGHT).toBeLessThan(127);
+      // on the outline, facing away from the building
+      const onEast = Math.abs(x - maxX) < 0.01, onWest = Math.abs(x - minX) < 0.01;
+      const onSouth = Math.abs(z - maxZ) < 0.01, onNorth = Math.abs(z - minZ) < 0.01;
+      expect(onEast || onWest || onSouth || onNorth).toBe(true);
+      const [dx, dz] = [Math.cos(yaw), Math.sin(yaw)];
+      if (onEast) expect(dx).toBeCloseTo(1, 3);
+      if (onWest) expect(dx).toBeCloseTo(-1, 3);
+      if (onSouth) expect(dz).toBeCloseTo(1, 3);
+      if (onNorth) expect(dz).toBeCloseTo(-1, 3);
+    }
+    expect(build([{ rings: [rect()], tags: tall }]).acs).toEqual(m.acs);
+    expect(build([{ rings: [rect()], tags: { building: 'industrial', 'building:levels': '9' } }]).acs.length).toBe(0);
   });
 });
 
@@ -296,9 +372,8 @@ describe('buildBuildingMesh', () => {
     const sample = (lon: number) => 100 + (lon - westLon) * 10000;
     const m = build([{ rings: [rect()], tags: { building: 'house', height: '10' } }], sample);
     const minY = Math.min(...ys(m));
-    const maxY = Math.max(...ys(m));
     expect(minY).toBeCloseTo(100, 2);
-    expect(maxY).toBeCloseTo(110, 2);
+    expect(edgeTop(m)).toBeCloseTo(110, 2);
   });
 
   it('raises elevated parts and adds a ceiling (arch)', () => {
@@ -317,7 +392,8 @@ describe('buildBuildingMesh', () => {
   });
 
   it.each(['flat', 'gabled', 'hipped', 'pyramidal', 'dome', 'skillion', 'half-hipped'])('roof %s rises above the walls', (shape) => {
-    const m = build([{ rings: [rect()], tags: { building: 'house', height: '12', 'roof:shape': shape, 'roof:height': '3' } }]);
+    // a small footprint: no rooftop structures on the flat one
+    const m = build([{ rings: [rect(0.0001, 0.00008)], tags: { building: 'house', height: '12', 'roof:shape': shape, 'roof:height': '3' } }]);
     const maxY = Math.max(...ys(m));
     expect(maxY).toBeGreaterThanOrEqual(110.5);
     expect(maxY).toBeLessThanOrEqual(112.01);

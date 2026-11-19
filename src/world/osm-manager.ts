@@ -5,7 +5,7 @@ import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { WINDOW_ATTR_FLOATS } from './building-mesher';
-import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS } from './props-mesher';
+import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
 /** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines */
@@ -351,7 +351,7 @@ export class OsmManager {
         const type = inst[start * TREE_STRIDE + 5];
         let end = start + 1;
         while (end < total && inst[end * TREE_STRIDE + 5] === type) end++;
-        const mesh = TREE_MESHES[Math.min(TREE_TYPES - 1, Math.max(0, type | 0))];
+        const mesh = TREE_MESHES[Math.min(TREE_MESHES.length - 1, Math.max(0, type | 0))];
         const vao = must(gl.createVertexArray(), 'tree VAO');
         gl.bindVertexArray(vao);
         gl.bindBuffer(gl.ARRAY_BUFFER, this.treeGeometry);
@@ -371,6 +371,9 @@ export class OsmManager {
         gl.enableVertexAttribArray(5);
         gl.vertexAttribPointer(5, 1, gl.FLOAT, false, iStride, start * iStride + 24);
         gl.vertexAttribDivisor(5, 1);
+        gl.enableVertexAttribArray(6);
+        gl.vertexAttribPointer(6, 1, gl.FLOAT, false, iStride, start * iStride + 28);
+        gl.vertexAttribDivisor(6, 1);
         gl.bindVertexArray(null);
         chunk.vaos.push(vao);
         sets.push({ vao, buffer: ib, count: end - start, first: mesh.first, vertexCount: mesh.count });

@@ -634,6 +634,8 @@ layout(location=3) in vec3 aInstPos;
 layout(location=4) in vec2 aInstSR;
 // the face colour's bits 24..31 (glow level, snow, material)
 layout(location=5) in float aInstFlags;
+// yaw: the mesh's +x turns towards (cos, sin) in x, z
+layout(location=6) in float aInstYaw;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec4 uOffset;
@@ -656,13 +658,16 @@ void main() {
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
   vRef = vec3(0.0);
-  vec3 wp = toWorld(aPos * aInstSR.x + aInstPos);
+  float cy = cos(aInstYaw), sy = sin(aInstYaw);
+  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z);
+  vec3 ln = vec3(cy * aNormal.x - sy * aNormal.z, aNormal.y, sy * aNormal.x + cy * aNormal.z);
+  vec3 wp = toWorld(lp * aInstSR.x + aInstPos);
   vWater = 0.0;
   vRay = vec3(0.0, 1.0, 0.0);
   vec3 rel = wp - uCamPos;
   float d = length(rel.xz);
   wp.y -= (d * d) / (2.0 * 6371000.0);
-  vec3 n = normalize(toWorldDir(aNormal));
+  vec3 n = normalize(toWorldDir(ln));
   // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
   // by the normal of the side the eye sees, not the other side's
   if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;

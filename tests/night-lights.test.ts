@@ -9,7 +9,7 @@ import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
 } from '../src/world/night-glow';
 import { farLightSize } from '../src/world/osm-manager';
-import { setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
+import { INSTANCE, LAMP_SHAPE, setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
@@ -408,6 +408,19 @@ describe('street lighting', () => {
       expect(Math.abs(z)).toBeCloseTo(6, 0);
       if (i > 0) expect(Math.sign(z)).toBe(-Math.sign(m.lamps[(i - 1) * 4 + 2]));
     }
+    // one post instance per head: foot on the ground beyond the road, its arm turned to reach the head
+    expect(m.lampPosts.length / TREE_STRIDE).toBe(n);
+    for (let i = 0; i < n; i++) {
+      const [px, py, pz, scale, , type, , yaw] = m.lampPosts.subarray(i * TREE_STRIDE, (i + 1) * TREE_STRIDE);
+      const [hx, , hz] = m.lamps.subarray(i * 4, i * 4 + 3);
+      expect(type).toBe(INSTANCE.LAMP);
+      expect(scale).toBe(1);
+      expect(py).toBeCloseTo(GROUND, 3);
+      expect(px + Math.cos(yaw) * LAMP_SHAPE.ARM).toBeCloseTo(hx, 3);
+      expect(pz + Math.sin(yaw) * LAMP_SHAPE.ARM).toBeCloseTo(hz, 3);
+    }
+    // the posts are no longer in the road mesh: nothing there stands above the road surface
+    for (let i = 0; i < m.roads.vertexCount; i++) expect(m.roads.vertices[i * 6 + 1]).toBeLessThan(GROUND + 3);
   });
 
   it('one-way roads: oneway=yes lamps only right of the drawing direction, oneway=-1 only left', () => {

@@ -197,12 +197,14 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
     applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);
     applyGlow(bmesh.vertices, bmesh.ramps, tile, locate, levels);
-    applyGlowToTrees(props.trees, tile, locate, levels);
+    const instances = concatF32(concatF32(props.trees, houses.acs), mesh.lampPosts);
+    applyGlowToTrees(instances, tile, locate, levels);
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
       dots: dotData.slice().buffer,
-      trees: props.trees.slice().buffer, lights: props.lights.slice().buffer,
+      // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
+      trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
       glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,

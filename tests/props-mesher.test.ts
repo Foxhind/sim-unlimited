@@ -32,8 +32,8 @@ function props(data: OsmTileData, detail: 'full' | 'large' = 'full', sample = fl
 }
 
 describe('tree geometry', () => {
-  it('packs one unit-height silhouette per type, with unit normals', () => {
-    expect(TREE_MESHES.length).toBe(TREE_TYPES);
+  it('packs one unit-height silhouette per tree type (then the props), with unit normals', () => {
+    expect(TREE_MESHES.length).toBe(TREE_TYPES + 2);
     let next = 0;
     for (const m of TREE_MESHES) {
       expect(m.first).toBe(next);
@@ -46,7 +46,7 @@ describe('tree geometry', () => {
       const v = TREE_GEOMETRY.subarray(i * TREE_VERTEX_FLOATS, (i + 1) * TREE_VERTEX_FLOATS);
       expect(Math.hypot(v[3], v[4], v[5])).toBeCloseTo(1, 5);
       expect(v[1]).toBeGreaterThanOrEqual(0);
-      expect(v[1]).toBeLessThanOrEqual(1);
+      if (i < TREE_MESHES[TREE_TYPES].first) expect(v[1]).toBeLessThanOrEqual(1);
       expect([0, 1]).toContain(v[6]);
     }
   });

@@ -4,6 +4,7 @@ import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
+import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
 import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofModel, type XZ } from './roof-shapes';
 
 /** floats per vertex of BuildingMeshData.windows */
@@ -17,7 +18,37 @@ export const WINDOW_ATTR_FLOATS = 5;
  */
 export interface BuildingMeshData extends TerrainMeshData {
   windows: Float32Array;
+  /** air-conditioner units on the walls: instances of INSTANCE.AC (props-mesher TREE_STRIDE), drawn with the trees */
+  acs: Float32Array;
 }
+
+/** building values whose walls carry air-conditioner units */
+const AC_TYPES = new Set([
+  'yes', 'house', 'detached', 'semidetached_house', 'terrace', 'residential', 'apartments', 'dormitory',
+  'hotel', 'commercial', 'office', 'retail',
+]);
+/**
+ * Air conditioners: on a wall edge at least MIN_EDGE_M long, one slot every SPACING_M per floor,
+ * each slot taken with PROBABILITY (deterministic by its position); the unit hangs FLOOR_OFFSET_M
+ * above the floor, under the windows.
+ */
+export const AC = { MIN_EDGE_M: 4, SPACING_M: 3.5, PROBABILITY: 0.05, FLOOR_OFFSET_M: 0.25, MIN_WALL_M: 2.5 } as const;
+const AC_RGB: RGB = [222, 222, 216];
+
+/**
+ * Mini structures on a large flat roof (stair and lift sheds, machine rooms, vents, plant): on a roof
+ * surface of at least MIN_AREA_M2, one per AREA_PER_UNIT_M2 (at least one, at most MAX), kept MARGIN_M
+ * off the parapet and each other. UNITS: four kinds, [length along the building, width, height, colour].
+ */
+export const ROOFTOP = {
+  MIN_AREA_M2: 400, AREA_PER_UNIT_M2: 600, MAX: 6, MARGIN_M: 0.6,
+  UNITS: [
+    [4, 3, 2.6, [150, 150, 150]],
+    [6, 4.5, 3, [118, 120, 123]],
+    [1.4, 1.4, 1.2, [178, 178, 175]],
+    [4.5, 2, 1.4, [96, 98, 102]],
+  ] as [number, number, number, RGB][],
+} as const;
 
 export interface BuildingMeshOptions {
   tile: Tile;
@@ -499,6 +530,16 @@ function ringAreaXZ(ring: XZ[]): number {
   return a / 2;
 }
 
+/** a point inside a ring (even-odd) */
+function insideXZ(p: XZ, ring: XZ[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, zi] = ring[i], [xj, zj] = ring[j];
+    if ((zi > p[1]) !== (zj > p[1]) && p[0] < ((xj - xi) * (p[1] - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
 function normalizeRing(ring: XZ[], ccw: boolean): XZ[] {
   const area = ringAreaXZ(ring);
   if ((area > 0) !== ccw) return [...ring].reverse();
@@ -511,6 +552,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const verts: number[] = [];
   const ramps: number[] = [];
   const win: number[] = [];
+  const acs: number[] = [];
 
   const toXZ = (ll: LonLat): XZ => {
     const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
@@ -579,6 +621,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
           door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? h.wall : 0, balconies);
         }
       }
+      if (AC_TYPES.has(tags.building) && h.min < 0.5 && h.wall >= AC.MIN_WALL_M) airConditioners(outer, wallBase, wallTop);
     }
 
     // ceiling under elevated parts (arches, bridges)
@@ -591,7 +634,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       const withParapet = !isCanopy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
       if (withParapet) {
         const roofY = wallTop - PARAPET.HEIGHT_M;
-        capRing(parapet(outer, roofY, wallTop, wRamp), holes.map((r) => parapet(r, roofY, wallTop, wRamp)), roofY, snowy(rRamp), true);
+        const inOuter = parapet(outer, roofY, wallTop, wRamp);
+        const inHoles = holes.map((r) => parapet(r, roofY, wallTop, wRamp));
+        capRing(inOuter, inHoles, roofY, snowy(rRamp), true);
+        rooftop(inOuter, inHoles, roofY, buildingSeed(outerLL));
       } else {
         capRing(outer, holes, wallTop, snowy(rRamp), true);
       }
@@ -753,6 +799,73 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
   }
 
+  /** air-conditioner instances on the outer walls (ring ccw: outward is to the right of each edge) */
+  function airConditioners(ring: XZ[], wallBase: number, wallTop: number): void {
+    const floors = Math.max(1, Math.floor((wallTop - wallBase) / LEVEL_M));
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i], q = ring[(i + 1) % ring.length];
+      const ex = q[0] - p[0], ez = q[1] - p[1], len = Math.hypot(ex, ez);
+      if (len < AC.MIN_EDGE_M) continue;
+      const ox = ez / len, oz = -ex / len;
+      const yaw = Math.atan2(oz, ox);
+      const slots = Math.floor(len / AC.SPACING_M);
+      for (let k = 0; k < floors; k++) {
+        const y = wallBase + k * LEVEL_M + AC.FLOOR_OFFSET_M;
+        if (y + AC_SIZE.HEIGHT > wallTop - 0.3) break;
+        for (let j = 0; j < slots; j++) {
+          const t = (j + 0.5) / slots;
+          const x = p[0] + ex * t, z = p[1] + ez * t;
+          if (hash01(x, y, z) >= AC.PROBABILITY) continue;
+          pushInstance(acs, x, y, z, 1, rgbRamp(AC_RGB), INSTANCE.AC, yaw);
+        }
+      }
+    }
+  }
+
+  /** ROOFTOP structures on a flat roof surface (inside the parapet), placed by the building's seed */
+  function rooftop(outer: XZ[], holes: XZ[][], y: number, seed: number): void {
+    const area = Math.abs(ringAreaXZ(outer)) - holes.reduce((s, r) => s + Math.abs(ringAreaXZ(r)), 0);
+    if (area < ROOFTOP.MIN_AREA_M2) return;
+    const want = Math.min(ROOFTOP.MAX, Math.max(1, Math.round(area / ROOFTOP.AREA_PER_UNIT_M2)));
+    // along the longest outer edge
+    let ux = 1, uz = 0, best = 0;
+    for (let i = 0; i < outer.length; i++) {
+      const p = outer[i], q = outer[(i + 1) % outer.length];
+      const l = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (l > best) { best = l; ux = (q[0] - p[0]) / l; uz = (q[1] - p[1]) / l; }
+    }
+    const vx = -uz, vz = ux;
+    const bb = bbox(outer);
+    let st = (Math.floor(seed * 4294967296) ^ 0x9e3779b9) >>> 0;
+    const rnd = (): number => {
+      st = (st + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(st ^ (st >>> 15), 1 | st);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const placed: [number, number, number][] = [];
+    for (let attempt = 0; attempt < want * 12 && placed.length < want; attempt++) {
+      const [len, wid, ht, rgb] = ROOFTOP.UNITS[Math.min(3, Math.floor(rnd() * 4))];
+      const cx = bb.minX + rnd() * (bb.maxX - bb.minX), cz = bb.minZ + rnd() * (bb.maxZ - bb.minZ);
+      const hl = len / 2 + ROOFTOP.MARGIN_M, hw = wid / 2 + ROOFTOP.MARGIN_M;
+      const corners: XZ[] = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => [cx + ux * a * hl + vx * b * hw, cz + uz * a * hl + vz * b * hw]);
+      const inside = (pt: XZ) => insideXZ(pt, outer) && !holes.some((h) => insideXZ(pt, h));
+      if (!inside([cx, cz]) || !corners.every(inside)) continue;
+      if (holes.some((h) => h.some((pt) => Math.abs((pt[0] - cx) * ux + (pt[1] - cz) * uz) < hl && Math.abs((pt[0] - cx) * vx + (pt[1] - cz) * vz) < hw))) continue;
+      const r = Math.hypot(hl, hw);
+      if (placed.some(([px, pz, pr]) => Math.hypot(px - cx, pz - cz) < pr + r)) continue;
+      placed.push([cx, cz, r]);
+      const ramp = rgbRamp(rgb);
+      const c = ([a, b]: number[], yy: number): V3 => [cx + ux * a * len / 2 + vx * b * wid / 2, yy, cz + uz * a * len / 2 + vz * b * wid / 2];
+      const y1 = y + ht;
+      const sides: [number[], number[], V3][] = [
+        [[-1, -1], [1, -1], [-vx, 0, -vz]], [[1, -1], [1, 1], [ux, 0, uz]], [[1, 1], [-1, 1], [vx, 0, vz]], [[-1, 1], [-1, -1], [-ux, 0, -uz]],
+      ];
+      for (const [a, b, n] of sides) flatQuad(c(a, y), c(b, y), c(b, y1), c(a, y1), n, ramp);
+      flatQuad(c([-1, -1], y1), c([1, -1], y1), c([1, 1], y1), c([-1, 1], y1), [0, 1, 0], snowy(ramp));
+    }
+  }
+
   /** a quad with one normal for all its vertices, no facade attributes */
   function flatQuad(a: V3, b: V3, c: V3, d: V3, n: V3, ramp: number): void {
     for (const p of [a, b, c, a, c, d]) {
@@ -808,7 +921,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   }
 
   const vertexCount = ramps.length;
-  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), vertexCount, windows: new Float32Array(win) };
+  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), vertexCount, windows: new Float32Array(win), acs: new Float32Array(acs) };
 }
 
 /**

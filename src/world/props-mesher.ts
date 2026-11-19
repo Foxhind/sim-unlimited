@@ -14,7 +14,7 @@ export interface PropsOptions {
 }
 
 export interface PropsData {
-  /** per tree: x, y, z, height, colour payload, type, colour flags (TREE_STRIDE, treeColour), sorted by type */
+  /** per tree: x, y, z, height, colour payload, type, colour flags, yaw (TREE_STRIDE, treeColour), sorted by type */
   trees: Float32Array;
   /** per light: x, y, z, palette index (stride 4) */
   lights: Float32Array;
@@ -57,10 +57,25 @@ const LIGHT_TAXI = LIGHT.TAXI_BLUE;
 export const TREE = { SPRUCE: 0, BROADLEAF: 1, PINE: 2, CYPRESS: 3, PALM: 4 } as const;
 export const TREE_TYPES = 5;
 /**
- * floats per tree instance: x, y, z, height, colour payload, type, colour flags. The face colour
- * (palette.ts) is split in two floats, its low 24 bits and its flag byte, so a float holds each exactly.
+ * floats per instance (trees and the other instanced props: INSTANCE): x, y, z, scale (a tree's
+ * height; 1 for a prop modelled in metres), colour payload, type, colour flags, yaw (radians: the
+ * mesh's +x turns towards (cos yaw, sin yaw) in x, z). The face colour (palette.ts) is split in two
+ * floats, its low 24 bits and its flag byte, so a float holds each exactly.
  */
-export const TREE_STRIDE = 7;
+export const TREE_STRIDE = 8;
+/** instanced props drawn with the trees, by their type (after the tree types) */
+export const INSTANCE = { AC: TREE_TYPES, LAMP: TREE_TYPES + 1 } as const;
+
+/** appends one instance (TREE_STRIDE floats) */
+export function pushInstance(out: number[], x: number, y: number, z: number, scale: number, packed: number, type: number, yaw: number): void {
+  out.push(x, y, z, scale, packed & PAYLOAD_MASK, type, packed >>> GLOW_SHIFT, yaw);
+}
+
+/** a deterministic yaw from a position (trees face every way, stable across rebuilds) */
+function yawAt(x: number, z: number): number {
+  const v = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
+  return (v - Math.floor(v)) * Math.PI * 2;
+}
 
 /** the face colour of tree instance i (its first float) */
 /** runway and taxiway edge lights stand this high above the pad, m */
@@ -114,7 +129,22 @@ class Shape {
     }
     return this;
   }
+  /** an axis-aligned box (all six faces) */
+  box(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, part: number): this {
+    const c: V3 = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
+    const v = (i: number): V3 => [i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0];
+    for (const [a, b, d, e] of [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]]) {
+      this.tri(v(a), v(b), v(d), part, c);
+      this.tri(v(a), v(d), v(e), part, c);
+    }
+    return this;
+  }
 }
+
+/** an outdoor air-conditioner unit, m: its back on the wall at x = 0, sticking out along +x */
+export const AC_SIZE = { DEPTH: 0.3, WIDTH: 0.8, HEIGHT: 0.55 } as const;
+/** a street lamp, m: pole at the origin, arm along +x at the top */
+export const LAMP_SHAPE = { HEIGHT: 8, ARM: 2, POLE_HALF: 0.12 } as const;
 
 const TRUNK = 1;
 const CROWN = 0;
@@ -144,11 +174,17 @@ const SHAPES: Shape[] = [
   // cypress: a narrow dark column
   new Shape().lathe([[0, 0], [0.11, 0.25], [0.1, 0.6], [0, 1]], 5, CROWN),
   palm(),
+  // INSTANCE.AC
+  new Shape().box(0, 0, -AC_SIZE.WIDTH / 2, AC_SIZE.DEPTH, AC_SIZE.HEIGHT, AC_SIZE.WIDTH / 2, CROWN),
+  // INSTANCE.LAMP: pole and the arm over the road
+  new Shape()
+    .box(-LAMP_SHAPE.POLE_HALF, 0, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN)
+    .box(LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT - 2 * LAMP_SHAPE.POLE_HALF, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.ARM + LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN),
 ];
 
 /** all silhouettes in one buffer (TREE_VERTEX_FLOATS per vertex) */
 export const TREE_GEOMETRY = new Float32Array(SHAPES.flatMap((sh) => sh.out));
-/** per tree type: first vertex and vertex count in TREE_GEOMETRY */
+/** per instance type (tree types, then INSTANCE): first vertex and vertex count in TREE_GEOMETRY */
 export const TREE_MESHES: { first: number; count: number }[] = (() => {
   let first = 0;
   return SHAPES.map((sh) => {
@@ -260,7 +296,7 @@ export function buildProps(opts: PropsOptions): PropsData {
       const type = pickType(treeWeights(climateLatitude(lat, y), area.tags), rng());
       const [h0, h1] = TREE_HEIGHT[type];
       const packed = snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST);
-      byType[type].push(x, y, z, h0 + rng() * (h1 - h0), packed & PAYLOAD_MASK, type, packed >>> GLOW_SHIFT);
+      pushInstance(byType[type], x, y, z, h0 + rng() * (h1 - h0), packed, type, yawAt(x, z));
       placed++;
     }
   }

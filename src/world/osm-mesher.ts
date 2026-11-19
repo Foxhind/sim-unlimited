@@ -4,6 +4,7 @@ import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
+import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
@@ -54,11 +55,9 @@ export const LIT_ROAD_GLOW = 6;
 /** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating; a one-way road keeps
  *  them on one side (see lampSide) */
 export const LAMP_SPACING_M = 35;
-export const LAMP_HEIGHT_M = 8;
+export const LAMP_HEIGHT_M = LAMP_SHAPE.HEIGHT;
 /** pole foot this far beyond the road edge; the arm reaches back over the road */
 const LAMP_SETBACK_M = 1;
-const LAMP_ARM_M = 2;
-const LAMP_POLE_HALF_M = 0.12;
 
 /**
  * the side of the way's drawing direction its lamps stand on: oneway=yes only to the right,
@@ -72,8 +71,10 @@ export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
 const LAMP_RAMP = RAMP.HULL_DARK;
 
 export interface OsmMeshData extends TerrainMeshData {
-  /** road ribbons (highway=*) and street lamp poles, drawn only near like the buildings */
+  /** road ribbons (highway=*), drawn only near like the buildings */
   roads: TerrainMeshData;
+  /** street lamp posts: instances of INSTANCE.LAMP (props-mesher TREE_STRIDE), drawn with the trees */
+  lampPosts: Float32Array;
   /**
    * water areas and river/canal ribbons, drawn after the drape without writing depth: whatever
    * comes after (roads first of all) always shows over the water
@@ -282,6 +283,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const water: Out = { verts: [], ramps: [] };
   const roadLines: number[] = [];
   const lamps: number[] = [];
+  const lampPosts: number[] = [];
   const { verts, ramps } = main;
 
   const enu = (lon: number, lat: number): [number, number] => {
@@ -482,20 +484,6 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     }
   };
 
-  /** an axis-aligned box with outward normals into the road mesh (lamp poles and arms) */
-  const box = (x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void => {
-    const quad = (a: number[], b: number[], c: number[], d: number[], n: number[]): void => {
-      for (const q of [a, b, c, a, c, d]) {
-        roads.verts.push(q[0], q[1], q[2], n[0], n[1], n[2]);
-        roads.ramps.push(LAMP_RAMP);
-      }
-    };
-    quad([x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0], [0, 0, -1]);
-    quad([x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [x0, y0, z1], [0, 0, 1]);
-    quad([x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [x0, y0, z0], [-1, 0, 0]);
-    quad([x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1], [1, 0, 0]);
-    quad([x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [0, 1, 0]);
-  };
   /** street lamps along a road: pole beside it, arm over it, a light at the arm's end */
   const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0): void => {
     const p = points.map(([lon, lat]) => enu(lon, lat));
@@ -516,11 +504,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         const ll = enuToLatLon(center, fx, -fz, 0);
         const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
         const top = y0 + LAMP_HEIGHT_M;
-        const r = LAMP_POLE_HALF_M;
-        box(fx - r, y0, fz - r, fx + r, top, fz + r);
-        // the arm back over the road, as a box along whichever axis it runs closer to
-        const tx = fx - nx * LAMP_ARM_M, tz = fz - nz * LAMP_ARM_M;
-        box(Math.min(fx, tx) - r, top - 2 * r, Math.min(fz, tz) - r, Math.max(fx, tx) + r, top, Math.max(fz, tz) + r);
+        const r = LAMP_SHAPE.POLE_HALF;
+        // the post, its arm turned back over the road
+        pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, Math.atan2(-nz, -nx));
+        const tx = fx - nx * LAMP_SHAPE.ARM, tz = fz - nz * LAMP_SHAPE.ARM;
         lamps.push(tx, top - 2 * r - 0.1, tz, LIGHT.STREET);
         if (!fixedSide) side = -side;
         next += LAMP_SPACING_M;
@@ -866,5 +853,6 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     water: { vertices: new Float32Array(water.verts), ramps: new Uint32Array(water.ramps), vertexCount: water.ramps.length },
     roadLines: new Float32Array(roadLines),
     lamps: new Float32Array(lamps),
+    lampPosts: new Float32Array(lampPosts),
   };
 }
