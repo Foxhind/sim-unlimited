@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 
 // Q34: dev stub of our own report endpoint — logs batches, no third parties.
@@ -19,8 +21,47 @@ function reportStub(): Plugin {
   };
 }
 
+// M6 prototype: our own PMTiles (tiles/SimProfile.java) from tiles/data/out, with Range requests.
+function localTiles(): Plugin {
+  const root = path.resolve('tiles/data/out');
+  return {
+    name: 'local-tiles',
+    configureServer(server) {
+      server.middlewares.use('/tiles', (req, res) => {
+        const file = path.join(root, decodeURIComponent((req.url ?? '/').split('?')[0]));
+        if (!file.startsWith(root + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        const size = fs.statSync(file).size;
+        const m = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? '');
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Type', file.endsWith('.json') ? 'application/json' : 'application/octet-stream');
+        if (!m) {
+          res.setHeader('Content-Length', size);
+          fs.createReadStream(file).pipe(res);
+          return;
+        }
+        const start = Number(m[1]);
+        const end = Math.min(size - 1, m[2] ? Number(m[2]) : size - 1);
+        if (start > end) {
+          res.statusCode = 416;
+          res.setHeader('Content-Range', `bytes */${size}`);
+          res.end();
+          return;
+        }
+        res.statusCode = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+        res.setHeader('Content-Length', end - start + 1);
+        fs.createReadStream(file, { start, end }).pipe(res);
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [reportStub()],
+  plugins: [reportStub(), localTiles()],
   server: {
     port: 5173,
     proxy: {

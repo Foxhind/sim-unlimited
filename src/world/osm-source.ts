@@ -3,6 +3,7 @@ import { tileBounds, tileKey, type Tile } from './geodesy';
 import { fetchOsmApiTile } from './osm-api';
 import { getOsmRaw, putOsmRaw } from './tile-cache';
 import { overpassQuery, parseOverpass, type OverpassJson } from './overpass';
+import { PmtilesOsm } from './osm-pmtiles';
 import type { OsmDetail, OsmTileData, TileSource } from './osm-types';
 
 /** bump when the filter changes: cached raw tiles lack what it newly selects (3: antenna masts, 6: masts mapped as ways, 7: building entrances, 8: aerodrome outlines, 10: roads within ROAD_REACH_M round the tile) */
@@ -12,8 +13,8 @@ export const OSM_SCHEMA_VERSION = 10;
 // so dev goes through a same-origin Vite proxy that injects a descriptive UA (Q42).
 const ENDPOINT = import.meta.env.DEV ? '/overpass/api/interpreter' : 'https://overpass-api.de/api/interpreter';
 
-/** which upstream serves OSM: Overpass, the OSM API 0.6, or Overpass with the API as fallback */
-export type OsmSourceMode = 'auto' | 'overpass' | 'osm-api';
+/** which upstream serves OSM: Overpass, the OSM API 0.6, Overpass with the API as fallback, or our own PMTiles (M6) */
+export type OsmSourceMode = 'auto' | 'overpass' | 'osm-api' | 'pmtiles';
 /** after Overpass fails as unreachable, go straight to the API for this long */
 const OVERPASS_DOWN_MS = 60000;
 
@@ -52,7 +53,15 @@ const EMPTY: OsmTileData = { areas: [], lines: [], points: [], buildings: [] };
 
 export function osmSourceMode(): OsmSourceMode {
   const v = (import.meta.env.VITE_OSM_SOURCE as string | undefined) ?? 'auto';
-  return v === 'overpass' || v === 'osm-api' ? v : 'auto';
+  return v === 'overpass' || v === 'osm-api' || v === 'pmtiles' ? v : 'auto';
+}
+
+/**
+ * The raw OSM cache key of a tile. Our own tiles are cached apart from Overpass / the OSM API (which
+ * share theirs), so switching VITE_OSM_SOURCE never serves one upstream's tiles as the other's.
+ */
+export function osmRawKey(tile: Tile, detail: OsmDetail = 'full', mode: OsmSourceMode = osmSourceMode()): string {
+  return `${tileKey(mode === 'pmtiles' ? 'osm-pm' : 'osm', tile, OSM_SCHEMA_VERSION)}/${detail}`;
 }
 
 /**
@@ -63,13 +72,14 @@ export function osmSourceMode(): OsmSourceMode {
 export class OsmSource implements TileSource {
   readonly name: string;
   private overpassDownUntil = 0;
+  private pmtiles?: PmtilesOsm;
 
   constructor(private readonly mode: OsmSourceMode = osmSourceMode()) {
     this.name = mode;
   }
 
   async fetch(tile: Tile, detail: OsmDetail): Promise<OsmTileData> {
-    const key = `${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/${detail}`;
+    const key = osmRawKey(tile, detail, this.mode);
     const cached = await getOsmRaw(key);
     if (cached) return parseOverpass(JSON.parse(cached.json) as OverpassJson);
     const json = await this.fetchJson(tile, detail);
@@ -79,6 +89,11 @@ export class OsmSource implements TileSource {
   }
 
   private async fetchJson(tile: Tile, detail: OsmDetail): Promise<string | null> {
+    if (this.mode === 'pmtiles') {
+      if (detail !== 'full') return null;
+      this.pmtiles ??= new PmtilesOsm();
+      return this.pmtiles.fetchJson(tile);
+    }
     if (this.mode === 'osm-api') return fetchOsmApi(tile, detail);
     if (this.mode === 'overpass') return fetchOverpass(tile, detail);
     if (Date.now() >= this.overpassDownUntil) {

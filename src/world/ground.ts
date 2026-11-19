@@ -1,11 +1,11 @@
 import { vec3 } from 'gl-matrix';
-import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
+import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, type LatLon } from './geodesy';
 import { loadTileDem, type HeightSampler } from './terrain-source';
 import { buildTerrainTin, tinSampler } from './terrain-tin';
 import { applyPads, loadPads, type Pad } from './aerodrome';
 import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
-import { OSM_SCHEMA_VERSION } from './osm-source';
+import { osmRawKey } from './osm-source';
 import { parseOverpass } from './overpass';
 import { coastlineWays } from './coast';
 import { buildingHeights } from './building-mesher';
@@ -100,7 +100,7 @@ export class GroundProbe {
     const gen = this.outdated.get(key);
     try {
       // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
-      const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
+      const raw = await getOsmRaw(osmRawKey(tile)).catch(() => undefined);
       let data: ReturnType<typeof parseOverpass> | undefined;
       if (raw) {
         try {

@@ -3,7 +3,7 @@ import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../worl
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildTerrainMesh } from '../world/terrain-mesher';
 import { loadTileDem } from '../world/terrain-source';
-import { OSM_SCHEMA_VERSION } from '../world/osm-source';
+import { osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
@@ -50,9 +50,10 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     // Q40: when OSM is cached for this tile, build with the aerodromes on their pads;
     // the '/o' suffix keeps pre-OSM and flattened meshes in separate cache slots
     const osmRaw = tile.z >= 12
-      ? await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined)
+      ? await getOsmRaw(osmRawKey(tile)).catch(() => undefined)
       : undefined;
-    const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? '/o' : '');
+    // meshes flattened by our own tiles' aerodromes (M6) are kept apart from Overpass-flattened ones
+    const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? (osmSourceMode() === 'pmtiles' ? '/op' : '/o') : '');
     const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
       const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph };

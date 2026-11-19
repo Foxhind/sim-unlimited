@@ -13,10 +13,10 @@ import { ChunkManager, type CameraWorld } from './world/chunks';
 import { OsmManager } from './world/osm-manager';
 import { FarOsmManager } from './world/far-osm-manager';
 import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
-import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon, type Tile } from './world/geodesy';
+import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, type LatLon, type Tile } from './world/geodesy';
 import { runwayStart } from './world/runway';
 import { getOsmRaw } from './world/tile-cache';
-import { OSM_SCHEMA_VERSION } from './world/osm-source';
+import { osmRawKey } from './world/osm-source';
 import { parseOverpass, type OverpassJson } from './world/overpass';
 import type { OsmLine } from './world/osm-types';
 import { GroundProbe, towerAnchor } from './world/ground';
@@ -364,7 +364,7 @@ function tilesAround(ll: LatLon): Tile[] {
 async function cachedRunwayLines(tiles: Tile[]): Promise<OsmLine[]> {
   const lines: OsmLine[] = [];
   await Promise.all(tiles.map(async (tile) => {
-    const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
+    const raw = await getOsmRaw(osmRawKey(tile)).catch(() => undefined);
     if (!raw) return;
     try {
       for (const l of parseOverpass(JSON.parse(raw.json) as OverpassJson).lines) if (l.tags.aeroway === 'runway') lines.push(l);

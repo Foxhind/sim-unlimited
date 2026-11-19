@@ -6,7 +6,7 @@ import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOAT
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
-import { OsmSource, OSM_SCHEMA_VERSION } from '../world/osm-source';
+import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
 import { loadTileDem } from '../world/terrain-source';
@@ -106,7 +106,7 @@ function terrainFlags(data: Pick<OsmTileData, 'areas' | 'lines'>, lattice?: Floa
 }
 
 async function cachedTerrainFlags(tile: Tile): Promise<{ runways: number; coast: boolean }> {
-  const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
+  const raw = await getOsmRaw(osmRawKey(tile)).catch(() => undefined);
   if (!raw) return { runways: 0, coast: false };
   try {
     return { runways: terrainFlags(parseOverpass(JSON.parse(raw.json))).runways, coast: false };
@@ -134,7 +134,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const areaStyles = e.data.areaStyles;
   const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles));
   // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on
-  const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
+  const key = `${tileKey(osmSourceMode() === 'pmtiles' ? 'osmmesh-pm' : 'osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [

@@ -1,0 +1,255 @@
+import com.onthegomap.planetiler.FeatureCollector;
+import com.onthegomap.planetiler.Planetiler;
+import com.onthegomap.planetiler.Profile;
+import com.onthegomap.planetiler.config.Arguments;
+import com.onthegomap.planetiler.reader.SourceFeature;
+import com.onthegomap.planetiler.reader.osm.OsmElement;
+import com.onthegomap.planetiler.reader.osm.OsmSourceFeature;
+import java.io.IOException;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.regex.Pattern;
+import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.geom.LineString;
+import org.locationtech.jts.geom.Polygon;
+
+/**
+ * M6 prototype: the sim's own OSM vector tiles (PMTiles, z14 only) with the same selection and the
+ * same raw OSM tags as the Overpass filter in src/world/overpass.ts (FULL_FILTER), so the client can
+ * rebuild Overpass-shaped JSON from a tile and feed it to parseOverpass unchanged.
+ *
+ * Layers: `areas` (polygons, buildings included), `lines`, `points`. Aerodrome outlines and runway
+ * centrelines are not in the tiles: they go whole and unquantised to `<output>.aerodromes.json`,
+ * because a tile's pads are built from aerodromes up to AERODROME_REACH_DEG away and keyed by their
+ * exact geometry (src/world/aerodrome.ts), which clipped tile copies would break.
+ *
+ * Run (Java 21+):
+ *   java -Xmx8g -cp planetiler.jar tiles/SimProfile.java --osm=austria.osm.pbf --output=out/austria.pmtiles
+ * (Planetiler reads one OSM extract per run: one archive per extract, or the planet.)
+ */
+public class SimProfile implements Profile {
+
+  static final int Z = 14;
+  /** buildings and points (entrances) reach this far past the tile edge (256 px a tile): a building across the border is whole in both tiles */
+  static final int BUILDING_BUFFER_PX = 32;
+
+  static final Pattern HIGHWAY = Pattern.compile("motorway|trunk|primary|secondary|tertiary|residential|unclassified");
+  static final Pattern AEROWAY = Pattern.compile("runway|taxiway|apron|helipad");
+  static final Pattern NATURAL_WAY = Pattern.compile("water|wood|scrub|beach|bare_rock");
+  static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
+  static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course");
+  static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
+
+  /** tags the client reads (grep of src/world): the rest are dropped */
+  static final Set<String> KEYS = Set.of(
+    "building", "building:part", "height", "min_height", "location", "layer", "colour", "color",
+    "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
+    "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
+    "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en");
+  static final String[] KEY_PREFIXES = {"building:", "roof:"};
+
+  static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
+
+  final ConcurrentLinkedQueue<Map<String, Object>> aerodromes = new ConcurrentLinkedQueue<>();
+  final ConcurrentLinkedQueue<Map<String, Object>> runways = new ConcurrentLinkedQueue<>();
+
+  static String s(SourceFeature f, String k) {
+    Object v = f.getTag(k);
+    return v == null ? null : v.toString();
+  }
+
+  static boolean find(Pattern p, String v) {
+    return v != null && p.matcher(v).find();
+  }
+
+  static boolean isBuilding(SourceFeature f) {
+    String b = s(f, "building");
+    return (b != null && !b.equals("no")) || f.hasTag("building:part");
+  }
+
+  /** overpass.ts isAreaTags */
+  static boolean isAreaTags(SourceFeature f) {
+    if ("no".equals(s(f, "area")) || "coastline".equals(s(f, "natural"))) return false;
+    for (String k : AREA_KEYS) if (f.hasTag(k)) return true;
+    return false;
+  }
+
+  /** FULL_FILTER, way statements (relation statements: multipolygons below) */
+  static boolean wayWanted(SourceFeature f) {
+    return f.hasTag("building") || f.hasTag("building:part") ||
+      find(HIGHWAY, s(f, "highway")) ||
+      "rail".equals(s(f, "railway")) ||
+      find(AEROWAY, s(f, "aeroway")) || "aerodrome".equals(s(f, "aeroway")) ||
+      find(NATURAL_WAY, s(f, "natural")) || "coastline".equals(s(f, "natural")) ||
+      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||
+      find(WATERWAY, s(f, "waterway")) ||
+      find(LEISURE, s(f, "leisure")) ||
+      isMast(f);
+  }
+
+  static boolean relationWanted(SourceFeature f) {
+    return f.hasTag("building") || f.hasTag("building:part") ||
+      "aerodrome".equals(s(f, "aeroway")) ||
+      "water".equals(s(f, "natural")) || "wood".equals(s(f, "natural")) ||
+      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse"));
+  }
+
+  static boolean isMast(SourceFeature f) {
+    return find(MAST, s(f, "man_made")) || ("tower".equals(s(f, "man_made")) && "communication".equals(s(f, "tower:type")));
+  }
+
+  static boolean nodeWanted(SourceFeature f) {
+    return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance");
+  }
+
+  static Map<String, Object> keptTags(SourceFeature f) {
+    Map<String, Object> out = new TreeMap<>();
+    for (var e : f.tags().entrySet()) {
+      String k = e.getKey();
+      boolean keep = KEYS.contains(k);
+      for (String p : KEY_PREFIXES) keep |= k.startsWith(p);
+      if (keep && e.getValue() != null) out.put(k, e.getValue().toString());
+    }
+    return out;
+  }
+
+  static FeatureCollector.Feature withTags(FeatureCollector.Feature feat, Map<String, Object> tags) {
+    feat.setMinZoom(Z).setPixelToleranceAtAllZooms(0).setMinPixelSizeAtAllZooms(0);
+    for (var e : tags.entrySet()) feat.setAttr(e.getKey(), e.getValue());
+    return feat;
+  }
+
+  @Override
+  public void processFeature(SourceFeature f, FeatureCollector fc) {
+    // -Dsim.debug=<osm id>: how one feature is seen (way and relation ids may collide)
+    if (f.id() == Long.getLong("sim.debug", -1L)) {
+      System.err.printf("DEBUG %d point=%s line=%s polygon=%s tags=%s wanted=%s%n", f.id(), f.isPoint(), f.canBeLine(), f.canBePolygon(), f.tags(), wayWanted(f));
+    }
+    if (f.isPoint()) {
+      if (nodeWanted(f)) withTags(fc.point("points"), keptTags(f)).setBufferPixels(BUILDING_BUFFER_PX);
+      return;
+    }
+    // not !canBeLine(): a closed way with area=yes cannot be a line either
+    boolean relation = f instanceof OsmSourceFeature<?> o && o.originalElement().type() == OsmElement.Type.RELATION;
+    if (relation ? !relationWanted(f) : !wayWanted(f)) return;
+    Map<String, Object> tags = keptTags(f);
+    String aeroway = s(f, "aeroway");
+    try {
+      if ("aerodrome".equals(aeroway) && f.canBePolygon()) {
+        Geometry g = f.latLonGeometry();
+        for (int i = 0; i < g.getNumGeometries(); i++) {
+          if (g.getGeometryN(i) instanceof Polygon p) aerodromes.add(Map.of("tags", tags, "rings", rings(p)));
+        }
+        return;
+      }
+      boolean area = f.canBePolygon() && (isBuilding(f) || isAreaTags(f));
+      if ("runway".equals(aeroway) && !area) {
+        if (f.latLonGeometry() instanceof LineString l) runways.add(Map.of("tags", tags, "points", coords(l.getCoordinates())));
+        return;
+      }
+    } catch (Exception e) {
+      return; // broken geometry: Overpass would hand it over, but parseOverpass drops what does not close or has < 2 nodes
+    }
+    if (f.canBePolygon() && (isBuilding(f) || isAreaTags(f))) {
+      var feat = withTags(fc.polygon("areas"), tags);
+      if (isBuilding(f)) feat.setBufferPixels(BUILDING_BUFFER_PX);
+    } else if (!relation) {
+      withTags(fc.line("lines"), tags);
+    }
+  }
+
+  static List<List<double[]>> rings(Polygon p) {
+    List<List<double[]>> out = new ArrayList<>();
+    out.add(coords(p.getExteriorRing().getCoordinates()));
+    for (int i = 0; i < p.getNumInteriorRing(); i++) out.add(coords(p.getInteriorRingN(i).getCoordinates()));
+    return out;
+  }
+
+  static List<double[]> coords(Coordinate[] cs) {
+    List<double[]> out = new ArrayList<>(cs.length);
+    for (Coordinate c : cs) out.add(new double[] {Math.round(c.x * 1e7) / 1e7, Math.round(c.y * 1e7) / 1e7});
+    return out;
+  }
+
+  @Override
+  public String name() {
+    return "sim-unlimited";
+  }
+
+  @Override
+  public String description() {
+    return "sim-unlimited OSM tiles (M6 prototype): Overpass FULL_FILTER selection, raw OSM tags";
+  }
+
+  @Override
+  public String attribution() {
+    return "<a href=\"https://www.openstreetmap.org/copyright\">© OpenStreetMap contributors</a>";
+  }
+
+  // --- aerodrome index: a small hand-rolled JSON writer (no JSON library on planetiler's classpath is guaranteed) ---
+
+  static void json(Writer w, Object v) throws IOException {
+    if (v instanceof Map<?, ?> m) {
+      w.write('{');
+      boolean first = true;
+      for (var e : m.entrySet()) {
+        if (!first) w.write(',');
+        first = false;
+        json(w, e.getKey().toString());
+        w.write(':');
+        json(w, e.getValue());
+      }
+      w.write('}');
+    } else if (v instanceof List<?> l) {
+      w.write('[');
+      for (int i = 0; i < l.size(); i++) {
+        if (i > 0) w.write(',');
+        json(w, l.get(i));
+      }
+      w.write(']');
+    } else if (v instanceof double[] d) {
+      w.write('[' + num(d[0]) + ',' + num(d[1]) + ']');
+    } else {
+      String str = v.toString();
+      StringBuilder sb = new StringBuilder("\"");
+      for (char c : str.toCharArray()) {
+        if (c == '"' || c == '\\') sb.append('\\').append(c);
+        else if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
+        else sb.append(c);
+      }
+      w.write(sb.append('"').toString());
+    }
+  }
+
+  static String num(double d) {
+    String t = java.math.BigDecimal.valueOf(d).stripTrailingZeros().toPlainString();
+    return t.equals("-0") ? "0" : t;
+  }
+
+  void writeIndex(Path path) throws IOException {
+    try (Writer w = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+      json(w, Map.of("aerodromes", new ArrayList<>(aerodromes), "runways", new ArrayList<>(runways)));
+    }
+  }
+
+  public static void main(String[] argv) throws Exception {
+    Arguments args = Arguments.fromArgsOrConfigFile(argv).orElse(Arguments.of(Map.of("minzoom", "14", "maxzoom", "14")));
+    Path osm = args.file("osm", "OSM .osm.pbf extract", null);
+    Path output = args.file("output", "output .pmtiles", Path.of("tiles/data/out/sim.pmtiles"));
+    if (osm == null) throw new IllegalArgumentException("--osm=<extract.osm.pbf> is required");
+    SimProfile profile = new SimProfile();
+    Planetiler.create(args).setProfile(profile).addOsmSource("osm", osm).overwriteOutput(output).run();
+    Path index = Path.of(output.toString().replaceFirst("\\.pmtiles$", "") + ".aerodromes.json");
+    profile.writeIndex(index);
+    System.out.printf("aerodrome index: %d aerodromes, %d runways → %s%n", profile.aerodromes.size(), profile.runways.size(), index);
+  }
+}
