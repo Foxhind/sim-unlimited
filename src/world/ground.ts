@@ -1,9 +1,9 @@
 import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
-import { decodePngToSampler, loadTileDem, fetchTerrariumPng, type HeightSampler } from './terrain-source';
+import { loadTileDem, type HeightSampler } from './terrain-source';
 import { buildTerrainTin, tinSampler } from './terrain-tin';
 import { loadLandsatTerrain } from './landsat-process';
-import { flattenRunways } from './runway';
+import { applyPads, loadPads, type Pad } from './aerodrome';
 import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
 import { OSM_SCHEMA_VERSION } from './osm-source';
@@ -81,8 +81,6 @@ export class GroundProbe {
 
   private async load(tile: { z: number; x: number; y: number }, key: string, now: number): Promise<void> {
     try {
-      const png = await fetchTerrariumPng(tile);
-      const sampler = await decodePngToSampler(png, tile);
       // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
       const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
       let data: ReturnType<typeof parseOverpass> | undefined;
@@ -95,14 +93,10 @@ export class GroundProbe {
       }
       // the surface is the rendered one: same lattice (runway-flattened when OSM is cached) → same isoline TIN as the mesh
       const grid = gridForZoom(tile.z);
-      const { heights: lattice, borders } = await loadTileDem(tile, grid);
-      if (data) {
-        try {
-          flattenRunways(lattice, tile, grid, data.lines, sampler);
-        } catch {
-          // fall back to the unflattened lattice, like the terrain worker
-        }
-      }
+      const dem = await loadTileDem(tile, grid);
+      const { heights: lattice, borders } = dem;
+      const pads: Pad[] = data ? await loadPads(data) : [];
+      applyPads(dem, tile, grid, pads);
       // Landsat colour boundaries are part of the TIN; without imagery use the plain TIN for now and
       // reload the tile later so collision matches the mesh once it is rebuilt with imagery
       const ls = await loadLandsatTerrain(tile, grid);
@@ -110,6 +104,7 @@ export class GroundProbe {
         borders,
         colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined,
         coast: data ? coastlineWays(data.lines) : undefined,
+        pads,
       }), tile);
       this.samplers.set(key, surface);
       if (!ls) this.stale.set(key, now + 10000);

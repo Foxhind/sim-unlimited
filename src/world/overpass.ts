@@ -12,6 +12,7 @@ const FULL_FILTER = `
   way["highway"~"motorway|trunk|primary|secondary|tertiary|residential|unclassified"];
   way["railway"="rail"];
   way["aeroway"~"runway|taxiway|apron|helipad"]; node["aeroway"="helipad"];
+  way["aeroway"="aerodrome"]; relation["aeroway"="aerodrome"];
   way["natural"~"water|wood|scrub|beach|bare_rock"]; relation["natural"="water"];
   way["landuse"="forest"]; relation["landuse"="forest"]; relation["natural"="wood"];
   way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"];
@@ -36,9 +37,23 @@ export function osmFilter(detail: OsmDetail): string {
   return detail === 'full' ? FULL_FILTER : LARGE_FILTER;
 }
 
+/**
+ * Aerodrome outlines are fetched from AERODROME_REACH_DEG around a near tile too: a tile inside a
+ * large aerodrome, or beside one, must know it to put its terrain on the aerodrome's pad (see
+ * aerodrome.ts) even when no outline vertex or edge lies in the tile itself.
+ */
+export const AERODROME_REACH_DEG = 0.05;
+
 export function overpassQuery(tile: Tile, detail: OsmDetail): string {
   const b = tileBounds(tile);
-  const filter = osmFilter(detail);
+  let filter = osmFilter(detail);
+  if (detail === 'full') {
+    const dLat = AERODROME_REACH_DEG;
+    const dLon = AERODROME_REACH_DEG / Math.max(0.1, Math.cos((((b.north + b.south) / 2) * Math.PI) / 180));
+    const wide = `(${b.south - dLat},${b.west - dLon},${b.north + dLat},${b.east + dLon})`;
+    // an explicit bbox overrides the global one for its statement
+    filter += `  way["aeroway"="aerodrome"]${wide}; relation["aeroway"="aerodrome"]${wide};\n`;
+  }
   return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${filter});out body; >; out skel qt;`;
 }
 

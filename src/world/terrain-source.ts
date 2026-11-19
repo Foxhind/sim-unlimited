@@ -198,6 +198,44 @@ async function loadOwnDem(tile: Tile, grid: number): Promise<{ heights: Float32A
   return sampleDem(padDem(Math.round(Math.sqrt(centre.length)), around), grid);
 }
 
+/**
+ * DEM heights at lon/lat points, bilinear over the Terrarium tiles of zoom `z` (pixel centres).
+ * A point depends only on itself and `z`, never on which tile asks: every tile that fits the same
+ * aerodrome pad gets the same numbers. NaN where a tile does not exist; a temporarily unavailable
+ * one fails as retryable.
+ */
+export async function demHeights(points: ReadonlyArray<readonly [number, number]>, z: number): Promise<Float64Array> {
+  const n = 2 ** z;
+  const out = new Float64Array(points.length).fill(NaN);
+  const byTile = new Map<string, { t: Tile; idx: number[] }>();
+  const fxy = points.map(([lon, lat]) => {
+    const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
+    return [((lon + 180) / 360) * n, (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * n] as const;
+  });
+  fxy.forEach(([fx, fy], k) => {
+    const t = { z, x: Math.min(n - 1, Math.max(0, Math.floor(fx))), y: Math.min(n - 1, Math.max(0, Math.floor(fy))) };
+    const key = `${t.x}/${t.y}`;
+    let g = byTile.get(key);
+    if (!g) byTile.set(key, (g = { t, idx: [] }));
+    g.idx.push(k);
+  });
+  for (const { t, idx } of byTile.values()) {
+    const elev = await tileElev(t).catch((err) => {
+      if (err instanceof RetryableError) throw err;
+      return null;
+    });
+    if (!elev) continue;
+    const size = Math.round(Math.sqrt(elev.length));
+    const at = (x: number, y: number) => elev[Math.max(0, Math.min(size - 1, y)) * size + Math.max(0, Math.min(size - 1, x))];
+    for (const k of idx) {
+      const px = (fxy[k][0] - t.x) * size - 0.5, py = (fxy[k][1] - t.y) * size - 0.5;
+      const x0 = Math.floor(px), y0 = Math.floor(py), tx = px - x0, ty = py - y0;
+      out[k] = (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
+    }
+  }
+  return out;
+}
+
 export type HeightSampler = (lon: number, lat: number) => number;
 
 /** Bilinear DEM sampler over a tile's Mercator extent, for draping OSM geometry. */

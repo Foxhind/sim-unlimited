@@ -29,7 +29,7 @@ export function tileForLatLon(lat: number, lon: number, z: number): Tile {
   return { z, x: Math.min(n - 1, Math.max(0, x)), y: Math.min(n - 1, Math.max(0, y)) };
 }
 
-function mercatorYToLat(fy: number): number {
+export function mercatorYToLat(fy: number): number {
   return Math.atan(Math.sinh(Math.PI * (1 - 2 * fy))) * R2D;
 }
 

@@ -9,7 +9,8 @@ import {
 } from './contours';
 import { clipPolyline } from './clip';
 import { coastSeaTest, joinLines, toLatticeLine } from './coast';
-import { tileRowMeters, type Tile } from './geodesy';
+import { latLonToEnu, mercatorYToLat, tileRowMeters, type Tile } from './geodesy';
+import { padDistance, padHeightEnu, type Pad } from './aerodrome';
 import type { LonLat } from './osm-types';
 import type { HeightSampler, TileBorders } from './terrain-source';
 
@@ -111,6 +112,12 @@ export interface TinOptions {
    * decides alone. Every builder of a tile's TIN must pass the same.
    */
   coast?: ReadonlyArray<ReadonlyArray<LonLat>>;
+  /**
+   * Aerodrome pads (see aerodrome.ts) over the tile, with the lattice already on them (applyPads).
+   * Their outlines become fixed edges and every vertex on or inside one takes the pad's plane, so
+   * no face inside an aerodrome bends. Every builder of a tile's TIN must pass the same.
+   */
+  pads?: ReadonlyArray<Pad>;
 }
 
 /** land beside an OSM coastline is lifted to at least this height (the DEM has it at or below 0) */
@@ -121,6 +128,8 @@ export const LAND_MIN_M = 1;
  * tile is not downloaded), and a wrong side once laid whole mountains under the sea.
  */
 export const COAST_SEA_MAX_M = 5;
+/** a TIN vertex this close outside an aerodrome outline (metres) is on it */
+const PAD_ON_M = 0.5;
 /** simplification of the OSM coastline inside a tile, lattice cells */
 const COAST_EPS = 0.25;
 
@@ -735,6 +744,33 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     heights = fixed;
   }
 
+  // aerodrome pads: their outlines inside the tile, and the plane height of a point on or inside one
+  const pads = opts.pads ?? [];
+  const padPieces: Pt[][] = [];
+  const padAt = (p: Pt): number | undefined => {
+    if (!pads.length) return undefined;
+    const n = 2 ** tile.z;
+    const lon = ((tile.x + p.x / grid) / n) * 360 - 180;
+    const lat = mercatorYToLat((tile.y + p.y / grid) / n);
+    for (const pad of pads) {
+      const [e, nn] = latLonToEnu(pad.origin, lat, lon, 0);
+      // on the outline counts as inside: crossings computed on it land a hair either side
+      if (padDistance(pad, e, nn) <= PAD_ON_M) return padHeightEnu(pad, e, nn);
+    }
+    return undefined;
+  };
+  {
+    const box = { west: 0, south: 0, east: grid, north: grid };
+    const snap = (v: number) => (Math.abs(v) < 1e-9 ? 0 : Math.abs(v - grid) < 1e-9 ? grid : v);
+    for (const pad of pads) {
+      const line = toLatticeLine(tile, grid, pad.ring);
+      for (const piece of clipPolyline(line.map((p) => [p.x, p.y] as LonLat), box)) {
+        const pts = piece.map(([x, y]) => ({ x: snap(x), y: snap(y) }));
+        if (pts.length >= 2) padPieces.push(pts);
+      }
+    }
+  }
+
   let minH = Infinity, maxH = -Infinity;
   for (let k = 0; k < heights.length; k++) {
     minH = Math.min(minH, heights[k]);
@@ -884,6 +920,15 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         onBorder[e].push(p);
       }
     }
+    // an aerodrome outline ends on the border at the pad's height (the neighbour does the same)
+    for (const piece of padPieces) {
+      for (const p of [piece[0], piece[piece.length - 1]]) {
+        const e = edgeOf(p);
+        if (e < 0) continue;
+        vid(p, padAt(p) ?? borderHeight(p));
+        onBorder[e].push(p);
+      }
+    }
     // a colour boundary runs up to the border and ends in a vertex on it (on the border line, like
     // an isoline's end): stopped short of it, the strip in between was filled with fans from the
     // few border vertices, each sliver in the colour of whatever lay under it
@@ -943,6 +988,12 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       for (let ci = from; ci < constraints.length; ci++) if (!halves.has(ci)) coast[ci] = true;
     }
 
+    // aerodrome outlines: fixed edges, so no face reaches across one
+    if (padPieces.length) {
+      insertColourLines(padPieces, constraints, vx, vy, vh, vid, (p) => padAt(p) ?? latticeHeight(heights, grid, p),
+        { verts: 0, crossings: 0 }, (p) => edgeOf(p) >= 0, (ci, added) => { if (coast[ci]) coast[added] = true; });
+    }
+
     // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
     // level) or another boundary
     if (colourHeight) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => {
@@ -952,6 +1003,14 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     }, stats, (p) => edgeOf(p) >= 0, (ci, added) => { if (coast[ci]) coast[added] = true; });
     const coastEdges = new Set<number>();
     constraints.forEach(([u, v], ci) => { if (coast[ci]) coastEdges.add(edgeKey(u, v)); });
+    // everything on or inside an aerodrome outline lies on its plane: the faces there are all
+    // bounded by the outline, so none of them bends
+    if (pads.length) {
+      for (let k = 0; k < vx.length; k++) {
+        const h = padAt({ x: vx[k], y: vy[k] });
+        if (h !== undefined) vh[k] = h;
+      }
+    }
 
     // a triangle is flat when all three corners sit at one height (one isoline): it lies on a belt
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.

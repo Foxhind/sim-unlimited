@@ -33,6 +33,8 @@ export interface TerrainMeshOptions {
   borders?: TileBorders;
   /** OSM coastline ways (see TinOptions.coast) */
   coast?: TinOptions['coast'];
+  /** aerodrome pads (see TinOptions.pads) */
+  pads?: TinOptions['pads'];
 }
 
 function faceRamp(avgH: number, ny: number): number {
@@ -153,7 +155,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris, coarse, sea } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast });
+  const { vx, vy, vh, tris, coarse, sea } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads });
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);
   const vyH = vh.map((h) => Math.max(h, 0));

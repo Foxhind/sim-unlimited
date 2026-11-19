@@ -2,12 +2,12 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildTerrainMesh } from '../world/terrain-mesher';
-import { decodePngToSampler, loadTileDem, fetchTerrariumPng } from '../world/terrain-source';
+import { loadTileDem } from '../world/terrain-source';
 import { OSM_SCHEMA_VERSION } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
-import { flattenRunways } from '../world/runway';
+import { applyPads, loadPads, type Pad } from '../world/aerodrome';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 
 export interface TileRequest {
@@ -46,7 +46,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
   const grade = e.data.grade ?? NEUTRAL_GRADE;
   const useCache = isNeutralGrade(grade);
   try {
-    // Q40: when OSM is cached for this tile, build with runway flattening;
+    // Q40: when OSM is cached for this tile, build with the aerodromes on their pads;
     // the '/o' suffix keeps pre-OSM and flattened meshes in separate cache slots
     const osmRaw = tile.z >= 12
       ? await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined)
@@ -58,16 +58,22 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       ctx.postMessage(res, [res.vertices, res.ramps, ...(res.morph ? [res.morph] : [])]);
       return;
     }
-    const png = await fetchTerrariumPng(tile);
-    const { heights, borders } = await loadTileDem(tile, grid);
+    const dem = await loadTileDem(tile, grid);
+    const { heights, borders } = dem;
     let coast: LonLat[][] | undefined;
+    let pads: Pad[] = [];
     if (osmRaw) {
+      let data: ReturnType<typeof parseOverpass> | undefined;
       try {
-        const lines = parseOverpass(JSON.parse(osmRaw.json)).lines;
-        flattenRunways(heights, tile, grid, lines, await decodePngToSampler(png, tile));
-        coast = coastlineWays(lines);
+        data = parseOverpass(JSON.parse(osmRaw.json));
       } catch {
         // corrupt raw cache: fall back to unflattened relief and the DEM's shoreline
+      }
+      if (data) {
+        // aerodromes on their pads (a DEM outage fails the tile as retryable, like its own DEM)
+        pads = await loadPads(data);
+        applyPads(dem, tile, grid, pads);
+        coast = coastlineWays(data.lines);
       }
     }
     // Landsat: colour boundaries shape the TIN and faces take the imagery colour. A tile is shown
@@ -79,6 +85,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       faceColor: ls.faceColor,
       colourLines: { lines: ls.lines, maxVerts: ls.maxVerts },
       coast,
+      pads,
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
