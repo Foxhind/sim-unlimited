@@ -135,9 +135,9 @@ describe('roof shapes (S3DB)', () => {
     expect(computeHeights({ height: '20', 'roof:shape': 'gabled', 'roof:levels': '2' }, 5).roof).toBe(6);
     expect(computeHeights({ height: '20', 'roof:shape': 'gabled' }, 5).roof).toBeCloseTo(5 * Math.tan(Math.PI / 6), 6);
     expect(computeHeights({ height: '20', 'roof:shape': 'dome' }, 6).roof).toBe(6);
-    // facade levels plus the roof (S3DB: building:levels=3, roof:levels=1 → 12 m, 9 m of it facade)
-    expect(computeHeights({ 'building:levels': '3', 'roof:levels': '1', 'roof:shape': 'gabled' }, 5)).toEqual({ min: 0, wall: 9, roof: 3 });
-    expect(computeHeights({ 'building:levels': '2', 'roof:height': '2.5', 'roof:shape': 'hipped' })).toEqual({ min: 0, wall: 6, roof: 2.5 });
+    // facade levels plus the roof (S3DB: building:levels=3, roof:levels=1 → 12 m, 9 m of it facade), plus the 1 m plinth
+    expect(computeHeights({ 'building:levels': '3', 'roof:levels': '1', 'roof:shape': 'gabled' }, 5)).toEqual({ min: 0, wall: 10, roof: 3 });
+    expect(computeHeights({ 'building:levels': '2', 'roof:height': '2.5', 'roof:shape': 'hipped' })).toEqual({ min: 0, wall: 7, roof: 2.5 });
     expect(computeHeights({ height: '10', 'building:min_level': '2' }).min).toBe(6);
   });
 

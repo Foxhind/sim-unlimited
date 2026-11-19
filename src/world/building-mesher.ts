@@ -28,11 +28,12 @@ const AC_TYPES = new Set([
   'hotel', 'commercial', 'office', 'retail',
 ]);
 /**
- * Air conditioners: on a wall edge at least MIN_EDGE_M long, one slot every SPACING_M per floor,
- * each slot taken with PROBABILITY (deterministic by its position); the unit hangs FLOOR_OFFSET_M
- * above the floor, under the windows.
+ * Air conditioners: on the window grid of a facade (WORLD_FS windowAt: slots every WINDOWS.SPACING_M,
+ * floors every WINDOWS.FLOOR_M, both stretched to fit), under a window pane GAP_M below its sill, not
+ * on the ground floor of a building of two floors or more; each window taken with PROBABILITY
+ * (deterministic by its position).
  */
-export const AC = { MIN_EDGE_M: 4, SPACING_M: 3.5, PROBABILITY: 0.05, FLOOR_OFFSET_M: 0.25, MIN_WALL_M: 2.5 } as const;
+export const AC = { PROBABILITY: 0.05, GAP_M: 0.1 } as const;
 const AC_RGB: RGB = [222, 222, 216];
 
 /**
@@ -132,6 +133,20 @@ export function parseLength(v: string | undefined): number | undefined {
   return n;
 }
 
+/**
+ * Facade zones of a building with windows (isLitBuilding, not a booth): a windowless plinth PLINTH_M
+ * high on the ground, then the floors with windows, then under a flat roof a windowless technical
+ * floor TECH_FLOOR_M high. A booth (footprint under BOOTH_MAX_AREA_M2) has no windows at all.
+ */
+export const FACADE_ZONES = { PLINTH_M: 1, TECH_FLOOR_M: 1.5, BOOTH_MAX_AREA_M2: 20 } as const;
+/** internal tag (not OSM): the footprint is a booth's (FACADE_ZONES.BOOTH_MAX_AREA_M2) */
+export const BOOTH_TAG = 'sim:booth';
+
+/** the building has the facade zones (plinth, floors with windows, technical floor) */
+export function hasFacadeZones(tags: Record<string, string>): boolean {
+  return isLitBuilding(tags) && tags[BOOTH_TAG] !== 'yes';
+}
+
 /** facade levels of a building with no height, no building:levels and no footprint rule (withDefaultTags) */
 export const DEFAULT_LEVELS = 2;
 
@@ -147,7 +162,9 @@ const DEFAULT_PITCH_DEG = 30;
  * roof:levels × 3 m, else a default for the shape (30° pitch, a hemisphere for a dome). Without
  * `height`: building:levels × 3 m plus that roof; without levels either, the facade from the footprint
  * (FOOTPRINT_WALL_TAG, set by withDefaultTags for building=residential) plus that roof; else
- * DEFAULT_LEVELS (2) × 3 m plus that roof.
+ * DEFAULT_LEVELS (2) × 3 m plus that roof. Levels counted from tags (building:levels, the default) get
+ * the facade zones added (hasFacadeZones): the plinth on the ground and, under a flat roof, the
+ * technical floor, so the levels keep their full 3 m.
  */
 export function computeHeights(tags: Record<string, string>, run?: number): { min: number; wall: number; roof: number } {
   const shape = roofShape(tags);
@@ -162,19 +179,24 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
       ?? defaultRoofHeight(shape, run);
   }
 
+  let min = parseLength(tags.min_height) ?? 0;
+  const minLevel = parseLength(tags['building:min_level']);
+  if (min === 0 && minLevel !== undefined) min = minLevel * LEVEL_M;
+
   let height = parseLength(tags.height);
   if (height === undefined) {
     const levels = parseLength(tags['building:levels']);
     // roof levels under a flat roof are still storeys on top of the facade levels
     const flatRoofLevels = shape === 'flat' ? (parseLength(tags['roof:levels']) ?? 0) * LEVEL_M : 0;
     const footprintWall = parseLength(tags[FOOTPRINT_WALL_TAG]);
-    if (levels !== undefined) height = levels * LEVEL_M + roof + flatRoofLevels;
-    else height = (footprintWall ?? DEFAULT_LEVELS * LEVEL_M) + roof + flatRoofLevels;
+    if (footprintWall !== undefined && levels === undefined) height = footprintWall + roof + flatRoofLevels;
+    else {
+      const zones = hasFacadeZones(tags)
+        ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (shape === 'flat' ? FACADE_ZONES.TECH_FLOOR_M : 0)
+        : 0;
+      height = (levels ?? DEFAULT_LEVELS) * LEVEL_M + zones + roof + flatRoofLevels;
+    }
   }
-
-  let min = parseLength(tags.min_height) ?? 0;
-  const minLevel = parseLength(tags['building:min_level']);
-  if (min === 0 && minLevel !== undefined) min = minLevel * LEVEL_M;
 
   height = Math.max(height, min + 0.3);
   roof = Math.min(roof, Math.max(0, height - min));
@@ -239,6 +261,7 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
   if (tags.building === 'residential' && parseLength(tags.height) === undefined && levels === undefined && outer && outer.length >= 3) {
     out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
   }
+  if (outer && outer.length >= 3 && Math.abs(ringAreaXZ(outer)) < FACADE_ZONES.BOOTH_MAX_AREA_M2) out[BOOTH_TAG] = 'yes';
   const isPart = tags['building:part'] !== undefined && tags['building:part'] !== 'no';
   const small = !outer || Math.abs(ringAreaXZ(outer)) <= HIPPED_DEFAULT_MAX_AREA_M2;
   if (tags['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
@@ -604,24 +627,28 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
     const centroid = areaCentroid(outer);
     // windows on the facades of buildings people live or work in, below the roof (not in gables)
-    const windowed = isLitBuilding(tags) && h.wall >= WINDOWS.MIN_WALL_M;
+    // between the plinth and (under a flat roof) the technical floor (FACADE_ZONES)
+    const zoned = hasFacadeZones(tags);
+    const winBase = wallBase + (zoned && h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
+    const winH = wallTop - winBase - (zoned && roof.kind === 'flat' ? FACADE_ZONES.TECH_FLOOR_M : 0);
+    const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges, rare signs on the ground floor
-    const balconies = windowed && hasBalconies(tags, h.wall);
+    const balconies = windowed && hasBalconies(tags, winH);
 
     // walls up to the roof profile (gable ends close themselves); none under a canopy
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? h.wall : 0, balconies);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies);
         }
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
-          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? h.wall : 0, balconies);
+          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies);
         }
       }
-      if (AC_TYPES.has(tags.building) && h.min < 0.5 && h.wall >= AC.MIN_WALL_M) airConditioners(outer, wallBase, wallTop);
+      if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH);
     }
 
     // ceiling under elevated parts (arches, bridges)
@@ -654,9 +681,12 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
   }
 
-  /** windowH: the facade height that has windows (0: none); balconies: some edges may carry them */
+  /**
+   * windowH: the height of the facade with windows (0: none), from winBase up (the facade's v is
+   * measured from there: the plinth under it is negative, no windows); balconies: some edges may carry them
+   */
   function wallUnderRoof(
-    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, balconies: boolean,
+    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean,
   ): void {
     const field = roof.kind === 'planar' ? roof.field : () => 0;
     const ts = [0, ...crossings(p, q, creases), 1];
@@ -672,7 +702,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       emitWallQuad([a[0], yBase, a[1]], [a[0], ya, a[1]], [c[0], yc, c[1]], [c[0], yBase, c[1]], ramp, centroid);
       // where each of the six vertices is on the facade (emitWallQuad order: a0, c0, c1, a0, c1, a1)
       const ua = ts[k] * len, uc = ts[k + 1] * len;
-      for (const [u, v] of [[ua, 0], [uc, 0], [uc, yc - yBase], [ua, 0], [uc, yc - yBase], [ua, ya - yBase]]) {
+      const v0 = yBase - winBase;
+      for (const [u, v] of [[ua, v0], [uc, v0], [uc, yc - winBase], [ua, v0], [uc, yc - winBase], [ua, ya - winBase]]) {
         win.push(u, v, len, wallH, seed);
       }
     }
@@ -754,7 +785,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * that slot's ground floor is covered by a blind patch of the wall (the edge's facade code with
    * FACADE_BLIND: the ground floor's tint, no openings), so no pane or shop window shows round the door.
    */
-  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, residential: boolean): void {
+  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean): void {
     const [w, hgt] = DOOR_SIZE[e.kind] ?? DOOR_SIZE.default;
     let best: { p: XZ; dir: XZ; len: number; u: number; d: number } | undefined;
     for (const ring of rings) {
@@ -785,7 +816,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // the slot's whole ground floor (wallUnderRoof gives the edge the same code)
       const fh = wallH / Math.max(1, Math.floor(wallH / WINDOWS.FLOOR_M));
       const code = edgeCode(p, wallBase, len, residential) + FACADE_BLIND;
-      wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, wallBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, wallBase]);
+      wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, winBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, winBase]);
     }
     const garage = e.kind === 'garage';
     wallRect(p, dir, n, u - w / 2 - 0.1, u + w / 2 + 0.1, y0, top + 0.1, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
@@ -799,21 +830,24 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
   }
 
-  /** air-conditioner instances on the outer walls (ring ccw: outward is to the right of each edge) */
-  function airConditioners(ring: XZ[], wallBase: number, wallTop: number): void {
-    const floors = Math.max(1, Math.floor((wallTop - wallBase) / LEVEL_M));
+  /** air-conditioner instances under the windows of the outer walls (ring ccw: outward is to the right of each edge) */
+  function airConditioners(ring: XZ[], winBase: number, winH: number): void {
+    const floors = Math.max(1, Math.floor(winH / WINDOWS.FLOOR_M));
+    const fh = winH / floors;
+    // the pane of WORLD_FS windowAt: centred 0.55 of the floor up, half as high as min(0.75, 0.27 fh)
+    const sill = 0.55 * fh - Math.min(0.75, 0.27 * fh) - AC.GAP_M - AC_SIZE.HEIGHT;
+    if (sill < 0) return;
     for (let i = 0; i < ring.length; i++) {
       const p = ring[i], q = ring[(i + 1) % ring.length];
       const ex = q[0] - p[0], ez = q[1] - p[1], len = Math.hypot(ex, ez);
-      if (len < AC.MIN_EDGE_M) continue;
+      if (len < WINDOWS.MIN_EDGE_M) continue;
       const ox = ez / len, oz = -ex / len;
       const yaw = Math.atan2(oz, ox);
-      const slots = Math.floor(len / AC.SPACING_M);
-      for (let k = 0; k < floors; k++) {
-        const y = wallBase + k * LEVEL_M + AC.FLOOR_OFFSET_M;
-        if (y + AC_SIZE.HEIGHT > wallTop - 0.3) break;
-        for (let j = 0; j < slots; j++) {
-          const t = (j + 0.5) / slots;
+      const slots = Math.max(1, Math.floor(len / WINDOWS.SPACING_M));
+      for (let f = floors >= 2 ? 1 : 0; f < floors; f++) {
+        const y = winBase + f * fh + sill;
+        for (let k = 0; k < slots; k++) {
+          const t = (k + 0.5) / slots;
           const x = p[0] + ex * t, z = p[1] + ez * t;
           if (hash01(x, y, z) >= AC.PROBABILITY) continue;
           pushInstance(acs, x, y, z, 1, rgbRamp(AC_RGB), INSTANCE.AC, yaw);

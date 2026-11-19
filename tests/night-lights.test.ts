@@ -76,10 +76,11 @@ describe('building night lights', () => {
     const walls = attrs.filter((a) => a[3] > 0);
     expect(walls.length).toBeGreaterThan(0);
     for (const [u, v, len, wallH, seed] of walls) {
-      expect(wallH).toBeCloseTo(15, 3); // 5 levels
+      expect(wallH).toBeCloseTo(15, 3); // 5 levels between the plinth and the technical floor
       expect(u).toBeGreaterThanOrEqual(0);
       expect(u).toBeLessThanOrEqual(len + 1e-3);
-      expect(v).toBeGreaterThanOrEqual(0);
+      // v from the top of the 1 m plinth: the plinth itself is below 0 (no windows)
+      expect(v).toBeGreaterThanOrEqual(-1 - 1e-3);
       expect(Number.isInteger(seed)).toBe(true);
     }
     // roofs carry no windows
@@ -145,13 +146,13 @@ describe('building night lights', () => {
       expect(z).toBeGreaterThan(-en);
       expect(Math.abs(x - ex)).toBeLessThan(WINDOWS.SPACING_M + 1.5);
       expect(y).toBeGreaterThanOrEqual(GROUND - 1e-3);
-      expect(y).toBeLessThan(GROUND + 3.01);
+      expect(y).toBeLessThan(GROUND + 4.01); // plinth and the ground floor
     }
     // the blind patch carries the facade attributes of its edge, flagged blind; frame and leaf none
     const patch = Array.from({ length: 6 }, (_, i) => Array.from(withDoor.windows.subarray((first + i) * WINDOW_ATTR_FLOATS, (first + i + 1) * WINDOW_ATTR_FLOATS)));
     for (const [, v, , wallH, code] of patch) {
       expect(wallH).toBeCloseTo(15, 3);
-      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeGreaterThanOrEqual(-1 - 1e-3);
       expect(v).toBeLessThanOrEqual(3);
       expect(code & FACADE_BLIND).toBe(FACADE_BLIND);
       expect(code & FACADE_RESIDENTIAL).toBe(FACADE_RESIDENTIAL); // apartments

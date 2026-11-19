@@ -6,6 +6,8 @@ import {
   buildingHeights,
   buildingSeed,
   buildingTags,
+  BOOTH_TAG,
+  FACADE_ZONES,
   footprintHeight,
   PARAPET,
   ROOFTOP,
@@ -18,6 +20,7 @@ import {
 } from '../src/world/building-mesher';
 import type { OsmBuilding } from '../src/world/osm-types';
 import { AC_SIZE, INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
+import { WINDOWS } from '../src/engine/palette';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -70,16 +73,17 @@ describe('default height and roof', () => {
     expect(hs.wall).toBeGreaterThanOrEqual(2.5);
   });
 
-  it('other types without height/levels: 2 floors, whatever the footprint', () => {
-    for (const building of ['yes', 'house', 'industrial', 'garage']) {
+  it('other types without height/levels: 2 floors (plus the plinth and the technical floor), whatever the footprint', () => {
+    // flat roofs: 1 m plinth + 2 × 3 m + 1.5 m technical floor; a garage has no facade zones
+    for (const [building, wall] of [['yes', 8.5], ['house', 8.5], ['industrial', 8.5], ['garage', 6]] as const) {
       const b: OsmBuilding = { rings: [rect()], tags: { building } };
       expect(buildingTags(b)['sim:footprint_wall']).toBeUndefined();
-      expect(buildingHeights(b).wall).toBe(6);
+      expect(buildingHeights(b).wall).toBe(wall);
     }
-    // yes: 2 floors are low-rise → a hipped roof on top of the 6 m facade
+    // yes: 2 floors are low-rise → a hipped roof on top of the 1 m plinth and 6 m of floors
     const yes: OsmBuilding = { rings: [rect(0.00005, 0.00004)], tags: { building: 'yes' } };
     expect(buildingTags(yes)['roof:shape']).toBe('hipped');
-    expect(buildingHeights(yes).wall).toBe(6);
+    expect(buildingHeights(yes).wall).toBe(7);
     expect(buildingHeights(yes).roof).toBeGreaterThan(0);
   });
 
@@ -185,8 +189,11 @@ describe('rooftop structures and air conditioners', () => {
       const [x, y, z, scale, , type, , yaw] = m.acs.subarray(i * TREE_STRIDE, (i + 1) * TREE_STRIDE);
       expect(type).toBe(INSTANCE.AC);
       expect(scale).toBe(1);
-      expect(y).toBeGreaterThanOrEqual(100);
-      expect(y + AC_SIZE.HEIGHT).toBeLessThan(127);
+      // under a pane of the window grid (1 m plinth, 9 floors of 3 m), never on the ground floor
+      const fh = 3, inFloor = (y - 101) - Math.floor((y - 101) / fh) * fh;
+      expect(y).toBeGreaterThanOrEqual(101 + fh);
+      expect(inFloor + AC_SIZE.HEIGHT).toBeLessThanOrEqual(0.55 * fh - Math.min(0.75, 0.27 * fh) + 1e-3);
+      expect(y + AC_SIZE.HEIGHT).toBeLessThan(128);
       // on the outline, facing away from the building
       const onEast = Math.abs(x - maxX) < 0.01, onWest = Math.abs(x - minX) < 0.01;
       const onSouth = Math.abs(z - maxZ) < 0.01, onNorth = Math.abs(z - minZ) < 0.01;
@@ -196,9 +203,42 @@ describe('rooftop structures and air conditioners', () => {
       if (onWest) expect(dx).toBeCloseTo(-1, 3);
       if (onSouth) expect(dz).toBeCloseTo(1, 3);
       if (onNorth) expect(dz).toBeCloseTo(-1, 3);
+      // at a slot centre along its edge
+      const [lo, hi, at] = onEast || onWest ? [minZ, maxZ, z] : [minX, maxX, x];
+      const len = hi - lo, slots = Math.max(1, Math.floor(len / WINDOWS.SPACING_M));
+      const k = ((at - lo) / len) * slots - 0.5;
+      expect(Math.abs(k - Math.round(k))).toBeLessThan(1e-3);
     }
     expect(build([{ rings: [rect()], tags: tall }]).acs).toEqual(m.acs);
     expect(build([{ rings: [rect()], tags: { building: 'industrial', 'building:levels': '9' } }]).acs.length).toBe(0);
+  });
+});
+
+describe('facade zones', () => {
+  const facade = (m: ReturnType<typeof build>) =>
+    Array.from({ length: m.vertexCount }, (_, i) => ({ y: m.vertices[i * 6 + 1], a: Array.from(m.windows.subarray(i * 5, i * 5 + 5)) }))
+      .filter((p) => p.a[3] > 0);
+
+  it('windows run from the top of a 1 m plinth to under a 1.5 m technical floor on a flat roof', () => {
+    const m = build([{ rings: [rect()], tags: { building: 'apartments', 'building:levels': '5' } }]);
+    const f = facade(m);
+    expect(f.length).toBeGreaterThan(0);
+    for (const { y, a: [, v, , winH] } of f) {
+      expect(winH).toBeCloseTo(15, 4);
+      // v counts from the plinth top (ground 100 + 1 m)
+      expect(y - v).toBeCloseTo(100 + FACADE_ZONES.PLINTH_M, 3);
+    }
+    // the wall reaches past the windows by the technical floor
+    expect(edgeTop(m)).toBeCloseTo(100 + FACADE_ZONES.PLINTH_M + 15 + FACADE_ZONES.TECH_FLOOR_M, 3);
+  });
+
+  it('a pitched roof: no technical floor; a booth: no windows and no zones at all', () => {
+    const m = build([{ rings: [rect(0.0001, 0.00008)], tags: { building: 'house', 'building:levels': '2', 'roof:shape': 'gabled' } }]);
+    for (const { a: [, , , winH] } of facade(m)) expect(winH).toBeCloseTo(6, 4);
+    const booth = { rings: [rect(0.00002, 0.00002)], tags: { building: 'yes' } }; // ~ 2.5 × 4.5 m
+    expect(buildingTags(booth)[BOOTH_TAG]).toBe('yes');
+    expect(facade(build([booth]))).toHaveLength(0);
+    expect(buildingHeights(booth).wall).toBe(6);
   });
 });
 
@@ -217,13 +257,15 @@ describe('parseLength', () => {
 });
 
 describe('computeHeights', () => {
-  it('prefers height, then levels, then 2 floors', () => {
+  it('prefers height, then levels, then 2 floors; counted levels get the plinth and the technical floor', () => {
     expect(computeHeights({ height: '20', building: 'house' })).toEqual({ min: 0, wall: 20, roof: 0 });
-    expect(computeHeights({ 'building:levels': '4', building: 'house' }).wall).toBe(12);
-    expect(computeHeights({ building: 'house' }).wall).toBe(6);
+    expect(computeHeights({ 'building:levels': '4', building: 'house' }).wall).toBe(14.5);
+    expect(computeHeights({ building: 'house' }).wall).toBe(8.5);
     expect(computeHeights({ building: 'garage' }).wall).toBe(6);
-    expect(computeHeights({ building: 'apartments' }).wall).toBe(6);
-    expect(computeHeights({}).wall).toBe(6);
+    expect(computeHeights({ building: 'apartments' }).wall).toBe(8.5);
+    expect(computeHeights({ building: 'apartments', 'roof:shape': 'gabled', 'roof:height': '3' }).wall).toBe(7);
+    expect(computeHeights({ building: 'apartments', 'sim:booth': 'yes' }).wall).toBe(6);
+    expect(computeHeights({}).wall).toBe(8.5);
   });
 
   it('splits roof height off pitched roofs and honors min_height', () => {
@@ -231,7 +273,7 @@ describe('computeHeights', () => {
     expect(h.min).toBe(3);
     expect(h.roof).toBe(4);
     expect(h.wall).toBe(8);
-    expect(computeHeights({ 'building:levels': '3', 'roof:levels': '1', 'roof:shape': 'flat' }).wall).toBe(12);
+    expect(computeHeights({ 'building:levels': '3', 'roof:levels': '1', 'roof:shape': 'flat' }).wall).toBe(14.5);
   });
 });
 
