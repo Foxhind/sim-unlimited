@@ -1,6 +1,7 @@
 import { PAYLOAD_MASK, RAMP } from '../engine/palette';
 import type { JointDef, LightDef } from './articulation';
 import an225Model from './models/an225.json';
+import c150Model from './models/c150.json';
 import f117Model from './models/f117.json';
 import f16Model from './models/f16.json';
 import su27Model from './models/su27.json';
@@ -89,7 +90,7 @@ export interface FbwDef {
   rollRate: number;
 }
 
-export type AircraftId = 'su27' | 'f117' | 'an225' | 'f16';
+export type AircraftId = 'su27' | 'f117' | 'an225' | 'f16' | 'c150';
 
 /**
  * National markings: the colours the model's roundel slots are painted in (tools/export-aircraft.py: the faces
@@ -149,8 +150,17 @@ export interface AircraftConfig {
   spinYaw: number;
   /** never-exceed equivalent airspeed, m/s: beyond ~110% the tail surfaces flutter off */
   vne: number;
+  /** jets: thrust at full throttle, N, dry and with afterburner; a propeller: its static thrust */
   thrustDry: number;
   thrustAfterburner: number;
+  /**
+   * A piston engine and propeller in place of a jet: thrust is the static thrust until the shaft power, at the
+   * propeller's efficiency, gives less (efficiency x power / airspeed); the power falls with air density.
+   * A fixed-pitch propeller works best at its cruise: its efficiency is `efficiency` x (1 - exp(-V / effSpeed)).
+   */
+  prop?: { power: number; efficiency: number; effSpeed: number };
+  /** the gear does not retract: always down, the gear key does nothing */
+  fixedGear?: boolean;
   /** m/s at altitude, used for Q41 air start (70% of cruise) */
   cruiseSpeed: number;
   maxSpeed: number;
@@ -226,7 +236,7 @@ function pair(def: Omit<SurfaceDef, 'part'>, right: PartId, left: PartId): Surfa
 }
 
 /** the exported models by aircraft id */
-const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model, f16: f16Model };
+const MODELS: Record<AircraftId, ModelJson> = { su27: su27Model, f117: f117Model, an225: an225Model, f16: f16Model, c150: c150Model };
 
 /**
  * The separable part (PART_IDS index + 1, 0 = the fuselage) of the model's surface nearest to a point in mesh
@@ -574,7 +584,79 @@ export const F16: AircraftConfig = fromModel({
   loadouts: [{ id: 'clean', name: 'CLEAN', stores: [], mass: 0, cd: 0 }],
 });
 
-export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225, f16: F16 };
+export const C150: AircraftConfig = fromModel({
+  id: 'c150',
+  name: 'CESSNA 150',
+  hudLang: 'en',
+  // C150M: 504 kg empty, 726 kg at most; here one pilot and full tanks
+  mass: 680,
+  // the published Cessna 172 inertias, scaled to this mass and the C150's span and length
+  inertia: [960, 1470, 750],
+  wingArea: 14.83,
+  wingSpan: 10.17,
+  // the model's origin is at 25% of the root chord, 0.1 m above the thrust line
+  cg: [0, 0, 0],
+  surfaces: [
+    // the wing across the cabin roof: with both panels gone the box of a fuselage lifts next to nothing
+    { pos: [0, 0.78, 0.01], normal: UP, area: 1.67, cla: 4.6, alpha0: 3, stall: 21, k: 0.061, carry: { share: 0.85, k: 0.8, stall: 14, offset: 0.4 } },
+    // the constant-chord inner panel with the flap, the tapered outer one with the aileron; washed out 3 deg
+    // towards the tip, so the root stalls first and the ailerons keep working; the areas keep the model's
+    // proportions, the total the real 14.83 m2
+    ...pair({ pos: [1.66, 0.81, 0.01], normal: UP, area: 3.55, cla: 4.6, alpha0: 3, stall: 21, k: 0.061, flap: true }, 'wingR', 'wingL'),
+    ...pair({ pos: [3.88, 0.85, 0.12], normal: UP, area: 3.03, cla: 4.6, alpha0: 1.5, stall: 21, k: 0.061, roll: 20, tau: 0.45 }, 'wingR', 'wingL'),
+    // tailplane with elevators, in the wing's downwash and set to trim the nose up
+    ...pair({ pos: [0.75, 0.15, 4.11], normal: UP, area: 1.35, cla: 2.4, alpha0: -2, stall: 16, k: 0.12, pitch: 25, tau: 0.5 }, 'stabR', 'stabL'),
+    // the swept fin with its dorsal fillet; it stays with the fuselage
+    { pos: [0, 0.7, 4.19], normal: SIDE, area: 1.5, cla: 2.5, stall: 18, k: 0.2, yaw: 23, tau: 0.45, shield: 0.2 },
+    // the cowling and cabin sides ahead of the CG
+    { pos: [0, 0.1, -1.3], normal: SIDE, area: 1.8, cla: 0.5, stall: 12, k: 0.5 },
+  ],
+  // drawn in assets/models/c150.blend (BREAK_<part> empties): 4.4 g limit x 1.5 on 726 kg, a wing panel with its
+  // strut carrying ~44% (21 kN); tailplane halves 4.5 kN. The fin stays with the fuselage
+  parts: breakPoints(c150Model),
+  // estimates: a wing panel with its strut and the fuel in its tank; the tailplane halves
+  partMass: { wingL: 75, wingR: 75, stabL: 6, stabR: 6 },
+  nose: [0, -0.1, -2.2],
+  // the tail tie-down: what touches first if the tail drops on the runway
+  tail: [0, 0.08, 4.4],
+  bodySide: 6,
+  // mechanical controls; the limiter stands for a pilot's hands: the normal category's 3.8 g, the stall
+  // reachable by pulling through
+  fbw: { gMax: 3.8, gMin: -1.52, alphaLimit: 15, alphaOverride: 22, rollRate: 1.0 },
+  // with the fixed gear's drag (gearCd) about 0.033, as measured on the type
+  cd0: 0.027,
+  waveDrag: [[0, 1], [0.4, 1], [0.6, 1.6]],
+  inducedK: 0.061,
+  spinYaw: 0,
+  // 141 KIAS
+  vne: 72.5,
+  // Continental O-200, 100 hp, on a 69 in propeller
+  thrustDry: 1700,
+  thrustAfterburner: 1700,
+  // its efficiency 0.70 at the best climb speed, 0.78 flat out: 3.4 m/s climb, 109 kt
+  prop: { power: 74600, efficiency: 0.865, effSpeed: 24 },
+  fixedGear: true,
+  // set for what the game derives from it: the air start at 70% (52 m/s, 100 kt, a cruise) and the
+  // autopilot's approach at 42% (31 m/s, 60 kt); the real 75% cruise is 55 m/s
+  cruiseSpeed: 74,
+  maxSpeed: 56,
+  // the tyres are 1.255 m below the model's origin
+  gearHeight: 1.255,
+  landingSinkLimit: 3.0,
+  landingBankLimit: 15,
+  // 40 deg flaps: CLmax 1.3 -> 1.7, and a lot of drag
+  flapClBonus: 0.5,
+  flapCd: 0.05,
+  gearCd: 0.006,
+  speedbrakeCd: 0,
+  brakeDecel: 3.0,
+  stallAlpha: 16,
+  nozzles: [],
+  // the pilot's eye under the wing's leading edge; outside views stand half as far back as for a fighter
+  view: { eye: [0, 0.42, 0.05], scale: 0.5 },
+});
+
+export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225, f16: F16, c150: C150 };
 
 export function tableLookup(table: AeroTable, x: number): number {
   if (x <= table[0][0]) return table[0][1];

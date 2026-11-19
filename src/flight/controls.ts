@@ -76,6 +76,8 @@ export interface ControlInput {
 export class Controls {
   throttle = 0;
   gearDown = true;
+  /** fixed gear: the gear key does nothing and the gear stays down */
+  gearFixed = false;
   flaps = false;
   private edges = new Set<Action>();
   private padHeld: boolean[] = [];
@@ -101,7 +103,7 @@ export class Controls {
 
   /** The autopilot sets gear/flaps itself; adopt its state so disengaging doesn't snap back to a stale one. */
   syncSystems(gearDown: boolean, flaps: boolean): void {
-    this.gearDown = gearDown;
+    this.gearDown = gearDown || this.gearFixed;
     this.flaps = flaps;
   }
 
@@ -165,7 +167,7 @@ export class Controls {
     this.throttle = Math.max(0, Math.min(1, this.throttle + ((down('throttleUp') ? 1 : 0) - (down('throttleDown') ? 1 : 0) + padThr) * 0.55 * dt));
     edge('gear');
     edge('flaps');
-    if (this.edges.has('gear') && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
+    if (this.edges.has('gear') && !this.gearFixed && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
     if (this.edges.has('flaps') && this.toggleAllowed('flaps')) this.flaps = !this.flaps;
     for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom'] as Action[]) {
       edge(a);

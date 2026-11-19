@@ -207,6 +207,7 @@ export class Menu {
     }, cfg.aircraft === id];
     row([pick('su27', 'SU-27 FLANKER'), pick('f117', 'F-117A NIGHTHAWK')]);
     row([pick('f16', 'F-16AM FALCON'), pick('an225', 'AN-225 MRIYA')]);
+    row([pick('c150', 'CESSNA 150')]);
     // the chosen aircraft's markings and loadouts, when it has a choice of them (the first is its default)
     const ac = AIRCRAFT[cfg.aircraft];
     const choose = (key: StringKey, items: { id: string; name: string }[] | undefined, field: 'insignia' | 'loadout'): void => {

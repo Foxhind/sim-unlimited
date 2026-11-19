@@ -381,8 +381,9 @@ function spawn(): void {
     const alt = start.alt ?? groundH + 1500;
     model.spawnAir(vec3.fromValues(e, alt, -n), spawnAt.hdg);
   }
-  // an air start begins clean: gear up (the model snaps its actuators to this on the first step)
-  controls.gearDown = start.alt === 0;
+  // an air start begins clean: gear up (the model snaps its actuators to this on the first step), unless it is fixed
+  controls.gearFixed = !!cfg.fixedGear;
+  controls.gearDown = start.alt === 0 || controls.gearFixed;
   controls.flaps = false;
   prevGear = controls.gearDown;
   prevFlaps = controls.flaps;

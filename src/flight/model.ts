@@ -432,6 +432,8 @@ export class FlightModel {
 
   /** Fixed-step accumulator; returns number of physics steps taken. */
   update(dt: number, controls: FlightControls, probe: GroundProbe = flatGround, air: Air = CALM_AIR): number {
+    // fixed gear stays down whatever the gear lever says
+    if (this.cfg.fixedGear && !controls.gearDown) controls = { ...controls, gearDown: true };
     this.acc = Math.min(this.acc + dt, PHYSICS_STEP * 10);
     let steps = 0;
     while (this.acc >= PHYSICS_STEP) {
@@ -755,12 +757,23 @@ export class FlightModel {
       }
     }
     // thrust: falls with air density (so with altitude and heat); the afterburner gains from ram pressure
-    const abFrac = cfg.thrustAfterburner > cfg.thrustDry ? Math.max(0, (c.throttle - 0.85) / 0.15) : 0;
-    const lapse = Math.pow(rho / RHO0, 0.7);
-    const thrust = lapse * c.throttle * (
-      cfg.thrustDry * (1 - 0.12 * Math.min(this.mach, 1.5)) +
-      (cfg.thrustAfterburner - cfg.thrustDry) * abFrac * (1 + 0.25 * this.mach * this.mach)
-    );
+    let thrust: number;
+    if (cfg.prop) {
+      // a piston engine: its power falls with density (Gagg-Ferrar), the propeller turns it into thrust at
+      // an efficiency that grows with airspeed, no more than its static thrust at low speed
+      const p = cfg.prop;
+      const power = p.power * c.throttle * Math.max(0, 1.132 * (rho / RHO0) - 0.132);
+      // (efficiency / V, which tends to 1 / effSpeed standing still)
+      const etaPerV = V > 1e-3 ? (p.efficiency * -Math.expm1(-V / p.effSpeed)) / V : p.efficiency / p.effSpeed;
+      thrust = Math.min(cfg.thrustDry * c.throttle * (rho / RHO0), etaPerV * power);
+    } else {
+      const abFrac = cfg.thrustAfterburner > cfg.thrustDry ? Math.max(0, (c.throttle - 0.85) / 0.15) : 0;
+      const lapse = Math.pow(rho / RHO0, 0.7);
+      thrust = lapse * c.throttle * (
+        cfg.thrustDry * (1 - 0.12 * Math.min(this.mach, 1.5)) +
+        (cfg.thrustAfterburner - cfg.thrustDry) * abFrac * (1 + 0.25 * this.mach * this.mach)
+      );
+    }
     // an engine that went with its wing gives nothing, and the ones left push off the centre line: the
     // missing engines' share comes off the total, and its moment about the centre of gravity with it (only
     // the lost ones', so an intact aircraft trims exactly as before)

@@ -116,7 +116,8 @@ export class Autopilot {
     const cross = (m.pos[0] - x) * Math.cos(H) + (m.pos[2] - z) * Math.sin(H);
     const along = (m.pos[0] - x) * Math.sin(H) - (m.pos[2] - z) * Math.cos(H);
     this.interStage = 0;
-    this.patternScale = clamp((2.2 / m.cfg.fbw.rollRate) ** 0.6, 1, 2.5);
+    // (a slow light aircraft turns tight: its pattern shrinks with its speed, which leaves the jets' as it was)
+    this.patternScale = clamp((2.2 / m.cfg.fbw.rollRate) ** 0.6, 1, 2.5) * Math.min(1, m.cfg.cruiseSpeed / 180);
     this.startAlt = m.pos[1];
     this.holdAlt = Math.min(m.pos[1], this.groundAt(x, z) + 450);
     // far out and roughly on the approach side: go straight to the final-approach law
@@ -149,6 +150,8 @@ export class Autopilot {
     const cross = rel[0] * rx + rel[1] * rz;
     const V = Math.max(30, m.speed);
     const vApp = approachSpeed(m);
+    // pattern speed: 35 m/s over the approach speed, or 60% over it for an aircraft that cannot fly that fast
+    const vPattern = Math.min(vApp + 35, vApp * 1.6);
     // speed is held through the air (what the wing feels); the path over the ground uses ground velocity
     const tas = Math.max(30, m.airspeed);
     const gt = this.groundAt(th.x, th.z);
@@ -184,7 +187,7 @@ export class Autopilot {
         const hdgErr = angOff(m.headingDeg);
         if (toE < CAPTURE || (Math.abs(cross) < 300 && hdgErr < 15 && along > -FIXD - 9000 * k)) this.landing = 'final';
       }
-      this.targets.speed = vApp + 35;
+      this.targets.speed = vPattern;
       // terrain clearance along the track: never hold below the highest ground ahead plus a margin
       const hr = (m.headingDeg * Math.PI) / 180;
       let highest = this.groundAt(m.pos[0], m.pos[2]);
@@ -225,7 +228,7 @@ export class Autopilot {
       // aircraft would float on down the runway, so add a gentle direct sink-rate push to settle it
       const settle = h < SETTLE_H && this.vsF > -0.6 ? SETTLE_GAIN * (-0.9 - this.vsF) : 0;
       const stick = (this.gamma.step(gammaT, gammaM, dt) - 0.35 * m.omega[0]) * (flare ? 2.5 : 1) + settle;
-      const vTarget = dAim > 10000 ? vApp + 35 : vApp;
+      const vTarget = dAim > 10000 ? vPattern : vApp;
       const thrT = h < 9 ? 0 : this.speedPid.step(vTarget, tas, dt);
       this.throttle += (thrT - this.throttle) * Math.min(1, dt / (h < 9 ? 0.3 : 1.5));
       out.pitch = clamp(stick, -1, 1);
