@@ -8,6 +8,7 @@ import {
 } from '../world/map-features';
 import { fetchOverpassQuery } from '../world/osm-source';
 import { getOsmRaw, putOsmRaw } from '../world/tile-cache';
+import { offsetLatLon, type Navaid } from '../flight/navaids';
 
 /** Q22: fixed reference airfields until the M6 global index. */
 /**
@@ -307,6 +308,57 @@ export class Minimap {
     const fy = ((this.center.lat + halfLat) - ll.lat) / (halfLat * 2);
     if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
     return [x + fx * size, y + fy * size];
+  }
+
+  /** aerodromes the map has loaded for its current view (the flight map feeds the radio stations from them) */
+  airfields(): Array<{ kind: string; lat: number; lon: number; code?: string; name?: string }> {
+    if (this.dirty) return [];
+    return this.features.features(this.featureTiles, this.featureLevel)
+      .filter((f) => f.kind === 'airport' || f.kind === 'airfield')
+      .map((f) => ({ kind: f.kind, lat: f.lat, lon: f.lon, code: f.code, name: featureName(f, 'en') || undefined }));
+  }
+
+  /**
+   * Radio stations over the map: VOR a hexagon, NDB a dotted ring, ILS a feather down the approach;
+   * the tuned ones white with a line from the aircraft, the rest green. Draw after draw().
+   */
+  drawNav(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number, stations: Navaid[], tuned: Set<string>, own?: LatLon): void {
+    const lw = Math.max(1, u);
+    const ownP = own ? this.project(own, x, y, size) : null;
+    for (const n of stations) {
+      const p = this.project(n, x, y, size);
+      const on = tuned.has(n.id);
+      const color = on ? HUD_WHITE : HUD_GREEN;
+      if (n.kind === 'ILS') {
+        // the feather: 10 NM back down the approach, two converging edges and the centreline
+        const far = this.project(offsetLatLon(n, n.course! + 180, 18500), x, y, size);
+        const l = this.project(offsetLatLon(offsetLatLon(n, n.course! + 180, 18500), n.course! - 90, 1600), x, y, size);
+        const r = this.project(offsetLatLon(offsetLatLon(n, n.course! + 180, 18500), n.course! + 90, 1600), x, y, size);
+        if (!p || !far) continue;
+        vec.line(p[0], p[1], far[0], far[1], lw, color);
+        if (l && r) vec.polyline([l, p, r], lw, color);
+        if (on && ownP) vec.line(ownP[0], ownP[1], p[0], p[1], lw, HUD_WHITE);
+        continue;
+      }
+      if (!p) continue;
+      const r = 4 * u;
+      if (n.kind === 'VOR') {
+        const pts: [number, number][] = [];
+        for (let i = 0; i < 6; i++) pts.push([p[0] + Math.cos((i * Math.PI) / 3) * r, p[1] + Math.sin((i * Math.PI) / 3) * r]);
+        vec.polyline(pts, lw, color, true);
+        vec.fillRect(p[0] - u, p[1] - u, 2 * u, 2 * u, color);
+      } else {
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4;
+          vec.fillRect(p[0] + Math.cos(a) * r - u / 2, p[1] + Math.sin(a) * r - u / 2, u, u, color);
+        }
+        vec.fillRect(p[0] - u, p[1] - u, 2 * u, 2 * u, color);
+      }
+      if (on) {
+        if (ownP) vec.line(ownP[0], ownP[1], p[0], p[1], lw, HUD_WHITE);
+        font.text(n.ident, p[0] + r + 2 * u, p[1] + 2 * u, u, HUD_WHITE);
+      }
+    }
   }
 
   /** In-flight use: keep the view still until the aircraft drifts off-centre, so tiles aren't resampled every frame. */

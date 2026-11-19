@@ -52,7 +52,25 @@ export class Pid {
   }
 }
 
+/** final approach speed the autoland flies (and the HUD shows in APP), m/s */
+export function approachSpeed(m: FlightModel): number {
+  return m.cfg.cruiseSpeed * 0.42;
+}
+
 export type LandingPhase = 'intercept' | 'final' | 'rollout';
+
+/** HDG flies the selected heading; NAV tracks the tuned VOR course or ILS localizer */
+export type LateralMode = 'HDG' | 'NAV';
+
+/** what NAV mode steers on: the course and the cross-track error (+ = aircraft right of the course), m */
+export interface NavGuidance {
+  course: number;
+  xtkM: number;
+}
+
+/** deg of intercept per metre off the course in NAV mode, and the steepest intercept it flies */
+const NAV_KP = 0.03;
+const NAV_MAX_INTERCEPT = 30;
 
 export interface AutopilotTargets {
   altitude: number; // m
@@ -77,11 +95,16 @@ export class Autopilot {
   /** terrain height under a world (x, z) point; set by the sim, flat zero by default */
   groundAt: (x: number, z: number) => number = () => 0;
   landing: LandingPhase | null = null;
+  lateral: LateralMode = 'HDG';
+  /** NAV-mode guidance from the radio, fed every frame; null while there is no usable signal */
+  nav: NavGuidance | null = null;
   private thr: { x: number; z: number; hdg: number } | null = null;
   private interStage = 0;
   /** pattern size multiplier: sluggish roll authority means a wider turn radius */
   private patternScale = 1;
   private holdAlt = 450;
+  /** altitude the approach began at: the pattern is never flown above it */
+  private startAlt = 450;
 
   /** Autoland on the runway whose threshold is (x, z) in world metres and whose heading is hdgDeg. */
   startLanding(m: FlightModel, x: number, z: number, hdgDeg: number): void {
@@ -94,6 +117,7 @@ export class Autopilot {
     const along = (m.pos[0] - x) * Math.sin(H) - (m.pos[2] - z) * Math.cos(H);
     this.interStage = 0;
     this.patternScale = clamp((2.2 / m.cfg.fbw.rollRate) ** 0.6, 1, 2.5);
+    this.startAlt = m.pos[1];
     this.holdAlt = Math.min(m.pos[1], this.groundAt(x, z) + 450);
     // far out and roughly on the approach side: go straight to the final-approach law
     // (needs the aircraft to be able to reach the centreline at <= ~35 deg intercept before the threshold)
@@ -124,10 +148,12 @@ export class Autopilot {
     const along = rel[0] * ux + rel[1] * uz;
     const cross = rel[0] * rx + rel[1] * rz;
     const V = Math.max(30, m.speed);
-    const vApp = m.cfg.cruiseSpeed * 0.42;
+    const vApp = approachSpeed(m);
     // speed is held through the air (what the wing feels); the path over the ground uses ground velocity
     const tas = Math.max(30, m.airspeed);
     const gt = this.groundAt(th.x, th.z);
+    // the threshold's height may only become known on the way in (terrain still loading): never hold below 450 m over it
+    this.holdAlt = Math.max(this.holdAlt, Math.min(this.startAlt, gt + 450));
     const GLIDE = (3 * Math.PI) / 180;
     const out: FlightControls = { ...base };
 
@@ -237,6 +263,18 @@ export class Autopilot {
     return out;
   }
 
+  /**
+   * NAV mode: steer the track onto the course, the intercept growing with the cross-track error
+   * (with a lead on how fast it is closing), and hold the crab into the wind; returns the heading.
+   */
+  navHeading(m: FlightModel, g: NavGuidance): number {
+    const C = (g.course * Math.PI) / 180;
+    const xRate = m.vel[0] * Math.cos(C) + m.vel[2] * Math.sin(C);
+    const trackT = g.course - clamp((g.xtkM + XTRK_LEAD * xRate) * NAV_KP, -NAV_MAX_INTERCEPT, NAV_MAX_INTERCEPT);
+    const crab = ((m.headingDeg - m.trackDeg + 540) % 360) - 180;
+    return (((trackT + crab) % 360) + 360) % 360;
+  }
+
   /** the roll loop is tuned for ~0.75 rad/s of roll per unit stick; scale the stick for snappier airframes */
   private rollScale(m: FlightModel): number {
     return Math.min(1, 0.75 / m.cfg.fbw.rollRate);
@@ -256,6 +294,7 @@ export class Autopilot {
 
   update(dt: number, m: FlightModel, base: FlightControls, fromLanding = false): FlightControls {
     if (this.landing && !fromLanding) return this.landingUpdate(dt, m, base);
+    if (!fromLanding && this.lateral === 'NAV' && this.nav) this.targets.heading = this.navHeading(m, this.nav);
     const V = Math.max(30, m.speed);
     // altitude -> desired climb rate -> desired flight-path angle (soft, rate limited)
     const vsCmd = clamp((this.targets.altitude - m.pos[1]) * 0.08, -12, 12);

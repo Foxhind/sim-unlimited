@@ -21,6 +21,7 @@ import { OSM_SCHEMA_VERSION } from './world/osm-source';
 import { parseOverpass, type OverpassJson } from './world/overpass';
 import type { OsmLine } from './world/osm-types';
 import { GroundProbe, towerAnchor } from './world/ground';
+import { FarElevation } from './world/far-elevation';
 import { buildSkyPoints, limitingMagnitude, PLANETS_OFFSET, planetPoints, skyMatrix, toGlMat3 } from './world/sky';
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
@@ -29,13 +30,14 @@ import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
 import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
-import { Autopilot } from './flight/autopilot';
+import { approachSpeed, Autopilot } from './flight/autopilot';
+import { cdi, GS_ANTENNA_M, NavDb, offsetLatLon, receive, type Navaid, type NavKind } from './flight/navaids';
 import { Air } from './flight/air';
 import { Controls, type Action } from './flight/controls';
 import { CameraRig, type CameraMode } from './flight/cameras';
 import { AircraftRenderer } from './flight/aircraft-renderer';
 import { FlightAudio } from './flight/audio';
-import { drawHud } from './flight/hud';
+import { drawHud, type HudMode, type HudNav } from './flight/hud';
 import { loadSettings, saveSettings } from './ui/settings';
 import { Menu } from './ui/menu';
 import { AIRFIELDS, Minimap } from './ui/minimap';
@@ -272,8 +274,34 @@ function startLocation(fc: { location: string; customPoint: LatLon | null }): La
   return fc.location === 'custom' && fc.customPoint ? fc.customPoint : af ?? start.latLon;
 }
 
+/** radio stations: an ILS onto each reference airfield's runway and a VOR/DME on it, then more as the OSM arrives */
+const navDb = new NavDb();
+for (const af of AIRFIELDS) {
+  navDb.addIls({ name: af.icao, lat: af.rwyLat, lon: af.rwyLon, course: af.hdg, lenM: 2000 });
+  navDb.addAirfield({ kind: 'airport', code: af.icao, lat: af.lat, lon: af.lon });
+}
+/** the airfield a runway belongs to: the nearest known one within 5 km of its middle */
+function runwayOwner(pts: [number, number][]): string | undefined {
+  const mid = { lat: (pts[0][1] + pts[pts.length - 1][1]) / 2, lon: (pts[0][0] + pts[pts.length - 1][0]) / 2 };
+  let best: string | undefined;
+  let bestD = 5000;
+  const fields = [...AIRFIELDS.map((a) => ({ lat: a.lat, lon: a.lon, code: a.icao as string | undefined, name: a.name as string | undefined })), ...flightMap.airfields()];
+  for (const f of fields) {
+    const [e, n] = latLonToEnu(mid, f.lat, f.lon, 0);
+    const d = Math.hypot(e, n);
+    if (d < bestD && (f.code || f.name)) { bestD = d; best = (f.code ?? f.name)!.toUpperCase(); }
+  }
+  return best;
+}
+
 // Q40: a fresh runway tile invalidates nearby terrain so flattening is applied
 osm.onTileReady = (tile, runways, coast) => {
+  // every long paved runway gets an ILS on each end
+  if (runways > 0) {
+    void cachedRunwayLines([tile]).then((lines) => {
+      for (const l of lines) navDb.addRunway(l.points as [number, number][], l.tags, runwayOwner(l.points as [number, number][]));
+    }).catch(() => undefined);
+  }
   // runways flatten the terrain and the OSM coastline reshapes the shore: rebuild with the OSM
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
   else if (coast) chunks.invalidate(tile); // only this tile's shore changes
@@ -443,14 +471,29 @@ const camActions: [Action, CameraMode][] = [
 
 let last = performance.now();
 const autopilot = new Autopilot();
+/** beyond the ground probe's few kilometres the autopilot still needs the terrain: coarse DEM tiles */
+const farElevation = new FarElevation();
 autopilot.groundAt = (x, z) => {
   const ll = enuToLatLon(chunks.origin, x, -z, 0);
-  return Math.max(0, ground.heightAt(ll.lon, ll.lat) ?? 0);
+  return Math.max(0, ground.heightAt(ll.lon, ll.lat) ?? farElevation.heightAt(ll.lon, ll.lat) ?? 0);
 };
 let apOn = false;
 const flightMap = new Minimap();
-const FLIGHT_MAP_SPAN_M = 40000;
+/** flight map ranges the zoom key steps through */
+const FLIGHT_MAP_SPANS_M = [10000, 20000, 40000, 80000];
+let mapSpanIdx = 2;
 let landingField: (typeof AIRFIELDS)[number] | null = null;
+/** the ILS the autoland flies, when it found one */
+let landingIls: Navaid | null = null;
+let hudMode: HudMode = 'NAV';
+/** tuned radios: NAV1 (VOR or ILS) with its selected course, ADF (NDB); null until something is in range */
+let nav1: Navaid | null = null;
+let adf: Navaid | null = null;
+let obs = 0;
+let lastNavFeed = 0;
+/** the approach condition last frame: the HUD switches to APP when it first becomes true */
+let prevApproach = false;
+let hudNav: HudNav | undefined;
 let fpsAvg = 60;
 let lastUrlUpdate = 0;
 let prevGear = true;
@@ -462,6 +505,107 @@ const crashCamPos = vec3.create();
 const menuView = mat4.create();
 const menuCamPos = vec3.create();
 const menuTarget = vec3.create();
+
+/** where the aircraft is, for the radios */
+function ownLatLon(): LatLon {
+  return enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], 0);
+}
+
+/** tune to the next station of the kinds in range after the current one (nearest first, wrapping) */
+function nextStation(cur: Navaid | null, kinds: NavKind[]): Navaid | null {
+  const list = navDb.inRange(ownLatLon(), model.pos[1], kinds);
+  if (!list.length) return cur;
+  const i = cur ? list.findIndex((r) => r.nav.id === cur.id) : -1;
+  return list[(i + 1) % list.length].nav;
+}
+
+/** a newly tuned NAV1: an ILS brings its course, a VOR starts on the direct course to it */
+function tuneNav1(n: Navaid | null): void {
+  nav1 = n;
+  if (n) obs = n.kind === 'ILS' ? n.course! : Math.round(receive(n, ownLatLon(), model.pos[1]).bearing);
+}
+
+/** terrain height under a lat/lon (0 until the ground has loaded there) */
+function groundAtLatLon(ll: LatLon): number | undefined {
+  const h = ground.heightAt(ll.lon, ll.lat) ?? farElevation.heightAt(ll.lon, ll.lat);
+  return h === undefined ? undefined : Math.max(0, h);
+}
+
+/** world position of a lat/lon at height h, relative to the aircraft */
+function relWorld(ll: LatLon, h: number): [number, number, number] {
+  const [e, n] = latLonToEnu(chunks.origin, ll.lat, ll.lon, 0);
+  return [e - model.pos[0], h - model.pos[1], -n - model.pos[2]];
+}
+
+/** radios, autopilot selectors, HUD mode and map zoom; returns what the HUD shows from the radios */
+function updateNav(now: number): HudNav {
+  const own = ownLatLon();
+  const alt = model.pos[1];
+  // feed stations from the aerodromes the flight map has loaded, once a second
+  if (now - lastNavFeed > 1000) {
+    lastNavFeed = now;
+    for (const f of flightMap.airfields()) navDb.addAirfield(f);
+    // nothing tuned yet: the nearest ILS close by, else the nearest VOR; the nearest NDB on the ADF
+    if (!nav1) {
+      const ils = navDb.inRange(own, alt, ['ILS']).find((r) => r.distM < 25000);
+      tuneNav1(ils?.nav ?? navDb.inRange(own, alt, ['VOR'])[0]?.nav ?? null);
+    }
+    adf ??= navDb.inRange(own, alt, ['NDB'])[0]?.nav ?? null;
+  }
+  if (controls.justPressed('navTune')) tuneNav1(nextStation(nav1, ['VOR', 'ILS']));
+  if (controls.justPressed('adfTune')) adf = nextStation(adf, ['NDB']);
+  if (controls.justPressed('hudMode')) hudMode = hudMode === 'NAV' ? 'APP' : 'NAV';
+  if (controls.justPressed('mapZoom')) mapSpanIdx = (mapSpanIdx + 1) % FLIGHT_MAP_SPANS_M.length;
+  if (nav1 && nav1.kind !== 'ILS') obs = (((obs + controls.knob('crsInc') - controls.knob('crsDec')) % 360) + 360) % 360;
+
+  // NAV1 and the approach: the ILS threshold's height comes from the terrain once it has loaded
+  let n1: HudNav['nav1'] = null;
+  if (nav1) {
+    if (nav1.kind === 'ILS' && nav1.elev === undefined) nav1.elev = groundAtLatLon(nav1);
+    const rx = receive(nav1, own, alt);
+    n1 = { rx, cdi: cdi(rx, obs, own, alt) };
+  }
+  const groundH = autopilot.groundAt(model.pos[0], model.pos[2]);
+  const ra = model.pos[1] - model.cfg.gearHeight - groundH;
+  // switch to APP as an ILS approach begins: gear down, localizer received, within 25 km of the threshold
+  const approach = !!n1 && n1.rx.nav.kind === 'ILS' && n1.rx.inRange && controls.gearDown && !model.onGround
+    && (n1.cdi.thrDistM ?? 1e9) < 25000 && (n1.cdi.thrDistM ?? 0) > -500;
+  if (approach && !prevApproach) hudMode = 'APP';
+  prevApproach = approach;
+
+  let runway: HudNav['runway'] = null;
+  if (nav1?.kind === 'ILS' && hudMode === 'APP') {
+    const e = nav1.elev ?? groundH;
+    const c = nav1.course!;
+    const half = (nav1.widthM ?? 45) / 2;
+    const thr = { lat: nav1.lat, lon: nav1.lon };
+    const far = offsetLatLon(thr, c, nav1.lenM ?? 2000);
+    runway = {
+      corners: [
+        relWorld(offsetLatLon(thr, c - 90, half), e), relWorld(offsetLatLon(thr, c + 90, half), e),
+        relWorld(offsetLatLon(far, c + 90, half), e), relWorld(offsetLatLon(far, c - 90, half), e),
+      ],
+      aim: relWorld(offsetLatLon(thr, c, GS_ANTENNA_M), e),
+    };
+  }
+
+  // autopilot selectors (while it holds them, not during autoland) and NAV-mode guidance
+  if (controls.justPressed('apNav') && state === 'flying') {
+    if (!apOn) { apOn = true; autopilot.engage(model); }
+    autopilot.lateral = autopilot.lateral === 'NAV' ? 'HDG' : 'NAV';
+  }
+  if (apOn && !autopilot.landing) {
+    const t = autopilot.targets;
+    const metric = settings.units === 'metric';
+    t.heading = (((t.heading + controls.knob('hdgInc') - controls.knob('hdgDec')) % 360) + 360) % 360;
+    t.altitude = Math.max(0, t.altitude + (controls.knob('altInc') - controls.knob('altDec')) * (metric ? 50 : 30.48));
+    t.speed = Math.max(30, t.speed + (controls.knob('spdInc') - controls.knob('spdDec')) * (metric ? 10 / 3.6 : 5 / 1.94384));
+  }
+  autopilot.nav = n1 && n1.rx.inRange && nav1!.kind !== 'NDB' ? { course: n1.cdi.course, xtkM: n1.cdi.xtkM } : null;
+
+  const adfRx = adf ? { rx: receive(adf, own, alt) } : null;
+  return { nav1: n1, adf: adfRx, runway, ra, vapp: approachSpeed(model) };
+}
 
 function frame(now: number): void {
   requestAnimationFrame(frame); // scheduled first: a bad frame must not kill the loop
@@ -483,7 +627,25 @@ function frame(now: number): void {
     else autopilot.stopLanding();
   }
   // L: autoland on the nearest reference airfield (within 80 km), approaching along its runway heading
+  if (!autopilot.landing) landingIls = null;
+  let ilsLanding = false;
   if (controls.justPressed('autoland') && state === 'flying' && !model.onGround) {
+    // the tuned ILS when it is received, else the nearest one within 80 km
+    const own = ownLatLon();
+    const tuned = nav1?.kind === 'ILS' && receive(nav1, own, model.pos[1]).inRange ? nav1 : null;
+    const ils = tuned ?? navDb.inRange(own, model.pos[1], ['ILS']).find((r) => r.distM < 80000)?.nav ?? null;
+    if (ils) {
+      tuneNav1(ils);
+      landingIls = ils;
+      landingField = null;
+      const [e, n] = latLonToEnu(chunks.origin, ils.lat, ils.lon, 0);
+      autopilot.startLanding(model, e, -n, ils.course!);
+      apOn = true;
+      hudMode = 'APP';
+      ilsLanding = true;
+    }
+  }
+  if (controls.justPressed('autoland') && state === 'flying' && !model.onGround && !ilsLanding) {
     let best: (typeof AIRFIELDS)[number] | null = null;
     let bestD = 80000;
     for (const af of AIRFIELDS) {
@@ -496,10 +658,12 @@ function frame(now: number): void {
       landingField = best;
       autopilot.startLanding(model, e, -n, best.hdg);
       apOn = true;
+      hudMode = 'APP';
     }
   }
-  if (apOn && autopilot.landing && landingField) {
-    const [e, n] = latLonToEnu(chunks.origin, landingField.lat, landingField.lon, 0);
+  const landingAt = landingIls ?? landingField;
+  if (apOn && autopilot.landing && landingAt) {
+    const [e, n] = latLonToEnu(chunks.origin, landingAt.lat, landingAt.lon, 0);
     autopilot.moveThreshold(e, -n);
     if (autopilot.landing === 'rollout' && model.onGround && model.speed < 1) {
       apOn = false;
@@ -507,11 +671,13 @@ function frame(now: number): void {
     }
   }
   // stick deflection by the pilot takes over; the autopilot only flies hands-off
-  const landingRoll = autopilot.landing === 'rollout';
+  // (touchdown itself: the autopilot only switches final -> rollout on its next update)
+  const landingRoll = autopilot.landing === 'rollout' || (autopilot.landing === 'final' && model.onGround);
   if (apOn && (Math.abs(flight.pitch) > 0.25 || Math.abs(flight.roll) > 0.25 || state !== 'flying' || (model.onGround && !landingRoll))) {
     apOn = false;
     autopilot.stopLanding();
   }
+  if (spawned && state === 'flying') hudNav = updateNav(now);
   if (apOn) {
     flight = autopilot.update(dt, model, flight);
     controls.syncSystems(flight.gearDown, flight.flaps);
@@ -729,7 +895,9 @@ function frame(now: number): void {
   const pad = 8 * u;
   if (spawned && state === 'flying' && rimLab.hud) {
     drawHud(font, vectors, renderer.width, renderer.height, u, {
-      model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound, autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined } : null,
+      model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound,
+      autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined, lateral: autopilot.lateral } : null,
+      hudMode, nav: hudNav, fovYDeg: 60,
       weather: { data: weatherInForce(), tempC: weather.tempC },
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
@@ -737,9 +905,12 @@ function frame(now: number): void {
     const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
     const own = enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], 0);
     flightMap.lang = settings.lang;
-    flightMap.follow(own, FLIGHT_MAP_SPAN_M);
+    const span = FLIGHT_MAP_SPANS_M[mapSpanIdx];
+    flightMap.follow(own, span);
     flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
-    font.text(`N  ${FLIGHT_MAP_SPAN_M / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
+    const tuned = new Set([nav1?.id, adf?.id, landingIls?.id].filter((x): x is string => !!x));
+    flightMap.drawNav(vectors, font, pad, mapY, mapSize, u, navDb.all(), tuned, own);
+    font.text(`N  ${span / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
   }
   if (!spawned && state === 'loading') {
     const msg = t(settings.lang, 'loading');

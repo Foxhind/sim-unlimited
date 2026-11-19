@@ -259,6 +259,8 @@ export class Menu {
     this.button(x0 + cw * 0.5, by, cw * 0.5, 40 * u, t(L, 'fly') + ' >', () => this.cb.onFly({ ...cfg }), false, true);
     this.text(t(L, 'helpFly'), x0, h * 0.86 - 44 * u, u, DIM);
     this.text(t(L, 'helpKeys'), x0, h * 0.86 - 26 * u, u, DIM);
+    this.text(t(L, 'helpAp'), x0, h * 0.86 - 80 * u, u, DIM);
+    this.text(t(L, 'helpNav'), x0, h * 0.86 - 62 * u, u, DIM);
   }
 
   private drawSettings(w: number, h: number, u: number): void {

@@ -5,7 +5,16 @@ export type Action =
   | 'pitchUp' | 'pitchDown' | 'rollLeft' | 'rollRight' | 'yawLeft' | 'yawRight'
   | 'throttleUp' | 'throttleDown' | 'gear' | 'flaps' | 'brakes' | 'speedbrake'
   | 'pause' | 'mute' | 'restart' | 'newPoint' | 'autopilot' | 'autoland'
-  | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget';
+  | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget'
+  // autopilot selectors, radios, HUD mode, flight map
+  | 'hdgDec' | 'hdgInc' | 'altDec' | 'altInc' | 'spdDec' | 'spdInc' | 'crsDec' | 'crsInc'
+  | 'apNav' | 'navTune' | 'adfTune' | 'hudMode' | 'mapZoom';
+
+/** selector knobs: one step per press, then repeating while held (Shift makes a step ten times bigger) */
+export const KNOB_ACTIONS = ['hdgDec', 'hdgInc', 'altDec', 'altInc', 'spdDec', 'spdInc', 'crsDec', 'crsInc'] as const;
+export type KnobAction = (typeof KNOB_ACTIONS)[number];
+const KNOB_DELAY_S = 0.4;
+const KNOB_RATE_S = 0.07;
 
 /** Q37 default layout; arrows are the stick (Up pushes the nose down). */
 export const DEFAULT_BINDINGS: Record<Action, string> = {
@@ -33,6 +42,19 @@ export const DEFAULT_BINDINGS: Record<Action, string> = {
   camFlyby: 'F4',
   camTower: 'F5',
   camTarget: 'F6',
+  hdgDec: 'BracketLeft',
+  hdgInc: 'BracketRight',
+  altDec: 'Minus',
+  altInc: 'Equal',
+  spdDec: 'Digit9',
+  spdInc: 'Digit0',
+  crsDec: 'Semicolon',
+  crsInc: 'Quote',
+  apNav: 'KeyU',
+  navTune: 'KeyT',
+  adfTune: 'KeyY',
+  hudMode: 'KeyH',
+  mapZoom: 'KeyK',
 };
 
 const clamp1 = (v: number): number => Math.max(-1, Math.min(1, v));
@@ -60,6 +82,9 @@ export class Controls {
   private clock = 0;
   private lastToggle: Partial<Record<'gear' | 'flaps', number>> = {};
   private axes = { pitch: 0, roll: 0, yaw: 0 };
+  /** knob steps this frame: signed count per knob, x10 with Shift */
+  private knobSteps = new Map<KnobAction, number>();
+  private knobHeld = new Map<KnobAction, number>();
 
   binding(action: Action, settings: Settings): string {
     return settings.bindings[action] ?? DEFAULT_BINDINGS[action];
@@ -67,6 +92,11 @@ export class Controls {
 
   justPressed(action: Action): boolean {
     return this.edges.has(action);
+  }
+
+  /** steps of a selector knob this frame (a press, then auto-repeat while held); 10 per step with Shift */
+  knob(action: KnobAction): number {
+    return this.knobSteps.get(action) ?? 0;
   }
 
   /** The autopilot sets gear/flaps itself; adopt its state so disengaging doesn't snap back to a stale one. */
@@ -137,8 +167,22 @@ export class Controls {
     edge('flaps');
     if (this.edges.has('gear') && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
     if (this.edges.has('flaps') && this.toggleAllowed('flaps')) this.flaps = !this.flaps;
-    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake'] as Action[]) {
+    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom'] as Action[]) {
       edge(a);
+    }
+    this.knobSteps.clear();
+    const big = input.down('ShiftLeft') || input.down('ShiftRight') ? 10 : 1;
+    for (const a of KNOB_ACTIONS) {
+      const pressed = presses.has(this.binding(a, settings));
+      let n = pressed ? 1 : 0;
+      if (down(a) || pressed) {
+        const held = (this.knobHeld.get(a) ?? -KNOB_DELAY_S) + (pressed ? 0 : dt);
+        if (held > 0) {
+          n += Math.floor(held / KNOB_RATE_S);
+          this.knobHeld.set(a, held % KNOB_RATE_S);
+        } else this.knobHeld.set(a, held);
+      } else this.knobHeld.delete(a);
+      if (n) this.knobSteps.set(a, n * big);
     }
 
     return {
