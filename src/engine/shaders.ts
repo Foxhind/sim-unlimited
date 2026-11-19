@@ -409,6 +409,49 @@ uint winHash(uint x) {
   return x;
 }
 float winRand(uint x) { return float(winHash(x)) / 4294967296.0; }
+// the facade at this fragment (WORLD_FS main): unit view ray from the eye, the face's normal toward the eye
+vec3 gWinD;
+vec3 gWinN;
+// an edge's glass tint: cool blue, neutral grey, green, bronze or dark
+vec3 glassTint(uint seed) {
+  uint t = winHash(seed * 17u + 9u) % 5u;
+  return t == 0u ? vec3(0.38, 0.44, 0.56) : t == 1u ? vec3(0.42, 0.44, 0.47) : t == 2u ? vec3(0.37, 0.46, 0.45)
+    : t == 3u ? vec3(0.46, 0.41, 0.36) : vec3(0.3, 0.33, 0.38);
+}
+// glass mirrors: the haze at a grazing look, and by day the sun as a stepped glint. Each pane leans a
+// little its own way (by r), so a facade flashes window by window, not all at once
+vec3 glassShine(vec3 g, float r, float fog) {
+  vec3 up = vec3(0.0, 1.0, 0.0);
+  vec3 t = cross(up, gWinN);
+  t = dot(t, t) > 1e-6 ? normalize(t) : vec3(1.0, 0.0, 0.0);
+  vec3 n = normalize(gWinN + t * (fract(r * 31.0) - 0.5) * 0.06 + up * (fract(r * 53.0) - 0.5) * 0.06);
+  float fres = pow(1.0 - clamp(dot(-gWinD, n), 0.0, 1.0), 4.0);
+  g = mix(g, uHaze, (floor(fres * 3.0 + 0.5) / 3.0) * 0.35 * (1.0 - fog));
+  float sunUp = clamp((uGlitterSun.y + 0.01) / 0.05, 0.0, 1.0);
+  float power = sunUp * mix(0.25, 1.0, clamp((uDirect.x - 0.5) * 2.0, 0.0, 1.0)) * (1.0 - fog);
+  if (power > 0.0) {
+    float m = max(dot(reflect(gWinD, n), uGlitterSun), 0.0);
+    float spot = pow(m, 300.0) * power;
+    float sheen = pow(m, 30.0) * power;
+    if (spot > 0.35) g = mix(g, uGlitterCore, ${GLINT_CORE});
+    else if (spot > 0.08) g = mix(g, uGlitterCore, ${GLINT_MID});
+    else if (sheen > 0.25) g = mix(g, uGlitterCore, ${GLINT_SHEEN});
+  }
+  return g;
+}
+// a pane's glass: the lit white of the wall's light in the edge's tint, a little lighter or darker per
+// pane, with its reflections; into the wall's colour with the fog
+vec3 paneGlass(vec3 wall, uint seed, float r, float fog) {
+  vec3 g = vRef * glassTint(seed) * (0.92 + 0.16 * fract(r * 97.0));
+  return mix(glassShine(g, r, fog), wall, fog);
+}
+// an edge's window frames: colour (white, anthracite, brown, wood, silver), bar width, and the bars
+// across the pane (none, a mullion, a mullion and a transom)
+vec3 frameColour(uint fs) {
+  uint t = (fs >> 2u) % 5u;
+  return t == 0u ? vec3(0.92) : t == 1u ? vec3(0.25, 0.26, 0.28) : t == 2u ? vec3(0.36, 0.25, 0.17)
+    : t == 3u ? vec3(0.56, 0.39, 0.23) : vec3(0.64, 0.65, 0.67);
+}
 // the ground floor of a building of two floors and more (windowAt)
 bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh, vec2 uv, vec3 edge, uint seed, bool resid, float r, vec2 fw, float fog) {
   // rare pastel signs over the shop windows of residential buildings
@@ -423,7 +466,7 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
   // shops are lit more often than flats, mostly white
   bool lit = uWindows == 2 && r < 0.5;
   vec3 shop = emitLight(mix(lutColor(r < 0.15 ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
-  vec3 glass = c * mix(vec3(0.42, 0.48, 0.6), vec3(1.0), fog);
+  vec3 glass = paneGlass(c, seed, r, fog);
   if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
     // the whole floor glazed along the edge, mullions every half slot
     if (dv < 0.06 * fh || dv > 0.84 * fh || uv.x < 0.25 || uv.x > edge.x - 0.25) return false;
@@ -468,8 +511,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, r, fw, fog);
   bool lit = uWindows == 2 && r < ${WINDOWS.LIT_SHARE};
   vec3 light = emitLight(mix(lutColor(r < ${(WINDOWS.LIT_SHARE * WINDOWS.YELLOW_SHARE).toFixed(3)} ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
-  // shades of the wall's own light, fading into the haze with it
-  vec3 glass = c * mix(vec3(0.4, 0.45, 0.55), vec3(1.0), fog);
+  vec3 glass = paneGlass(c, seed, r, fog);
   if (style > 0u && f >= 1.0 && winRand(seed * 31u + uint(k) * 0x9e3779b9u) < 0.6) {
     float bw = min(max(min(1.5, 0.42 * cw), 0.6 * fw.x), 0.47 * cw);
     if (abs(du) > bw || dv < 0.04 * fh || dv > 0.92 * fh) return false;
@@ -482,7 +524,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
     if (style == 1u) {
       if (lit) { c = light; return true; }
       // glazing lighter than a window, with mullions where they are wider than a pixel
-      c *= mix(vec3(0.58, 0.64, 0.74), vec3(1.0), fog);
+      c = mix(glassShine(c * mix(vec3(0.58, 0.64, 0.74), vec3(1.0), fog), r, fog), c, fog);
       float m = abs(fract((du + bw) / 0.75 + 0.5) - 0.5) * 0.75;
       if (fw.x < 0.25 && (m < 0.04 || dv < rail + 0.05)) c *= 0.8;
       return false;
@@ -498,7 +540,21 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   }
   float hw = min(max(min(0.7, 0.3 * cw), 0.6 * fw.x), 0.45 * cw);
   float hh = min(max(min(0.75, 0.27 * fh), 0.6 * fw.y), 0.4 * fh);
-  if (abs(du) > hw || abs(dv - 0.55 * fh) > hh) return false;
+  float dy = dv - 0.55 * fh;
+  if (abs(du) > hw || abs(dy) > hh) return false;
+  // the frame: its true width where that is about a pixel or more, else a pixel wide round a pane of
+  // 6 pixels or more; the bars across the pane only where they are wider than about a pixel
+  uint fs = winHash(seed * 13u + 5u);
+  float bar = 0.04 + 0.03 * float(fs & 3u);
+  bool real = bar > 0.7 * max(fw.x, fw.y);
+  bool outline = hw > 3.0 * fw.x && hh > 3.0 * fw.y;
+  if (real || outline) {
+    uint bars = (fs >> 5u) % 3u;
+    bool inFrame = hw - abs(du) < max(bar, fw.x) || hh - abs(dy) < max(bar, fw.y)
+      || (real && bars >= 1u && hw > 0.45 && abs(du) < 0.5 * bar)
+      || (real && bars == 2u && abs(dy - 0.33 * hh) < 0.5 * bar);
+    if (inFrame) { c = mix(vRef * frameColour(fs), c, fog); return false; }
+  }
   if (lit) { c = light; return true; }
   c = glass;
   return false;
@@ -605,6 +661,11 @@ void main() {
   vec2 wxz = uCamPos.xz + vRay.xz;
   vec2 fw = fwidth(wxz);
   vec2 winFw = fwidth(vWinUV);
+  // the face's normal from the ray's derivatives (faces are flat), toward the eye; for the windows
+  vec3 faceN = cross(dFdx(vRay), dFdy(vRay));
+  gWinD = vRay / max(length(vRay), 1e-4);
+  gWinN = dot(faceN, faceN) > 1e-12 ? normalize(faceN) : -gWinD;
+  if (dot(gWinN, gWinD) > 0.0) gWinN = -gWinN;
   if (vWater > 0.5) {
     float dist = length(vRay);
     c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
