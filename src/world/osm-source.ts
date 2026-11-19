@@ -6,7 +6,7 @@ import { overpassQuery, parseOverpass, type OverpassJson } from './overpass';
 import type { OsmDetail, OsmTileData, TileSource } from './osm-types';
 
 /** bump when the filter changes: cached raw tiles lack what it newly selects (3: antenna masts, 6: masts mapped as ways, 7: building entrances, 8: aerodrome outlines) */
-export const OSM_SCHEMA_VERSION = 8;
+export const OSM_SCHEMA_VERSION = 9;
 
 // Overpass rejects browser User-Agents (406) and fetch cannot override UA,
 // so dev goes through a same-origin Vite proxy that injects a descriptive UA (Q42).

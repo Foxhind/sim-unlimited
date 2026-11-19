@@ -571,6 +571,29 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
 }
 `;
 
+/**
+ * A railway track on its ballast (osm-mesher rail ribbons in the road mesh, aWinEdge.x TRACK_EDGE):
+ * uv is metres along and across the line. Concrete sleepers every 0.55 m, 2.7 m long, faded to their
+ * mean share where they would be under about 2 pixels; two steel rails 1.52 m apart, at least a pixel
+ * wide (thinner ones blended by their coverage); the ballast darker down the slopes of its prism.
+ */
+const TRACK_GLSL = `
+vec3 trackAt(vec3 c, vec2 uv, vec2 fw, float fog) {
+  float v = abs(uv.y);
+  float k = 1.0 - fog;
+  c *= mix(1.0, 0.8, smoothstep(1.7, 3.0, v) * k);
+  float fade = clamp(2.0 - 4.0 * fw.x / 0.55, 0.0, 1.0);
+  float sleeper = mix(0.4, step(fract(uv.x / 0.55), 0.4), fade);
+  if (v < 1.35) c = min(mix(c, c * 1.4, sleeper * k), 1.0);
+  float hw = max(0.035, 0.5 * fw.y);
+  if (abs(v - 0.76) < hw) {
+    vec3 steel = min(vec3(dot(c, vec3(0.3, 0.4, 0.3))) * 1.8, 1.0);
+    c = mix(c, steel, min(1.0, 0.07 / (2.0 * hw)) * k);
+  }
+  return c;
+}
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
@@ -665,7 +688,7 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}
 void main() {
   writeLogDepth();
   vec3 c = vColor;
@@ -683,6 +706,10 @@ void main() {
     c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
   }
   float alpha = 1.0 - uSelfLit;
+  if (vWinEdge.x < -0.5) {
+    float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    c = trackAt(c, vWinUV, winFw, floor(fog * 12.0) / 12.0);
+  }
   if (uWindows > 0 && vWinEdge.y > 0.0) {
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
     fog = floor(fog * 12.0) / 12.0;

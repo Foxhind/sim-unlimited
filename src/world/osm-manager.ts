@@ -79,6 +79,7 @@ interface MeshPayload {
   glowRamps: ArrayBuffer;
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
+  rAttrs: ArrayBuffer;
   wVertices: ArrayBuffer;
   wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
@@ -146,7 +147,7 @@ export class OsmManager {
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
             glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
-            rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), roadLines: buf(msg.roadLines),
+            rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false,
           });
@@ -333,7 +334,7 @@ export class OsmManager {
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
     chunk.glow = this.worldMesh(chunk, data.glowVertices, data.glowRamps);
-    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps);
+    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps);
     chunk.roadLines = this.points(chunk, data.roadLines);
     chunk.lamps = this.points(chunk, data.lamps);

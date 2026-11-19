@@ -9,8 +9,8 @@ const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
   relation["type"="building"];
-  way["highway"~"motorway|trunk|primary|secondary|tertiary|residential|unclassified"];
-  way["railway"="rail"];
+  way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway)$"];
+  way["railway"~"^(rail|narrow_gauge|light_rail)$"];
   way["aeroway"~"runway|taxiway|apron|helipad"]; node["aeroway"="helipad"];
   way["aeroway"="aerodrome"]; relation["aeroway"="aerodrome"];
   way["natural"~"water|wood|scrub|beach|bare_rock"]; relation["natural"="water"];

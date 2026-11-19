@@ -32,9 +32,15 @@ export interface OsmMeshOptions {
 }
 
 type P2 = [number, number];
+/** a vertex's WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) from its position */
+type VertexAttr = (p: { x: number; z: number }) => [number, number, number, number, number];
+/** aWinEdge.x of a railway track vertex (WORLD_FS trackAt; facades have the edge length there, > 0) */
+export const TRACK_EDGE = -1;
 
 /** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
+/** colour of a far railway line */
+const RAIL_LINE_INDEX = rampIndex(RAMP.HULL_DARK, 7);
 /** runway, taxiway, apron and helipad areas above the aerodrome pad, m */
 export const AEROWAY_AREA_BIAS = 0.1;
 /** runway and taxiway ribbons above the pad, m: over the asphalt areas they cross */
@@ -47,7 +53,7 @@ export const AEROWAY_LINE_BIAS = 0.2;
 export function isLitRoad(tags: Record<string, string>): boolean {
   const hw = tags.highway;
   if (!hw) return false;
-  return tags.lit === 'yes' || hw === 'residential' || hw === 'motorway' || hw === 'trunk' || hw === 'primary' || hw === 'secondary';
+  return tags.lit === 'yes' || hw === 'residential' || hw === 'living_street' || hw === 'motorway' || hw === 'trunk' || hw === 'primary' || hw === 'secondary';
 }
 
 /** glow level of a street-lit road surface at night (the brightest built-up ground is GLOW_LEVELS) */
@@ -71,8 +77,10 @@ export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
 const LAMP_RAMP = RAMP.HULL_DARK;
 
 export interface OsmMeshData extends TerrainMeshData {
-  /** road ribbons (highway=*), drawn only near like the buildings */
+  /** road ribbons (highway=*) with their shoulders and railway tracks, drawn only near like the buildings */
   roads: TerrainMeshData;
+  /** per road vertex WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge): zero, on a track u, v and TRACK_EDGE */
+  roadAttrs: Float32Array;
   /** street lamp posts: instances of INSTANCE.LAMP (props-mesher TREE_STRIDE), drawn with the trees */
   lampPosts: Float32Array;
   /**
@@ -190,6 +198,12 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
 interface LineStyle {
   ramp: number;
   width: number;
+  /** a road's shoulder beyond the carriageway on each side, metres (ROAD_SHOULDER_M) */
+  shoulder?: number;
+  /** a railway: its ballast carries the track (WORLD_FS trackAt) and a right-of-way strip beside it */
+  rail?: boolean;
+  /** a minor road (service, track, footway-like streets): no far line */
+  minor?: boolean;
 }
 
 /**
@@ -210,21 +224,69 @@ const LANE_WIDTH_M = 3.5;
 /** width of a waterway line without a `width` tag, metres */
 const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
 
-function classifyLine(tags: Record<string, string>): LineStyle | undefined {
+/**
+ * Roads drawn near, by highway=*: carriageway width without `width` or `lanes`, and the shoulder
+ * beside it on each side (none on town streets that have kerbs instead); footways, paths, cycleways,
+ * steps and the like are not drawn. *_link roads take LINK_ROAD.
+ */
+const ROAD_KINDS: Record<string, { width: number; shoulder: number; minor?: boolean }> = {
+  motorway: { width: 20, shoulder: 3 },
+  trunk: { width: 20, shoulder: 3 },
+  primary: { width: 14, shoulder: 2.5 },
+  secondary: { width: 11, shoulder: 2 },
+  tertiary: { width: 9, shoulder: 1.5 },
+  unclassified: { width: 7, shoulder: 1 },
+  road: { width: 6, shoulder: 1 },
+  busway: { width: 7, shoulder: 1 },
+  raceway: { width: 10, shoulder: 1.5, minor: true },
+  residential: { width: 7, shoulder: 0.5 },
+  living_street: { width: 6, shoulder: 0 },
+  service: { width: 4, shoulder: 0.5, minor: true },
+  track: { width: 3, shoulder: 0, minor: true },
+  pedestrian: { width: 5, shoulder: 0, minor: true },
+};
+const LINK_ROAD = { width: 7, shoulder: 1.5 };
+/** service=parking_aisle / driveway: narrower, no shoulder */
+const NARROW_SERVICE = new Set(['parking_aisle', 'driveway', 'drive-through', 'alley']);
+/** shoulders: compacted gravel and earth */
+export const SHOULDER_RAMP = snowy(colour(150, 140, 118));
+/** unpaved roads and tracks: gravel, or earth and grass ruts */
+export const GRAVEL_ROAD_RAMP = snowy(colour(146, 134, 110));
+export const DIRT_ROAD_RAMP = snowy(colour(118, 102, 80));
+const GRAVEL_SURFACES = new Set(['unpaved', 'gravel', 'fine_gravel', 'compacted', 'pebblestone', 'shells']);
+const DIRT_SURFACES = new Set(['dirt', 'earth', 'ground', 'grass', 'mud', 'sand', 'grass_paver', 'woodchips']);
+const PAVED_SURFACES = new Set(['paved', 'asphalt', 'concrete', 'concrete:plates', 'concrete:lanes', 'paving_stones', 'sett', 'cobblestone']);
+/** railway ballast (the track on it is WORLD_FS trackAt): grey-brown crushed stone, cleared of snow */
+export const BALLAST_RAMP = colour(104, 98, 90);
+/** railway=* drawn: main lines, sidings and yards (service=*), narrow gauge and light rail */
+const RAIL_KINDS = new Set(['rail', 'narrow_gauge', 'light_rail']);
+/** width of the ballast bed, metres (sleepers 2.7 m in the middle) */
+export const BALLAST_WIDTH_M = 6;
+/** the right-of-way strip beside the ballast on each side (cleared, mown), metres */
+export const RAIL_ZONE_M = 8;
+export const RAIL_ZONE_RAMP = snowy(colour(124, 118, 86));
+
+export function classifyLine(tags: Record<string, string>): LineStyle | undefined {
   const hw = tags.highway;
   if (hw) {
+    if (tags.area === 'yes') return undefined;
+    let kind = ROAD_KINDS[hw] ?? (/^(motorway|trunk|primary|secondary|tertiary)_link$/.test(hw) ? LINK_ROAD : undefined);
+    if (!kind) return undefined;
+    if (hw === 'service' && NARROW_SERVICE.has(tags.service)) kind = { width: 3, shoulder: 0, minor: true };
     const lanes = Number(tags.lanes);
     const width =
       osmWidthM(tags.width) ??
       (Number.isInteger(lanes) && lanes > 0 && lanes <= 16 ? lanes * LANE_WIDTH_M : undefined) ??
-      (hw === 'motorway' || hw === 'trunk' ? 20 :
-        hw === 'primary' ? 14 :
-        hw === 'secondary' ? 11 :
-        hw === 'tertiary' ? 9 :
-        7);
-    return { ramp: RAMP.ASPHALT, width };
+      kind.width;
+    const surface = tags.surface ?? (hw === 'track' ? 'unpaved' : undefined);
+    const unpaved = surface !== undefined && !PAVED_SURFACES.has(surface) && (GRAVEL_SURFACES.has(surface) || DIRT_SURFACES.has(surface));
+    const ramp = !unpaved ? (hw === 'pedestrian' ? RAMP.CONCRETE : RAMP.ASPHALT)
+      : DIRT_SURFACES.has(surface!) || (hw === 'track' && (tags.tracktype === 'grade4' || tags.tracktype === 'grade5')) ? DIRT_ROAD_RAMP : GRAVEL_ROAD_RAMP;
+    // a bridge has railings, not shoulders (and no strip painted over the water under it)
+    const shoulder = unpaved || (tags.bridge && tags.bridge !== 'no') ? 0 : kind.shoulder;
+    return { ramp, width, shoulder, minor: kind.minor };
   }
-  if (tags.railway === 'rail') return { ramp: RAMP.HULL_DARK, width: 6 };
+  if (tags.railway && RAIL_KINDS.has(tags.railway)) return { ramp: BALLAST_RAMP, width: BALLAST_WIDTH_M, rail: true };
   const ww = tags.waterway;
   if (ww && WATERWAY_WIDTH_M[ww] !== undefined) {
     // piped under roads, fields and buildings: nothing to see
@@ -277,9 +339,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const maxEdge = opts.maxEdgeMeters ?? Math.max(120, Math.min(500, tileSizeMeters(tile) / 12));
   // far 'large' layer sits slightly lower so the near 'full' layer wins depth where they overlap
   const biasScale = opts.detail === 'large' ? 0.4 : 1;
-  interface Out { verts: number[]; ramps: number[] }
+  // attrs: per vertex WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) where the mesh carries them
+  interface Out { verts: number[]; ramps: number[]; attrs?: number[] }
   const main: Out = { verts: [], ramps: [] };
-  const roads: Out = { verts: [], ramps: [] };
+  const roads: Out = { verts: [], ramps: [], attrs: [] };
   const water: Out = { verts: [], ramps: [] };
   const roadLines: number[] = [];
   const lamps: number[] = [];
@@ -296,7 +359,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return { lon, lat, x, z, y };
   };
 
-  const emitTri = (a: Pt, b: Pt, c: Pt, ramp: number, out: Out = main): void => {
+  const emitTri = (a: Pt, b: Pt, c: Pt, ramp: number, out: Out = main, attr?: VertexAttr): void => {
     const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
     const e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
     let nx = e1y * e2z - e1z * e2y;
@@ -309,6 +372,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     for (const p of [a, b, c]) {
       out.verts.push(p.x, p.y, p.z, nx, ny, nz);
       out.ramps.push(ramp);
+      if (out.attrs) {
+        if (attr) out.attrs.push(...attr(p));
+        else out.attrs.push(0, 0, 0, 0, 0);
+      }
     }
   };
 
@@ -400,7 +467,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return rgb;
   };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: RGB): void => {
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: RGB, attr?: VertexAttr): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
@@ -409,7 +476,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
       const under = filter && imageryOf(f);
       const col = under ? snowy(colourOf(softLight(under, filter))) : ramp;
-      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out);
+      for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out, attr);
     }
   };
   /** a segment cut by the terrain faces it crosses: GL line pairs lying on them */
@@ -520,17 +587,27 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
 
   const LINE_BIAS = 1.4;
+  /** under a road's carriageway its shoulders, over a railway's right-of-way strip its track */
+  const SHOULDER_BIAS = 1.3;
+  const ZONE_BIAS = 1.0;
+  const RAIL_BIAS = 1.5;
   /** how a line is drawn: undefined when it is not drawn at all */
   const lineLook = (line: OsmLine) => {
     const style = classifyLine(line.tags);
     if (!style || line.points.length < 2 || isTunnel(line.tags)) return undefined;
     const road = !!line.tags.highway;
     const lit = road && isLitRoad(line.tags);
+    const bridge = !!line.tags.bridge && line.tags.bridge !== 'no';
     return {
       half: style.width / 2,
       road,
       lit,
-      out: road ? roads : style.ramp === RAMP.WATER ? water : main,
+      rail: !!style.rail,
+      minor: !!style.minor,
+      shoulder: style.shoulder ?? 0,
+      // the right-of-way strip: not on a bridge (it would paint the river under it)
+      zone: style.rail && !bridge ? RAIL_ZONE_M : 0,
+      out: road || style.rail ? roads : style.ramp === RAMP.WATER ? water : main,
       // runways and taxiways lie on the flat aerodrome pad: just above its asphalt areas, not a
       // ribbon raised over bumps (the aircraft stands on the pad, it sank into a 1.4 m ribbon)
       bias: line.tags.aeroway ? AEROWAY_LINE_BIAS : LINE_BIAS,
@@ -552,12 +629,40 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const buildRibbon = (line: OsmLine): void => {
     const look = lineLook(line);
     if (!look || !tin) return;
-    const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
-    if (c.length < 2) return;
+    const pts = line.points.map((ll) => ({ c: toLattice(ll), e: enu(ll[0], ll[1]) }))
+      .filter((p, i, a) => i === 0 || p.c[0] !== a[i - 1].c[0] || p.c[1] !== a[i - 1].c[1]);
+    if (pts.length < 2) return;
+    const c = pts.map((p) => p.c);
     // nothing of it reaches this tile: skip the work
-    const g = tin.grid, r = look.half * latticePerMetre;
+    const g = tin.grid, r = (look.half + look.shoulder + look.zone) * latticePerMetre;
     if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > g + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > g + r)) return;
-    const { ramp, out } = look;
+    const lit = look.lit ? (ramp: number) => withGlow(ramp, LIT_ROAD_GLOW) : (ramp: number) => ramp;
+    // under the carriageway: the right-of-way strip of a railway, the shoulders of a road
+    if (look.zone) ribbon(c, look.half + look.zone, RAIL_ZONE_RAMP, ZONE_BIAS, main);
+    if (look.shoulder) ribbon(c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads);
+    if (!look.rail) {
+      ribbon(c, look.half, look.ramp, look.bias, look.out);
+      return;
+    }
+    // the track: each segment's vertices carry u along the line (metres from its start) and v across it
+    const segs: VertexAttr[] = [];
+    let u0 = 0;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [ax, az] = pts[i].e, [bx, bz] = pts[i + 1].e;
+      const len = Math.hypot(bx - ax, bz - az) || 1;
+      const dx = (bx - ax) / len, dz = (bz - az) / len, start = u0;
+      segs.push((p) => [start + (p.x - ax) * dx + (p.z - az) * dz, (p.z - az) * dx - (p.x - ax) * dz, TRACK_EDGE, 0, 0]);
+      u0 += len;
+    }
+    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, segs);
+  };
+
+  /**
+   * A ribbon `half` metres wide each side of the lattice polyline `c`, cut by the terrain faces; per
+   * segment vertex attributes optional (the caps take the first and last segment's)
+   */
+  const ribbon = (c: P2[], half: number, ramp: number, bias: number, out: Out, segs?: VertexAttr[]): void => {
+    const r = half * latticePerMetre;
     const left: P2[] = [], right: P2[] = [];
     for (let i = 0; i < c.length; i++) {
       const prev = c[Math.max(0, i - 1)], next = c[Math.min(c.length - 1, i + 1)];
@@ -575,13 +680,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       right.push([c[i][0] + dy * m, c[i][1] - dx * m]);
     }
     for (let i = 0; i < c.length - 1; i++) {
-      onFaces([left[i], right[i], left[i + 1]], ramp, look.bias, out);
-      onFaces([right[i], right[i + 1], left[i + 1]], ramp, look.bias, out);
+      onFaces([left[i], right[i], left[i + 1]], ramp, bias, out, undefined, segs?.[i]);
+      onFaces([right[i], right[i + 1], left[i + 1]], ramp, bias, out, undefined, segs?.[i]);
     }
-    for (const e of [c[0], c[c.length - 1]]) {
+    for (const [e, attr] of [[c[0], segs?.[0]], [c[c.length - 1], segs?.[segs.length - 1]]] as const) {
       for (let k = 0; k < CAP_SIDES; k++) {
         const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
-        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, look.bias, out);
+        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, bias, out, undefined, attr);
       }
     }
   };
@@ -594,9 +699,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     if (lit) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
-      if (!road) return;
+      // far lines: roads but the minor ones, and railways
+      if (!(road && !look.minor) && !look.rail) return;
+      const index = look.rail ? RAIL_LINE_INDEX : ROAD_LINE_INDEX;
       const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
-      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], look.bias, roadLines, ROAD_LINE_INDEX);
+      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], look.bias, roadLines, index);
       return;
     }
     // without the TIN the ribbon is sampled point by point and must clear the relief between them
@@ -766,6 +873,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       for (const q of [a, b, c]) {
         roads.verts.push(q[0], q[1], q[2], n[0], n[1], n[2]);
         roads.ramps.push(ramp);
+        roads.attrs!.push(0, 0, 0, 0, 0);
       }
     };
     const quad = (a: number[], b: number[], c: number[], d: number[], n: number[], ramp: number): void => {
@@ -850,6 +958,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     ramps: new Uint32Array(ramps), // face colours (palette.ts)
     vertexCount: ramps.length,
     roads: { vertices: new Float32Array(roads.verts), ramps: new Uint32Array(roads.ramps), vertexCount: roads.ramps.length },
+    roadAttrs: new Float32Array(roads.attrs!),
     water: { vertices: new Float32Array(water.verts), ramps: new Uint32Array(water.ramps), vertexCount: water.ramps.length },
     roadLines: new Float32Array(roadLines),
     lamps: new Float32Array(lamps),

@@ -16,7 +16,7 @@ const API: OverpassJson = {
     way(100, [1, 2, 3, 4, 1], { building: 'yes' }),
     way(101, [5, 6], { highway: 'footway' }),
     way(102, [5, 6], { highway: 'primary_link', name: 'Link' }),
-    way(103, [9, 10], { highway: 'service' }),
+    way(103, [9, 10], { highway: 'cycleway' }),
     way(104, [1, 2, 3, 4, 1], { barrier: 'fence' }),
     { type: 'relation', id: 200, members: [{ type: 'way', ref: 104, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'farmland' } },
     { type: 'relation', id: 201, members: [{ type: 'way', ref: 103, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
@@ -45,9 +45,9 @@ describe('filterOsmApi', () => {
   });
 
   it('matches ~ like Overpass (unanchored regex) and = exactly', () => {
-    expect(ids(out)).toContain('w102'); // primary_link ~ "…|primary|…"
+    expect(ids(out)).toContain('w102'); // primary_link ~ "^((…|primary|…)(_link)?|…)$"
     expect(ids(out)).not.toContain('w101'); // footway
-    expect(ids(out)).not.toContain('w103'); // service, only in a bus route
+    expect(ids(out)).not.toContain('w103'); // cycleway, only in a bus route
   });
 
   it('keeps tags only on matched elements; members and geometry nodes are bare', () => {
