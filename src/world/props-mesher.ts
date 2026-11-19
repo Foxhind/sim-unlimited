@@ -63,6 +63,9 @@ export const TREE_TYPES = 5;
 export const TREE_STRIDE = 7;
 
 /** the face colour of tree instance i (its first float) */
+/** runway and taxiway edge lights stand this high above the pad, m */
+const RUNWAY_LIGHT_M = 0.5;
+
 export function treeColour(trees: Float32Array, i: number): number {
   return ((trees[i + 6] << GLOW_SHIFT) | trees[i + 4]) >>> 0;
 }
@@ -267,8 +270,8 @@ export function buildProps(opts: PropsOptions): PropsData {
   const pushLight = (lon: number, lat: number, index: number): void => {
     if (lon < b.west || lon >= b.east || lat <= b.south || lat > b.north) return;
     const [x, z] = enu(lon, lat);
-    // above the draped runway ribbon (bias 1.4) so depth test keeps the points visible
-    lights.push(x, Math.max(sampleHeight(lon, lat), 0) + 1.8, z, index);
+    // edge-light height, above the runway ribbon (AEROWAY_LINE_BIAS) so the depth test keeps them visible
+    lights.push(x, Math.max(sampleHeight(lon, lat), 0) + RUNWAY_LIGHT_M, z, index);
   };
   for (const line of data.lines) {
     const runway = line.tags.aeroway === 'runway';

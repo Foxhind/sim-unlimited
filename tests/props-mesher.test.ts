@@ -173,7 +173,7 @@ describe('buildProps lights (Q7)', () => {
     expect(p.lights.length % 4).toBe(0);
     const indices = new Set<number>();
     for (let i = 0; i < p.lights.length / 4; i++) {
-      expect(p.lights[i * 4 + 1]).toBeCloseTo(101.8, 3);
+      expect(p.lights[i * 4 + 1]).toBeCloseTo(100.5, 3);
       indices.add(p.lights[i * 4 + 3]);
     }
     expect(indices.has(rampIndex(RAMP.EMISSIVE, 13))).toBe(true); // edge

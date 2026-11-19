@@ -34,6 +34,10 @@ type P2 = [number, number];
 
 /** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
+/** runway, taxiway, apron and helipad areas above the aerodrome pad, m */
+export const AEROWAY_AREA_BIAS = 0.1;
+/** runway and taxiway ribbons above the pad, m: over the asphalt areas they cross */
+export const AEROWAY_LINE_BIAS = 0.2;
 
 /**
  * A street-lit road: every residential street and motorway / trunk / primary / secondary road,
@@ -166,7 +170,8 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
     return { ramp: RAMP.WATER, bias: 0.3, water: true };
   }
   if (aeroway === 'runway' || aeroway === 'taxiway' || aeroway === 'apron' || aeroway === 'helipad') {
-    return { ramp: RAMP.ASPHALT, bias: 1.0, water: false };
+    // on the aerodrome's flat pad (aerodrome.ts): a hair above it, where the aircraft's wheels are
+    return { ramp: RAMP.ASPHALT, bias: AEROWAY_AREA_BIAS, water: false };
   }
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
   if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, FILTER.SCRUB);
@@ -539,6 +544,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       road,
       lit,
       out: road ? roads : style.ramp === RAMP.WATER ? water : main,
+      // runways and taxiways lie on the flat aerodrome pad: just above its asphalt areas, not a
+      // ribbon raised over bumps (the aircraft stands on the pad, it sank into a 1.4 m ribbon)
+      bias: line.tags.aeroway ? AEROWAY_LINE_BIAS : LINE_BIAS,
       // a street-lit surface glows at night (the shader shows the level only then)
       ramp: lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp,
     };
@@ -580,13 +588,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       right.push([c[i][0] + dy * m, c[i][1] - dx * m]);
     }
     for (let i = 0; i < c.length - 1; i++) {
-      onFaces([left[i], right[i], left[i + 1]], ramp, LINE_BIAS, out);
-      onFaces([right[i], right[i + 1], left[i + 1]], ramp, LINE_BIAS, out);
+      onFaces([left[i], right[i], left[i + 1]], ramp, look.bias, out);
+      onFaces([right[i], right[i + 1], left[i + 1]], ramp, look.bias, out);
     }
     for (const e of [c[0], c[c.length - 1]]) {
       for (let k = 0; k < CAP_SIDES; k++) {
         const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
-        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, LINE_BIAS, out);
+        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, look.bias, out);
       }
     }
   };
@@ -595,16 +603,17 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const buildLine = (line: OsmLine): void => {
     const look = lineLook(line);
     if (!look) return;
-    const bias = LINE_BIAS;
     const { half, road, lit, out, ramp } = look;
     if (lit) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
       if (!road) return;
       const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
-      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], bias, roadLines, ROAD_LINE_INDEX);
+      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], look.bias, roadLines, ROAD_LINE_INDEX);
       return;
     }
+    // without the TIN the ribbon is sampled point by point and must clear the relief between them
+    const bias = LINE_BIAS;
 
     // densify long segments so the ribbon follows terrain
     const path: LonLat[] = [];
