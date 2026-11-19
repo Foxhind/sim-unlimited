@@ -511,7 +511,13 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, r, fw, fog);
   bool lit = uWindows == 2 && r < ${WINDOWS.LIT_SHARE};
   vec3 light = emitLight(mix(lutColor(r < ${(WINDOWS.LIT_SHARE * WINDOWS.YELLOW_SHARE).toFixed(3)} ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
-  vec3 glass = paneGlass(c, seed, r, fog);
+  // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
+  // changed by its owner (residential only), so frames and glass vary up a wall and along it
+  uint ws = seed;
+  if (winRand(seed ^ winHash(uint(f) * 0x2545u + 77u)) < 0.25) ws = winHash(seed + uint(f) * 0x632be5abu);
+  if (resid && winRand(seed ^ winHash(uint(k) * 0x27d4eb2du + uint(f) * 0x165667b1u + 3u)) < 0.75)
+    ws = winHash(ws ^ (uint(k) * 0x9e3779b9u + uint(f) * 0x85ebca6bu));
+  vec3 glass = paneGlass(c, ws, r, fog);
   if (style > 0u && f >= 1.0 && winRand(seed * 31u + uint(k) * 0x9e3779b9u) < 0.6) {
     float bw = min(max(min(1.5, 0.42 * cw), 0.6 * fw.x), 0.47 * cw);
     if (abs(du) > bw || dv < 0.04 * fh || dv > 0.92 * fh) return false;
@@ -544,7 +550,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   if (abs(du) > hw || abs(dy) > hh) return false;
   // the frame: its true width where that is about a pixel or more, else a pixel wide round a pane of
   // 6 pixels or more; the bars across the pane only where they are wider than about a pixel
-  uint fs = winHash(seed * 13u + 5u);
+  uint fs = winHash(ws * 13u + 5u);
   float bar = 0.04 + 0.03 * float(fs & 3u);
   bool real = bar > 0.7 * max(fw.x, fw.y);
   bool outline = hw > 3.0 * fw.x && hh > 3.0 * fw.y;
