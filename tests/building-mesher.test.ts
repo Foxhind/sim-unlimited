@@ -7,6 +7,7 @@ import {
   buildingSeed,
   buildingTags,
   footprintHeight,
+  PARAPET,
   computeHeights,
   parseColor,
   parseLength,
@@ -84,6 +85,44 @@ describe('default height and roof', () => {
       expect(roof({ building, 'building:levels': '2' })).toBeUndefined();
     }
     expect(roof({ 'building:part': 'yes', building: 'yes', height: '7' })).toBeUndefined();
+    // a large footprint (~ 63 × 67 m) keeps the flat default; the small one above (~ 6 × 9 m) is hipped
+    expect(buildingTags({ rings: [rect()], tags: { building: 'yes' } })['roof:shape']).toBeUndefined();
+    expect(buildingTags({ rings: [rect()], tags: { building: 'residential', 'building:levels': '2' } })['roof:shape']).toBeUndefined();
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'yes' } }).roof).toBe(0);
+  });
+});
+
+describe('parapet', () => {
+  const upAt = (m: ReturnType<typeof build>, y: number) => {
+    const out: number[] = [];
+    for (let i = 0; i < m.vertexCount; i++) {
+      if (Math.abs(m.vertices[i * 6 + 1] - y) < 1e-3 && m.vertices[i * 6 + 4] > 0.99) out.push(m.vertices[i * 6]);
+    }
+    return out;
+  };
+
+  it('a flat roof sits 50 cm under the wall top behind a parapet 20 cm wide; the top stays at height', () => {
+    const m = build([{ rings: [rect()], tags: { building: 'industrial', height: '10' } }]);
+    expect(Math.max(...ys(m))).toBeCloseTo(110, 4);
+    const maxX = Math.max(...Array.from({ length: m.vertexCount }, (_, i) => m.vertices[i * 6]));
+    // parapet top: from the wall face to 20 cm inside; the roof surface ends 20 cm inside, 50 cm lower
+    expect(Math.min(...upAt(m, 110).filter((x) => x > maxX - 1))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
+    expect(Math.max(...upAt(m, 110 - PARAPET.HEIGHT_M))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
+    expect(m.windows.length / 5).toBe(m.vertexCount);
+  });
+
+  it('no parapet on a canopy, a pitched roof or a too low building', () => {
+    expect(upAt(build([{ rings: [rect()], tags: { building: 'roof', height: '4' } }]), 103.5)).toHaveLength(0);
+    expect(upAt(build([{ rings: [rect()], tags: { building: 'shed', height: '2' } }]), 101.5)).toHaveLength(0);
+    expect(upAt(build([{ rings: [rect()], tags: { building: 'shed', height: '2' } }]), 102).length).toBeGreaterThan(0);
+  });
+
+  it('a courtyard gets a parapet on its edge too', () => {
+    const hole = rect(0.0001, 0.0001).reverse();
+    const m = build([{ rings: [rect(), hole], tags: { building: 'apartments', height: '10' } }]);
+    const flat = build([{ rings: [rect()], tags: { building: 'apartments', height: '10' } }]);
+    expect(m.vertexCount).toBeGreaterThan(flat.vertexCount);
+    expect(Math.max(...ys(m))).toBeCloseTo(110, 4);
   });
 });
 

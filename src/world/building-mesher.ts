@@ -43,6 +43,12 @@ export function hasBalconies(tags: Record<string, string>, wall: number): boolea
 
 /** an entrance node this close to a wall edge (it is usually a vertex of the outline) is on it */
 const ENTRANCE_SNAP_M = 1.5;
+/**
+ * Parapet along the edges of a flat roof, inside the building's height (the roof is HEIGHT_M under the
+ * wall top): width inward from the wall face, height; only on a footprint whose sides are at least
+ * MIN_SIDE_M and a facade at least MIN_WALL_M tall.
+ */
+export const PARAPET = { WIDTH_M: 0.2, HEIGHT_M: 0.5, MIN_SIDE_M: 2, MIN_WALL_M: 2.5 } as const;
 /** doors: width × height by the entrance tag, and the leaf colours (picked per door by its hash) */
 const DOOR_SIZE: Record<string, [number, number]> = { main: [1.9, 2.4], garage: [2.6, 2.3], default: [1.1, 2.1] };
 const DOOR_FRAME_RGB: RGB = [58, 56, 54];
@@ -185,13 +191,16 @@ export function footprintHeight(outer: XZ[]): number {
 
 /** building values that get a hipped roof by default when low-rise */
 const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
+/** a footprint larger than this (m²) keeps the flat default roof: a hipped roof over it would tower over the walls */
+export const HIPPED_DEFAULT_MAX_AREA_M2 = 1000;
 
 /**
  * The tags a building is drawn with: OSM tags plus the defaults it lacks. A building=residential
  * without `height` and `building:levels` has the footprint height as its facade (FOOTPRINT_WALL_TAG;
  * the roof goes on top); others get DEFAULT_LEVELS in computeHeights. Without `roof:shape`, a low-rise
  * building=yes or building=residential (facade from height, else building:levels × 3 m, else the
- * default, up to 12 m) gets a `hipped` roof; every other type and building:part areas stay flat.
+ * default, up to 12 m) with a footprint up to HIPPED_DEFAULT_MAX_AREA_M2 gets a `hipped` roof; larger
+ * footprints, every other type and building:part areas stay flat.
  */
 export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | undefined): Record<string, string> {
   const out = { ...tags };
@@ -200,7 +209,8 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
     out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
   }
   const isPart = tags['building:part'] !== undefined && tags['building:part'] !== 'no';
-  if (tags['roof:shape'] === undefined && !isPart && HIPPED_DEFAULT_TYPES.has(tags.building)) {
+  const small = !outer || Math.abs(ringAreaXZ(outer)) <= HIPPED_DEFAULT_MAX_AREA_M2;
+  if (tags['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
     const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
       ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
     if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = 'hipped';
@@ -576,7 +586,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
 
     if (roof.kind === 'flat') {
       // a flat roof holds snow in winter
-      capRing(outer, holes, wallTop, snowy(rRamp), true);
+      // a parapet along the edges, the roof sunk behind it (not on a canopy or a too small building)
+      const bb = bbox(outer);
+      const withParapet = !isCanopy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
+      if (withParapet) {
+        const roofY = wallTop - PARAPET.HEIGHT_M;
+        capRing(parapet(outer, roofY, wallTop, wRamp), holes.map((r) => parapet(r, roofY, wallTop, wRamp)), roofY, snowy(rRamp), true);
+      } else {
+        capRing(outer, holes, wallTop, snowy(rRamp), true);
+      }
     } else if (roof.kind === 'fan') {
       const apex: V3 = [centroid[0], wallTop + h.roof, centroid[1]];
       for (let i = 0; i < outer.length; i++) {
@@ -733,6 +751,44 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     } else {
       wallRect(p, dir, n, u - w / 2, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
     }
+  }
+
+  /** a quad with one normal for all its vertices, no facade attributes */
+  function flatQuad(a: V3, b: V3, c: V3, d: V3, n: V3, ramp: number): void {
+    for (const p of [a, b, c, a, c, d]) {
+      verts.push(p[0], p[1], p[2], n[0], n[1], n[2]);
+      ramps.push(ramp);
+      win.push(0, 0, 0, 0, 0);
+    }
+  }
+
+  /**
+   * Parapet on a flat roof along a ring (outer ccw, hole cw, so the roof is on the left of every edge):
+   * the wall face is its outside; an inner face PARAPET.WIDTH_M inside it from the roof (y0) to the
+   * wall top (y1), and a top. Returns the inner ring, the edge of the roof surface.
+   */
+  function parapet(ring: XZ[], y0: number, y1: number, ramp: number): XZ[] {
+    const n = ring.length;
+    const left = (p: XZ, q: XZ): XZ => {
+      const ex = q[0] - p[0], ez = q[1] - p[1], len = Math.hypot(ex, ez) || 1;
+      return [-ez / len, ex / len];
+    };
+    const inner = ring.map((p, i): XZ => {
+      const n1 = left(ring[(i + n - 1) % n], p), n2 = left(p, ring[(i + 1) % n]);
+      const denom = 1 + n1[0] * n2[0] + n1[1] * n2[1];
+      // a miter, but at a near-reversal corner only the next edge's offset (no long spike)
+      const k = denom < 0.2 ? 0 : PARAPET.WIDTH_M / denom;
+      return k ? [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k] : [p[0] + n2[0] * PARAPET.WIDTH_M, p[1] + n2[1] * PARAPET.WIDTH_M];
+    });
+    const top = snowy(ramp);
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const p = ring[i], q = ring[j], pi = inner[i], qi = inner[j];
+      const [lx, lz] = left(p, q);
+      flatQuad([pi[0], y0, pi[1]], [qi[0], y0, qi[1]], [qi[0], y1, qi[1]], [pi[0], y1, pi[1]], [lx, 0, lz], ramp);
+      flatQuad([p[0], y1, p[1]], [q[0], y1, q[1]], [qi[0], y1, qi[1]], [pi[0], y1, pi[1]], [0, 1, 0], top);
+    }
+    return inner;
   }
 
   function capRing(outer: XZ[], holes: XZ[][], y: number, ramp: number, up: boolean): void {
