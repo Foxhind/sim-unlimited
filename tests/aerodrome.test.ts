@@ -137,4 +137,31 @@ describe('aerodrome pads', () => {
     }
     expect(inside).toBeGreaterThan(1000);
   });
+
+  it('does not bend the pad towards a coarser neighbour', async () => {
+    const pad = (await buildPad(padSources({ areas: [aerodrome()], lines: [] })[0]))!;
+    const dem = lattice(A);
+    // a parent whose border lines miss the pad by metres on every edge
+    const up = (p: Float32Array) => Float32Array.from(p, (h) => h + 6);
+    const coarse = { n: up(dem.borders.n), s: up(dem.borders.s), w: up(dem.borders.w), e: up(dem.borders.e) };
+    applyPads(dem, A, GRID, [pad]);
+    const tin = buildTerrainTin(A, GRID, dem.heights, { borders: { ...dem.borders, coarse }, pads: [pad] });
+    expect(tin.coarse).toBeDefined();
+    let onPad = 0, offPad = 0;
+    for (let k = 0; k < tin.vx.length; k++) {
+      const onBorder = tin.vx[k] === 0 || tin.vx[k] === GRID || tin.vy[k] === 0 || tin.vy[k] === GRID;
+      if (!onBorder) continue;
+      const lon = ((A.x + tin.vx[k] / GRID) / n) * 360 - 180;
+      const lat = mercatorYToLat((A.y + tin.vy[k] / GRID) / n);
+      const [e, nn] = latLonToEnu(pad.origin, lat, lon, 0);
+      if (padDistance(pad, e, nn) <= 0) {
+        onPad++;
+        expect(tin.coarse!.edges[k]).toBe(0);
+        expect(tin.coarse!.dh[k]).toBe(0);
+      } else if (tin.coarse!.edges[k]) offPad++;
+    }
+    expect(onPad).toBeGreaterThan(0);
+    // elsewhere the seam is still stitched
+    expect(offPad).toBeGreaterThan(0);
+  });
 });

@@ -64,6 +64,7 @@ export interface TerrainTin {
    * `edges` — bits of the edges the vertex lies on that are also the parent's boundary
    * (1 n, 2 s, 4 w, 8 e); `dh` — metres from the vertex to the parent's border line there (both
    * clamped to sea level). The renderer adds `dh` on the edges whose neighbour is coarser.
+   * Vertices on an aerodrome pad get neither (TinOptions.pads): the pad stays flat.
    */
   coarse?: { dh: number[]; edges: number[] };
 }
@@ -1122,6 +1123,9 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   if (!coarseLines.some((l) => l)) return { grid, vx, vy, vh, tris, sea };
   const dh = vx.map(() => 0), edges = vx.map(() => 0);
   for (let k = 0; k < vx.length; k++) {
+    // an aerodrome pad is not bent towards a coarser neighbour (by metres where the parent's line
+    // misses the pad): it stays flat, and the skirts close the seam
+    if (padAt({ x: vx[k], y: vy[k] }) !== undefined) continue;
     const on = [vy[k] === 0, vy[k] === grid, vx[k] === 0, vx[k] === grid];
     for (let e = 0; e < 4; e++) {
       const line = coarseLines[e];
