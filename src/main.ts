@@ -104,6 +104,10 @@ const start = parseStart();
 const cfg = fitAircraft(AIRCRAFT[start.aircraft], start.insignia, start.loadout);
 const model = new FlightModel(cfg);
 const rig = new CameraRig();
+rig.groundAt = (x, z) => {
+  const ll = enuToLatLon(chunks.origin, x, -z, 0);
+  return ground.heightAt(ll.lon, ll.lat);
+};
 const aircraftRenderer = new AircraftRenderer(gl);
 const chunks = new ChunkManager(gl, start.latLon);
 const osm = new OsmManager(gl, start.latLon);
@@ -294,7 +298,7 @@ function runwayOwner(pts: [number, number][]): string | undefined {
   return best;
 }
 
-// Q40: a fresh runway tile invalidates nearby terrain so flattening is applied
+// Q40: a fresh aerodrome/runway tile invalidates nearby terrain so its pad is applied
 osm.onTileReady = (tile, runways, coast) => {
   // every long paved runway gets an ILS on each end
   if (runways > 0) {
@@ -302,7 +306,9 @@ osm.onTileReady = (tile, runways, coast) => {
       for (const l of lines) navDb.addRunway(l.points as [number, number][], l.tags, runwayOwner(l.points as [number, number][]));
     }).catch(() => undefined);
   }
-  // runways flatten the terrain and the OSM coastline reshapes the shore: rebuild with the OSM
+  // the collision surface is built from the tile's own OSM like the mesh: rebuild it too
+  ground.refresh(tile);
+  // aerodrome pads flatten the terrain and the OSM coastline reshapes the shore: rebuild with the OSM
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
   else if (coast) chunks.invalidate(tile); // only this tile's shore changes
 };
@@ -325,6 +331,32 @@ const spawnAt = { lat: start.latLon.lat, lon: start.latLon.lon, hdg: start.hdg }
 let runwaySnap: 'waiting' | 'busy' | 'done' = start.alt === 0 ? 'waiting' : 'done';
 let runwaySnapSince = 0;
 const RUNWAY_WAIT_MS = 20000;
+
+/**
+ * A ground start stands on the detailed (z14) surface, so it waits until the tiles there are drawn
+ * in detail — which needs their OSM. When the OSM is late (Overpass down, the OSM API throttling)
+ * the coarse parent drawn instead may lie metres above that surface and the aircraft would stand
+ * inside it: after DETAIL_WAIT_MS from the runway snap the detailed tiles around the start are
+ * drawn without their OSM (the terrain then has no aerodrome pad yet, and neither has the ground
+ * probe; both are rebuilt with it when it arrives).
+ */
+const DETAIL_WAIT_MS = 15000;
+let detailWaitSince = 0;
+const forcedDetail = new Set<string>();
+
+function startDrawnInDetail(now: number): boolean {
+  if (start.alt !== 0) return true;
+  const c = tileForLatLon(spawnAt.lat, spawnAt.lon, 14);
+  if (chunks.shownDetail.has(`${c.z}/${c.x}/${c.y}`)) return true;
+  detailWaitSince ||= now;
+  if (now - detailWaitSince > DETAIL_WAIT_MS && !forcedDetail.size) {
+    // a z14 tile is drawn only with all its siblings (else their parent covers it): force whole families
+    for (const t of tilesAround(spawnAt)) {
+      for (let k = 0; k < 4; k++) forcedDetail.add(`14/${(t.x & ~1) + (k & 1)}/${(t.y & ~1) + (k >> 1)}`);
+    }
+  }
+  return false;
+}
 
 function tilesAround(ll: LatLon): Tile[] {
   const c = tileForLatLon(ll.lat, ll.lon, 14);
@@ -772,7 +804,8 @@ function frame(now: number): void {
 
   // OSM is not a spawn gate: an Overpass outage must not ground the sim (a runway start waits for it a little)
   if (state === 'loading' && !spawned) snapToRunway(now);
-  if (state === 'loading' && !spawned && runwaySnap === 'done' && chunks.nearReady(camWorld.latLon, 3000) && ground.ready) {
+  if (state === 'loading' && !spawned && runwaySnap === 'done' && chunks.nearReady(camWorld.latLon, 3000) && ground.ready &&
+    startDrawnInDetail(now)) {
     spawn();
     state = 'flying';
   }
@@ -810,7 +843,7 @@ function frame(now: number): void {
 
   profiler.stage('тайлы: выбор и загрузка');
   // a detailed (z14) tile is shown only once its OSM is ready; until then its coarse parent stands in
-  chunks.update(camWorld, view, proj, now, (key) => osm.ready(key));
+  chunks.update(camWorld, view, proj, now, (key) => osm.ready(key) || forcedDetail.has(key));
   osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
   const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
   farOsm.update(camWorld, view, proj, now, chunks.origin, farOsmTiles(camWorld.latLon, camWorld.alt, detailKeys), chunks.shownDetail);

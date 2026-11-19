@@ -43,6 +43,13 @@ export class GroundProbe {
   private retryAt = new Map<string, number>();
   /** tiles built without Landsat imagery: reload after this time */
   private stale = new Map<string, number>();
+  /**
+   * Tiles whose OSM arrived after their surface was built (refresh): reloaded as soon as possible,
+   * the old surface kept meanwhile. The value is the refresh generation, so a load that started
+   * before the refresh does not count as the reload.
+   */
+  private outdated = new Map<string, number>();
+  private generation = 0;
   private active = 0;
 
   constructor(private origin: () => LatLon) {}
@@ -59,7 +66,8 @@ export class GroundProbe {
         const tile = { z: 14, x: ((center.x + dx) % n + n) % n, y: Math.max(0, Math.min(n - 1, center.y + dy)) };
         const key = `${tile.z}/${tile.x}/${tile.y}`;
         wanted.add(key);
-        if ((this.samplers.has(key) && !((this.stale.get(key) ?? Infinity) <= now)) || this.pending.has(key)) continue;
+        const due = this.outdated.has(key) || (this.stale.get(key) ?? Infinity) <= now;
+        if ((this.samplers.has(key) && !due) || this.pending.has(key)) continue;
         if ((this.retryAt.get(key) ?? 0) > now) continue;
         if (this.active >= 2) continue;
         this.pending.add(key);
@@ -75,11 +83,22 @@ export class GroundProbe {
         this.samplers.delete(key);
         this.prisms.delete(key);
         this.stale.delete(key);
+        this.outdated.delete(key);
       }
     }
   }
 
+  /**
+   * The OSM of `tile` has arrived: rebuild its surface from it (aerodrome pads, coastline,
+   * buildings), as the terrain mesh is rebuilt. The current surface stays until the new one is in.
+   */
+  refresh(tile: { z: number; x: number; y: number }): void {
+    const key = `${tile.z}/${tile.x}/${tile.y}`;
+    if (this.samplers.has(key) || this.pending.has(key)) this.outdated.set(key, ++this.generation);
+  }
+
   private async load(tile: { z: number; x: number; y: number }, key: string, now: number): Promise<void> {
+    const gen = this.outdated.get(key);
     try {
       // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
       const raw = await getOsmRaw(`${tileKey('osm', tile, OSM_SCHEMA_VERSION)}/full`).catch(() => undefined);
@@ -107,6 +126,7 @@ export class GroundProbe {
         pads,
       }), tile);
       this.samplers.set(key, surface);
+      if (this.outdated.get(key) === gen) this.outdated.delete(key);
       if (!ls) this.stale.set(key, now + 10000);
       else this.stale.delete(key);
       if (data) {
@@ -181,7 +201,8 @@ export class GroundProbe {
   /** runway/tower anchor: tile center of the start tile, grounded */
   get ready(): boolean {
     const tile = tileForLatLon(this.tileLatLon.lat, this.tileLatLon.lon, 14);
-    return this.samplers.has(`${tile.z}/${tile.x}/${tile.y}`);
+    const key = `${tile.z}/${tile.x}/${tile.y}`;
+    return this.samplers.has(key) && !this.outdated.has(key);
   }
 }
 

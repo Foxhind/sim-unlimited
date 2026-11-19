@@ -6,6 +6,8 @@ export type CameraMode = 'cockpit' | 'orbit' | 'chase' | 'flyby' | 'tower' | 'ta
 export const CAMERA_MODES: CameraMode[] = ['cockpit', 'orbit', 'chase', 'flyby', 'tower', 'target'];
 
 const UP = vec3.fromValues(0, 1, 0);
+/** outside cameras keep at least this far above the ground (m): the terrain is not drawn from below */
+const CAMERA_CLEARANCE_M = 1.5;
 
 export class CameraRig {
   mode: CameraMode = 'cockpit';
@@ -14,6 +16,8 @@ export class CameraRig {
   orbitYaw = 0.6;
   orbitPitch = 0.25;
   orbitDist = 45;
+  /** ground height under a world point (x, z), m; outside cameras do not go below it */
+  groundAt?: (x: number, z: number) => number | undefined;
   private chasePos = vec3.create();
   private anchor = vec3.create();
   private anchorSet = false;
@@ -34,6 +38,12 @@ export class CameraRig {
   private bodyDir(model: FlightModel, x: number, y: number, z: number, out: vec3): vec3 {
     this.basis(model);
     return vec3.transformMat3(out, vec3.fromValues(x, y, z), this.rot);
+  }
+
+  /** lift an outside camera out of the ground: from below, the terrain is not drawn at all */
+  private aboveGround(p: vec3): void {
+    const h = this.groundAt?.(p[0], p[2]);
+    if (h !== undefined) p[1] = Math.max(p[1], Math.max(0, h) + CAMERA_CLEARANCE_M);
   }
 
   private chaseTarget(model: FlightModel): vec3 {
@@ -72,6 +82,7 @@ export class CameraRig {
           model.pos[1] + Math.sin(this.orbitPitch) * dist,
           model.pos[2] + Math.cos(this.orbitYaw) * cp * dist,
         );
+        this.aboveGround(this.pos);
         mat4.lookAt(this.view, this.pos, model.pos, UP);
         return;
       }
@@ -79,6 +90,7 @@ export class CameraRig {
         const goal = this.chaseTarget(model);
         vec3.lerp(this.chasePos, this.chasePos, goal, Math.min(1, 4 * dt));
         vec3.copy(this.pos, this.chasePos);
+        this.aboveGround(this.pos);
         vec3.scaleAndAdd(this.target, model.pos, fwd, 20);
         mat4.lookAt(this.view, this.pos, this.target, UP);
         return;
@@ -92,6 +104,7 @@ export class CameraRig {
           this.anchorSet = true;
         }
         vec3.copy(this.pos, this.anchor);
+        this.aboveGround(this.pos);
         mat4.lookAt(this.view, this.pos, model.pos, UP);
         return;
       }
@@ -111,6 +124,7 @@ export class CameraRig {
           model.pos[1] + 18 * k,
           model.pos[2] + Math.cos(this.orbitYaw) * d,
         );
+        this.aboveGround(this.pos);
         mat4.lookAt(this.view, this.pos, model.pos, UP);
         return;
       }
