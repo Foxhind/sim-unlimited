@@ -3,7 +3,7 @@ import {
   applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, type RGB,
 } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
-import { buildBuildingMesh, buildingNightLights, hasBalconies, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
+import { buildBuildingMesh, buildingNightLights, hasBalconies, isLitBuilding, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
@@ -130,6 +130,20 @@ describe('building night lights', () => {
     expect(windowFade(WINDOW_LIGHT.FADE_HALF_M)).toBeCloseTo((1 + WINDOW_LIGHT.FADE_MIN) / 2, 6);
     expect(windowFade(1000)).toBeGreaterThan(windowFade(5000));
     expect(windowFade(1e7)).toBeGreaterThan(WINDOW_LIGHT.FADE_MIN);
+  });
+
+  it('chimneys and other man_made structures mapped as buildings have no windows', () => {
+    const windowed = (tags: Record<string, string>) => {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect()], tags }], sampleHeight: flat });
+      for (let i = 0; i < m.vertexCount; i++) if (m.windows[i * WINDOW_ATTR_FLOATS + 3] > 0) return true;
+      return false;
+    };
+    // OSM way 53521351: a 250 m power station chimney
+    expect(windowed({ building: 'industrial', height: '250' })).toBe(true);
+    expect(windowed({ building: 'industrial', man_made: 'chimney', height: '250' })).toBe(false);
+    for (const man_made of ['tower', 'water_tower', 'silo', 'storage_tank']) expect(isLitBuilding({ building: 'yes', man_made })).toBe(false);
+    expect(isLitBuilding({ building: 'chimney' })).toBe(false);
+    expect(isLitBuilding({ building: 'industrial', man_made: 'works' })).toBe(true);
   });
 
   it('balconies: only on residential buildings, glazed or open on some edges, the rest plain windows', () => {

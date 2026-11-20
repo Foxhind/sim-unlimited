@@ -81,6 +81,15 @@ const ENTRANCE_SNAP_M = 1.5;
  * MIN_SIDE_M and a facade at least MIN_WALL_M tall.
  */
 export const PARAPET = { WIDTH_M: 0.2, HEIGHT_M: 0.5, MIN_SIDE_M: 2, MIN_WALL_M: 2.5 } as const;
+/**
+ * A chimney (man_made=chimney, building=chimney) is open at the top: a rim WALL_M thick like a
+ * parapet, the shaft inside it soot-black (SOOT) and its floor sunk DEPTH (a share of the wall) below
+ * the top, with no rooftop structures.
+ */
+export const CHIMNEY = { WALL_M: 0.5, DEPTH: 0.8, SOOT: [22, 22, 24] as RGB } as const;
+export function isChimney(tags: Record<string, string>): boolean {
+  return tags.man_made === 'chimney' || (tags['building:part'] || tags.building) === 'chimney';
+}
 /** doors: width × height by the entrance tag, and the leaf colours (picked per door by its hash) */
 const DOOR_SIZE: Record<string, [number, number]> = { main: [1.9, 2.4], garage: [2.6, 2.3], default: [1.1, 2.1] };
 const DOOR_FRAME_RGB: RGB = [58, 56, 54];
@@ -681,7 +690,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // a parapet along the edges, the roof sunk behind it (not on a canopy or a too small building)
       const bb = bbox(outer);
       const withParapet = !isCanopy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
-      if (withParapet) {
+      if (withParapet && isChimney(tags)) {
+        const soot = rgbRamp(CHIMNEY.SOOT);
+        const floorY = wallTop - CHIMNEY.DEPTH * h.wall;
+        const inOuter = parapet(outer, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M);
+        const inHoles = holes.map((r) => parapet(r, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M));
+        capRing(inOuter, inHoles, floorY, soot, true);
+      } else if (withParapet) {
         const roofY = wallTop - PARAPET.HEIGHT_M;
         const inOuter = parapet(outer, roofY, wallTop, wRamp);
         const inHoles = holes.map((r) => parapet(r, roofY, wallTop, wRamp));
@@ -934,9 +949,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   /**
    * Parapet on a flat roof along a ring (outer ccw, hole cw, so the roof is on the left of every edge):
    * the wall face is its outside; an inner face PARAPET.WIDTH_M inside it from the roof (y0) to the
-   * wall top (y1), and a top. Returns the inner ring, the edge of the roof surface.
+   * wall top (y1), and a top. Returns the inner ring, the edge of the roof surface. The inner face
+   * takes innerRamp (the wall's by default), the top the wall's colour (snow in winter).
    */
-  function parapet(ring: XZ[], y0: number, y1: number, ramp: number): XZ[] {
+  function parapet(ring: XZ[], y0: number, y1: number, ramp: number, innerRamp = ramp, width: number = PARAPET.WIDTH_M): XZ[] {
     const n = ring.length;
     const left = (p: XZ, q: XZ): XZ => {
       const ex = q[0] - p[0], ez = q[1] - p[1], len = Math.hypot(ex, ez) || 1;
@@ -946,15 +962,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       const n1 = left(ring[(i + n - 1) % n], p), n2 = left(p, ring[(i + 1) % n]);
       const denom = 1 + n1[0] * n2[0] + n1[1] * n2[1];
       // a miter, but at a near-reversal corner only the next edge's offset (no long spike)
-      const k = denom < 0.2 ? 0 : PARAPET.WIDTH_M / denom;
-      return k ? [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k] : [p[0] + n2[0] * PARAPET.WIDTH_M, p[1] + n2[1] * PARAPET.WIDTH_M];
+      const k = denom < 0.2 ? 0 : width / denom;
+      return k ? [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k] : [p[0] + n2[0] * width, p[1] + n2[1] * width];
     });
     const top = snowy(ramp);
     for (let i = 0; i < n; i++) {
       const j = (i + 1) % n;
       const p = ring[i], q = ring[j], pi = inner[i], qi = inner[j];
       const [lx, lz] = left(p, q);
-      flatQuad([pi[0], y0, pi[1]], [qi[0], y0, qi[1]], [qi[0], y1, qi[1]], [pi[0], y1, pi[1]], [lx, 0, lz], ramp);
+      flatQuad([pi[0], y0, pi[1]], [qi[0], y0, qi[1]], [qi[0], y1, qi[1]], [pi[0], y1, pi[1]], [lx, 0, lz], innerRamp);
       flatQuad([p[0], y1, p[1]], [q[0], y1, q[1]], [qi[0], y1, qi[1]], [pi[0], y1, pi[1]], [0, 1, 0], top);
     }
     return inner;
@@ -1066,9 +1082,14 @@ export function isAllNight(tags: Record<string, string>): boolean {
 const UNLIT_TYPES = new Set([
   'garage', 'garages', 'carport', 'shed', 'hut', 'cabin', 'roof', 'barn', 'greenhouse', 'storage_tank',
   'silo', 'transformer_tower', 'service', 'ruins', 'construction', 'bunker', 'kiosk', 'toilets',
+  'chimney', 'water_tower', 'cooling_tower',
+]);
+/** structures mapped as buildings (man_made) that have no windows: chimneys, towers, tanks, silos */
+const UNLIT_MAN_MADE = new Set([
+  'chimney', 'tower', 'water_tower', 'silo', 'storage_tank', 'gasometer', 'kiln', 'bunker_silo', 'mast', 'reservoir_covered',
 ]);
 export function isLitBuilding(tags: Record<string, string>): boolean {
-  return !UNLIT_TYPES.has(tags['building:part'] || tags.building || 'yes');
+  return !UNLIT_TYPES.has(tags['building:part'] || tags.building || 'yes') && !UNLIT_MAN_MADE.has(tags.man_made);
 }
 
 /** taller than this (top above ground), a building carries red obstruction lights on its roof */

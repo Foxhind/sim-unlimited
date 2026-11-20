@@ -10,6 +10,7 @@ import {
   FACADE_ZONES,
   footprintHeight,
   PARAPET,
+  CHIMNEY,
   ROOFTOP,
   computeHeights,
   parseColor,
@@ -123,6 +124,31 @@ describe('parapet', () => {
     expect(Math.min(...upAt(m, 110).filter((x) => x > maxX - 1))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
     expect(Math.max(...upAt(m, 110 - PARAPET.HEIGHT_M))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
     expect(m.windows.length / 5).toBe(m.vertexCount);
+  });
+
+  it('a chimney is open: a 50 cm rim, a soot-black shaft, its floor sunk 80% of the wall', () => {
+    // OSM way 53521351: a 250 m power station chimney mapped as building=industrial
+    const m = build([{ rings: [rect()], tags: { building: 'industrial', man_made: 'chimney', height: '250' } }]);
+    expect(edgeTop(m)).toBeCloseTo(350, 3);
+    const maxX = Math.max(...Array.from({ length: m.vertexCount }, (_, i) => m.vertices[i * 6]));
+    const floorY = 350 - CHIMNEY.DEPTH * 250;
+    expect(Math.max(...upAt(m, floorY))).toBeCloseTo(maxX - CHIMNEY.WALL_M, 3);
+    expect(Math.min(...upAt(m, 350).filter((x) => x > maxX - 2))).toBeCloseTo(maxX - CHIMNEY.WALL_M, 3);
+    // the floor and the shaft's inner faces are soot, the rim keeps the wall's colour
+    const soot = colour(...CHIMNEY.SOOT);
+    let sootFaces = 0;
+    for (let i = 0; i < m.vertexCount; i++) {
+      const y = m.vertices[i * 6 + 1];
+      if (Math.abs(y - floorY) < 1e-3 && m.vertices[i * 6 + 4] > 0.99) expect(m.ramps[i] & 0xffffff).toBe(soot);
+      if (Math.abs(y - 350) < 1e-3 && m.vertices[i * 6 + 4] > 0.99) expect(m.ramps[i] & 0xffffff).not.toBe(soot);
+      if (Math.abs(m.vertices[i * 6 + 4]) < 0.01 && y > floorY - 1e-3 && (m.ramps[i] & 0xffffff) === soot) sootFaces++;
+    }
+    expect(sootFaces).toBeGreaterThan(0);
+    // nothing on the roof: no up-facing surface between the floor and the rim
+    for (let i = 0; i < m.vertexCount; i++) {
+      const y = m.vertices[i * 6 + 1];
+      if (m.vertices[i * 6 + 4] > 0.99) expect(Math.abs(y - floorY) < 1e-3 || Math.abs(y - 350) < 1e-3).toBe(true);
+    }
   });
 
   it('no parapet on a canopy, a pitched roof or a too low building', () => {
