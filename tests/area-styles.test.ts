@@ -6,11 +6,14 @@ const BASE: RGB = [90, 120, 60];
 const TOP: RGB = [200, 80, 160];
 
 describe('blend', () => {
-  it('soft-light is the existing softLight exactly (default styles unchanged)', () => {
+  it('soft-light is the existing softLight exactly', () => {
     expect(blend(BASE, TOP, 'soft-light', 0.7)).toEqual(softLight(BASE, TOP, 0.7));
+  });
+
+  it('every default filter is the blend of its own mode and strength', () => {
     for (const { kind } of AREA_KINDS) {
       const f = DEFAULT_AREA_STYLES[kind];
-      expect(filterColour(BASE, f)).toEqual(softLight(BASE, f.colour));
+      expect(filterColour(BASE, f)).toEqual(blend(BASE, f.colour, f.mode, f.strength));
     }
   });
 

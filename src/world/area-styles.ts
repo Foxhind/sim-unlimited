@@ -29,20 +29,17 @@ export const AREA_KINDS: ReadonlyArray<{ kind: AreaKind; name: string; tags: str
   { kind: 'rock', name: 'Скалы и осыпи', tags: 'natural=bare_rock, scree' },
 ];
 
-const soft = (r: number, g: number, b: number): AreaFilter => ({ colour: [r, g, b], mode: 'soft-light', strength: 1 });
-const GRASS = soft(104, 192, 80);
-
-/** soft-light filters of open ground: channels above mid grey lighten the imagery, below darken */
+/** the game's filters (tuned in areas.html) */
 export const DEFAULT_AREA_STYLES: AreaStyles = {
-  scrub: soft(72, 120, 56),
-  beach: soft(224, 204, 150),
-  rock: soft(150, 138, 122),
-  farmland: soft(128, 200, 72),
-  pitch: GRASS,
-  park: GRASS,
-  garden: GRASS,
-  golf: GRASS,
-  wetland: soft(88, 144, 112),
+  park: { colour: [104, 192, 80], mode: 'color-burn', strength: 0.18 },
+  garden: { colour: [104, 192, 80], mode: 'soft-light', strength: 1 },
+  golf: { colour: [104, 192, 80], mode: 'soft-light', strength: 1 },
+  pitch: { colour: [50, 80, 42], mode: 'screen', strength: 0.44 },
+  farmland: { colour: [16, 16, 9], mode: 'screen', strength: 1 },
+  scrub: { colour: [104, 192, 80], mode: 'color-burn', strength: 0.2 },
+  wetland: { colour: [88, 144, 112], mode: 'soft-light', strength: 1 },
+  beach: { colour: [179, 164, 122], mode: 'normal', strength: 0.74 },
+  rock: { colour: [150, 138, 122], mode: 'soft-light', strength: 1 },
 };
 
 const sameFilter = (a: AreaFilter, b: AreaFilter): boolean =>
