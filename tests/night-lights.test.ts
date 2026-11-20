@@ -41,6 +41,13 @@ describe('sun colour', () => {
     expect(sunColour(10)).toEqual(low); // the "morning" preset puts the sun at +10°
   });
 
+  it('the moon glows on XDR like the lit windows, far below the sun', async () => {
+    const { HDR_EMISSION } = await import('../src/engine/renderer');
+    expect(SKY_FS).toContain('uniform float uMoonEmit;');
+    expect(SKY_FS).toContain(`idx == ${LIGHT.SUN}u ? uSunEmit : uMoonEmit`);
+    expect(HDR_EMISSION.cityLights).toBeLessThan(HDR_EMISSION.sun);
+  });
+
   it('the sky shader draws the sun as one plain disc from the LUT entry applySunColors writes', () => {
     expect(SKY_FS).toContain(`idx = ${LIGHT.SUN}u;`);
     expect(SKY_FS).not.toContain('halo');

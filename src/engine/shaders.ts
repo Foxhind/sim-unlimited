@@ -996,6 +996,9 @@ void main() {
 }
 `;
 
+/** the moon disc's lit side: step 13 of the sky ramp (208 + 13) */
+const MOON_LIT_INDEX = 208 + 13;
+
 export const SKY_FS = `#version 300 es
 precision highp float;
 in vec2 vNdc;
@@ -1010,6 +1013,8 @@ uniform float uFogStart;
 uniform float uFogEnd;
 // brightness of the sun disc × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uSunEmit;
+// the moon's lit side glows like the windows on XDR (renderer HDR_EMISSION.cityLights), far below the sun
+uniform float uMoonEmit;
 // an overcast deck (Q46): how far its base is above the camera / the camera above its top, m (0: none),
 // and its face colour. Like the base ground, it goes on to the horizon under the deck's tiles.
 uniform float uDeckUp;
@@ -1086,12 +1091,12 @@ void main() {
       vec2 xy = vec2(dot(o, a), dot(o, b)) / moonR;
       float z = sqrt(max(1.0 - dot(xy, xy), 0.0));
       vec3 n = xy.x * a + xy.y * b - z * uMoonDir;
-      if (dot(n, uSunDir) > 0.0) idx = 208u + 13u;
+      if (dot(n, uSunDir) > 0.0) idx = ${MOON_LIT_INDEX}u;
     }
   }
   // the sun: one plain disc (~1.7 deg radius), white by day, yellow when low (applySunColors)
   if (ang < 0.03) idx = ${LIGHT.SUN}u;
-  oColor = vec4(idx > 0u ? emitLight(lutColor(idx), idx == ${LIGHT.SUN}u ? uSunEmit : 1.0) : col, 1.0);
+  oColor = vec4(idx > 0u ? emitLight(lutColor(idx), idx == ${LIGHT.SUN}u ? uSunEmit : uMoonEmit) : col, 1.0);
 }
 `;
 

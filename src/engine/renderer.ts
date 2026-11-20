@@ -184,7 +184,7 @@ export class Renderer {
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
-      'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uMoonEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
     this.dsU = uniformMap(gl, this.dsProg, [
@@ -385,6 +385,8 @@ export class Renderer {
     this.setLight(this.skyU);
     gl.uniform1f(this.skyU.uSunGlow, this.light?.sunGlow ?? 0);
     gl.uniform1f(this.skyU.uSunEmit, this.emission('sun'));
+    // the moon as bright as the lit windows, far below the sun
+    gl.uniform1f(this.skyU.uMoonEmit, this.emission('cityLights'));
     gl.bindVertexArray(this.triVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
