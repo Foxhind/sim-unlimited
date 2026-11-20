@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow,
+  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, type RGB,
 } from '../src/engine/palette';
-import { POINTS_FS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
+import { POINTS_FS, POINTS_VS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 import { buildBuildingMesh, buildingNightLights, hasBalconies, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import {
@@ -93,11 +93,43 @@ describe('building night lights', () => {
 
   it('the world shader lights a share of the windows at night in the window colours', () => {
     expect(WORLD_FS).toContain('bool windowAt(');
-    expect(WORLD_FS).toContain(`${LIGHT.WINDOW_YELLOW}u`);
-    expect(WORLD_FS).toContain(`${LIGHT.WINDOW_WHITE}u`);
-    expect(WORLD_FS).toContain('bool lit = uWindows == 2 && r < share;');
+    expect(WORLD_FS).toContain('vec3 windowLightColour(float t, float kMin)');
+    expect(WORLD_FS).toContain('bool lit = uWindows == 2 && (r < share || grow);');
+    expect(WORLD_FS).toContain('windowFade(length(vRay))');
+    expect(POINTS_VS).toContain('windowFade(length(rel))');
     expect(WORLD_VS).toContain('layout(location=3) in vec2 aWinUV;');
     expect(TREE_VS).toContain('vWinEdge = vec3(0.0);');
+  });
+
+  it('lit windows: mostly 2700-5000 K, rarely yellow, orange, pale blue or green; grow lamps 1 in 2000; dimmer far away', () => {
+    const n = 100000;
+    const count = new Map<RGB, number>();
+    let kelvin = 0;
+    for (let i = 0; i < n; i++) {
+      const c = windowLightColour((i + 0.5) / n);
+      if ([WINDOW_LIGHT.YELLOW, WINDOW_LIGHT.ORANGE, WINDOW_LIGHT.BLUE, WINDOW_LIGHT.GREEN].includes(c as never)) count.set(c, (count.get(c) ?? 0) + 1);
+      else {
+        kelvin++;
+        // between the 2700 K and 5000 K lamp colours
+        expect(c[0]).toBe(255);
+        expect(c[1]).toBeGreaterThanOrEqual(kelvinRgb(2700)[1] - 1e-9);
+        expect(c[2]).toBeLessThanOrEqual(kelvinRgb(5000)[2] + 1e-9);
+      }
+    }
+    for (const c of [WINDOW_LIGHT.YELLOW, WINDOW_LIGHT.ORANGE, WINDOW_LIGHT.BLUE, WINDOW_LIGHT.GREEN]) {
+      expect((count.get(c) ?? 0) / n).toBeCloseTo(WINDOW_LIGHT.RARE_SHARE, 3);
+    }
+    expect(kelvin / n).toBeGreaterThan(0.8);
+    expect(kelvinRgb(2700).map(Math.round)).toEqual([255, 167, 87]);
+    expect(kelvinRgb(5000).map(Math.round)).toEqual([255, 228, 206]);
+    // pale: the cool colours are far from saturated
+    for (const [r, g, b] of [WINDOW_LIGHT.BLUE, WINDOW_LIGHT.GREEN]) expect(Math.min(r, g, b) / Math.max(r, g, b)).toBeGreaterThan(0.7);
+    expect(WINDOW_LIGHT.GROW_SHARE).toBe(0.0005);
+    expect(WORLD_FS).toContain(`< ${WINDOW_LIGHT.GROW_SHARE}`);
+    expect(windowFade(0)).toBe(1);
+    expect(windowFade(WINDOW_LIGHT.FADE_HALF_M)).toBeCloseTo((1 + WINDOW_LIGHT.FADE_MIN) / 2, 6);
+    expect(windowFade(1000)).toBeGreaterThan(windowFade(5000));
+    expect(windowFade(1e7)).toBeGreaterThan(WINDOW_LIGHT.FADE_MIN);
   });
 
   it('balconies: only on residential buildings, glazed or open on some edges, the rest plain windows', () => {

@@ -709,7 +709,7 @@ export const LIGHT = {
 /**
  * Windows of the near buildings (building-mesher wall attributes, drawn in WORLD_FS): a slot every
  * SPACING_M along each wall on every FLOOR_M floor; at night litShare(hour) of them lit (LIT_SHARE at
- * the evening peak), YELLOW_SHARE of those yellow, the rest white (the far building dots follow the
+ * the evening peak), in the WINDOW_LIGHT colours (YELLOW_SHARE picks the far dot's LUT colour; the dots follow the
  * same share). Hospitals and supermarkets (FACADE_ALL_NIGHT) keep ALL_NIGHT_SHARE lit, mostly white.
  */
 export const WINDOWS = {
@@ -722,6 +722,56 @@ export const WINDOWS = {
   YELLOW_SHARE: 0.7,
   ALL_NIGHT_SHARE: 0.6,
 } as const;
+/**
+ * Colours of lit windows (sRGB), shared by the near facades (WORLD_FS) and the far building dots
+ * (POINTS_VS). Most lit windows are lamps of a random colour temperature between KELVIN_MIN and
+ * KELVIN_MAX (kelvinRgb); a few are rare colours, RARE_SHARE each: saturated yellow, orange, pale
+ * blue and pale green. GROW_SHARE of all windows (1 in 2000) hold grow lamps: red-violet, lit all
+ * night whatever the hour. Hospitals, supermarkets and shops take the cooler half (KELVIN_COOL_MIN up).
+ * Lit windows dim with distance from the eye: FADE_MIN + (1 − FADE_MIN) / (1 + d / FADE_HALF_M).
+ */
+export const WINDOW_LIGHT = {
+  KELVIN_MIN: 2700,
+  KELVIN_MAX: 5000,
+  KELVIN_COOL_MIN: 4000,
+  YELLOW: [255, 204, 72] as RGB,
+  ORANGE: [255, 146, 52] as RGB,
+  BLUE: [178, 200, 238] as RGB,
+  GREEN: [190, 228, 192] as RGB,
+  GROW: [222, 44, 200] as RGB,
+  RARE_SHARE: 0.04,
+  GROW_SHARE: 0.0005,
+  FADE_HALF_M: 2500,
+  FADE_MIN: 0.3,
+} as const;
+/** rare window colours in the order windowLightColour picks them */
+const RARE_WINDOW_COLOURS = [WINDOW_LIGHT.YELLOW, WINDOW_LIGHT.ORANGE, WINDOW_LIGHT.BLUE, WINDOW_LIGHT.GREEN];
+/**
+ * sRGB 0..255 of a black body at `k` kelvin, 1000-6600 K (the usual fit of Mitchell Charity's table):
+ * 2700 K a warm incandescent (255, 167, 87), 5000 K near white (255, 228, 206). Mirrored in GLSL.
+ */
+export function kelvinRgb(k: number): RGB {
+  const t = k / 100;
+  const g = 99.4708025861 * Math.log(t) - 161.1195681661;
+  const b = t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  const c = (v: number) => Math.max(0, Math.min(255, v));
+  return [255, c(g), c(b)];
+}
+/** brightness of a lit window seen from `d` metres (WINDOW_LIGHT.FADE_*), 1 at the eye */
+export function windowFade(d: number): number {
+  return WINDOW_LIGHT.FADE_MIN + (1 - WINDOW_LIGHT.FADE_MIN) / (1 + Math.max(0, d) / WINDOW_LIGHT.FADE_HALF_M);
+}
+/**
+ * The colour of a lit window from its hash `t` (0..1): the rare colours first (RARE_SHARE each), the
+ * rest a colour temperature from `kMin` to KELVIN_MAX along the remaining hash.
+ */
+export function windowLightColour(t: number, kMin: number = WINDOW_LIGHT.KELVIN_MIN): RGB {
+  const rare = WINDOW_LIGHT.RARE_SHARE;
+  const i = Math.floor(t / rare);
+  if (i < RARE_WINDOW_COLOURS.length) return RARE_WINDOW_COLOURS[i];
+  const u = (t - rare * RARE_WINDOW_COLOURS.length) / (1 - rare * RARE_WINDOW_COLOURS.length);
+  return kelvinRgb(kMin + u * (WINDOW_LIGHT.KELVIN_MAX - kMin));
+}
 /**
  * The share of windows lit by the local solar hour: [hour, share] keys, eased between them and round
  * midnight: the evening peak 19-21 h, a few left at 1 h, the fewest before dawn, people up at 7-8 h.

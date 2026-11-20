@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -388,6 +388,31 @@ uniform highp float uOrthoFar;
 float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * uOrthoFar : max(clip.w, 0.0)); }
 `;
 
+const glslRgb = (c: RGB) => `vec3(${c.map((v) => (v / 255).toFixed(3)).join(', ')})`;
+/**
+ * Lit window colours and their dimming with distance (palette.ts WINDOW_LIGHT, windowLightColour,
+ * windowFade), for the near facades (WORLD_FS) and the far building dots (POINTS_VS).
+ */
+const WINDOW_LIGHT_GLSL = `
+vec3 kelvinRgb(float k) {
+  float t = k / 100.0;
+  return vec3(1.0, clamp((99.4708025861 * log(t) - 161.1195681661) / 255.0, 0.0, 1.0),
+    t <= 19.0 ? 0.0 : clamp((138.5177312231 * log(t - 10.0) - 305.0447927307) / 255.0, 0.0, 1.0));
+}
+vec3 windowLightColour(float t, float kMin) {
+  float rare = ${WINDOW_LIGHT.RARE_SHARE.toFixed(4)};
+  if (t < rare) return ${glslRgb(WINDOW_LIGHT.YELLOW)};
+  if (t < 2.0 * rare) return ${glslRgb(WINDOW_LIGHT.ORANGE)};
+  if (t < 3.0 * rare) return ${glslRgb(WINDOW_LIGHT.BLUE)};
+  if (t < 4.0 * rare) return ${glslRgb(WINDOW_LIGHT.GREEN)};
+  float u = (t - 4.0 * rare) / (1.0 - 4.0 * rare);
+  return kelvinRgb(mix(kMin, ${WINDOW_LIGHT.KELVIN_MAX.toFixed(1)}, u));
+}
+float windowFade(float d) {
+  return ${WINDOW_LIGHT.FADE_MIN.toFixed(3)} + ${(1 - WINDOW_LIGHT.FADE_MIN).toFixed(3)} / (1.0 + max(d, 0.0) / ${WINDOW_LIGHT.FADE_HALF_M.toFixed(1)});
+}
+`;
+
 /**
  * Windows on the near building facades (WORLD_FS; building-mesher BuildingMeshData.windows). Each
  * wall edge is cut into slots every WINDOWS.SPACING_M and floors every WINDOWS.FLOOR_M (both
@@ -395,14 +420,15 @@ float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * u
  * smaller than about a pixel (fw: the metres one pixel spans along u and v), so far windows do not
  * flicker away. By day panes are dark glass in the wall's light; at night (uWindows 2) the slot's
  * hash lights uLitShare of them (palette.ts litShare by the hour; ALL_NIGHT_SHARE on hospitals and
- * supermarkets), mostly yellow, the rest white, like the far building dots.
+ * supermarkets) in the WINDOW_LIGHT colours (mostly 2700-5000 K, rarely yellow, orange, pale blue or
+ * green; 1 in 2000 a red-violet grow lamp lit all night), like the far building dots, dimmer the farther from the eye.
  *
  * The edge code (edge.z) carries a building-mesher FACADE style above its seed: on a balconied edge
  * some slot columns (by the slot's hash, the same on every floor) carry balconies from the first
  * floor up — glazed (a parapet panel under a lighter glazing with mullions) or open (a railing in
  * front of a dark recess with the balcony door, which lights like a window). Returns true on a lit pane.
  */
-const WINDOW_GLSL = `
+const WINDOW_GLSL = `${WINDOW_LIGHT_GLSL}
 uint winHash(uint x) {
   x ^= x >> 16u; x *= 0x7feb352du;
   x ^= x >> 15u; x *= 0x846ca68bu;
@@ -465,8 +491,9 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
     }
   }
   // shops are lit more often than flats, mostly white; they close at night with the flats going dark
-  bool lit = uWindows == 2 && r < (allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)});
-  vec3 shop = emitLight(mix(lutColor(r < 0.15 ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
+  float open = allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)};
+  bool lit = uWindows == 2 && r < open;
+  vec3 shop = emitLight(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));
   vec3 glass = paneGlass(c, seed, r, fog);
   if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
     // the whole floor glazed along the edge, mullions every half slot
@@ -512,9 +539,11 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   if (blind) return false;
   if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, allNight, r, fw, fog);
   float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} : uLitShare;
-  bool lit = uWindows == 2 && r < share;
-  bool yellow = r < share * (allNight ? 0.2 : ${WINDOWS.YELLOW_SHARE.toFixed(2)});
-  vec3 light = emitLight(mix(lutColor(yellow ? ${LIGHT.WINDOW_YELLOW}u : ${LIGHT.WINDOW_WHITE}u), uHaze, 0.5 * fog), uWinEmit);
+  // grow lamps: a window in 2000, on all night whatever the hour
+  bool grow = winRand(seed * 0x2c1b3c6du ^ winHash(uint(k) * 0x297a2d39u + uint(f) * 0x6c8e9cf5u + 101u)) < ${WINDOW_LIGHT.GROW_SHARE};
+  bool lit = uWindows == 2 && (r < share || grow);
+  vec3 lc = grow ? ${glslRgb(WINDOW_LIGHT.GROW)} : windowLightColour(r / max(share, 1e-6), allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
+  vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));
   // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
   // changed by its owner (residential only), so frames and glass vary up a wall and along it
   uint ws = seed;
@@ -859,7 +888,7 @@ uniform float uEmit;
 uniform float uLitShare;
 flat out vec3 vColor;
 out float vLogW;
-${COLOUR_GLSL}
+${COLOUR_GLSL}${WINDOW_LIGHT_GLSL}
 void main() {
   vec3 wp = toWorld(aPos);
   vec3 rel = wp - uCamPos;
@@ -884,6 +913,9 @@ void main() {
   if (aIndex == ${LIGHT.WINDOW_YELLOW}.0 || aIndex == ${LIGHT.WINDOW_WHITE}.0) {
     float h = fract(sin(dot(floor(aPos.xz), vec2(12.9898, 78.233))) * 43758.5453);
     if (h >= uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)}) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; }
+    // its colour by a second hash (the WINDOW_LIGHT mix), dimmer the farther from the eye
+    float hc = fract(sin(dot(floor(aPos.xz), vec2(39.3468, 11.135))) * 24634.6345);
+    vColor = windowLightColour(hc, ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)}) * windowFade(length(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }
