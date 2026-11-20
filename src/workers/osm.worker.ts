@@ -19,7 +19,7 @@ import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 32;
+export const OSM_MESH_SCHEMA = 34;
 
 export interface OsmRequest {
   type: 'osm';
@@ -61,6 +61,8 @@ export interface OsmMeshResponse {
   wVertices: ArrayBuffer;
   wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
+  /** pitch markings: near 1 px GL lines (x, y, z, palette index) */
+  pitchLines: ArrayBuffer;
   /** night: lamp heads (x, y, z, palette index); far, the street-lit roads' dotted line */
   lamps: ArrayBuffer;
   runways: number;
@@ -131,7 +133,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
-      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.lamps,
+      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -146,7 +148,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
-        rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(),
+        rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(), pitchLines: cached.pitchLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
         lamps: cached.lamps ?? empty(),
         ...(detail === 'full' ? await cachedTerrainFlags(tile) : { runways: 0, coast: false }),
@@ -213,6 +215,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer, rAttrs: mesh.roadAttrs.slice().buffer,
       wVertices: mesh.water.vertices.slice().buffer, wRamps: mesh.water.ramps.slice().buffer,
       roadLines: mesh.roadLines.slice().buffer,
+      pitchLines: mesh.pitchLines.slice().buffer,
       lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });

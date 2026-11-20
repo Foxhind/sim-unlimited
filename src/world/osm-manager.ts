@@ -8,6 +8,9 @@ import { WINDOW_ATTR_FLOATS } from './building-mesher';
 import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 
+/** pitch markings toward the eye: metres, plus per metre of distance (renderer.drawLights pull) */
+const PITCH_LINE_PULL = [0.05, 0.0004] as const;
+
 /** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines */
 export const HOUSE_RADIUS_M = 3500;
 const UNLOAD_DELAY_MS = 15000;
@@ -36,6 +39,8 @@ interface OsmChunk {
   /** water areas and river ribbons: drawn after every drape, without depth writes, so roads win */
   wmesh?: Mesh;
   roadLines?: PropSet;
+  /** pitch markings (near) */
+  pitchLines?: PropSet;
   /** night: lamp heads near, and far the street-lit roads' dotted line */
   lamps?: PropSet;
   /** buildings, and their far stand-in dots */
@@ -83,6 +88,7 @@ interface MeshPayload {
   wVertices: ArrayBuffer;
   wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
+  pitchLines: ArrayBuffer;
   lamps: ArrayBuffer;
   runways: number;
   coast: boolean;
@@ -147,7 +153,7 @@ export class OsmManager {
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
             glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
-            rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines),
+            rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false,
           });
@@ -337,6 +343,7 @@ export class OsmManager {
     chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps);
     chunk.roadLines = this.points(chunk, data.roadLines);
+    chunk.pitchLines = this.points(chunk, data.pitchLines);
     chunk.lamps = this.points(chunk, data.lamps);
     if (data.trees.byteLength > 0) {
       // instances come sorted by type: one VAO per type, its instance attributes starting at the type's run
@@ -399,7 +406,7 @@ export class OsmManager {
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
     chunk.glow = chunk.rmesh = chunk.wmesh = undefined;
-    chunk.roadLines = chunk.lamps = undefined;
+    chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
   }
 
   draw(
@@ -428,6 +435,8 @@ export class OsmManager {
       const slant = Math.hypot(dx, dz, camPos[1]);
       if (slant < HOUSE_RADIUS_M) {
         if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        // pitch markings: 1 px white paint, pulled a hair toward the eye off the pitch under them
+        if (c.pitchLines) renderer.drawLights(c.pitchLines.vao, c.pitchLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, PITCH_LINE_PULL);
         if (c.bmesh) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
           renderer.windows = lightsOn ? 'lit' : 'glass';

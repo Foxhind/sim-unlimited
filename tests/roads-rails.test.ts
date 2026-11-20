@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP } from '../src/engine/palette';
+import { RAMP, withGlow } from '../src/engine/palette';
 import { WORLD_FS } from '../src/engine/shaders';
 import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
@@ -31,7 +31,7 @@ function meshOf(tags: Record<string, string>) {
 function band(m: { vertices: Float32Array; ramps: Uint32Array; vertexCount: number }, ramp: number) {
   let lo = Infinity, hi = -Infinity, y = NaN, n = 0;
   for (let i = 0; i < m.vertexCount; i++) {
-    if (m.ramps[i] !== ramp) continue;
+    if (withGlow(m.ramps[i], 0) !== withGlow(ramp, 0)) continue; // the night glow level aside
     lo = Math.min(lo, m.vertices[i * 6 + 2]);
     hi = Math.max(hi, m.vertices[i * 6 + 2]);
     y = m.vertices[i * 6 + 1] - GROUND;

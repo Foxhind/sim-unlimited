@@ -1,10 +1,11 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, RAMP, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
+import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, pitchSurface, type Seg } from './pitch-markings';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
@@ -57,7 +58,9 @@ export function isLitRoad(tags: Record<string, string>): boolean {
 }
 
 /** glow level of a street-lit road surface at night (the brightest built-up ground is GLOW_LEVELS) */
-export const LIT_ROAD_GLOW = 6;
+export const LIT_ROAD_GLOW = 7;
+/** glow level of an unlit road at night: just above the night sky's ground */
+export const UNLIT_ROAD_GLOW = 2;
 /** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating; a one-way road keeps
  *  them on one side (see lampSide) */
 export const LAMP_SPACING_M = 35;
@@ -90,6 +93,8 @@ export interface OsmMeshData extends TerrainMeshData {
   water: TerrainMeshData;
   /** far stand-in for the roads: GL line vertex pairs (x, y, z, palette index) on the terrain */
   roadLines: Float32Array;
+  /** pitch markings, drawn near: 1 px GL line vertex pairs (x, y, z, palette index) on the terrain */
+  pitchLines: Float32Array;
   /** night: lamp heads at the ends of the lamp arms (x, y, z, palette index); far, the same points
    *  stand in for the street-lit roads as a dotted line */
   lamps: Float32Array;
@@ -156,6 +161,20 @@ interface AreaStyle {
   filter?: RGB;
 }
 
+/** pitches over the parks round them; their markings a little above */
+export const PITCH_BIAS = 0.65;
+export const PITCH_LINE_BIAS = 0.7;
+/** a pitch at least this big (m²) has floodlights on its corners and is lit at night */
+export const PITCH_LIT_MIN_M2 = 300;
+/** floodlit pitch surface at night: the brightest artificial light */
+export const PITCH_GLOW = 7;
+/** the floodlight poles stand this far out from the pitch's corners, metres */
+const PITCH_LAMP_SETBACK_M = 1.5;
+/** pitch markings: white paint (the snow ramp, well lit) in the palette of the day */
+export const PITCH_LINE_INDEX = rampIndex(RAMP.SNOW, 10);
+/** on a floodlit pitch: the same from the brightest street-lit copy (the plain one by day, buildLUT) */
+export const LIT_PITCH_LINE_INDEX = PITCH_GLOW * LUT_SIZE + PITCH_LINE_INDEX;
+
 /** open ground (fields, parks, beaches...): snow covers it in winter */
 const ground = (ramp: number, bias: number, filter?: RGB): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter });
 
@@ -187,7 +206,12 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, FILTER.SAND);
   if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, FILTER.ROCK);
   if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, FILTER.FIELD);
-  if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course' || leisure === 'pitch') {
+  if (leisure === 'pitch') {
+    // over the park it lies in; a tagged surface solid, natural grass the imagery in a grass filter
+    const surface = pitchSurface(tags);
+    return surface !== undefined ? { ramp: surface, bias: PITCH_BIAS, water: false } : ground(RAMP.GRASS, PITCH_BIAS, FILTER.GRASS);
+  }
+  if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course') {
     return ground(RAMP.GRASS, 0.6, FILTER.GRASS);
   }
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
@@ -345,6 +369,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const roads: Out = { verts: [], ramps: [], attrs: [] };
   const water: Out = { verts: [], ramps: [] };
   const roadLines: number[] = [];
+  const pitchLines: number[] = [];
   const lamps: number[] = [];
   const lampPosts: number[] = [];
   const { verts, ramps } = main;
@@ -475,7 +500,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
       const under = filter && imageryOf(f);
-      const col = under ? snowy(colourOf(softLight(under, filter))) : ramp;
+      const col = under ? withGlow(snowy(colourOf(softLight(under, filter))), rampGlowLevel(ramp)) : ramp;
       for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out, attr);
     }
   };
@@ -495,8 +520,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   const buildArea = (area: OsmArea): void => {
-    const style = classifyArea(area.tags);
+    let style = classifyArea(area.tags);
     if (!style) return;
+    // a floodlit pitch is lit at night (its rect, from the whole outline: the same in every tile)
+    if (area.tags.leisure === 'pitch' && litPitch(area)) style = { ...style, ramp: withGlow(style.ramp, PITCH_GLOW) };
     const flat: number[] = [];
     const holes: number[] = [];
     const lls: LonLat[] = [];
@@ -548,6 +575,85 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const pts = lls.map(([lon, lat]) => makePt(lon, lat, groundY(lon, lat, style.bias)));
     for (let i = 0; i < tris.length; i += 3) {
       subdivide(pts[tris[i]], pts[tris[i + 1]], pts[tris[i + 2]], style.ramp, style.bias, 0);
+    }
+  };
+
+  /** a pitch's outer ring in tile-centre ENU (x, z), without the closing point */
+  const pitchRing = (area: OsmArea): [number, number][] => {
+    const ring = area.rings[0] ?? [];
+    const pts = ring.map(([lon, lat]) => enu(lon, lat));
+    if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+    return pts;
+  };
+  const ringArea = (r: [number, number][]): number => {
+    let a = 0;
+    for (let i = 0; i < r.length; i++) {
+      const [x0, z0] = r[i], [x1, z1] = r[(i + 1) % r.length];
+      a += x0 * z1 - x1 * z0;
+    }
+    return Math.abs(a) / 2;
+  };
+  /**
+   * the whole outline (not this tile's share of it) decides, so the tiles a pitch spans agree; the
+   * clipped share keeps the tags object of the whole (clip.ts)
+   */
+  const wholePitch = new Map<Record<string, string>, OsmArea>();
+  for (const a of opts.data.areas) if (a.tags.leisure === 'pitch') wholePitch.set(a.tags, a);
+  const litPitch = (area: OsmArea): boolean => ringArea(pitchRing(wholePitch.get(area.tags) ?? area)) >= PITCH_LIT_MIN_M2;
+
+  /**
+   * A pitch's markings (big-field sports, 1 px lines on the terrain faces, this tile's share) and the
+   * floodlights on the corners of its rectangle (those standing in this tile), arms over the pitch
+   */
+  const buildPitch = (area: OsmArea): void => {
+    const ring = pitchRing(area);
+    const r = orientedRect(ring);
+    if (!r) return;
+    const vx = -r.uz, vz = r.ux;
+    const toXZ = (s: number, t: number): [number, number] => [r.cx + r.ux * s + vx * t, r.cz + r.uz * s + vz * t];
+    const sport = pitchSport(area.tags);
+    let segs: Seg[] | undefined;
+    let frame = toXZ;
+    if (sport === 'baseball') {
+      // home plate: the corner of the fan nearest a right angle; second base towards the middle
+      let home = ring[0], bestDev = Infinity;
+      const mx = ring.reduce((s, p) => s + p[0], 0) / ring.length, mz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+      for (let i = 0; i < ring.length; i++) {
+        const p = ring[i], a = ring[(i + ring.length - 1) % ring.length], b = ring[(i + 1) % ring.length];
+        const ax = a[0] - p[0], az = a[1] - p[1], bx = b[0] - p[0], bz = b[1] - p[1];
+        const cos = (ax * bx + az * bz) / ((Math.hypot(ax, az) * Math.hypot(bx, bz)) || 1);
+        const dev = Math.abs(cos);
+        if (dev < bestDev) { bestDev = dev; home = p; }
+      }
+      const dl = Math.hypot(mx - home[0], mz - home[1]) || 1;
+      const dx = (mx - home[0]) / dl, dz = (mz - home[1]) / dl;
+      const reach = Math.max(...ring.map((p) => Math.hypot(p[0] - home[0], p[1] - home[1])));
+      segs = baseballMarkings(reach * 0.95);
+      frame = (s, t) => [home[0] + dx * s - dz * t, home[1] + dz * s + dx * t];
+    } else if (sport) {
+      segs = pitchMarkings(sport, r.length, r.width);
+    }
+    const lattice = ([x, z]: [number, number]): P2 => {
+      const ll = enuToLatLon(center, x, -z, 0);
+      return toLattice([ll.lon, ll.lat]);
+    };
+    const lit = ringArea(ring) >= PITCH_LIT_MIN_M2;
+    for (const [s0, t0, s1, t1] of segs ?? []) {
+      lineOnFaces(lattice(frame(s0, t0)), lattice(frame(s1, t1)), PITCH_LINE_BIAS, pitchLines, lit ? LIT_PITCH_LINE_INDEX : PITCH_LINE_INDEX);
+    }
+    if (!lit) return;
+    const g = tin!.grid;
+    for (const [es, et] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const d = Math.hypot(r.length, r.width) || 1;
+      const s = es * (r.length / 2 + PITCH_LAMP_SETBACK_M * r.length / d), t = et * (r.width / 2 + PITCH_LAMP_SETBACK_M * r.width / d);
+      const [fx, fz] = toXZ(s, t);
+      const [lx, ly] = lattice([fx, fz]);
+      if (lx < 0 || ly < 0 || lx >= g || ly >= g) continue; // the neighbour tile's pole
+      const ll = enuToLatLon(center, fx, -fz, 0);
+      const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
+      const cx = r.cx - fx, cz = r.cz - fz, cl = Math.hypot(cx, cz) || 1;
+      pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, Math.atan2(cz, cx));
+      lamps.push(fx + (cx / cl) * LAMP_SHAPE.ARM, y0 + LAMP_HEIGHT_M - 2 * LAMP_SHAPE.POLE_HALF - 0.1, fz + (cz / cl) * LAMP_SHAPE.ARM, LIGHT.STREET);
     }
   };
 
@@ -611,8 +717,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       // runways and taxiways lie on the flat aerodrome pad: just above its asphalt areas, not a
       // ribbon raised over bumps (the aircraft stands on the pad, it sank into a 1.4 m ribbon)
       bias: line.tags.aeroway ? AEROWAY_LINE_BIAS : LINE_BIAS,
-      // a street-lit surface glows at night (the shader shows the level only then)
-      ramp: lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : style.ramp,
+      // a street-lit surface glows at night (the shader shows the level only then); an unlit road
+      // a little too, lighter than the ground round it
+      ramp: lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : road ? withGlow(style.ramp, UNLIT_ROAD_GLOW) : style.ramp,
     };
   };
   /** points of a round cap around an end of a ribbon (lattice units); 12 sides */
@@ -942,6 +1049,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   for (const area of data.areas) buildArea(area);
+  if (tin) for (const area of opts.data.areas) if (area.tags.leisure === 'pitch') buildPitch(area);
   for (const line of data.lines) buildLine(line);
   if (tin) for (const line of opts.data.lines) buildRibbon(line);
   for (const p of data.points) buildPoint(p);
@@ -961,6 +1069,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     roadAttrs: new Float32Array(roads.attrs!),
     water: { vertices: new Float32Array(water.verts), ramps: new Uint32Array(water.ramps), vertexCount: water.ramps.length },
     roadLines: new Float32Array(roadLines),
+    pitchLines: new Float32Array(pitchLines),
     lamps: new Float32Array(lamps),
     lampPosts: new Float32Array(lampPosts),
   };

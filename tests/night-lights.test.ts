@@ -14,7 +14,7 @@ import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/wo
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
-import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW } from '../src/world/osm-mesher';
+import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
 
@@ -380,7 +380,7 @@ describe('street lighting', () => {
     expect(isLitRoad({ railway: 'rail', lit: 'yes' })).toBe(false);
   });
 
-  it('a lit road glows and has lamps (its far dotted line too); an unlit one has none', () => {
+  it('a lit road glows and has lamps (its far dotted line too); an unlit one only a little, no lamps', () => {
     const lit = road({ highway: 'residential' });
     const asphalt = lit.roads.ramps.filter((r) => withGlow(r, 0) === RAMP.ASPHALT);
     expect(asphalt.length).toBeGreaterThan(0);
@@ -388,7 +388,8 @@ describe('street lighting', () => {
     expect(lit.lamps.length).toBeGreaterThan(0);
 
     const dark = road({ highway: 'tertiary' });
-    for (const r of dark.roads.ramps) expect(rampGlowLevel(r)).toBe(0);
+    for (const r of dark.roads.ramps) expect(rampGlowLevel(r)).toBeLessThanOrEqual(UNLIT_ROAD_GLOW);
+    expect(dark.roads.ramps.some((r) => withGlow(r, 0) === RAMP.ASPHALT && rampGlowLevel(r) === UNLIT_ROAD_GLOW)).toBe(true);
     expect(dark.lamps.length).toBe(0);
     expect(dark.roads.vertexCount).toBeGreaterThan(0);
   });
