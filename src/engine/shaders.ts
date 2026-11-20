@@ -889,6 +889,9 @@ uniform float uLitShare;
 // far window dots: the framebuffer height (pixels) and the width of a dot's facade cell (metres)
 uniform float uFbH;
 uniform float uCell;
+// and the fog they run into the haze with, like the near panes (renderer.pointFog)
+uniform float uFogStart;
+uniform float uFogEnd;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}${WINDOW_LIGHT_GLSL}
@@ -935,7 +938,10 @@ void main() {
     else gl_PointSize = clamp(cellPx, 1.0, ${FAR_WINDOWS.MAX_PX.toFixed(1)});
     // its colour (the WINDOW_LIGHT mix), above white on XDR like the near panes, dimmer the farther from the eye
     vec3 lc = windowLightColour(hCol, allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
-    vColor = emitLight(lc, uEmit) * windowFade(length(rel));
+    // half-way into the haze with the fog, in its 12 steps (WORLD_FS windowAt)
+    float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    fog = floor(fog * 12.0) / 12.0;
+    vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(length(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }

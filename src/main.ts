@@ -909,7 +909,7 @@ function frame(now: number): void {
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
   osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
-  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u);
+  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, FOG_START_M, FOG_END_M);
   profiler.stage('облака');
   clouds.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
   renderer.rimWeight = rim.aircraft;

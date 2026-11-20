@@ -101,6 +101,8 @@ export class Renderer {
   litShare: number = WINDOWS.LIT_SHARE;
   /** the facade cell width of the far window dots drawLights draws next (palette.ts FAR_WINDOWS; the far OSM ring sets its own) */
   windowCellM: number = FAR_WINDOWS.CELL_M;
+  /** the fog range (metres) the far window dots drawLights draws next run into the haze over; none by default */
+  pointFog: readonly [number, number] = [1e9, 2e9];
   /**
    * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
    * extended drawingBufferToneMapping where the browser has it), the world and post targets are
@@ -176,7 +178,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
@@ -542,6 +544,8 @@ export class Renderer {
     gl.uniform1f(this.pointsU.uStackH, stacked ? fbHeight : 0);
     gl.uniform1f(this.pointsU.uFbH, fbHeight);
     gl.uniform1f(this.pointsU.uCell, this.windowCellM);
+    gl.uniform1f(this.pointsU.uFogStart, this.pointFog[0]);
+    gl.uniform1f(this.pointsU.uFogEnd, this.pointFog[1]);
     gl.uniform2f(this.pointsU.uPull, pull[0], pull[1]);
     gl.uniform1f(this.pointsU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);

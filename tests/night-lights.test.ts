@@ -253,7 +253,8 @@ describe('building night lights', () => {
     expect(POINTS_VS).toContain('bool keep = cellPx >= 1.0 || hKeep < cellPx * cellPx;');
     // as small as a near pane (one framebuffer pixel), not the far light size: no clipped over-bright pixels
     expect(POINTS_VS).toContain('gl_PointSize = clamp(cellPx, 1.0, ');
-    expect(POINTS_VS).toContain('vColor = emitLight(lc, uEmit) * windowFade(length(rel));');
+    // into the haze with the fog like the near panes
+    expect(POINTS_VS).toContain('vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(length(rel));');
     // fewer lit the more buildings likely stand in front along a low view ray (no walls hide them)
     expect(POINTS_VS).toContain(`float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});`);
     expect(WORLD_FS).toContain('vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));');

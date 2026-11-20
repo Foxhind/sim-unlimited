@@ -191,14 +191,16 @@ export class FarOsmManager {
   }
 
   /** as the detailed tiles' far mode (OsmManager.draw): 1 px wall + roof dots and road lines by day, window cell dots by night */
-  draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, lightsOn: boolean, pointSize: number): void {
+  draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, lightsOn: boolean, pointSize: number, fogStart = 1e9, fogEnd = 2e9): void {
     const px = farLightSize(pointSize);
     for (const c of this.renderList) {
       if (lightsOn) {
         if (c.nightDots) {
           renderer.windowCellM = FAR_WINDOWS.CELL_M * FAR_WINDOWS.FAR_RING_SCALE;
+          renderer.pointFog = [fogStart, fogEnd];
           renderer.drawLights(c.nightDots.vao, c.nightDots.count, c.offset, view, proj, camPos, px, true, 'points', false, FAR_PULL);
           renderer.windowCellM = FAR_WINDOWS.CELL_M;
+          renderer.pointFog = [1e9, 2e9];
         }
         continue;
       }
