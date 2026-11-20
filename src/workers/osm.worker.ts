@@ -17,6 +17,7 @@ import { gridForZoom } from '../world/chunks';
 import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
+import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
 export const OSM_MESH_SCHEMA = 50;
@@ -28,6 +29,8 @@ export interface OsmRequest {
   detail: OsmDetail;
   /** Landsat colour correction (relief inspector); a graded mesh is neither read from nor written to the cache */
   grade?: ColourGrade;
+  /** filters of the areas over the imagery (area style editor); not the defaults: the mesh is neither read from nor written to the cache */
+  areaStyles?: AreaStyles;
 }
 
 export interface OsmMeshResponse {
@@ -125,7 +128,8 @@ function concatU32(a: Uint32Array, b: Uint32Array): Uint32Array {
 ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
   const grade = e.data.grade ?? NEUTRAL_GRADE;
-  const useCache = isNeutralGrade(grade);
+  const areaStyles = e.data.areaStyles;
+  const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles));
   // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on
   const key = `${tileKey('osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
@@ -178,7 +182,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
     };
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor });
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
     // entrances from the whole fetch, not only the tile's own share: one by the border may belong to an own building

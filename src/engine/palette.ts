@@ -467,6 +467,68 @@ export function softLight(base: RGB, filter: RGB, strength = 1): RGB {
   return [ch(base[0], filter[0]), ch(base[1], filter[1]), ch(base[2], filter[2])];
 }
 
+/** W3C compositing blend modes (CSS mix-blend-mode names) */
+export const BLEND_MODES = [
+  'normal', 'multiply', 'screen', 'overlay', 'soft-light', 'hard-light', 'darken', 'lighten',
+  'color-dodge', 'color-burn', 'difference', 'exclusion', 'hue', 'saturation', 'color', 'luminosity',
+] as const;
+export type BlendMode = (typeof BLEND_MODES)[number];
+
+type Ch = (b: number, s: number) => number;
+const screenCh: Ch = (b, s) => b + s - b * s;
+const hardLightCh: Ch = (b, s) => (s <= 0.5 ? b * 2 * s : screenCh(b, 2 * s - 1));
+const SEPARABLE: Partial<Record<BlendMode, Ch>> = {
+  normal: (_b, s) => s,
+  multiply: (b, s) => b * s,
+  screen: screenCh,
+  overlay: (b, s) => hardLightCh(s, b),
+  'hard-light': hardLightCh,
+  darken: Math.min,
+  lighten: Math.max,
+  'color-dodge': (b, s) => (b === 0 ? 0 : s >= 1 ? 1 : Math.min(1, b / (1 - s))),
+  'color-burn': (b, s) => (b >= 1 ? 1 : s <= 0 ? 0 : 1 - Math.min(1, (1 - b) / s)),
+  difference: (b, s) => Math.abs(b - s),
+  exclusion: (b, s) => b + s - 2 * b * s,
+};
+
+type V3 = [number, number, number];
+const lum = (c: V3) => 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+const sat = (c: V3) => Math.max(c[0], c[1], c[2]) - Math.min(c[0], c[1], c[2]);
+function clipColour(c: V3): V3 {
+  const l = lum(c), n = Math.min(c[0], c[1], c[2]), x = Math.max(c[0], c[1], c[2]);
+  let o = c;
+  if (n < 0) o = o.map((v) => l + ((v - l) * l) / (l - n)) as V3;
+  if (x > 1) o = o.map((v) => l + ((v - l) * (1 - l)) / (x - l)) as V3;
+  return o;
+}
+const setLum = (c: V3, l: number): V3 => {
+  const d = l - lum(c);
+  return clipColour([c[0] + d, c[1] + d, c[2] + d]);
+};
+function setSat(c: V3, s: number): V3 {
+  const x = Math.max(...c), n = Math.min(...c);
+  return c.map((v) => (x > n ? ((v - n) * s) / (x - n) : 0)) as V3;
+}
+
+/**
+ * A colour over a base colour in a W3C blend mode; `strength` 0..1 lerps from the base to the full
+ * blend. 'soft-light' is softLight exactly.
+ */
+export function blend(base: RGB, top: RGB, mode: BlendMode, strength = 1): RGB {
+  if (mode === 'soft-light') return softLight(base, top, strength);
+  const b: V3 = [base[0] / 255, base[1] / 255, base[2] / 255];
+  const s: V3 = [top[0] / 255, top[1] / 255, top[2] / 255];
+  const ch = SEPARABLE[mode];
+  let r: V3;
+  if (ch) r = [ch(b[0], s[0]), ch(b[1], s[1]), ch(b[2], s[2])];
+  else if (mode === 'hue') r = setLum(setSat(s, sat(b)), lum(b));
+  else if (mode === 'saturation') r = setLum(setSat(b, sat(s)), lum(b));
+  else if (mode === 'color') r = setLum(s, lum(b));
+  else r = setLum(b, lum(s)); // luminosity
+  const k = Math.max(0, Math.min(1, strength));
+  return [0, 1, 2].map((i) => (b[i] + (r[i] - b[i]) * k) * 255) as unknown as RGB;
+}
+
 function scaleRGB(c: RGB, p: PaletteParams): RGB {
   const s = saturate(c, p.saturation);
   return [s[0] * p.lightMul * p.tint[0], s[1] * p.lightMul * p.tint[1], s[2] * p.lightMul * p.tint[2]];

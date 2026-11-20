@@ -1,5 +1,6 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE, FORK_TAPER_M, rampGlowLevel, rampIndex, rgbOf, snowy, softLight, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE, FORK_TAPER_M, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaKind, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
@@ -28,9 +29,11 @@ export interface OsmMeshOptions {
   tin?: TerrainTin;
   /**
    * Imagery colour of a TIN face (the terrain mesh's own). With it, filtered areas (AreaStyle.filter)
-   * take the colour of the face under each piece in soft light with their filter colour.
+   * take the colour of the face under each piece blended with their filter (area-styles).
    */
   faceColor?: FaceColor;
+  /** filters of the areas over the imagery (area style editor); DEFAULT_AREA_STYLES by default */
+  areaStyles?: AreaStyles;
 }
 
 type P2 = [number, number];
@@ -162,10 +165,10 @@ interface AreaStyle {
   water: boolean;
   /**
    * A colour filter instead of a solid fill: each piece takes the imagery colour of the terrain face
-   * under it in soft light with this colour (palette softLight), so the ground keeps its own
+   * under it blended with this filter (area-styles filterColour), so the ground keeps its own
    * pattern. Where the face has no imagery colour (or no faceColor is given), `ramp` is drawn.
    */
-  filter?: RGB;
+  filter?: AreaFilter;
 }
 
 /** pitches over the parks round them; their markings a little above */
@@ -182,20 +185,9 @@ export const PITCH_LINE_INDEX = rampIndex(RAMP.SNOW, 10);
 /** on a floodlit pitch: the same from the brightest street-lit copy (the plain one by day, buildLUT) */
 export const LIT_PITCH_LINE_INDEX = PITCH_GLOW * LUT_SIZE + PITCH_LINE_INDEX;
 
-/** open ground (fields, parks, beaches...): snow covers it in winter */
-const ground = (ramp: number, bias: number, filter?: RGB): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter });
-
-/** soft-light filter colours of open ground: channels above mid grey lighten the imagery, below darken */
-const FILTER = {
-  SCRUB: [72, 120, 56] as RGB,
-  FIELD: [128, 200, 72] as RGB,
-  GRASS: [104, 192, 80] as RGB,
-  WETLAND: [88, 144, 112] as RGB,
-  SAND: [224, 204, 150] as RGB,
-  ROCK: [150, 138, 122] as RGB,
-};
-
-function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
+function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaStyle | undefined {
+  /** open ground (fields, parks, beaches...): snow covers it in winter */
+  const ground = (ramp: number, bias: number, kind: AreaKind): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter: styles[kind] });
   const natural = tags.natural;
   const landuse = tags.landuse;
   const leisure = tags.leisure;
@@ -209,20 +201,20 @@ function classifyArea(tags: Record<string, string>): AreaStyle | undefined {
     return { ramp: RAMP.ASPHALT, bias: AEROWAY_AREA_BIAS, water: false };
   }
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
-  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, FILTER.SCRUB);
-  if (natural === 'beach') return ground(RAMP.SAND, 0.6, FILTER.SAND);
-  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, FILTER.ROCK);
-  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, FILTER.FIELD);
+  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
+  if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
+  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, 'rock');
+  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, 'farmland');
   if (leisure === 'pitch') {
     // over the park it lies in; a tagged surface solid, natural grass the imagery in a grass filter
     const surface = pitchSurface(tags);
-    return surface !== undefined ? { ramp: surface, bias: PITCH_BIAS, water: false } : ground(RAMP.GRASS, PITCH_BIAS, FILTER.GRASS);
+    return surface !== undefined ? { ramp: surface, bias: PITCH_BIAS, water: false } : ground(RAMP.GRASS, PITCH_BIAS, 'pitch');
   }
-  if (leisure === 'park' || leisure === 'garden' || leisure === 'golf_course') {
-    return ground(RAMP.GRASS, 0.6, FILTER.GRASS);
-  }
+  if (leisure === 'park') return ground(RAMP.GRASS, 0.6, 'park');
+  if (leisure === 'garden') return ground(RAMP.GRASS, 0.6, 'garden');
+  if (leisure === 'golf_course') return ground(RAMP.GRASS, 0.6, 'golf');
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
-  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5, FILTER.WETLAND);
+  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5, 'wetland');
   return undefined;
 }
 
@@ -575,7 +567,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return rgb;
   };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: RGB, attr?: VertexAttr): void => {
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: AreaFilter, attr?: VertexAttr): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
@@ -583,7 +575,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
       const under = filter && imageryOf(f);
-      const col = under ? withGlow(snowy(colourOf(softLight(under, filter))), rampGlowLevel(ramp)) : ramp;
+      const col = under ? withGlow(snowy(colourOf(filterColour(under, filter))), rampGlowLevel(ramp)) : ramp;
       for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out, attr);
     }
   };
@@ -603,7 +595,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   const buildArea = (area: OsmArea): void => {
-    let style = classifyArea(area.tags);
+    let style = classifyArea(area.tags, opts.areaStyles ?? DEFAULT_AREA_STYLES);
     if (!style) return;
     // a floodlit pitch is lit at night (its rect, from the whole outline: the same in every tile)
     if (area.tags.leisure === 'pitch' && litPitch(area)) style = { ...style, ramp: withGlow(style.ramp, PITCH_GLOW) };

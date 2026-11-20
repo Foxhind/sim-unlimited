@@ -7,6 +7,7 @@ import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Ti
 import { WINDOW_ATTR_FLOATS } from './building-mesher';
 import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
+import type { AreaStyles } from './area-styles';
 
 /** pitch markings toward the eye: metres, plus per metre of distance (renderer.drawLights pull) */
 const PITCH_LINE_PULL = [0.05, 0.0004] as const;
@@ -122,6 +123,8 @@ export class OsmManager {
   onTileReady?: (tile: Tile, runways: number, coast: boolean) => void;
   /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
   grade: ColourGrade = NEUTRAL_GRADE;
+  /** filters of the areas for tiles built from now on (area style editor; invalidate() to rebuild); undefined: the game's */
+  areaStyles: AreaStyles | undefined = undefined;
   private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
@@ -266,7 +269,7 @@ export class OsmManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full', grade: this.grade });
+      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full', grade: this.grade, areaStyles: this.areaStyles });
     });
   }
 

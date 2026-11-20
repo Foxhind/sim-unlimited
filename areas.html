@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Area styles</title>
+    <style>
+      :root {
+        --bg: #101318; --panel: #171b22; --line: #2a303a; --text: #d6dbe2; --dim: #8a93a0;
+        --accent: #f0b54a; --border: #4fc3d9;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+      body { display: grid; grid-template-columns: 340px 1fr; }
+      aside { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 10px 12px; }
+      h1 { font-size: 13px; margin: 0 0 8px; color: var(--accent); }
+      h2 { font-size: 11px; margin: 14px 0 6px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+      label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+      .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+      .row > * { flex: 1; min-width: 0; }
+      input[type=number], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 3px 5px; font: inherit; width: 100%; }
+      input[type=color] { flex: 0 0 34px; width: 34px; height: 22px; padding: 0; border: 1px solid var(--line); background: var(--bg); cursor: pointer; }
+      input[type=range] { accent-color: var(--accent); }
+      button { background: #222833; color: var(--text); border: 1px solid var(--line); padding: 4px 6px; font: inherit; cursor: pointer; }
+      button:hover:not(:disabled) { border-color: var(--accent); }
+      button.on { border-color: var(--accent); color: var(--accent); }
+      pre { margin: 0; white-space: pre-wrap; }
+      .hint { color: var(--dim); }
+      .err { color: #ff6b6b; }
+      main { min-width: 0; min-height: 0; }
+      .pane { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; }
+      canvas { display: block; width: 100%; height: 100%; }
+      #screen { cursor: grab; }
+      .overlay { position: absolute; left: 8px; bottom: 8px; background: rgba(16,19,24,.85); padding: 6px 8px; border: 1px solid var(--line); pointer-events: none; }
+      .title { position: absolute; left: 8px; top: 6px; color: var(--dim); pointer-events: none; }
+      .kind { border-top: 1px solid var(--line); padding: 6px 0 4px; }
+      .kind.changed .name::after { content: ' ●'; color: var(--accent); }
+      .kind .name { flex: 1; }
+      .kind .row > .tiny { flex: 0 0 auto; }
+      .kind .num { flex: 0 0 52px; }
+      .swatches { display: grid; grid-template-columns: repeat(10, 1fr); height: 18px; margin-top: 3px; }
+      .swatches span { display: block; }
+      .swatches.after { margin-top: 0; }
+      @media (max-width: 900px) {
+        body { grid-template-columns: 1fr; grid-template-rows: auto 80vh; }
+        html, body { height: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <h1>Area styles</h1>
+      <div class="hint">Площадные объекты OSM, которые рисуются фильтром поверх снимка Landsat: цвет снимка под гранью смешивается с цветом объекта в выбранном режиме. Рендер — код и шейдеры игры, вид сверху.</div>
+
+      <h2>Место</h2>
+      <select id="preset"></select>
+      <div class="row">
+        <input id="lat" type="number" step="0.0001" title="широта" />
+        <input id="lon" type="number" step="0.0001" title="долгота" />
+      </div>
+      <div class="row"><span>ширина вида, км</span><input id="span" type="number" min="0.2" max="12" step="0.5" /></div>
+      <div class="row"><button id="go">Перейти</button></div>
+      <div id="pasteMsg" class="hint">⌘V / Ctrl+V — вставить ссылку Google Maps, Apple Maps, Яндекс Карт, OpenStreetMap, ссылку симулятора или инспекторов либо «широта, долгота».</div>
+
+      <h2>Солнце</h2>
+      <div class="row"><span>высота, °</span><input id="sunEl" type="number" min="-10" max="90" step="5" /></div>
+      <label><input type="checkbox" id="osm" checked /> OSM: показать площади, дороги, здания</label>
+
+      <h2>Стили площадей</h2>
+      <div class="hint">Полоски — образцы цветов снимка до и после фильтра. «Найти» на время красит объекты этого типа пурпурным. Каждое изменение пересобирает OSM в кадре, без кэша.</div>
+      <div id="kinds"></div>
+      <div class="row"><button id="resetAll">Сбросить всё</button><button id="copy">Скопировать код</button></div>
+      <div id="styleMsg" class="hint"></div>
+      <pre id="code" class="hint"></pre>
+
+      <h2>Статистика</h2>
+      <pre id="stats"></pre>
+
+      <h2>Управление</h2>
+      <div class="hint">Перетаскивание — сдвиг, колесо — масштаб.</div>
+    </aside>
+    <main>
+      <div class="pane">
+        <canvas id="screen"></canvas>
+        <div class="title">Вид сверху</div><div id="hover" class="overlay"></div>
+      </div>
+    </main>
+    <script type="module" src="/src/tools/area-styles-editor.ts"></script>
+  </body>
+</html>
