@@ -303,8 +303,9 @@ describe('road ribbons where ways meet and across tile borders', () => {
       points: [], buildings: [],
     };
     const covered = coverage(data, [tiles[0]]);
-    // the outer corner of the bend is south-east of the node
-    for (let deg = -90; deg <= 0; deg += 5) {
+    // the outer corner of the bend is south-east of the node (probes off the mitre's seam at -45°,
+    // which lies on the edge shared by the two ways' triangles)
+    for (let deg = -87.5; deg <= -2.5; deg += 5) {
       const r = 0.9 * HALF;
       const x = Math.cos((deg * Math.PI) / 180) * r, y = Math.sin((deg * Math.PI) / 180) * r;
       expect(covered(c.lon + x * lonPerM, c.lat + y * latPerM)).toBe(true);

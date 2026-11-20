@@ -435,7 +435,8 @@ describe('street lighting', () => {
     const right = zs(road({ highway: 'primary', oneway: 'yes' }));
     const left = zs(road({ highway: 'primary', oneway: '-1' }));
     expect(right.length).toBe(zs(road({ highway: 'primary' })).length);
-    for (const z of right) expect(z).toBeCloseTo(6, 0);
-    for (const z of left) expect(z).toBeCloseTo(-6, 0);
+    // one carriageway, 7 m: the pole 1 m beyond its edge, the head 2 m back over it
+    for (const z of right) expect(z).toBeCloseTo(2.5, 0);
+    for (const z of left) expect(z).toBeCloseTo(-2.5, 0);
   });
 });

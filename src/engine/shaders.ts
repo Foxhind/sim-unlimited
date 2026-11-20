@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -594,6 +594,54 @@ vec3 trackAt(vec3 c, vec2 uv, vec2 fw, float fog) {
 }
 `;
 
+/**
+ * Road paint (osm-mesher paintedRibbon, aWinEdge.x ROAD_EDGE and below; the packing is there): lines
+ * 15 cm wide, at least a pixel (thinner ones blended by their coverage); dashes 3 m in 12, faded to
+ * their mean where the pattern would be under a few pixels. The width narrows towards an end with a
+ * taper; lane lines are measured from the left edge, so a dropped lane closes on the right. No paint
+ * within the end's gap (a junction where the road yields).
+ */
+const ROAD_MARK_GLSL = `
+float paintLine(float d, float fw) {
+  float hw = max(0.075, 0.5 * fw);
+  return abs(d) < hw ? min(1.0, 0.075 / hw) : 0.0;
+}
+float roadDash(float u, float fwu) {
+  return mix(0.25, step(fract(u / 12.0), 0.25), clamp(2.0 - fwu / 1.5, 0.0, 1.0));
+}
+vec3 roadMarkAt(vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
+  bool atEnd = uv.x < 0.0;
+  float d = abs(uv.x) - ${ROAD_U_BASE.toFixed(1)};
+  uint code = uint(edge.z + 0.5), wp = uint(edge.y + 0.5), tp = uint(${ROAD_EDGE}.0 - edge.x + 0.5);
+  float gap = float(atEnd ? (code >> 13u) & 63u : (code >> 7u) & 63u) * 0.5;
+  if (d < gap) return c;
+  float full = float(wp & 1023u) * 0.25;
+  float narrow = float(atEnd ? (wp >> 15u) & 31u : (wp >> 10u) & 31u) * 0.5;
+  float taper = float(atEnd ? tp & 63u : tp >> 6u) * 2.0;
+  float w = taper > 0.0 ? full - narrow * (1.0 - min(1.0, d / taper)) : full;
+  float vl = uv.y, a = 0.0;
+  float lanes = float(code & ${ROAD_MARK.LANES}u);
+  float lw = full / max(lanes, 1.0);
+  float dash = roadDash(d, fw.x);
+  if ((code & ${ROAD_MARK.EDGES}u) != 0u) a = max(paintLine(vl - 0.35, fw.y), paintLine(w - 0.35 - vl, fw.y));
+  if ((code & ${ROAD_MARK.ONEWAY}u) != 0u) {
+    for (float k = 1.0; k < 15.0; k++) {
+      if (k >= lanes || k * lw > w - 0.5) break;
+      a = max(a, paintLine(vl - k * lw, fw.y) * dash);
+    }
+  } else if (lanes >= 2.0) {
+    float mid = 0.5 * w;
+    if ((code & ${ROAD_MARK.DOUBLE}u) != 0u) a = max(a, max(paintLine(vl - mid - 0.15, fw.y), paintLine(vl - mid + 0.15, fw.y)));
+    else a = max(a, paintLine(vl - mid, fw.y) * dash);
+    for (float k = 1.0; k < 8.0; k++) {
+      if (k >= floor(lanes * 0.5)) break;
+      a = max(a, max(paintLine(vl - mid - k * lw, fw.y), paintLine(vl - mid + k * lw, fw.y)) * dash);
+    }
+  }
+  return mix(c, min(c * 3.0, vec3(0.92)), a * (1.0 - fog));
+}
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
@@ -688,7 +736,7 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}
 void main() {
   writeLogDepth();
   vec3 c = vColor;
@@ -706,9 +754,11 @@ void main() {
     c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
   }
   float alpha = 1.0 - uSelfLit;
-  if (vWinEdge.x < -0.5) {
+  // TRACK_EDGE, ROAD_EDGE: negative; a facade's edge length is positive
+  if (vWinEdge.x < ${TRACK_EDGE + 0.5}) {
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
-    c = trackAt(c, vWinUV, winFw, floor(fog * 12.0) / 12.0);
+    fog = floor(fog * 12.0) / 12.0;
+    c = vWinEdge.x < ${ROAD_EDGE + 0.5} ? roadMarkAt(c, vWinUV, vWinEdge, winFw, fog) : trackAt(c, vWinUV, winFw, fog);
   }
   if (uWindows > 0 && vWinEdge.y > 0.0) {
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);

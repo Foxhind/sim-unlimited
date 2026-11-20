@@ -760,6 +760,25 @@ export const FACADE_SEED_BITS = 19;
 export const FACADE_RESIDENTIAL = 1 << 21;
 /** a blind patch (the wall round a door): the ground floor's tint, no openings or signs */
 export const FACADE_BLIND = 1 << 22;
+/**
+ * Road paint, WORLD_FS roadMarkAt (aWinEdge.z of a road vertex): the lane count in bits 0..3, ONEWAY,
+ * EDGES (solid lines along both edges), DOUBLE (a double solid centre line). Two-way roads have a
+ * dashed centre line and dashed lines between the lanes of each direction, one-way roads dashed lines
+ * between their lanes. Town streets, service roads and tracks have none.
+ */
+export const ROAD_MARK = { LANES: 15, ONEWAY: 16, EDGES: 32, DOUBLE: 64 } as const;
+/** aWinEdge.x of a painted road vertex (WORLD_FS roadMarkAt, osm-mesher roadMarks) */
+export const ROAD_EDGE = -2;
+/** at a junction a yielding road's paint stops this far short of the widest road it meets (osm-mesher junctionGap) */
+export const ROAD_MARK_END_M = 1;
+/** a painted road's u is offset by this (sign: which end it counts from; osm-mesher paintedRibbon) */
+export const ROAD_U_BASE = 50000;
+/** a road narrows to the narrower way that continues it over this many metres (at most half its length) */
+export const ROAD_TAPER_M = 60;
+/** a one-way branch of a fork eases from the two-way road's side onto its own line over this many metres */
+export const FORK_TAPER_M = 50;
+/** aWinEdge.x of a railway track vertex (WORLD_FS trackAt; facades have the edge length there, > 0) */
+export const TRACK_EDGE = -1;
 /** the edge is on a building lit all night (hospital, supermarket): its windows ignore litShare */
 export const FACADE_ALL_NIGHT = 1 << 23;
 const LIGHT_COLORS: [number, RGB][] = [
