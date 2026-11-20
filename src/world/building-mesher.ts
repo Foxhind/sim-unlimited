@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -1102,23 +1102,28 @@ function hash01(x: number, y: number, z: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
-const windowColour = (r: number) => (r < WINDOWS.YELLOW_SHARE ? LIGHT.WINDOW_YELLOW : LIGHT.WINDOW_WHITE);
-
 export interface NightLights {
   /** near (with the building mesh): red lights on the roof corners of tall buildings; the windows are on the walls (WORLD_FS) */
   roofLights: Float32Array;
-  /** far (instead of the roof-coloured dots): one yellow or white dot per building, red at roof height for tall ones */
+  /**
+   * far (instead of the roof-coloured dots): window cell dots on the facades (FAR_WINDOWS; palette
+   * index WINDOW_YELLOW, WINDOW_WHITE on a building lit all night), red at roof height for tall ones
+   */
   dots: Float32Array;
 }
 
 /**
  * Night lights of buildings as points; per point x, y, z (tile-centre ENU), palette index, like
- * buildingDots. Near buildings show lit windows on their walls instead of points (WORLD_FS).
+ * buildingDots. Near buildings show lit windows on their walls instead of points (WORLD_FS); far, the
+ * same facades carry a dot per cell `cellM` wide (FAR_WINDOWS), over the band the near windows take:
+ * edges of at least WINDOWS.MIN_EDGE_M, between the plinth and the technical floor (none when `cellM`
+ * is 0: the detailed tiles draw their lit facades at night instead).
  */
 export function buildingNightLights(
   buildings: OsmBuilding[],
   tile: Tile,
   sampleHeight: HeightSampler,
+  cellM: number = FAR_WINDOWS.CELL_M,
 ): NightLights {
   const center = tileCenter(tile);
   const roofLights: number[] = [];
@@ -1149,9 +1154,34 @@ export function buildingNightLights(
     const tall = h.min + h.wall + h.roof > TALL_BUILDING_M;
     const lit = isLitBuilding(b.tags) && b.tags.building !== 'roof';
 
-    if (lit) {
-      const r = hash01(cx, wallBase, cz);
-      dots.push(cx, wallBase + h.wall * 0.5, cz, windowColour(hash01(cz, r, cx)));
+    const tags = buildingTags(b);
+    if (lit && cellM > 0 && hasFacadeZones(tags)) {
+      const winBase = wallBase + (h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
+      const winTop = wallBase + h.wall - (hasTechFloor(tags, roofShape(tags)) ? FACADE_ZONES.TECH_FLOOR_M : 0);
+      const index = isAllNight(tags) ? LIGHT.WINDOW_WHITE : LIGHT.WINDOW_YELLOW;
+      if (winTop - winBase >= WINDOWS.MIN_WALL_M) {
+        const rows = Math.max(1, Math.round((winTop - winBase) / (cellM * FAR_WINDOWS.CELL_ASPECT)));
+        const rowH = (winTop - winBase) / rows;
+        let area2 = 0;
+        for (let i = 0; i < ring.length; i++) {
+          const p = ring[i], q = ring[(i + 1) % ring.length];
+          area2 += p[0] * q[1] - q[0] * p[1];
+        }
+        const sign = area2 > 0 ? 1 : -1;
+        for (let i = 0; i < ring.length; i++) {
+          const p = ring[i], q = ring[(i + 1) % ring.length];
+          const ex = q[0] - p[0], ez = q[1] - p[1];
+          const len = Math.hypot(ex, ez);
+          if (len < WINDOWS.MIN_EDGE_M) continue;
+          // out of the footprint: the right of a counter-clockwise edge (x east, z south)
+          const ox = (sign * ez / len) * FAR_WINDOWS.OUT_M, oz = (-sign * ex / len) * FAR_WINDOWS.OUT_M;
+          const cols = Math.max(1, Math.round(len / cellM));
+          for (let c = 0; c < cols; c++) {
+            const t = (c + 0.5) / cols;
+            for (let r = 0; r < rows; r++) dots.push(p[0] + ex * t + ox, winBase + (r + 0.5) * rowH, p[1] + ez * t + oz, index);
+          }
+        }
+      }
     }
     if (tall) dots.push(cx, roofTop, cz, LIGHT.RED);
 

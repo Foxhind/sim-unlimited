@@ -5,6 +5,7 @@ import type { Renderer } from '../engine/renderer';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { farLightSize } from './osm-manager';
+import { FAR_WINDOWS } from '../engine/palette';
 
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 10000;
@@ -189,12 +190,16 @@ export class FarOsmManager {
     c.dots = c.nightDots = c.roadLines = undefined;
   }
 
-  /** as the detailed tiles' far mode (OsmManager.draw): 1 px wall + roof dots and road lines by day, 1 px lights by night */
+  /** as the detailed tiles' far mode (OsmManager.draw): 1 px wall + roof dots and road lines by day, window cell dots by night */
   draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, lightsOn: boolean, pointSize: number): void {
     const px = farLightSize(pointSize);
     for (const c of this.renderList) {
       if (lightsOn) {
-        if (c.nightDots) renderer.drawLights(c.nightDots.vao, c.nightDots.count, c.offset, view, proj, camPos, px, true, 'points', false, FAR_PULL);
+        if (c.nightDots) {
+          renderer.windowCellM = FAR_WINDOWS.CELL_M * FAR_WINDOWS.FAR_RING_SCALE;
+          renderer.drawLights(c.nightDots.vao, c.nightDots.count, c.offset, view, proj, camPos, px, true, 'points', false, FAR_PULL);
+          renderer.windowCellM = FAR_WINDOWS.CELL_M;
+        }
         continue;
       }
       if (c.roadLines) renderer.drawLights(c.roadLines.vao, c.roadLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, FAR_PULL);

@@ -1,6 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
-import { LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
+import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
 import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
@@ -99,6 +99,8 @@ export class Renderer {
   windows: 'off' | 'glass' | 'lit' = 'off';
   /** the share of windows lit at night now (palette.ts litShare by the local hour) */
   litShare: number = WINDOWS.LIT_SHARE;
+  /** the facade cell width of the far window dots drawLights draws next (palette.ts FAR_WINDOWS; the far OSM ring sets its own) */
+  windowCellM: number = FAR_WINDOWS.CELL_M;
   /**
    * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
    * extended drawingBufferToneMapping where the browser has it), the world and post targets are
@@ -174,7 +176,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
@@ -538,6 +540,8 @@ export class Renderer {
     gl.uniform1i(this.pointsU.uRound, mode === 'points' && !stacked ? 1 : 0);
     const fbHeight = this.height * (this.msaa ? 2 : 1);
     gl.uniform1f(this.pointsU.uStackH, stacked ? fbHeight : 0);
+    gl.uniform1f(this.pointsU.uFbH, fbHeight);
+    gl.uniform1f(this.pointsU.uCell, this.windowCellM);
     gl.uniform2f(this.pointsU.uPull, pull[0], pull[1]);
     gl.uniform1f(this.pointsU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);

@@ -12,7 +12,7 @@ import type { AreaStyles } from './area-styles';
 /** pitch markings toward the eye: metres, plus per metre of distance (renderer.drawLights pull) */
 const PITCH_LINE_PULL = [0.05, 0.0004] as const;
 
-/** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines */
+/** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines (at night its lit buildings still) */
 export const HOUSE_RADIUS_M = 3500;
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
@@ -453,10 +453,16 @@ export class OsmManager {
           renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
       } else {
-        // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one; by night only
-        // their 1 px yellow/white lights, no roof
+        // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one. By night the
+        // same lit facades as near (the windows shader keeps sub-pixel panes, the walls hide what is
+        // behind them), so no border shows between near and far at night
         if (lightsOn) {
-          if (c.nightDots) renderer.drawLights(c.nightDots.vao, c.nightDots.count, c.offset, view, proj, camPos, farLightSize(pointSize), true);
+          if (c.bmesh) {
+            renderer.windows = 'lit';
+            renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+            renderer.windows = 'off';
+          }
+          if (c.roofLights) renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         } else if (c.dots) {
           renderer.drawLights(c.dots.vao, c.dots.count, c.offset, view, proj, camPos, farLightSize(pointSize), true, 'points', true);
         }

@@ -20,7 +20,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 51;
+export const OSM_MESH_SCHEMA = 52;
 
 export interface OsmRequest {
   type: 'osm';
@@ -196,7 +196,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       windows: concatF32(houses.windows, new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
     };
     const dotData = buildingDots(own, tile, drape);
-    const night = buildingNightLights(own, tile, drape);
+    // no far window dots: the detailed tiles draw their lit facades at any distance at night
+    const night = buildingNightLights(own, tile, drape, 0);
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
     // night glow: each terrain triangle lit by how densely it is built up, and everything on it too
     const levels = glowLevels(buildingCoverage(tin, tile, own, locate));

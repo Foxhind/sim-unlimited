@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, type RGB,
+  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB,
 } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 import { buildBuildingMesh, buildingNightLights, hasBalconies, isLitBuilding, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
@@ -20,6 +20,7 @@ import type { OsmBuilding } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GROUND = 100;
+const FACADE_ZONES_PLINTH = 1;
 const flat = () => GROUND;
 
 function rect(w = 0.0004, h = 0.0003): [number, number][] {
@@ -217,11 +218,45 @@ describe('building night lights', () => {
     for (let i = 0; i < office.vertexCount; i++) expect(office.windows[i * WINDOW_ATTR_FLOATS + 4] & FACADE_RESIDENTIAL).toBe(0);
   });
 
-  it('far: one yellow or white dot per lit building; garages stay dark', () => {
+  it('far: a window dot per facade cell, just outside the walls, over the near windows band; garages stay dark', () => {
     const { dots } = buildingNightLights([house, garage], TILE, flat);
     const d = quads(dots);
-    expect(d).toHaveLength(1);
-    expect([LIGHT.WINDOW_YELLOW, LIGHT.WINDOW_WHITE]).toContain(d[0][3]);
+    expect(d.every((q) => q[3] === LIGHT.WINDOW_YELLOW)).toBe(true);
+    // the footprint in tile-centre ENU (x east, z south)
+    const xs = rect().map(([lon, lat]) => latLonToEnu(tileCenter(TILE), lat, lon, 0));
+    const minX = Math.min(...xs.map((p) => p[0])), maxX = Math.max(...xs.map((p) => p[0]));
+    const minZ = Math.min(...xs.map((p) => -p[1])), maxZ = Math.max(...xs.map((p) => -p[1]));
+    const w = maxX - minX, l = maxZ - minZ;
+    // 5 levels: 15 m of windows over the 1 m plinth, under the 1.5 m technical floor: rows of 6 m
+    const rows = Math.round(15 / (FAR_WINDOWS.CELL_M * FAR_WINDOWS.CELL_ASPECT));
+    const cols = 2 * Math.round(w / FAR_WINDOWS.CELL_M) + 2 * Math.round(l / FAR_WINDOWS.CELL_M);
+    expect(d).toHaveLength(rows * cols);
+    for (const [x, y, z] of d) {
+      expect(y).toBeGreaterThan(GROUND + FACADE_ZONES_PLINTH);
+      expect(y).toBeLessThan(GROUND + FACADE_ZONES_PLINTH + 15);
+      // on a wall, out of the footprint by FAR_WINDOWS.OUT_M
+      const out = Math.max(minX - x, x - maxX, minZ - z, z - maxZ);
+      expect(out).toBeCloseTo(FAR_WINDOWS.OUT_M, 2);
+    }
+    // smaller cells (the near border) give more dots; a building lit all night is flagged white
+    expect(quads(buildingNightLights([house], TILE, flat, 4).dots).length).toBeGreaterThan(d.length);
+    // the detailed tiles (cellM 0) draw lit facades at night instead: no window dots
+    expect(quads(buildingNightLights([house], TILE, flat, 0).dots)).toHaveLength(0);
+    const hospital = quads(buildingNightLights([{ ...house, tags: { building: 'hospital', 'building:levels': '5' } }], TILE, flat).dots);
+    expect(hospital.length).toBeGreaterThan(0);
+    expect(hospital.every((q) => q[3] === LIGHT.WINDOW_WHITE)).toBe(true);
+  });
+
+  it('far window dots match the near facades: lit with the near mean, about one per pixel, sized to their cell', () => {
+    expect(FAR_WINDOW_LIT_FACTOR).toBeCloseTo(FAR_WINDOWS.PANE_FILL / 2, 6);
+    expect(POINTS_VS).toContain(`hLit >= ${FAR_WINDOW_LIT_FACTOR.toFixed(3)} * share`);
+    expect(POINTS_VS).toContain('bool keep = cellPx >= 1.0 || hKeep < cellPx * cellPx;');
+    // as small as a near pane (one framebuffer pixel), not the far light size: no clipped over-bright pixels
+    expect(POINTS_VS).toContain('gl_PointSize = clamp(cellPx, 1.0, ');
+    expect(POINTS_VS).toContain('vColor = emitLight(lc, uEmit) * windowFade(length(rel));');
+    // fewer lit the more buildings likely stand in front along a low view ray (no walls hide them)
+    expect(POINTS_VS).toContain(`float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});`);
+    expect(WORLD_FS).toContain('vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));');
   });
 
   it(`buildings over ${TALL_BUILDING_M} m get red lights on the roof (near) and in the air at roof height (far)`, () => {

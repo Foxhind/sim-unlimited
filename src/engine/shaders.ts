@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, type RGB } from './palette';
+import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -886,6 +886,9 @@ uniform vec2 uPull;
 uniform float uEmit;
 // the share of windows lit now (renderer.litShare): far building window dots go dark with it
 uniform float uLitShare;
+// far window dots: the framebuffer height (pixels) and the width of a dot's facade cell (metres)
+uniform float uFbH;
+uniform float uCell;
 flat out vec3 vColor;
 out float vLogW;
 ${COLOUR_GLSL}${WINDOW_LIGHT_GLSL}
@@ -909,13 +912,30 @@ void main() {
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_PointSize = uPointSize;
-  // a far building's window dot: lit while its hash is under the share of the evening peak
+  // a far facade cell of windows (palette.ts FAR_WINDOWS): the cell's size on screen; under a pixel
+  // only about one cell per pixel is kept, and a kept cell is lit with the near facades' mean light
   if (aIndex == ${LIGHT.WINDOW_YELLOW}.0 || aIndex == ${LIGHT.WINDOW_WHITE}.0) {
-    float h = fract(sin(dot(floor(aPos.xz), vec2(12.9898, 78.233))) * 43758.5453);
-    if (h >= uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)}) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; }
-    // its colour by a second hash (the WINDOW_LIGHT mix), dimmer the farther from the eye
-    float hc = fract(sin(dot(floor(aPos.xz), vec2(39.3468, 11.135))) * 24634.6345);
-    vColor = windowLightColour(hc, ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)}) * windowFade(length(rel));
+    bool allNight = aIndex == ${LIGHT.WINDOW_WHITE}.0;
+    uvec3 q = uvec3(ivec3(floor(aPos * 4.0)) + 1048576);
+    uint hx = q.x * 0x8da6b343u ^ q.y * 0xd8163841u ^ q.z * 0xcb1ab31fu;
+    hx ^= hx >> 16u; hx *= 0x7feb352du; hx ^= hx >> 15u; hx *= 0x846ca68bu; hx ^= hx >> 16u;
+    float hLit = float(hx & 0xffffu) / 65536.0;
+    float hKeep = float((hx >> 16u) & 0xffu) / 256.0 + 0.5 / 256.0;
+    float hCol = float(((hx * 0x9e3779b9u) >> 8u) & 0xffffu) / 65536.0;
+    float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} : uLitShare;
+    float cellPx = uCell * uProj[1][1] * 0.5 * uFbH / max(gl_Position.w, 1e-3);
+    bool keep = cellPx >= 1.0 || hKeep < cellPx * cellPx;
+    // the buildings likely in front of it along the view ray (FAR_WINDOWS.CANOPY_M, FREE_PATH_M)
+    float slope = max(uCamPos.y - wp.y, 1.0) / max(d, 1.0);
+    float run = min(d, ${FAR_WINDOWS.CANOPY_M.toFixed(1)} / slope);
+    float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});
+    if (!keep || hLit >= ${FAR_WINDOW_LIT_FACTOR.toFixed(3)} * share * seen) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; }
+    // at least one framebuffer pixel, as small as a near pane: on a supersampled frame it averages
+    // into the screen pixel like the panes do, rather than a whole over-bright pixel clipped to yellow
+    else gl_PointSize = clamp(cellPx, 1.0, ${FAR_WINDOWS.MAX_PX.toFixed(1)});
+    // its colour (the WINDOW_LIGHT mix), above white on XDR like the near panes, dimmer the farther from the eye
+    vec3 lc = windowLightColour(hCol, allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
+    vColor = emitLight(lc, uEmit) * windowFade(length(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }

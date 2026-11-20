@@ -8,14 +8,16 @@ import { buildingDots, buildingNightLights } from './building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, tileForLatLon, type LatLon, type Tile } from './geodesy';
 import { decodeMvt, ringArea, type MvtLayer } from './mvt';
 import type { LonLat, OsmBuilding } from './osm-types';
-import { rampIndex, RAMP } from '../engine/palette';
+import { FAR_WINDOWS, rampIndex, RAMP } from '../engine/palette';
 import type { HeightSampler } from './terrain-source';
 
 /** OSM is drawn (as dots and lines) out to this slant distance; within DETAIL_RADIUS_M the detailed tiles take over */
 export const FAR_OSM_RADIUS_M = 21000;
 export const FAR_OSM_Z = 14;
 /** bump when what a far tile is built from or into changes (cached far tiles are rebuilt) */
-export const FAR_OSM_SCHEMA = 1;
+export const FAR_OSM_SCHEMA = 2;
+/** far window dots here cover larger facade cells than on the detailed tiles (palette.ts FAR_WINDOWS) */
+export const FAR_RING_CELL_M = FAR_WINDOWS.CELL_M * FAR_WINDOWS.FAR_RING_SCALE;
 
 export const OPENFREEMAP_TILEJSON = 'https://tiles.openfreemap.org/planet';
 export const OPENFREEMAP_ATTRIBUTION = 'OpenFreeMap © OpenMapTiles';
@@ -121,7 +123,7 @@ export function buildFarOsm(mvt: Uint8Array, tile: Tile, sampleHeight: HeightSam
 
   return {
     dots: buildingDots(buildings, tile, sampleHeight),
-    nightDots: buildingNightLights(buildings, tile, sampleHeight).dots,
+    nightDots: buildingNightLights(buildings, tile, sampleHeight, FAR_RING_CELL_M).dots,
     roadLines: new Float32Array(lines),
   };
 }

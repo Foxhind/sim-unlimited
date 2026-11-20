@@ -104,7 +104,7 @@ describe('far OSM ring data', () => {
     const out = buildFarOsm(data, TILE, () => 600);
     expect(out.dots.length).toBe(8); // two points
     expect(out.dots[1]).toBeCloseTo(605); // half-way up the 10 m building
-    expect(out.nightDots.length).toBe(4); // one light, no windows
+    expect(out.nightDots.length).toBe(16); // a window cell dot on each of the 4 walls (cells of FAR_RING_CELL_M)
     // the 1.6 km road split into ≤ 150 m pieces, each a vertex pair at the DEM height
     expect(out.roadLines.length / 8).toBeGreaterThanOrEqual(11);
     for (let i = 1; i < out.roadLines.length; i += 4) expect(out.roadLines[i]).toBe(600);

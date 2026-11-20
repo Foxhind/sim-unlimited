@@ -819,6 +819,33 @@ export function kelvinRgb(k: number): RGB {
   const c = (v: number) => Math.max(0, Math.min(255, v));
   return [255, c(g), c(b)];
 }
+/**
+ * Far lit windows (building-mesher buildingNightLights, POINTS_VS): in the far OSM ring (the detailed
+ * tiles draw their lit facades at any distance) a building's windows are dots, one per facade cell CELL_M wide and CELL_M × CELL_ASPECT high (8 × 6 m:
+ * two window slots by two floors; FAR_RING_SCALE times that in the far OSM ring). A dot covers its
+ * cell on screen (at least a framebuffer pixel, like a near pane) and, where cells get under a pixel, only about one per
+ * pixel is kept, so the screen keeps the near facades' mean light: a cell is lit with LIT_FACTOR ×
+ * the window share — the near panes fill PANE_FILL of a slot once a slot is about a pixel, and dots on
+ * the far side of a building land on the same pixels as those on the near side (halved).
+ */
+export const FAR_WINDOWS = {
+  CELL_M: 8,
+  CELL_ASPECT: 0.75,
+  FAR_RING_SCALE: 2,
+  PANE_FILL: 0.72,
+  /** the dot sits this far out of its wall */
+  OUT_M: 0.3,
+  /** a dot is never drawn larger than this (framebuffer pixels) */
+  MAX_PX: 32,
+  /**
+   * No walls hide the far dots, so a dot is lit less the more buildings likely stand in front of
+   * it: × 1 / (1 + L / FREE_PATH_M), L the run of its view ray through the CANOPY_M of buildings
+   * round it — about one visible cell per pixel, as on the near facades, however low the view.
+   */
+  CANOPY_M: 25,
+  FREE_PATH_M: 100,
+} as const;
+export const FAR_WINDOW_LIT_FACTOR = FAR_WINDOWS.PANE_FILL / 2;
 /** brightness of a lit window seen from `d` metres (WINDOW_LIGHT.FADE_*), 1 at the eye */
 export function windowFade(d: number): number {
   return WINDOW_LIGHT.FADE_MIN + (1 - WINDOW_LIGHT.FADE_MIN) / (1 + Math.max(0, d) / WINDOW_LIGHT.FADE_HALF_M);
