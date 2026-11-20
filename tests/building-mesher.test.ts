@@ -275,6 +275,19 @@ describe('computeHeights', () => {
     expect(h.wall).toBe(8);
     expect(computeHeights({ 'building:levels': '3', 'roof:levels': '1', 'roof:shape': 'flat' }).wall).toBe(14.5);
   });
+
+  it('stacks building:part levels without overlaps: each part lifted by the plinth, no technical floor', () => {
+    // OSM relation 7036075: a ground floor, a body from level 1 to 7, a crown from level 7 to 8
+    const ground = computeHeights({ 'building:part': 'yes', 'building:levels': '1' });
+    const body = computeHeights({ 'building:part': 'yes', building: 'apartments', 'building:min_level': '1', 'building:levels': '7' });
+    const crown = computeHeights({ 'building:part': 'yes', 'building:min_level': '7', 'building:levels': '8' });
+    expect(ground.min).toBe(0);
+    expect(ground.min + ground.wall).toBe(3 + FACADE_ZONES.PLINTH_M);
+    expect(body.min).toBe(ground.min + ground.wall);
+    expect(body.min + body.wall).toBe(21 + FACADE_ZONES.PLINTH_M);
+    expect(crown.min).toBe(body.min + body.wall);
+    expect(crown.min + crown.wall).toBe(24 + FACADE_ZONES.PLINTH_M);
+  });
 });
 
 describe('colors', () => {

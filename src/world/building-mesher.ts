@@ -147,6 +147,20 @@ export function hasFacadeZones(tags: Record<string, string>): boolean {
   return isLitBuilding(tags) && tags[BOOTH_TAG] !== 'yes';
 }
 
+/** a building:part area (not the outline of a building made of parts) */
+export function isBuildingPart(tags: Record<string, string>): boolean {
+  return tags['building:part'] !== undefined && tags['building:part'] !== 'no';
+}
+
+/**
+ * The technical floor goes under a flat roof of a zoned building, not of a building:part: parts stack
+ * (building:min_level of one is building:levels of another), and an extra 1.5 m on top of each part
+ * would push it into the part above.
+ */
+function hasTechFloor(tags: Record<string, string>, shape: string): boolean {
+  return shape === 'flat' && hasFacadeZones(tags) && !isBuildingPart(tags);
+}
+
 /** facade levels of a building with no height, no building:levels and no footprint rule (withDefaultTags) */
 export const DEFAULT_LEVELS = 2;
 
@@ -164,7 +178,10 @@ const DEFAULT_PITCH_DEG = 30;
  * (FOOTPRINT_WALL_TAG, set by withDefaultTags for building=residential) plus that roof; else
  * DEFAULT_LEVELS (2) × 3 m plus that roof. Levels counted from tags (building:levels, the default) get
  * the facade zones added (hasFacadeZones): the plinth on the ground and, under a flat roof, the
- * technical floor, so the levels keep their full 3 m.
+ * technical floor, so the levels keep their full 3 m. A building:part counts its levels from the ground
+ * like the parts around it, so every part lifts its levels by the plinth (its top always, its bottom
+ * when building:min_level is above the ground) and none gets the technical floor (hasTechFloor): the
+ * parts keep stacking without gaps or overlaps.
  */
 export function computeHeights(tags: Record<string, string>, run?: number): { min: number; wall: number; roof: number } {
   const shape = roofShape(tags);
@@ -179,9 +196,10 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
       ?? defaultRoofHeight(shape, run);
   }
 
+  const part = isBuildingPart(tags);
   let min = parseLength(tags.min_height) ?? 0;
   const minLevel = parseLength(tags['building:min_level']);
-  if (min === 0 && minLevel !== undefined) min = minLevel * LEVEL_M;
+  if (min === 0 && minLevel !== undefined) min = minLevel * LEVEL_M + (part && minLevel > 0 ? FACADE_ZONES.PLINTH_M : 0);
 
   let height = parseLength(tags.height);
   if (height === undefined) {
@@ -191,9 +209,11 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
     const footprintWall = parseLength(tags[FOOTPRINT_WALL_TAG]);
     if (footprintWall !== undefined && levels === undefined) height = footprintWall + roof + flatRoofLevels;
     else {
-      const zones = hasFacadeZones(tags)
-        ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (shape === 'flat' ? FACADE_ZONES.TECH_FLOOR_M : 0)
-        : 0;
+      const zones = part
+        ? FACADE_ZONES.PLINTH_M
+        : hasFacadeZones(tags)
+          ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : 0)
+          : 0;
       height = (levels ?? DEFAULT_LEVELS) * LEVEL_M + zones + roof + flatRoofLevels;
     }
   }
@@ -262,7 +282,7 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
     out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
   }
   if (outer && outer.length >= 3 && Math.abs(ringAreaXZ(outer)) < FACADE_ZONES.BOOTH_MAX_AREA_M2) out[BOOTH_TAG] = 'yes';
-  const isPart = tags['building:part'] !== undefined && tags['building:part'] !== 'no';
+  const isPart = isBuildingPart(tags);
   const small = !outer || Math.abs(ringAreaXZ(outer)) <= HIPPED_DEFAULT_MAX_AREA_M2;
   if (tags['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
     const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
@@ -630,7 +650,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     // between the plinth and (under a flat roof) the technical floor (FACADE_ZONES)
     const zoned = hasFacadeZones(tags);
     const winBase = wallBase + (zoned && h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
-    const winH = wallTop - winBase - (zoned && roof.kind === 'flat' ? FACADE_ZONES.TECH_FLOOR_M : 0);
+    const winH = wallTop - winBase - (roof.kind === 'flat' && hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : 0);
     const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges, rare signs on the ground floor
     const balconies = windowed && hasBalconies(tags, winH);
