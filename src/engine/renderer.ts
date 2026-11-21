@@ -28,8 +28,8 @@ export class Renderer {
   private lutTex: WebGLTexture;
   private triVao: WebGLVertexArrayObject;
 
-  private worldProg: WebGLProgram;
-  private worldU: Uniforms;
+  /** the world shader's variants (WorldVariant), each a program and its uniforms */
+  private world: Record<WorldVariant, { prog: WebGLProgram; u: Uniforms }>;
   private treeProg: WebGLProgram;
   private treeU: Uniforms;
   private pointsProg: WebGLProgram;
@@ -99,6 +99,8 @@ export class Renderer {
   windows: 'off' | 'glass' | 'lit' = 'off';
   /** rare lighter dots on what drawWorld draws next (WORLD_FS uSpeckle): the terrain and OSM areas */
   speckle = false;
+  /** what drawWorld draws next has no water, dots, road marks or windows (clouds): a lighter shader */
+  bare = false;
   /** the device pixel ratio the canvas was last sized for (resize) */
   private dpr = 1;
   /** the share of windows lit at night now (palette.ts litShare by the local hour) */
@@ -115,6 +117,8 @@ export class Renderer {
    * in 0..1 and looks as before.
    */
   readonly hdrSupported: boolean;
+  /** depth is reversed-Z, written by the vertex shaders (EXT_clip_control; shaders.ts LOG_DEPTH_FS) */
+  readonly reversedZ: boolean;
   /** XDR is on: buffers are half-float and light sources are written above 1.0 */
   hdr = false;
   private hdrWanted = false;
@@ -137,6 +141,17 @@ export class Renderer {
     // drawing buffer above SDR white on an XDR display
     this.hdrSupported = typeof hdrGl.drawingBufferStorage === 'function'
       && gl.getExtension('EXT_color_buffer_float') !== null;
+    // reversed-Z (shaders.ts LOG_DEPTH_FS): clip depth 0..1, a float depth buffer cleared to 0, GREATER
+    const clip = gl.getExtension('EXT_clip_control') as ClipControl | null;
+    this.reversedZ = clip !== null;
+    if (clip) {
+      clip.clipControlEXT(clip.LOWER_LEFT_EXT, clip.ZERO_TO_ONE_EXT);
+      gl.depthFunc(gl.GREATER);
+    }
+    const depthed = (src: string, defines: readonly string[] = []) => {
+      const defs = [...(this.reversedZ ? ['REVERSED_Z'] : []), ...defines].map((d) => `#define ${d} 1\n`).join('');
+      return src.replace('#version 300 es\n', `#version 300 es\n${defs}`);
+    };
 
     this.worldTex = must(gl.createTexture(), 'world texture');
     this.depthTex = must(gl.createTexture(), 'depth texture');
@@ -170,17 +185,22 @@ export class Renderer {
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
 
-    this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
-    this.worldU = uniformMap(gl, this.worldProg, [
+    const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
-    ]);
-    this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
+    ];
+    const worldVariant = (v: WorldVariant) => {
+      const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
+      return { prog, u: uniformMap(gl, prog, worldNames) };
+    };
+    this.world = { full: worldVariant('full'), ground: worldVariant('ground'), houses: worldVariant('houses'), bare: worldVariant('bare') };
+    // trees have none of the surface effects
+    this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
-    this.pointsProg = createProgram(gl, POINTS_VS, POINTS_FS);
+    this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
@@ -190,7 +210,7 @@ export class Renderer {
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
       'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uMoonEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
-    this.dsProg = createProgram(gl, FULLSCREEN_VS, WORLD_POST_FS);
+    this.dsProg = createProgram(gl, FULLSCREEN_VS, depthed(WORLD_POST_FS));
     this.dsU = uniformMap(gl, this.dsProg, [
       'uWorldTex', 'uDepthTex', 'uScale', 'uOutline', 'uRimSteps', 'uRimColor', 'uSunDir', 'uViewProj', 'uInvViewProj', 'uFogStart', 'uFogEnd',
     ]);
@@ -213,7 +233,7 @@ export class Renderer {
     this.resolveU = uniformMap(gl, this.resolveProg, ['uWorldTex', 'uOverlayTex', 'uColorTex', 'uLut', 'uMsaa']);
     // the LUT lives on its own texture unit for the whole frame
     for (const [prog, u] of [
-      [this.worldProg, this.worldU], [this.treeProg, this.treeU], [this.pointsProg, this.pointsU],
+      ...Object.values(this.world).map((w): [WebGLProgram, Uniforms] => [w.prog, w.u]), [this.treeProg, this.treeU], [this.pointsProg, this.pointsU],
       [this.skyProg, this.skyU], [this.resolveProg, this.resolveU],
     ] as [WebGLProgram, Uniforms][]) {
       gl.useProgram(prog);
@@ -301,7 +321,8 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.worldTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, cInternal, w, h, 0, gl.RGBA, cType, null);
     gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    if (this.reversedZ) gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT32F, w, h, 0, gl.DEPTH_COMPONENT, gl.FLOAT, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.worldTex, 0);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.depthTex, 0);
@@ -342,7 +363,7 @@ export class Renderer {
     // overlay passes leave depthMask false; depth clears are masked by it
     gl.depthMask(true);
     gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0, 0, 0, 1]));
-    gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([1]));
+    gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([this.reversedZ ? 0 : 1]));
   }
 
   /**
@@ -454,25 +475,27 @@ export class Renderer {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(depthWrite);
-    gl.useProgram(this.worldProg);
-    gl.uniform1i(this.worldU.uCoarse, coarse);
-    gl.uniform1f(this.worldU.uOrthoFar, this.orthoFar);
-    gl.uniformMatrix4fv(this.worldU.uView, false, view);
-    gl.uniformMatrix4fv(this.worldU.uProj, false, proj);
-    setPlacement(gl, this.worldU.uOffset, offset);
-    gl.uniform3fv(this.worldU.uCamPos, camPos);
-    gl.uniform3fv(this.worldU.uSunDir, sunDir);
-    gl.uniform1f(this.worldU.uFogStart, fogStart);
-    gl.uniform1f(this.worldU.uFogEnd, fogEnd);
-    gl.uniform1i(this.worldU.uGlow, this.nightGlow ? 1 : 0);
-    gl.uniform1i(this.worldU.uSnow, this.snow ? 1 : 0);
-    this.setLight(this.worldU);
-    this.setRim(this.worldU, this.selfLit ? 0 : this.rimWeight);
-    gl.uniform1i(this.worldU.uTwoSided, this.selfLit ? 0 : 1);
-    gl.uniform1f(this.worldU.uSelfLit, this.selfLit ? 1 : 0);
-    gl.uniform1f(this.worldU.uEmit, this.selfLit ? this.selfLitGain : 1);
+    // the lightest variant that has what these faces need
+    const { prog, u } = this.world[this.bare ? 'bare' : this.speckle ? 'ground' : this.windows !== 'off' ? 'houses' : 'full'];
+    gl.useProgram(prog);
+    gl.uniform1i(u.uCoarse, coarse);
+    gl.uniform1f(u.uOrthoFar, this.orthoFar);
+    gl.uniformMatrix4fv(u.uView, false, view);
+    gl.uniformMatrix4fv(u.uProj, false, proj);
+    setPlacement(gl, u.uOffset, offset);
+    gl.uniform3fv(u.uCamPos, camPos);
+    gl.uniform3fv(u.uSunDir, sunDir);
+    gl.uniform1f(u.uFogStart, fogStart);
+    gl.uniform1f(u.uFogEnd, fogEnd);
+    gl.uniform1i(u.uGlow, this.nightGlow ? 1 : 0);
+    gl.uniform1i(u.uSnow, this.snow ? 1 : 0);
+    this.setLight(u);
+    this.setRim(u, this.selfLit ? 0 : this.rimWeight);
+    gl.uniform1i(u.uTwoSided, this.selfLit ? 0 : 1);
+    gl.uniform1f(u.uSelfLit, this.selfLit ? 1 : 0);
+    gl.uniform1f(u.uEmit, this.selfLit ? this.selfLitGain : 1);
     const blend = this.additive || this.opacity < 1;
-    gl.uniform1f(this.worldU.uClear, this.additive ? 0 : 1 - this.opacity);
+    gl.uniform1f(u.uClear, this.additive ? 0 : 1 - this.opacity);
     if (blend) {
       gl.enable(gl.BLEND);
       // colour blended or added; the destination's alpha (silhouette marks) left as it is
@@ -480,10 +503,10 @@ export class Renderer {
       else gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
       gl.depthMask(false);
     }
-    gl.uniform1i(this.worldU.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
-    gl.uniform1f(this.worldU.uWinEmit, this.emission('cityLights'));
-    gl.uniform1f(this.worldU.uLitShare, this.litShare);
-    gl.uniform1i(this.worldU.uSpeckle, this.speckle ? 1 : 0);
+    gl.uniform1i(u.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
+    gl.uniform1f(u.uWinEmit, this.emission('cityLights'));
+    gl.uniform1f(u.uLitShare, this.litShare);
+    gl.uniform1i(u.uSpeckle, this.speckle ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (blend) gl.disable(gl.BLEND);
@@ -727,6 +750,26 @@ type HdrGl = WebGL2RenderingContext & {
   drawingBufferStorage?: (internalFormat: number, width: number, height: number) => void;
   drawingBufferToneMapping?: (mapping: { mode: 'standard' | 'extended' }) => void;
 };
+
+/**
+ * The world shader's variants (shaders.ts WORLD_FS): what each leaves out. ground: the terrain and
+ * the OSM areas (water and dots); houses: the buildings (windows); bare: no surface effects (clouds,
+ * trees); full: the rest (roads, OSM water, aircraft).
+ */
+type WorldVariant = 'full' | 'ground' | 'houses' | 'bare';
+const WORLD_VARIANTS: Record<WorldVariant, readonly string[]> = {
+  full: [],
+  ground: ['NO_ROADS', 'NO_WINDOWS'],
+  houses: ['NO_WATER', 'NO_SPECKLE', 'NO_ROADS'],
+  bare: ['NO_WATER', 'NO_SPECKLE', 'NO_ROADS', 'NO_WINDOWS'],
+};
+
+/** EXT_clip_control (not in TypeScript's DOM lib) */
+interface ClipControl {
+  LOWER_LEFT_EXT: number;
+  ZERO_TO_ONE_EXT: number;
+  clipControlEXT(origin: number, depth: number): void;
+}
 
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime', 'uDotPx'];

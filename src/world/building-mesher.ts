@@ -18,6 +18,11 @@ export const WINDOW_ATTR_FLOATS = 5;
  */
 export interface BuildingMeshData extends TerrainMeshData {
   windows: Float32Array;
+  /**
+   * the vertices from 0 to here are the buildings without their small parts (parapets, roof plant,
+   * doors), which come after: what a far LOD draws (osm-manager BUILDING_DETAIL_M)
+   */
+  coreVertexCount: number;
   /** air-conditioner units on the walls: instances of INSTANCE.AC (props-mesher TREE_STRIDE), drawn with the trees */
   acs: Float32Array;
 }
@@ -601,10 +606,17 @@ function normalizeRing(ring: XZ[], ccw: boolean): XZ[] {
 export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const { tile, buildings, sampleHeight } = opts;
   const center = tileCenter(tile);
-  const verts: number[] = [];
-  const ramps: number[] = [];
-  const win: number[] = [];
+  // the small parts go to their own arrays, appended after the rest (coreVertexCount)
+  const core = { verts: [] as number[], ramps: [] as number[], win: [] as number[] };
+  const small = { verts: [] as number[], ramps: [] as number[], win: [] as number[] };
+  let verts = core.verts;
+  let ramps = core.ramps;
+  let win = core.win;
   const acs: number[] = [];
+  const detail = <T>(make: () => T): T => {
+    ({ verts, ramps, win } = small);
+    try { return make(); } finally { ({ verts, ramps, win } = core); }
+  };
 
   const toXZ = (ll: LonLat): XZ => {
     const [e, n] = latLonToEnu(center, ll[1], ll[0], 0);
@@ -676,7 +688,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
-          door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags);
+          detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags));
         }
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH);
@@ -693,15 +705,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       if (withParapet && isChimney(tags)) {
         const soot = rgbRamp(CHIMNEY.SOOT);
         const floorY = wallTop - CHIMNEY.DEPTH * h.wall;
-        const inOuter = parapet(outer, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M);
-        const inHoles = holes.map((r) => parapet(r, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M));
+        const inOuter = detail(() => parapet(outer, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M));
+        const inHoles = detail(() => holes.map((r) => parapet(r, floorY, wallTop, wRamp, soot, CHIMNEY.WALL_M)));
         capRing(inOuter, inHoles, floorY, soot, true);
       } else if (withParapet) {
         const roofY = wallTop - PARAPET.HEIGHT_M;
-        const inOuter = parapet(outer, roofY, wallTop, wRamp);
-        const inHoles = holes.map((r) => parapet(r, roofY, wallTop, wRamp));
+        const inOuter = detail(() => parapet(outer, roofY, wallTop, wRamp));
+        const inHoles = detail(() => holes.map((r) => parapet(r, roofY, wallTop, wRamp)));
         capRing(inOuter, inHoles, roofY, snowy(rRamp), true);
-        rooftop(inOuter, inHoles, roofY, buildingSeed(outerLL));
+        detail(() => rooftop(inOuter, inHoles, roofY, buildingSeed(outerLL)));
       } else {
         capRing(outer, holes, wallTop, snowy(rRamp), true);
       }
@@ -992,8 +1004,21 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
   }
 
-  const vertexCount = ramps.length;
-  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), vertexCount, windows: new Float32Array(win), acs: new Float32Array(acs) };
+  const coreVertexCount = core.ramps.length;
+  const vertexCount = coreVertexCount + small.ramps.length;
+  const join = <T extends Float32Array | Uint32Array>(out: T, a: number[], b: number[]): T => {
+    out.set(a);
+    out.set(b, a.length);
+    return out;
+  };
+  return {
+    vertices: join(new Float32Array(core.verts.length + small.verts.length), core.verts, small.verts),
+    ramps: join(new Uint32Array(vertexCount), core.ramps, small.ramps),
+    vertexCount,
+    coreVertexCount,
+    windows: join(new Float32Array(core.win.length + small.win.length), core.win, small.win),
+    acs: new Float32Array(acs),
+  };
 }
 
 /**

@@ -5,7 +5,7 @@ import { must } from '../engine/gl';
 import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { WINDOW_ATTR_FLOATS } from './building-mesher';
-import { TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
+import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
 
@@ -14,6 +14,17 @@ const PITCH_LINE_PULL = [0.05, 0.0004] as const;
 
 /** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines (at night its lit buildings still) */
 export const HOUSE_RADIUS_M = 3500;
+/**
+ * Building LOD: a tile whose nearest buildings are farther than this (slant, m) draws them without
+ * their small parts (parapets, roof plant, doors, masts: building-mesher coreVertexCount), each a
+ * pixel or two from here on.
+ */
+export const BUILDING_DETAIL_M = 1500;
+/**
+ * Prop LOD: wall air conditioners (0.8 m) and lamp posts (0.24 m thick) on a tile whose nearest
+ * point is farther than this (slant, m) are not drawn: under a pixel from there on.
+ */
+const PROP_DETAIL_M: Partial<Record<number, number>> = { [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500 };
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
 
@@ -25,6 +36,8 @@ interface PropSet {
 
 /** the instances of one tree type: their VAO and the type's slice of TREE_GEOMETRY */
 interface TreeSet extends PropSet {
+  /** the instance type (props-mesher: tree types, then INSTANCE) */
+  type: number;
   first: number;
   vertexCount: number;
 }
@@ -46,6 +59,8 @@ interface OsmChunk {
   lamps?: PropSet;
   /** buildings, and their far stand-in dots */
   bmesh?: Mesh;
+  /** the same buildings without their small parts (the same VAO, its first vertices): the far LOD */
+  bcore?: Mesh;
   dots?: PropSet;
   /** one set per tree type present */
   trees?: TreeSet[];
@@ -74,6 +89,7 @@ interface MeshPayload {
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
   bWindows: ArrayBuffer;
+  bCore: number;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -151,7 +167,7 @@ export class OsmManager {
         if (msg.type === 'mesh') {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
-            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), dots: buf(msg.dots),
+            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, dots: buf(msg.dots),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
@@ -336,6 +352,7 @@ export class OsmManager {
     const gl = this.gl;
     chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps);
     chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
+    chunk.bcore = chunk.bmesh && { vao: chunk.bmesh.vao, vertexCount: Math.min(data.bCore, chunk.bmesh.vertexCount) };
     chunk.dots = this.points(chunk, data.dots);
     chunk.lights = this.points(chunk, data.lights);
     chunk.roofLights = this.points(chunk, data.roofLights);
@@ -387,7 +404,7 @@ export class OsmManager {
         gl.vertexAttribDivisor(6, 1);
         gl.bindVertexArray(null);
         chunk.vaos.push(vao);
-        sets.push({ vao, buffer: ib, count: end - start, first: mesh.first, vertexCount: mesh.count });
+        sets.push({ vao, buffer: ib, type: type | 0, first: mesh.first, count: end - start, vertexCount: mesh.count });
         start = end;
       }
       chunk.trees = sets;
@@ -405,7 +422,7 @@ export class OsmManager {
     for (const v of chunk.vaos) gl.deleteVertexArray(v);
     chunk.buffers = [];
     chunk.vaos = [];
-    chunk.mesh = chunk.bmesh = undefined;
+    chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
     chunk.glow = chunk.rmesh = chunk.wmesh = undefined;
@@ -442,10 +459,11 @@ export class OsmManager {
         if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         // pitch markings: 1 px white paint, pulled a hair toward the eye off the pitch under them
         if (c.pitchLines) renderer.drawLights(c.pitchLines.vao, c.pitchLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, PITCH_LINE_PULL);
-        if (c.bmesh) {
+        const houses = slant - c.radius * 0.71 < BUILDING_DETAIL_M ? c.bmesh : c.bcore;
+        if (houses) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
           renderer.windows = lightsOn ? 'lit' : 'glass';
-          renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.drawWorld(houses, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
           renderer.windows = 'off';
         }
         if (c.lamps && lightsOn) {
@@ -459,9 +477,9 @@ export class OsmManager {
         // same lit facades as near (the windows shader keeps sub-pixel panes, the walls hide what is
         // behind them), so no border shows between near and far at night
         if (lightsOn) {
-          if (c.bmesh) {
+          if (c.bcore) {
             renderer.windows = 'lit';
-            renderer.drawWorld(c.bmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+            renderer.drawWorld(c.bcore, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
             renderer.windows = 'off';
           }
           if (c.roofLights) renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
@@ -483,7 +501,10 @@ export class OsmManager {
         renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
-        for (const t of c.trees) renderer.drawTrees(t.vao, t.count, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        for (const t of c.trees) {
+          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity)) continue;
+          renderer.drawTrees(t.vao, t.count, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        }
       }
       if (c.lights && lightsOn) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);

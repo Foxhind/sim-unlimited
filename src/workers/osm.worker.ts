@@ -20,7 +20,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 52;
+export const OSM_MESH_SCHEMA = 53;
 
 export interface OsmRequest {
   type: 'osm';
@@ -43,6 +43,8 @@ export interface OsmMeshResponse {
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
   bWindows: ArrayBuffer;
+  /** the first bCore building vertices: the buildings without their small parts (the far LOD) */
+  bCore: number;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -147,6 +149,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
+        bCore: cached.bCore ?? (cached.bRamps?.byteLength ?? 0) / 4,
         dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
@@ -211,6 +214,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
+      // the masts come after the houses: small parts too
+      bCore: houses.coreVertexCount,
       dots: dotData.slice().buffer,
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,

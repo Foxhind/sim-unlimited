@@ -17,6 +17,8 @@ export const DEPTH_FAR = 200000;
  * bright panel.
  */
 export const HDR_PEAK = 12;
+/** the projections' near plane, m (main.ts, camera.ts): reversed-Z depth is REVERSED_NEAR / w (LOG_DEPTH_FS) */
+export const REVERSED_NEAR = 0.5;
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
 const GLOW_RINGS = 4;
@@ -298,17 +300,58 @@ uint waterHash(uvec3 v) {
 float waterRand(vec2 cell, float salt) {
   return float(waterHash(uvec3(ivec3(ivec2(cell), int(salt)))) & 0xffffu) / 65535.0;
 }
-// a cell of level lvl (cells base * 2^lvl): its hash, salted
-uint dotHash(vec2 cell, float lvl, int salt) {
-  return waterHash(uvec3(ivec3(ivec2(cell), int(lvl) * 64 + salt)));
+// a light integer hash (a few multiplies) of a cell and a salt (worldDot)
+uint dotHash(ivec2 cell, int salt) {
+  uvec2 q = uvec2(cell);
+  uint h = (q.x * 0x8da6b343u) ^ (q.y * 0xd8163841u) ^ (uint(salt) << 24u);
+  h ^= h >> 15u; h *= 0x2c1b3c6du; h ^= h >> 13u;
+  return h;
+}
+/**
+ * Which of its 4 children (bit 0: +x, bit 1: +y) a cell of level l (>= 1) hands its dot down to
+ * (worldDot). The levels go in threes: one hash of the cell at the top of the three (level g, a
+ * multiple of 3: dotTop) holds the choice of that cell (2 bits), of its 4 children (8 bits) and of
+ * its 16 grandchildren (32 bits, the second word), so the descent takes three levels per hash.
+ * words: dotWords(the top cell, g); n: the cell, d = g - l its depth below the top.
+ */
+// (no integer division: slow on a GPU)
+int dotTop(int l) { return int(float(l + 2) * (1.0 / 3.0) + 0.01) * 3; }
+uvec2 dotWords(ivec2 top, int g) {
+  uint h = dotHash(top, g);
+  uint h2 = h * 0x297a2d39u;
+  return uvec2(h, h2 ^ (h2 >> 16u));
+}
+// the child of n (d levels below the top of words: 0, 1 or 2) by the bits of its choice: 0..1 for
+// the top, 2..9 by its index under the top, the second word by its parent's and its own index
+uint dotIndex(ivec2 n) { return uint((n.x & 1) | ((n.y & 1) << 1)); }
+ivec2 dotTo(ivec2 n, uint ch) { return (n << 1) + ivec2(int(ch & 1u), int((ch >> 1u) & 1u)); }
+ivec2 dotStep0(uvec2 w, ivec2 n) { return dotTo(n, w.x); }
+ivec2 dotStep1(uvec2 w, ivec2 n) { return dotTo(n, w.x >> (2u + 2u * dotIndex(n))); }
+ivec2 dotStep2(uvec2 w, ivec2 n) { return dotTo(n, w.y >> (2u * (4u * dotIndex(n >> 1) + dotIndex(n)))); }
+// from cell n at level l down to the next multiple of 3 below (or 0): the rest of its three levels
+ivec2 dotDescend(ivec2 n, int l, int g) {
+  uvec2 w = dotWords(n >> (g - l), g);
+  int d = g - l;
+  if (d == 0) n = dotStep0(w, n);
+  if (d <= 1) n = dotStep1(w, n);
+  return dotStep2(w, n);
+}
+// the child a cell of level l hands its dot down to
+ivec2 dotChild(ivec2 cell, int l) {
+  int g = dotTop(l);
+  uvec2 w = dotWords(cell >> (g - l), g);
+  int d = g - l;
+  return d == 0 ? dotStep0(w, cell) : d == 1 ? dotStep1(w, cell) : dotStep2(w, cell);
 }
 /**
  * World dots: one fixed set of points on the ground, each drawn as a square uDotPx device pixels
  * across (one CSS pixel, 2 or 3 on a dense screen), about one per perPx dot pixels on screen.
  * The set is nested by levels: a cell of level L (side base * 2^L) has one dot, that of one of its
- * 4 children (picked by the cell's hash) and so down to level 0, where it sits at random in its
- * cell. Farther (a pixel covering more ground) the level rises smoothly: the dots of level L that
- * are not also of level L + 1 go out one by one, so the dots never jump with the scale.
+ * 4 children (dotChild) and so down to level 0, where it sits at random in its cell. Farther (a
+ * pixel covering more ground) the level rises smoothly: the dots of level L that are not also of
+ * level L + 1 go out one by one, so the dots never jump with the scale.
+ * The dot is always inside the child it is handed to: the descent (three levels a step) stops as
+ * soon as that child is out of reach of the pixel, for most pixels after a step, not L levels.
  * p: the world xz; jac: (dFdx(p), dFdy(p)). In a dot: true, and id its level-0 cell (the dot's
  * identity at every level).
  */
@@ -318,35 +361,38 @@ bool worldDot(vec2 p, vec4 jac, float perPx, float base, out vec2 id) {
   if (det < 1e-10) return false;
   // the level whose cell holds about perPx dot pixels
   float lv = 0.5 * log2(det * uDotPx * uDotPx * perPx / (base * base));
-  float L = max(floor(lv), 0.0);
+  int L = int(max(floor(lv), 0.0));
   float f = lv < 0.0 ? 0.0 : fract(lv);
-  float size = base * exp2(L);
-  mat2 toPx = inverse(mat2(jac.xy, jac.zw));
-  // the cells the dot under this pixel may sit in: its own, and a neighbour within half a dot
+  float size = base * exp2(float(L));
+  // the ground a dot under this pixel may sit in: within half a dot of it
   vec2 reach = (abs(jac.xy) + abs(jac.zw)) * uDotPx * 0.5;
-  vec2 c0 = floor((p - reach) / size);
-  vec2 c1 = min(floor((p + reach) / size), c0 + 1.0);
-  for (float cy = c0.y; cy <= c1.y; cy += 1.0) {
-    for (float cx = c0.x; cx <= c1.x; cx += 1.0) {
-      vec2 cell = vec2(cx, cy);
-      // the level-0 cell of this cell's dot
-      vec2 cc = cell;
-      for (int i = 0; i < 24; i++) {
-        float l = L - float(i);
-        if (l <= 0.0) break;
-        uint h = dotHash(cc, l, 0);
-        cc = cc * 2.0 + vec2(float(h & 1u), float((h >> 1u) & 1u));
+  vec2 lo = p - reach, hi = p + reach;
+  ivec2 c0 = ivec2(floor(lo / size));
+  ivec2 c1 = min(ivec2(floor(hi / size)), c0 + 1);
+  for (int cy = c0.y; cy <= c1.y; cy++) {
+    for (int cx = c0.x; cx <= c1.x; cx++) {
+      ivec2 cell = ivec2(cx, cy);
+      // the level-0 cell of this cell's dot, while it can still be in reach
+      ivec2 cc = cell;
+      int l = L;
+      bool lost = false;
+      while (l >= 1) {
+        int g = dotTop(l);
+        cc = dotDescend(cc, l, g);
+        l = g - 3;
+        float side = base * exp2(float(l));
+        vec2 a = vec2(cc) * side;
+        if (any(greaterThan(a, hi)) || any(lessThan(a + side, lo))) { lost = true; break; }
       }
+      if (lost) continue;
+      uint hc = dotHash(cc, 1);
+      vec2 q = (vec2(cc) + vec2(float(hc & 0xffffu), float(hc >> 16u)) / 65535.0) * base;
+      vec2 s = inverse(mat2(jac.xy, jac.zw)) * (q - p);
+      if (any(greaterThanEqual(abs(s), vec2(uDotPx * 0.5)))) continue;
       // fading out with the level's fraction, unless the dot is also its parent's
-      if (f > 0.0) {
-        vec2 parent = floor(cell * 0.5);
-        uint h = dotHash(parent, L + 1.0, 0);
-        bool kept = parent * 2.0 + vec2(float(h & 1u), float((h >> 1u) & 1u)) == cell;
-        if (!kept && waterRand(cc, 5.0) < f) continue;
-      }
-      vec2 q = (cc + vec2(waterRand(cc, 1.0), waterRand(cc, 2.0))) * base;
-      vec2 s = toPx * (q - p);
-      if (all(lessThan(abs(s), vec2(uDotPx * 0.5)))) { id = cc; return true; }
+      if (f > 0.0 && dotChild(cell >> 1, L + 1) != cell && float(dotHash(cc, 5) & 0xffffu) / 65535.0 < f) continue;
+      id = vec2(cc);
+      return true;
     }
   }
   return false;
@@ -431,13 +477,23 @@ vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c) {
 }
 `;
 
+/**
+ * Depth. With REVERSED_Z (renderer: EXT_clip_control 0..1 clip depth, a float depth buffer cleared
+ * to 0, GREATER) the vertex shader writes it (ORTHO_VS depthZ): REVERSED_NEAR / w in perspective,
+ * as fine as the log depth from the near plane to the horizon, linear and reversed in orthographic
+ * views; the fragment shader leaves it alone, so the GPU can skip hidden fragments (a shader that
+ * writes gl_FragDepth turns that off: every covered pixel of every face was shaded). Without the
+ * extension: a log depth written per fragment, as before.
+ */
 const LOG_DEPTH_FS = `
 in float vLogW;
 // orthographic views (see ORTHO_VS) are all far from the eye, where the logarithm is at its
 // coarsest (decimetres): their depth is linear between the planes instead
 uniform highp float uOrthoFar;
 void writeLogDepth() {
+#ifndef REVERSED_Z
   gl_FragDepth = uOrthoFar > 0.0 ? (vLogW - 1.0) / uOrthoFar : log2(vLogW) / log2(${DEPTH_FAR.toFixed(1)} + 1.0);
+#endif
 }
 `;
 
@@ -461,6 +517,14 @@ vec3 toWorld(vec3 p) { return toWorldDir(p) + uOffset.xyz; }
 const ORTHO_VS = `
 uniform highp float uOrthoFar;
 float logW(vec4 clip) { return 1.0 + (uOrthoFar > 0.0 ? (clip.z * 0.5 + 0.5) * uOrthoFar : max(clip.w, 0.0)); }
+// clip z for the depth test (see LOG_DEPTH_FS): the projection's own without REVERSED_Z
+float depthZ(vec4 clip) {
+#ifdef REVERSED_Z
+  return uOrthoFar > 0.0 ? 0.5 - 0.5 * clip.z : ${REVERSED_NEAR.toFixed(2)};
+#else
+  return clip.z;
+#endif
+}
 `;
 
 const glslRgb = (c: RGB) => `vec3(${c.map((v) => (v / 255).toFixed(3)).join(', ')})`;
@@ -806,9 +870,15 @@ void main() {
   vRay = wp - uCamPos;
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
+  gl_Position.z = depthZ(gl_Position);
 }
 `;
 
+/**
+ * The world's faces. One source, compiled in variants (renderer WorldVariant) that leave out what a
+ * kind of face never has (NO_WATER, NO_SPECKLE, NO_ROADS, NO_WINDOWS): a lighter shader runs
+ * faster for every face it draws, the code it never runs included.
+ */
 export const WORLD_FS = `#version 300 es
 precision highp float;
 flat in vec3 vColor;
@@ -856,10 +926,14 @@ void main() {
   gWinD = vRay / max(length(vRay), 1e-4);
   gWinN = dot(faceN, faceN) > 1e-12 ? normalize(faceN) : -gWinD;
   if (dot(gWinN, gWinD) > 0.0) gWinN = -gWinN;
+#ifndef NO_WATER
   if (vWater > 0.5) {
     float dist = length(vRay);
     c = waterSurface(vRay / max(dist, 1e-4), wxz, jac, dist, c);
-  } else if (uSpeckle == 1) {
+  }
+#endif
+#ifndef NO_SPECKLE
+  if (vWater <= 0.5 && uSpeckle == 1) {
     // speckles: world dots in the face's colour, lighter; fewer into the haze
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
     vec2 id;
@@ -867,19 +941,24 @@ void main() {
       c = min(c * ${SPECKLE_LIFT.toFixed(2)} + 0.02, 1.0);
     }
   }
+#endif
   float alpha = 1.0 - uSelfLit;
+#ifndef NO_ROADS
   // TRACK_EDGE, ROAD_EDGE: negative; a facade's edge length is positive
   if (vWinEdge.x < ${TRACK_EDGE + 0.5}) {
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
     fog = floor(fog * 12.0) / 12.0;
     c = vWinEdge.x < ${ROAD_EDGE + 0.5} ? roadMarkAt(c, vWinUV, vWinEdge, winFw, fog) : trackAt(c, vWinUV, winFw, fog);
   }
+#endif
+#ifndef NO_WINDOWS
   if (uWindows > 0 && vWinEdge.y > 0.0) {
     float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
     fog = floor(fog * 12.0) / 12.0;
     // a lit window is a light source: alpha 0 keeps the silhouette rim pass off it
     if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;
   }
+#endif
   if (uSelfLit > 0.5) c = emitLight(c, uEmit);
   // see-through: the blend's source alpha (the target's own alpha is kept, renderer.drawWorld)
   if (uClear > 0.0) alpha = 1.0 - uClear;
@@ -943,6 +1022,7 @@ void main() {
   vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
+  gl_Position.z = depthZ(gl_Position);
 }
 `;
 
@@ -999,6 +1079,7 @@ void main() {
   }
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
+  gl_Position.z = depthZ(gl_Position);
   gl_PointSize = uPointSize;
   // a far facade cell of windows (palette.ts FAR_WINDOWS): the cell's size on screen; under a pixel
   // only about one cell per pixel is kept, and a kept cell is lit with the near facades' mean light
@@ -1273,7 +1354,11 @@ ivec2 worldSize;
 // distance to the eye from the log depth (LOG_DEPTH_FS); nothing drawn (sky) is far away
 float dist(ivec2 q) {
   float d = texelFetch(uDepthTex, clamp(q, ivec2(0), worldSize - 1), 0).r;
+#ifdef REVERSED_Z
+  return d <= 0.0 ? 1e9 : ${REVERSED_NEAR.toFixed(2)} / d;
+#else
   return d >= 1.0 ? 1e9 : exp2(d * LOG_FAR) - 1.0;
+#endif
 }
 vec3 outline(ivec2 p) {
   float d0 = dist(p);

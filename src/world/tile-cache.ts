@@ -21,6 +21,8 @@ export interface CachedMesh {
   bVertices?: ArrayBuffer;
   bRamps?: ArrayBuffer;
   bWindows?: ArrayBuffer;
+  /** the building vertices without the small parts (BuildingMeshData.coreVertexCount): the far LOD */
+  bCore?: number;
   dots?: ArrayBuffer;
   /** OSM tiles, night: roof obstruction lights (near), building night dots (far), mast lines (far), mast beacons */
   roofLights?: ArrayBuffer;

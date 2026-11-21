@@ -117,11 +117,13 @@ export class CloudField {
 
   draw(r: Renderer, view: mat4, proj: mat4, camPos: vec3, lightDir: vec3, fogStart: number, fogEnd: number): void {
     this.drawCalls = 0;
+    r.bare = true;
     for (const t of this.tiles.values()) {
       if (!t.visible || t.mesh.vertexCount === 0) continue;
       r.drawWorld(t.mesh, t.offset, view, proj, camPos, lightDir, fogStart, fogEnd);
       this.drawCalls++;
     }
+    r.bare = false;
   }
 
   /** how deep in cloud a point (the camera) is, 0..1: the densest layer there */
