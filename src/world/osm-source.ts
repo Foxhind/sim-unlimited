@@ -13,7 +13,10 @@ export const OSM_SCHEMA_VERSION = 10;
 // so dev goes through a same-origin Vite proxy that injects a descriptive UA (Q42).
 const ENDPOINT = import.meta.env.DEV ? '/overpass/api/interpreter' : 'https://overpass-api.de/api/interpreter';
 
-/** which upstream serves OSM: Overpass, the OSM API 0.6, Overpass with the API as fallback, or our own PMTiles (M6) */
+/**
+ * which upstream serves OSM: our own PMTiles (M6, the default), Overpass, the OSM API 0.6, or Overpass
+ * with the API as fallback ('auto'). Set with VITE_OSM_SOURCE.
+ */
 export type OsmSourceMode = 'auto' | 'overpass' | 'osm-api' | 'pmtiles';
 /** after Overpass fails as unreachable, go straight to the API for this long */
 const OVERPASS_DOWN_MS = 60000;
@@ -52,8 +55,8 @@ async function fetchOsmApi(tile: Tile, detail: OsmDetail): Promise<string | null
 const EMPTY: OsmTileData = { areas: [], lines: [], points: [], buildings: [] };
 
 export function osmSourceMode(): OsmSourceMode {
-  const v = (import.meta.env.VITE_OSM_SOURCE as string | undefined) ?? 'auto';
-  return v === 'overpass' || v === 'osm-api' || v === 'pmtiles' ? v : 'auto';
+  const v = import.meta.env.VITE_OSM_SOURCE as string | undefined;
+  return v === 'auto' || v === 'overpass' || v === 'osm-api' ? v : 'pmtiles';
 }
 
 /**
