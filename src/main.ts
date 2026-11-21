@@ -227,7 +227,7 @@ const moonLight = (): number =>
   Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
 /** light uniforms of a palette (frozen water is not drawn as water: no waves, glints or glitter) */
 function lightOf(p: PaletteParams): LightUniforms {
-  const l = lightUniforms(p, sunnyNow());
+  const l = lightUniforms(p, sunnyNow(), [(CLOUD_RGB >> 16) & 255, (CLOUD_RGB >> 8) & 255, CLOUD_RGB & 255]);
   l.direct[1] = moonLight();
   return l;
 }
@@ -880,6 +880,14 @@ function frame(now: number): void {
   }
   const flashing = state === 'crashed' && now - crashTime < 150;
   const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  profiler.stage('тени');
+  if (renderer.beginShadows(camPos, baseGround(camPos[1]).y, view, sunDir)) {
+    chunks.drawShadows(renderer);
+    osm.drawShadows(renderer, camPos);
+    clouds.drawShadows(renderer);
+    if (state !== 'crashed' && spawned) aircraftRenderer.drawShadow(renderer, model);
+    renderer.endShadows();
+  }
   profiler.stage('начало кадра: LUT, очистка');
   applyFlameColors(lut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);

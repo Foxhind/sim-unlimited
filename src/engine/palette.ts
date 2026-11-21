@@ -242,11 +242,6 @@ export interface PaletteParams {
   tint: RGB;
   /** colour saturation of lit surfaces (1 = as they are), applied before the light */
   saturation: number;
-  /**
-   * colour of the skylight that lights the faces turned away from the sun (any brightness: only
-   * its hue counts, SUNLIGHT_GLSL): blue under a clear sky, violet at dusk, plain under cloud
-   */
-  ambient: RGB;
 }
 
 /**
@@ -267,7 +262,6 @@ const NIGHT: PaletteParams = {
   lightMul: 0.22,
   tint: [0.55, 0.65, 1.0],
   saturation: 1,
-  ambient: [1, 1, 1],
 };
 /**
  * Sunset and sunrise (sun on the horizon): a violet zenith, magenta-pink half-way down, coral
@@ -287,7 +281,6 @@ const DUSK: PaletteParams = {
   lightMul: 0.58,
   tint: [1.0, 0.66, 0.74],
   saturation: 1.15,
-  ambient: [0.8, 0.78, 1.3],
 };
 /**
  * Sunrise (sun on the horizon, rising): the same glow as the sunset in the cool colours of a
@@ -306,7 +299,6 @@ const DAWN: PaletteParams = {
   lightMul: 0.62,
   tint: [0.82, 0.92, 1.06],
   saturation: 1.1,
-  ambient: [0.82, 0.92, 1.25],
 };
 /** daylight under a cloudy sky: the plain, even light */
 const DAY: PaletteParams = {
@@ -314,7 +306,6 @@ const DAY: PaletteParams = {
   lightMul: 1.0,
   tint: [1, 1, 1],
   saturation: 1,
-  ambient: [0.97, 0.99, 1.04],
 };
 /**
  * daylight in good weather (sunniness 1): a deep blue zenith over a bright clear horizon, warm
@@ -325,7 +316,6 @@ const SUNNY_DAY: PaletteParams = {
   lightMul: 1.12,
   tint: [1.0, 0.97, 0.88],
   saturation: 1.4,
-  ambient: [0.86, 0.95, 1.18],
 };
 
 /** total cloud cover up to this is fully sunny weather, from SUNNY_OVERCAST_PCT on none */
@@ -448,7 +438,6 @@ function lerpParams(a: PaletteParams, b: PaletteParams, t: number): PaletteParam
     lightMul: lerp(a.lightMul, b.lightMul, t),
     tint: lerpRGB(a.tint, b.tint, t),
     saturation: lerp(a.saturation, b.saturation, t),
-    ambient: lerpRGB(a.ambient, b.ambient, t),
   };
 }
 
@@ -613,22 +602,45 @@ const AMBIENT_OVERCAST = 0.55;
 const LIGHT_TINT = 0.7;
 const LUMA: RGB = [0.299, 0.587, 0.114];
 const luma = (c: RGB): number => c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
+/**
+ * how much of the sky's own hue the skylight keeps (the rest white): the drawn sky is far more
+ * saturated than the light it sheds, which also bounces off the ground and the air
+ */
+export const SKYLIGHT_HUE = 0.3;
+/** the cloud colour under an overcast sky (clouds.ts CLOUD_RGB), the skylight's source there */
+const OVERCAST_RGB: RGB = [242, 244, 247];
+
+/**
+ * The skylight's hue (luminance 1): what lights a face in shade, turned away from the sun or in a
+ * cast shadow. It comes from the sky over it — the drawn zenith and the band half-way down (the
+ * part of the dome a shaded face sees), blue by day, violet at dusk — and, as the cover closes,
+ * from the clouds: under overcast the shade takes the cloud deck's plain grey.
+ * `overcast` 0..1 (1 − sunniness); `cloud` the clouds' colour.
+ */
+export function skylightHue(p: PaletteParams, overcast: number, cloud: RGB = OVERCAST_RGB): RGB {
+  const dome: RGB = [0, 1, 2].map((i) => (2 * p.zenith[i] + p.skyMid[i]) / 3) as unknown as RGB;
+  const k = Math.max(0, Math.min(1, overcast));
+  const src = lerpRGB(dome, cloud, k);
+  const y = Math.max(luma(src), 1e-3);
+  return src.map((v) => 1 + SKYLIGHT_HUE * (v / y - 1)) as unknown as RGB;
+}
 
 /**
  * `sunny` (0..1, sunniness): a clear sky gives hard sunlight and dark shade, overcast soft even
- * light, mostly from the sky.
+ * light, mostly from the sky. `cloud`: the clouds' colour, the shade's hue under overcast.
  */
-export function lightUniforms(p: PaletteParams, sunny = 1): LightUniforms {
+export function lightUniforms(p: PaletteParams, sunny = 1, cloud: RGB = OVERCAST_RGB): LightUniforms {
   const levels = new Float32Array((GLOW_LEVELS + 1) * 3);
   for (let k = 0; k <= GLOW_LEVELS; k++) {
     const q = k === 0 ? p : glowParams(p, k);
     for (let i = 0; i < 3; i++) levels[k * 3 + i] = q.lightMul * q.tint[i];
   }
   const clear = Math.max(0, Math.min(1, sunny));
-  const y = luma(p.ambient);
+  const hue = skylightHue(p, 1 - clear, cloud);
+  const y = luma(hue);
   return {
     levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p),
-    sky: Float32Array.from([p.ambient[0] / y, p.ambient[1] / y, p.ambient[2] / y, lerp(AMBIENT_OVERCAST, AMBIENT_CLEAR, clear)]),
+    sky: Float32Array.from([hue[0] / y, hue[1] / y, hue[2] / y, lerp(AMBIENT_OVERCAST, AMBIENT_CLEAR, clear)]),
     direct: Float32Array.from([0.5 + 0.5 * clear, 0, LIGHT_TINT, 0]),
   };
 }

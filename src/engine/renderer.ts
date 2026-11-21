@@ -3,7 +3,7 @@ import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
-import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -50,6 +50,26 @@ export class Renderer {
   /** what drawSky drew this frame, for drawStars: moon, ground height, overcast decks above / below */
   private skyMoon = vec3.create();
   private skyCover = new Float32Array(3);
+
+  /** sun shadows (beginShadows): the depth map seen from the sun, its framebuffer and casters' programs */
+  private shadowTex: WebGLTexture;
+  private shadowFbo: WebGLFramebuffer;
+  private shadowProg: WebGLProgram;
+  private shadowU: Uniforms;
+  private shadowTreeProg: WebGLProgram;
+  private shadowTreeU: Uniforms;
+  /** world → the shadow map's clip space this frame (SHADOW_CLIP_GLSL) */
+  private shadowMat = mat4.create();
+  private shadowView = mat4.create();
+  private shadowProj = mat4.create();
+  /** the shadow box's half-width this frame, m */
+  private shadowR = 0;
+  /** the shadow box's centre on the ground this frame (world, m): casters tested against it take its height */
+  readonly shadowGround = vec3.create();
+  /** the shadow map holds this frame's casters: the world passes take shadows */
+  private shadowsOn = false;
+  /** shadows wanted at all (settings) */
+  shadows = true;
 
   private invViewProj = mat4.create();
   private viewProj = mat4.create();
@@ -189,7 +209,7 @@ export class Renderer {
 
     const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
       const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
@@ -200,7 +220,7 @@ export class Renderer {
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -241,6 +261,137 @@ export class Renderer {
       gl.useProgram(prog);
       gl.uniform1i(u.uLut, LUT_UNIT);
     }
+
+    // sun shadows: a float depth map, compared in hardware (sampler2DShadow), on its own unit
+    this.shadowTex = must(gl.createTexture(), 'shadow map');
+    gl.activeTexture(gl.TEXTURE0 + SHADOW_UNIT);
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT32F, SHADOW_SIZE, SHADOW_SIZE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, this.reversedZ ? gl.GEQUAL : gl.LEQUAL);
+    gl.activeTexture(gl.TEXTURE0);
+    this.shadowFbo = must(gl.createFramebuffer(), 'shadow framebuffer');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.shadowTex, 0);
+    gl.drawBuffers([gl.NONE]);
+    gl.readBuffer(gl.NONE);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('Shadow framebuffer incomplete');
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.shadowProg = createProgram(gl, depthed(SHADOW_VS), depthed(SHADOW_FS));
+    this.shadowU = uniformMap(gl, this.shadowProg, ['uShadowMat', 'uOffset', 'uCamPos', 'uCoarse']);
+    this.shadowTreeProg = createProgram(gl, depthed(SHADOW_TREE_VS), depthed(SHADOW_FS));
+    this.shadowTreeU = uniformMap(gl, this.shadowTreeProg, ['uShadowMat', 'uOffset', 'uCamPos']);
+    for (const { prog, u } of [...Object.values(this.world), { prog: this.treeProg, u: this.treeU }]) {
+      gl.useProgram(prog);
+      gl.uniform1i(u.uShadowMap, SHADOW_UNIT);
+    }
+  }
+
+  /**
+   * Sun shadows, step 1 of 3, before beginFrame: fit the shadow map round `ground` (a point on the
+   * ground near the camera) for the sun in `sunDir`, and start drawing casters into it (shadowMesh,
+   * shadowTrees). The box's half-width grows with the camera's height over that ground, in steps
+   * (so the shadows do not crawl as it changes), and its centre snaps to whole texels. Returns
+   * false (and the world takes no shadows this frame) when shadows are off or the sun is down.
+   */
+  beginShadows(camPos: vec3, groundY: number, view: mat4, sunDir: vec3): boolean {
+    this.shadowsOn = false;
+    if (!this.shadows || this.orthoFar > 0 || sunDir[1] < SHADOW_MIN_SUN_Y) return false;
+    const gl = this.gl;
+    const agl = Math.max(0, camPos[1] - groundY);
+    const want = Math.min(SHADOW_MAX_R, Math.max(SHADOW_MIN_R, SHADOW_R_PER_AGL * agl + SHADOW_MIN_R));
+    // half-width in steps of √2 from the smallest
+    this.shadowR = SHADOW_MIN_R * Math.SQRT2 ** Math.ceil(Math.log(want / SHADOW_MIN_R) / Math.log(Math.SQRT2) - 1e-6);
+    const r = this.shadowR;
+    // the ground under the camera, moved SHADOW_AHEAD of the half-width the way it looks
+    const fx = -view[2], fz = -view[10];
+    const fl = Math.hypot(fx, fz);
+    const ahead = fl > 1e-3 ? (SHADOW_AHEAD * r) / fl : 0;
+    const ground = vec3.set(this.shadowGround, camPos[0] + fx * ahead, groundY, camPos[2] + fz * ahead);
+    // the sun's view: looking down the sun's rays at the world origin, then the centre snapped there
+    const up = Math.abs(sunDir[1]) > 0.99 ? vec3.fromValues(0, 0, -1) : vec3.fromValues(0, 1, 0);
+    const eye = vec3.create();
+    mat4.lookAt(this.shadowView, eye, vec3.negate(vec3.create(), sunDir), up);
+    const c = vec3.transformMat4(vec3.create(), ground, this.shadowView);
+    const texel = (2 * r) / SHADOW_SIZE;
+    const cx = Math.round(c[0] / texel) * texel, cy = Math.round(c[1] / texel) * texel;
+    // view space looks down −z: the box runs SHADOW_DEPTH_M toward the sun and away from it round the centre
+    mat4.ortho(this.shadowProj, cx - r, cx + r, cy - r, cy + r, -c[2] - SHADOW_DEPTH_M, -c[2] + SHADOW_DEPTH_M);
+    mat4.multiply(this.shadowMat, this.shadowProj, this.shadowView);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
+    gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.depthMask(true);
+    gl.clearBufferfv(gl.DEPTH, 0, new Float32Array([this.reversedZ ? 0 : 1]));
+    gl.enable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    // casters' faces from both sides (thin plates, open meshes), pushed back by their slope
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.POLYGON_OFFSET_FILL);
+    gl.polygonOffset(this.reversedZ ? -SHADOW_SLOPE : SHADOW_SLOPE, 0);
+    for (const [prog, u] of [[this.shadowProg, this.shadowU], [this.shadowTreeProg, this.shadowTreeU]] as [WebGLProgram, Uniforms][]) {
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(u.uShadowMat, false, this.shadowMat);
+      gl.uniform3fv(u.uCamPos, camPos);
+    }
+    return true;
+  }
+
+  /** the shadow map's texel this frame, m (0: no shadows) */
+  get shadowTexel(): number { return this.shadowR > 0 ? (2 * this.shadowR) / SHADOW_SIZE : 0; }
+
+  /** a caster round `center` (m, world) within `radius` falls on the shadow map this frame */
+  shadowSees(center: vec3, radius: number): boolean {
+    const v = this.shadowView, p = this.shadowProj;
+    // the box's centre and half-width in the sun's view (ortho: x = (2·vx − (r+l)) / (r − l))
+    const vx = v[0] * center[0] + v[4] * center[1] + v[8] * center[2] + v[12];
+    const vy = v[1] * center[0] + v[5] * center[1] + v[9] * center[2] + v[13];
+    const sx = p[0], sy = p[5];
+    return Math.abs(vx * sx + p[12]) <= 1 + radius * sx && Math.abs(vy * sy + p[13]) <= 1 + radius * sy;
+  }
+
+  /** Sun shadows, step 2: a mesh drawn as drawWorld places it (`coarse`: terrain edges stitched). */
+  shadowMesh(mesh: Mesh, offset: vec3 | vec4, coarse = 0): void {
+    const gl = this.gl;
+    gl.useProgram(this.shadowProg);
+    setPlacement(gl, this.shadowU.uOffset, offset);
+    gl.uniform1i(this.shadowU.uCoarse, coarse);
+    gl.bindVertexArray(mesh.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+  }
+
+  /** Sun shadows, step 2: instanced trees, as drawTrees draws them. */
+  shadowTrees(vao: WebGLVertexArrayObject, count: number, first: number, vertexCount: number, offset: vec3 | vec4): void {
+    const gl = this.gl;
+    gl.useProgram(this.shadowTreeProg);
+    setPlacement(gl, this.shadowTreeU.uOffset, offset);
+    gl.bindVertexArray(vao);
+    gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
+  }
+
+  /** Sun shadows, step 3: the map is done; the world passes after beginFrame take shadows from it. */
+  endShadows(): void {
+    const gl = this.gl;
+    gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.bindVertexArray(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.shadowsOn = true;
+  }
+
+  /** the shadow uniforms of a world or tree draw (SHADOW_RECEIVE_VS / _FS) */
+  private setShadow(u: Uniforms, on: boolean): void {
+    const gl = this.gl;
+    const live = on && this.shadowsOn;
+    gl.uniform1f(u.uShadowOn, live ? 1 : 0);
+    if (!live) return;
+    gl.uniformMatrix4fv(u.uShadowMat, false, this.shadowMat);
+    const texel = (2 * this.shadowR) / SHADOW_SIZE;
+    gl.uniform1f(u.uShadowNormal, texel * SHADOW_NORMAL_TEXELS);
+    gl.uniform1f(u.uShadowBias, SHADOW_BIAS_TEXELS * texel / (2 * SHADOW_DEPTH_M));
   }
 
   /** Q12: "MSAA" = 2x supersampled world pass, averaged 2×2 down to the screen. */
@@ -511,6 +662,8 @@ export class Renderer {
     gl.uniform1f(u.uWinEmit, this.emission('cityLights'));
     gl.uniform1f(u.uLitShare, this.litShare);
     gl.uniform1i(u.uSpeckle, this.speckle ? 1 : 0);
+    // light sources and glints are not shaded
+    this.setShadow(u, !this.selfLit && !this.additive);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (blend) gl.disable(gl.BLEND);
@@ -550,6 +703,7 @@ export class Renderer {
     this.setLight(this.treeU);
     this.setRim(this.treeU, this.rimTreeWeight);
     gl.uniform1i(this.treeU.uTwoSided, 1);
+    this.setShadow(this.treeU, true);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
@@ -783,6 +937,29 @@ const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow'];
 
 /** texture unit the LUT stays bound to */
 const LUT_UNIT = 5;
+/** texture unit the shadow map stays bound to */
+const SHADOW_UNIT = 6;
+/** the shadow receivers' uniforms (shaders.ts SHADOW_RECEIVE_VS / _FS) */
+const SHADOW_UNIFORMS = ['uShadowMat', 'uShadowOn', 'uShadowNormal', 'uShadowBias', 'uShadowMap'];
+/** shadow map texels a side */
+const SHADOW_SIZE = 2048;
+/**
+ * the shadow box's half-width, m: SHADOW_MIN_R on the ground (under a metre a texel), growing by
+ * SHADOW_R_PER_AGL per metre of the camera's height over it, up to SHADOW_MAX_R
+ */
+const SHADOW_MIN_R = 600;
+const SHADOW_MAX_R = 6000;
+const SHADOW_R_PER_AGL = 1.2;
+/** the box reaches this far toward the sun and away from it round its centre, m (clouds included) */
+const SHADOW_DEPTH_M = 15000;
+/** no shadows with the sun this low (sine of its elevation): it no longer lights the faces */
+const SHADOW_MIN_SUN_Y = 0.01;
+/** against shadow acne: receivers nudged along their normal and their depth, in shadow texels; casters' slope offset */
+const SHADOW_NORMAL_TEXELS = 2;
+const SHADOW_BIAS_TEXELS = 2;
+const SHADOW_SLOPE = 4;
+/** the box's centre lies this share of its half-width ahead of the camera, where it looks */
+const SHADOW_AHEAD = 0.4;
 
 /** uOffset (see PLACE_VS): a vec3 offset places a mesh without turning it */
 function setPlacement(gl: WebGL2RenderingContext, loc: WebGLUniformLocation | null, offset: vec3 | vec4): void {

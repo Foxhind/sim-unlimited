@@ -36,6 +36,8 @@ const GHOST_SWEEP = 0.9;
 export class AircraftRenderer {
   private gl: WebGL2RenderingContext;
   private mesh: Mesh;
+  /** the mesh holds a pose (draw has run once): its shadow can be cast */
+  private posed = false;
   private vbo: WebGLBuffer;
   private rbo: WebGLBuffer;
   private base: Float32Array;
@@ -184,6 +186,11 @@ export class AircraftRenderer {
     return this.rpm;
   }
 
+  /** the aircraft into the sun's shadow map (renderer.beginShadows), in the pose its last draw left */
+  drawShadow(renderer: Renderer, model: FlightModel): void {
+    if (this.posed) renderer.shadowMesh(this.mesh, model.pos);
+  }
+
   draw(renderer: Renderer, model: FlightModel, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, throttle = 0, time = 0): void {
     if (model.crashed) return;
     this.ensureMesh(model.cfg);
@@ -247,6 +254,7 @@ export class AircraftRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.live);
     renderer.drawWorld(this.mesh, model.pos, view, proj, camPos, sunDir, 20000, 60000);
+    this.posed = true;
     if (prop && blur > 0 && state[0] === 0) this.drawPropeller(renderer, model, view, proj, camPos, sunDir, blur);
     // the flame and the lights light themselves: no rim of either kind, no two-sided flip
     renderer.selfLit = true;

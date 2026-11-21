@@ -162,6 +162,9 @@ export function sphereInFrustum(planes: Float32Array[], center: vec3, radius: nu
 
 export type ChunkStatus = 'pending' | 'ready' | 'error';
 
+/** how far the relief of a tile may stand above or below the shadow box's ground, m (drawShadows) */
+const SHADOW_RELIEF_M = 1500;
+
 export interface Chunk {
   tile: Tile;
   key: string;
@@ -204,6 +207,8 @@ export class ChunkManager {
   readonly chunks = new Map<string, Chunk>();
   origin: LatLon;
   renderList: Chunk[] = [];
+  /** every tile shown this frame, in view or not (one level of detail per place): the shadow casters */
+  private shownList: Chunk[] = [];
   /** stitch the edges of tiles to coarser neighbours (off in the overview tool to see the raw seams) */
   stitch = true;
   /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
@@ -356,6 +361,7 @@ export class ChunkManager {
 
     // planes come from proj*view where view is a full lookAt (translation included): they live in
     // the same world frame as centerEnu, so the sphere centre must NOT be made camera-relative
+    this.shownList = list;
     this.renderList = list.filter((c) => sphereInFrustum(this.planes, c.centerEnu, c.radius + 2500));
 
     for (const [key, c] of this.chunks) {
@@ -427,6 +433,16 @@ export class ChunkManager {
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, this.stitch ? c.coarse : 0);
     }
     renderer.speckle = false;
+  }
+
+  /** the terrain into the sun's shadow map (renderer.beginShadows): every tile shown over the box, not only those in view */
+  drawShadows(renderer: Renderer): void {
+    const at = vec3.create();
+    for (const c of this.shownList) {
+      if (!c.mesh) continue;
+      vec3.set(at, c.centerEnu[0], renderer.shadowGround[1], c.centerEnu[2]);
+      if (renderer.shadowSees(at, c.radius + SHADOW_RELIEF_M)) renderer.shadowMesh(c.mesh, c.offset, this.stitch ? c.coarse : 0);
+    }
   }
 
   nearReady(cam: LatLon, radiusM: number): boolean {

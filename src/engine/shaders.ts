@@ -119,6 +119,13 @@ vec4 sceneLight(vec3 n, float height) {
   vec3 c = mix(uSky.rgb, dir, sqrt(clamp((ds + dm) / (1.0 - a), 0.0, 1.0)));
   return vec4(mix(vec3(1.0), c, uDirect.z), min(a + ds + dm, 1.0));
 }
+// the same face in a cast shadow (SHADOW_RECEIVE_VS): the sun blocked, the skylight (and the moon) left
+vec4 sceneShade(vec3 n) {
+  float a = uSky.a;
+  float dm = (1.0 - a) * max(dot(n, uMoon), 0.0) * uDirect.y;
+  vec3 c = mix(uSky.rgb, vec3(1.0), sqrt(clamp(dm / (1.0 - a), 0.0, 1.0)));
+  return vec4(mix(vec3(1.0), c, uDirect.z), min(a + dm, 1.0));
+}
 `;
 /**
  * The drawn sky in direction dir (SKY_FS), the sun toward sun: its bands, the sunset glow's rings
@@ -832,6 +839,111 @@ vec3 roadMarkAt(vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
 }
 `;
 
+/** the shadows fade out from this share of the shadow map's half-width to its edge */
+const SHADOW_FADE = 0.8;
+/**
+ * Sun shadows (renderer.ts beginShadows): a depth map of the casters seen from the sun, an
+ * orthographic box round the ground near the camera. uShadowMat takes a world point (the
+ * curvature drop applied, as everywhere) to its clip space there: xy −1..1 across the map, z −1..1
+ * from the sun's side of the box to the far side. With REVERSED_Z the map stores 1 − depth
+ * (cleared to 0, GREATER), as the world's own depth buffer does.
+ */
+const SHADOW_CLIP_GLSL = `
+uniform mat4 uShadowMat;
+vec4 shadowClip(vec3 wp) {
+  vec4 c = uShadowMat * vec4(wp, 1.0);
+#ifdef REVERSED_Z
+  c.z = 0.5 - 0.5 * c.z;
+#endif
+  return c;
+}
+`;
+/**
+ * A face that takes shadows: its colour in shade (vShade: lit by the sky alone, sceneShade; the
+ * same as vColor when the sun does not reach it anyway) and where it falls in the shadow map
+ * (vShadow, nudged uShadowNormal metres off the face along its normal against shadow acne).
+ * uShadowOn 0: no shadows for this draw.
+ */
+const SHADOW_RECEIVE_VS = `
+uniform mat4 uShadowMat;
+uniform float uShadowOn;
+uniform float uShadowNormal;
+flat out vec3 vShade;
+out vec3 vShadow;
+void shadowCoord(vec3 wp, vec3 n) {
+  // the more a face slants from the sun, the further its texels reach in depth: nudged further
+  float slant = 1.0 - clamp(dot(n, uSun), 0.0, 1.0);
+  vShadow = (uShadowMat * vec4(wp + n * uShadowNormal * (0.5 + slant), 1.0)).xyz * 0.5 + 0.5;
+}
+`;
+/** see SHADOW_RECEIVE_VS: 1 where the sun reaches the fragment, 0 in a cast shadow */
+const SHADOW_RECEIVE_FS = `
+uniform highp sampler2DShadow uShadowMap;
+uniform float uShadowOn;
+uniform float uShadowBias;
+flat in vec3 vShade;
+in vec3 vShadow;
+const float SHADOW_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+float sunLit() {
+  if (uShadowOn < 0.5 || vShade == vColor) return 1.0;
+  vec2 e2 = abs(vShadow.xy * 2.0 - 1.0);
+  float edge = max(e2.x, e2.y);
+  if (edge >= 1.0 || vShadow.z <= 0.0 || vShadow.z >= 1.0) return 1.0;
+#ifdef REVERSED_Z
+  float ref = 1.0 - vShadow.z + uShadowBias;
+#else
+  float ref = vShadow.z - uShadowBias;
+#endif
+  // hard edges, like the palette's own steps: the 2×2 filtered test cut at half
+  float lit = step(0.5, texture(uShadowMap, vec3(vShadow.xy, ref)));
+  // the shadows fade out toward the map's edge in a dither, not along a line
+  ivec2 q = ivec2(gl_FragCoord.xy) & 3;
+  if (smoothstep(${SHADOW_FADE.toFixed(2)}, 1.0, edge) > (SHADOW_BAYER[q.y * 4 + q.x] + 0.5) / 16.0) lit = 1.0;
+  return lit;
+}
+`;
+/** a caster in the shadow map: the world's faces (terrain with its stitched edges, objects, clouds) */
+export const SHADOW_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPos;
+layout(location=5) in vec2 aMorph;
+uniform int uCoarse;
+uniform vec4 uOffset;
+uniform vec3 uCamPos;
+${PLACE_VS}${SHADOW_CLIP_GLSL}
+void main() {
+  vec3 wp = toWorld(aPos);
+  if ((int(aMorph.y) & uCoarse) != 0) wp.y += aMorph.x;
+  vec2 r = wp.xz - uCamPos.xz;
+  wp.y -= dot(r, r) / (2.0 * 6371000.0);
+  gl_Position = shadowClip(wp);
+}
+`;
+/** a caster in the shadow map: instanced trees (TREE_VS) */
+export const SHADOW_TREE_VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPos;
+layout(location=3) in vec3 aInstPos;
+layout(location=4) in vec2 aInstSR;
+layout(location=6) in float aInstYaw;
+uniform vec4 uOffset;
+uniform vec3 uCamPos;
+${PLACE_VS}${SHADOW_CLIP_GLSL}
+void main() {
+  float cy = cos(aInstYaw), sy = sin(aInstYaw);
+  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z);
+  vec3 wp = toWorld(lp * aInstSR.x + aInstPos);
+  vec2 r = wp.xz - uCamPos.xz;
+  wp.y -= dot(r, r) / (2.0 * 6371000.0);
+  gl_Position = shadowClip(wp);
+}
+`;
+/** the shadow map keeps depth only */
+export const SHADOW_FS = `#version 300 es
+precision mediump float;
+void main() {}
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
@@ -866,7 +978,7 @@ flat out vec3 vWinEdge;
 // what the facade paints in its own colours (WORLD_FS windowAt: the signs)
 flat out vec3 vRef;
 uniform highp int uWindows;
-${GLOW_VS}${RIM_GLSL}
+${GLOW_VS}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 void main() {
   vWinUV = aWinUV;
   vWinEdge = aWinEdge;
@@ -884,6 +996,9 @@ void main() {
   fog = floor(fog * 12.0) / 12.0;
   float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
   vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb, hazeAt(rel), tempC) + rimLight(n, wp, fog), 1.0);
+  vec4 shade = sceneShade(n);
+  vShade = uShadowOn > 0.5 && light.a > shade.a ? shadeColour(aRamp, shade.a * 11.0, fog, shade.rgb, hazeAt(rel), tempC) : vColor;
+  shadowCoord(wp, n);
   vRef = uWindows > 0 && aWinEdge.y > 0.0
     ? shadeColour((aRamp & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | 0xf0f0f0u, light.a * 11.0, fog, light.rgb, hazeAt(rel), 99.0)
     : vec3(0.0);
@@ -935,10 +1050,11 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}
+${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}
 void main() {
   writeLogDepth();
-  vec3 c = vColor;
+  // in a cast shadow the face keeps only the sky's light (vShade)
+  vec3 c = sunLit() > 0.5 ? vColor : vShade;
   // the derivative is taken on every fragment: fwidth is undefined in non-uniform control flow
   vec2 wxz = uCamPos.xz + vRay.xz;
   vec2 fw = fwidth(wxz);
@@ -1019,7 +1135,7 @@ out vec3 vRay;
 out vec2 vWinUV;
 flat out vec3 vWinEdge;
 flat out vec3 vRef;
-${GLOW_VS}${RIM_GLSL}
+${GLOW_VS}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 void main() {
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
@@ -1044,6 +1160,9 @@ void main() {
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
   float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
   vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel), tempC) + rimLight(n, wp, fog), 1.0);
+  vec4 shade = sceneShade(n);
+  vShade = uShadowOn > 0.5 && light.a > shade.a ? shadeColour(packed, shade.a * 11.0, fog, shade.rgb, hazeAt(rel), tempC) : vColor;
+  shadowCoord(wp, n);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);

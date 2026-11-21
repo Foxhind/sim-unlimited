@@ -126,6 +126,16 @@ export class CloudField {
     r.bare = false;
   }
 
+  /** the clouds into the sun's shadow map (renderer.beginShadows): every tile over the box, in view or not */
+  drawShadows(r: Renderer): void {
+    const at = vec3.create();
+    for (const t of this.tiles.values()) {
+      if (t.mesh.vertexCount === 0) continue;
+      vec3.set(at, t.offset[0], (t.layer.base + t.layer.top) / 2, t.offset[2]);
+      if (r.shadowSees(at, TILE_M * 0.75 + (t.layer.top - t.layer.base))) r.shadowMesh(t.mesh, t.offset);
+    }
+  }
+
   /** how deep in cloud a point (the camera) is, 0..1: the densest layer there */
   density(at: LatLon, alt: number): number {
     if (this.layers.length === 0) return 0;

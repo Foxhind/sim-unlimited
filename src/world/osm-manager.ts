@@ -13,6 +13,11 @@ import type { AreaStyles } from './area-styles';
 const PITCH_LINE_PULL = [0.05, 0.0004] as const;
 
 /** within this slant distance a detailed tile draws its buildings and road ribbons; beyond, wall + roof dots and 1 px road lines (at night its lit buildings still) */
+/** trees cast shadows while a shadow-map texel is no coarser than this, m (a crown is a few metres) */
+const SHADOW_TREE_TEXEL_M = 1.5;
+/** how far the relief may stand above or below the shadow box's ground, m (drawShadows) */
+const SHADOW_RELIEF_M = 1500;
+
 export const HOUSE_RADIUS_M = 3500;
 /**
  * Building LOD: a tile whose nearest buildings are farther than this (slant, m) draws them without
@@ -134,6 +139,8 @@ export function farLightSize(pointSize: number): number {
 export class OsmManager {
   readonly chunks = new Map<string, OsmChunk>();
   renderList: OsmChunk[] = [];
+  /** every tile shown this frame, in view or not: the shadow casters */
+  private shownList: OsmChunk[] = [];
   /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
   /** a tile's OSM arrived: `runways` and `coast` reshape its terrain, which then needs a rebuild */
   onTileReady?: (tile: Tile, runways: number, coast: boolean) => void;
@@ -252,10 +259,12 @@ export class OsmManager {
     }
 
     this.renderList = [];
+    this.shownList = [];
     for (const key of shown) {
       const c = this.chunks.get(key);
       if (!c || c.status !== 'ready') continue;
       c.lastUsed = now;
+      this.shownList.push(c);
       if (sphereInFrustum(this.planes, c.centerEnu, c.radius + 2000)) this.renderList.push(c);
     }
 
@@ -508,6 +517,28 @@ export class OsmManager {
       }
       if (c.lights && lightsOn) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
+      }
+    }
+  }
+
+  /**
+   * The buildings and, near the ground, the trees into the sun's shadow map (renderer.beginShadows):
+   * every tile shown over the box, not only those in view. The buildings' core (no doors, parapets
+   * or roof details) is enough for their shadows.
+   */
+  drawShadows(renderer: Renderer, camPos: vec3): void {
+    const at = vec3.create();
+    const trees = renderer.shadowTexel <= SHADOW_TREE_TEXEL_M;
+    for (const c of this.shownList) {
+      vec3.set(at, c.centerEnu[0], renderer.shadowGround[1], c.centerEnu[2]);
+      if (!renderer.shadowSees(at, c.radius * 0.71 + SHADOW_RELIEF_M)) continue;
+      const houses = c.bcore ?? c.bmesh;
+      if (houses) renderer.shadowMesh(houses, c.offset);
+      if (!trees || !c.trees) continue;
+      const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]) - c.radius * 0.71;
+      for (const t of c.trees) {
+        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity)) continue;
+        renderer.shadowTrees(t.vao, t.count, t.first, t.vertexCount, c.offset);
       }
     }
   }
