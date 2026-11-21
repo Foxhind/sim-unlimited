@@ -32,6 +32,8 @@ export const LIFT_EPS_M = 0.02;
 
 /** a water area under a bridge holds the lift by points this far apart */
 const HOLD_STEP_M = 10;
+/** a bridge holds its height between two crossings at most this far apart along it */
+const HOLD_GAP_M = LIFT_REACH_M;
 const CELL_M = 64;
 
 export interface RoadLevels {
@@ -259,11 +261,14 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
   // --- the graph: the ways' points (shared by their coordinates) and the points that ask ---
   const nodeOf = new Map<string, number>();
   const adj: [number, number][][] = [];
+  /** the edges that are bridges */
+  const bridgeAdj: [number, number][][] = [];
   const node = (k: string): number => {
     let n = nodeOf.get(k);
     if (n === undefined) {
       nodeOf.set(k, n = adj.length);
       adj.push([]);
+      bridgeAdj.push([]);
     }
     return n;
   };
@@ -283,14 +288,68 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
       if (a.node === b.node) continue;
       adj[a.node].push([b.node, b.d - a.d]);
       adj[b.node].push([a.node, b.d - a.d]);
+      if (w.bridge) {
+        bridgeAdj[a.node].push([b.node, b.d - a.d]);
+        bridgeAdj[b.node].push([a.node, b.d - a.d]);
+      }
     }
   });
+
+  // --- a bridge holds its height between two crossings: no dip between the roads it spans ---
+  /**
+   * Between two points that ask, at most HOLD_GAP_M apart along bridges, the deck runs straight
+   * from the one's height to the other's: left to the grade it would dip between every two roads
+   * under a long bridge. Further apart they are two humps: whoever sees a point between them must
+   * see both (LIFT_REACH_M), or the tiles of a border would disagree. And past its outermost crossing
+   * a bridge stays level up to the vertex where the fall after it would still end within that reach.
+   */
+  const held = new Set<string>();
+  const edgeKey = (a: number, b: number): string => (a < b ? `${a}:${b}` : `${b}:${a}`);
+  const hold = new Map<number, number>();
+  for (const [from, reqFrom] of asked) {
+    if (!bridgeAdj[from].length) continue;
+    const dist = new Map<number, number>([[from, 0]]);
+    const prev = new Map<number, number>();
+    const heap = new Heap();
+    heap.push([0, from]);
+    while (heap.size) {
+      const [neg, n] = heap.pop();
+      if (-neg > dist.get(n)!) continue;
+      for (const [m, len] of bridgeAdj[n]) {
+        const d = -neg + len;
+        if (d > HOLD_GAP_M || d >= (dist.get(m) ?? Infinity)) continue;
+        dist.set(m, d);
+        prev.set(m, n);
+        heap.push([-d, m]);
+      }
+    }
+    // level along the bridge as far as leaves room for the fall after it within the reach: a short
+    // bridge is level from end to end, and its approaches do the climbing
+    const level = LIFT_REACH_M - reqFrom / LIFT_GRADE;
+    for (const [to, d] of dist) {
+      if (to === from || d > level + 1e-6) continue;
+      hold.set(to, Math.max(hold.get(to) ?? 0, reqFrom));
+      held.add(edgeKey(to, prev.get(to)!));
+    }
+    for (const [to, gap] of dist) {
+      const reqTo = asked.get(to);
+      // each pair once
+      if (reqTo === undefined || to <= from || gap <= 0) continue;
+      for (let n = to; n !== from; n = prev.get(n)!) {
+        const v = reqFrom + ((reqTo - reqFrom) * dist.get(n)!) / gap;
+        hold.set(n, Math.max(hold.get(n) ?? 0, v));
+        held.add(edgeKey(n, prev.get(n)!));
+      }
+    }
+  }
+  for (const [n, v] of hold) asked.set(n, Math.max(asked.get(n) ?? 0, v));
 
   // --- the lift: what is asked for less the grade times the way there, the most of all ---
   /** one pass for each grade: the asks of at most LIFT_GRADE · LIFT_REACH_M share one */
   const byGrade = new Map<number, [number, number][]>();
   for (const [n, req] of asked) {
-    const g = Math.max(LIFT_GRADE, req / LIFT_REACH_M);
+    // in steps of LEVEL_M, the steeper: a held height between two levels falls no further than the higher
+    const g = Math.max(LIFT_GRADE, (Math.ceil(req / LEVEL_M - 1e-9) * LEVEL_M) / LIFT_REACH_M);
     let list = byGrade.get(g);
     if (!list) byGrade.set(g, list = []);
     list.push([req, n]);
@@ -319,6 +378,9 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
     passes.push({ g, val });
   }
 
+  const nodeLift = new Float64Array(adj.length);
+  for (const { val } of passes) for (let n = 0; n < val.length; n++) nodeLift[n] = Math.max(nodeLift[n], val[n]);
+
   const byLine = new Map<OsmLine, Way>();
   const byTags = new Map<Record<string, string>, Way[]>();
   for (const w of ways) {
@@ -339,6 +401,8 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
     const t = d - s[lo].d, rest = s[hi].d - d;
     let lift = 0;
     for (const { g, val } of passes) lift = Math.max(lift, val[s[lo].node] - g * t, val[s[hi].node] - g * rest);
+    // a held stretch of a bridge: straight between its ends
+    if (t + rest > 0 && held.has(edgeKey(s[lo].node, s[hi].node))) lift = Math.max(lift, (nodeLift[s[lo].node] * rest + nodeLift[s[hi].node] * t) / (t + rest));
     return lift < LIFT_EPS_M ? 0 : lift;
   };
   const maxOf = new Map<Way, number>();

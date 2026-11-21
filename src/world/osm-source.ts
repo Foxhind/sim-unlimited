@@ -6,8 +6,8 @@ import { overpassQuery, parseOverpass, type OverpassJson } from './overpass';
 import { PmtilesOsm } from './osm-pmtiles';
 import type { OsmDetail, OsmTileData, TileSource } from './osm-types';
 
-/** bump when the filter changes: cached raw tiles lack what it newly selects (3: antenna masts, 6: masts mapped as ways, 7: building entrances, 8: aerodrome outlines, 10: roads within ROAD_REACH_M round the tile, 12: footways and paths, car parks, 13: our tiles keep junction, sport, shop, healthcare and every drawn railway, 14: roads, railways, waterways and water within ROAD_REACH_M = 150 m) */
-export const OSM_SCHEMA_VERSION = 14;
+/** bump when the filter changes: cached raw tiles lack what it newly selects (3: antenna masts, 6: masts mapped as ways, 7: building entrances, 8: aerodrome outlines, 10: roads within ROAD_REACH_M round the tile, 12: footways and paths, car parks, 13: our tiles keep junction, sport, shop, healthcare and every drawn railway, 14: roads, railways, waterways and water within ROAD_REACH_M = 150 m, 15: our tiles rebuilt with that reach) */
+export const OSM_SCHEMA_VERSION = 15;
 
 // Overpass rejects browser User-Agents (406) and fetch cannot override UA,
 // so dev goes through a same-origin Vite proxy that injects a descriptive UA (Q42).
