@@ -143,7 +143,7 @@ rimSlider('faceGroup', 'захват теневой стороны', 'sideBias',
 rimSlider('rimGroup', 'ступеней (0 — плавно)', 'steps', 0, 8, 1);
 rimSlider('rimGroup', 'цвет: зарево → солнце', 'sunColour', 0, 1, 0.05);
 rimSlider('outlineGroup', 'сила', 'outline', 0, 4, 0.05);
-rimSlider('outlineGroup', 'ширина, px', 'outlinePx', 1, 12, 1);
+rimSlider('outlineGroup', 'ширина, CSS px', 'outlineCss', 0.5, 6, 0.5);
 rimSlider('outlineGroup', 'скачок глубины на краю', 'outlineGap', 0.02, 2, 0.02);
 rimSlider('weightGroup', 'рельеф', 'terrain', 0, 1.5, 0.05);
 rimSlider('weightGroup', 'здания, дороги, вода', 'objects', 0, 1.5, 0.05);

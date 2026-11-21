@@ -10,7 +10,7 @@ describe('rim light', () => {
   it('in the game: by day and at sunset, the values chosen in the rim lab', () => {
     expect(DEFAULT_RIM).toMatchObject({
       on: true, lowSunOnly: false, backPow: 2, steps: 5, sunColour: 0.35, strength: 2, edgePow: 2, sideBias: 0,
-      terrain: 0, objects: 0, trees: 1, aircraft: 1, outline: 1.5, outlinePx: 6, outlineGap: 0.34,
+      terrain: 0, objects: 0, trees: 1, aircraft: 1, outline: 1.5, outlineCss: 3, outlineGap: 0.34,
     });
     for (const el of [2, 45]) {
       expect(at(el).shape[0]).toBe(DEFAULT_RIM.strength);

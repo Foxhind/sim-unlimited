@@ -23,12 +23,12 @@ export interface RimParams {
   /** only while the sun is low: scaled by the palette's sunset glow (0 by day and at night); else by day too */
   lowSunOnly: boolean;
   /**
-   * by silhouette (screen space, renderer post pass WORLD_POST_FS): a band `outlinePx` pixels wide
-   * along every edge that has sky or far ground behind it on the sun's side, `outline` its strength;
+   * by silhouette (screen space, renderer post pass WORLD_POST_FS): a band `outlineCss` CSS pixels
+   * wide (the renderer turns them into device pixels by the screen's density) along every edge that has sky or far ground behind it on the sun's side, `outline` its strength;
    * `outlineGap`: the jump in distance between neighbouring pixels that counts as an edge (0.2 = 20 %)
    */
   outline: number;
-  outlinePx: number;
+  outlineCss: number;
   outlineGap: number;
   /** weight per kind of geometry (by faces only) */
   terrain: number;
@@ -47,7 +47,7 @@ export const DEFAULT_RIM: RimParams = {
   sunColour: 0.35,
   lowSunOnly: false,
   outline: 1.5,
-  outlinePx: 6,
+  outlineCss: 3,
   outlineGap: 0.34,
   terrain: 0,
   objects: 0,
@@ -60,7 +60,7 @@ export const rim: RimParams = { ...DEFAULT_RIM };
 
 /**
  * What the shaders get this frame: colour 0..1; shape (by faces: strength before the group weight,
- * edgePow, backPow, sideBias); outline (by silhouette: strength, width px, gap, backPow); steps.
+ * edgePow, backPow, sideBias); outline (by silhouette: strength, width in CSS px, gap, backPow); steps.
  */
 export interface RimFrame {
   colour: Float32Array;
@@ -84,7 +84,7 @@ export function rimFrame(p: RimParams, palette: PaletteParams, sun: RGB, sunElev
   return {
     colour: Float32Array.from(c),
     shape: new Float32Array([k, Math.max(0.05, p.edgePow), Math.max(0, p.backPow), p.sideBias]),
-    outline: new Float32Array([p.outline * low, Math.max(1, Math.min(32, Math.round(p.outlinePx))), Math.max(0.01, p.outlineGap), Math.max(0, p.backPow)]),
+    outline: new Float32Array([p.outline * low, Math.max(0.5, Math.min(16, p.outlineCss)), Math.max(0.01, p.outlineGap), Math.max(0, p.backPow)]),
     steps: Math.max(0, Math.round(p.steps)),
   };
 }

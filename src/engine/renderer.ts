@@ -792,7 +792,10 @@ export class Renderer {
       gl.uniform1i(this.dsU.uWorldTex, 0);
       gl.uniform1i(this.dsU.uDepthTex, 1);
       gl.uniform1i(this.dsU.uScale, this.msaa ? 2 : 1);
-      gl.uniform4fv(this.dsU.uOutline, outline ? this.rim.outline : NO_RIM.outline);
+      // the band's width: CSS pixels (rim.ts outlineCss) → device pixels of this screen (the shader adds the supersampling)
+      this.outlineFrame.set(outline ? this.rim.outline : NO_RIM.outline);
+      this.outlineFrame[1] = Math.max(1, Math.min(32, Math.round(this.outlineFrame[1] * this.dpr)));
+      gl.uniform4fv(this.dsU.uOutline, this.outlineFrame);
       gl.uniform1f(this.dsU.uRimSteps, this.rim.steps);
       gl.uniform3fv(this.dsU.uRimColor, this.rim.colour);
       gl.uniform3fv(this.dsU.uSunDir, this.sunDir);
@@ -835,6 +838,7 @@ export class Renderer {
   }
 
   private rimShape = new Float32Array(4);
+  private outlineFrame = new Float32Array(4);
 
   private setRim(u: Uniforms, weight: number): void {
     const r = this.rim;
