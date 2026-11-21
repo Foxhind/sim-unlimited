@@ -185,6 +185,18 @@ export const PITCH_LINE_INDEX = rampIndex(RAMP.SNOW, 10);
 /** on a floodlit pitch: the same from the brightest street-lit copy (the plain one by day, buildLUT) */
 export const LIT_PITCH_LINE_INDEX = PITCH_GLOW * LUT_SIZE + PITCH_LINE_INDEX;
 
+/** car parks over the parks and pitches they border, under the road ribbons (LINE_BIAS) */
+export const CAR_PARK_BIAS = 0.75;
+/**
+ * A car park drawn as asphalt: an open one (parking=surface, or untagged); not one under the ground,
+ * in a building (multi-storey: the building is drawn) or on a roof
+ */
+export function isOpenCarPark(tags: Record<string, string>): boolean {
+  if (tags.location === 'underground' || tags.parking === 'underground' || tags.parking === 'multi-storey' || tags.parking === 'rooftop') return false;
+  const layer = Number(tags.layer);
+  return !(Number.isFinite(layer) && layer < 0);
+}
+
 function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaStyle | undefined {
   /** open ground (fields, parks, beaches...): snow covers it in winter */
   const ground = (ramp: number, bias: number, kind: AreaKind): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter: styles[kind] });
@@ -200,6 +212,8 @@ function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaSty
     // on the aerodrome's flat pad (aerodrome.ts): a hair above it, where the aircraft's wheels are
     return { ramp: RAMP.ASPHALT, bias: AEROWAY_AREA_BIAS, water: false };
   }
+  // open car parks: the roads' asphalt, a little lit at night like an unlit road
+  if (tags.amenity === 'parking' && isOpenCarPark(tags)) return { ramp: withGlow(RAMP.ASPHALT, UNLIT_ROAD_GLOW), bias: CAR_PARK_BIAS, water: false };
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
   if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
@@ -229,6 +243,8 @@ interface LineStyle {
   minor?: boolean;
   /** a road's paint (roadMarks code, WORLD_FS roadMarkAt); 0: none */
   marks?: number;
+  /** a footway, path, cycleway or steps: no street lamps along it */
+  path?: boolean;
 }
 
 /**
@@ -251,8 +267,8 @@ const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream:
 
 /**
  * Roads drawn near, by highway=*: carriageway width without `width` or `lanes`, and the shoulder
- * beside it on each side (none on town streets that have kerbs instead); footways, paths, cycleways,
- * steps and the like are not drawn. *_link roads take LINK_ROAD.
+ * beside it on each side (none on town streets that have kerbs instead). Footways, paths, cycleways,
+ * bridleways and steps are PATH_KINDS. *_link roads take LINK_ROAD.
  */
 const ROAD_KINDS: Record<string, { width: number; shoulder: number; minor?: boolean }> = {
   motorway: { width: 20, shoulder: 3 },
@@ -271,6 +287,21 @@ const ROAD_KINDS: Record<string, { width: number; shoulder: number; minor?: bool
   pedestrian: { width: 5, shoulder: 0, minor: true },
 };
 const LINK_ROAD = { width: 7, shoulder: 1.5 };
+/**
+ * Footways, paths and the like: narrow strips without `width`, paved light (paving slabs) or, a
+ * path or bridleway without `surface`, beaten earth
+ */
+const PATH_KINDS: Record<string, { width: number; paved: boolean }> = {
+  footway: { width: 2, paved: true },
+  cycleway: { width: 2, paved: true },
+  steps: { width: 2, paved: true },
+  path: { width: 1.5, paved: false },
+  bridleway: { width: 2, paved: false },
+};
+/** footways and paved paths: light paving slabs */
+export const PAVING_RAMP = colour(184, 176, 160);
+/** unpaved paths: light beaten earth and fine gravel */
+export const TRAIL_RAMP = colour(166, 148, 116);
 /** service=parking_aisle / driveway: narrower, no shoulder */
 const NARROW_SERVICE = new Set(['parking_aisle', 'driveway', 'drive-through', 'alley']);
 /** shoulders: compacted gravel and earth */
@@ -305,6 +336,7 @@ const EDGE_LINE_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 
 const ROAD_RANK: Record<string, number> = {
   motorway: 9, trunk: 8, primary: 7, secondary: 6, tertiary: 5, unclassified: 4, road: 3.5, busway: 3.5,
   residential: 3, living_street: 2, service: 1.5, pedestrian: 1, track: 1, raceway: 1,
+  footway: 0.5, cycleway: 0.5, steps: 0.5, path: 0.5, bridleway: 0.5,
 };
 const LINK_RANK = 4.5;
 export const ROAD_RANK_STEP_M = 0.02;
@@ -368,6 +400,13 @@ export function classifyLine(tags: Record<string, string>): LineStyle | undefine
   const hw = tags.highway;
   if (hw) {
     if (tags.area === 'yes') return undefined;
+    const path = PATH_KINDS[hw];
+    if (path) {
+      const surface = tags.surface;
+      const paved = surface === undefined ? path.paved : PAVED_SURFACES.has(surface) || !(GRAVEL_SURFACES.has(surface) || DIRT_SURFACES.has(surface));
+      const ramp = surface === 'asphalt' ? RAMP.ASPHALT : paved ? PAVING_RAMP : TRAIL_RAMP;
+      return { ramp, width: Math.min(osmWidthM(tags.width) ?? path.width, 8), shoulder: 0, minor: true, marks: 0, path: true };
+    }
     let kind = ROAD_KINDS[hw] ?? (/^(motorway|trunk|primary|secondary|tertiary)_link$/.test(hw) ? LINK_ROAD : undefined);
     if (!kind) return undefined;
     if (hw === 'service' && NARROW_SERVICE.has(tags.service)) kind = { width: 3, shoulder: 0, minor: true };
@@ -785,6 +824,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       lit,
       rail: !!style.rail,
       minor: !!style.minor,
+      path: !!style.path,
       marks: style.marks ?? 0,
       shoulder: style.shoulder ?? 0,
       // the right-of-way strip: not on a bridge (it would paint the river under it)
@@ -1166,7 +1206,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const look = lineLook(line);
     if (!look) return;
     const { half, road, lit, out, ramp } = look;
-    if (lit) placeLamps(line.points, half, lampSide(line.tags));
+    if (lit && !look.path) placeLamps(line.points, half, lampSide(line.tags));
 
     if (tin) {
       // far lines: roads but the minor ones, and railways

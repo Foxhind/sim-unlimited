@@ -14,7 +14,7 @@ const API_REPLY = {
     { type: 'node', id: 1, lon: 29.1, lat: 36.62 }, { type: 'node', id: 2, lon: 29.1001, lat: 36.62 },
     { type: 'node', id: 3, lon: 29.1001, lat: 36.6201 }, { type: 'node', id: 4, lon: 29.1, lat: 36.6201 },
     { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'house' } },
-    { type: 'way', id: 11, nodes: [1, 2], tags: { highway: 'path' } },
+    { type: 'way', id: 11, nodes: [1, 2], tags: { highway: 'corridor' } },
   ],
 };
 
@@ -43,7 +43,7 @@ describe('OsmSource', () => {
     const API_TILE = ['api', 'api', 'api', 'api', 'api'];
     expect(calls).toEqual(['overpass', ...API_TILE]);
     expect(data.buildings).toHaveLength(1);
-    expect(data.lines).toHaveLength(0); // highway=path is not drawn
+    expect(data.lines).toHaveLength(0); // highway=corridor is not drawn
     await src.fetch({ ...TILE, x: TILE.x + 1 }, 'full');
     expect(calls).toEqual(['overpass', ...API_TILE, ...API_TILE]);
   });

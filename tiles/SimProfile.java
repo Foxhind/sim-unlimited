@@ -42,7 +42,8 @@ public class SimProfile implements Profile {
   /** buildings and points (entrances) reach this far past the tile edge (256 px a tile): a building across the border is whole in both tiles */
   static final int BUILDING_BUFFER_PX = 32;
 
-  static final Pattern HIGHWAY = Pattern.compile("motorway|trunk|primary|secondary|tertiary|residential|unclassified");
+  /** overpass.ts ROAD_SELECTOR: the drawn roads and paths */
+  static final Pattern HIGHWAY = Pattern.compile("^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$");
   static final Pattern AEROWAY = Pattern.compile("runway|taxiway|apron|helipad");
   static final Pattern NATURAL_WAY = Pattern.compile("water|wood|scrub|beach|bare_rock");
   static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
@@ -54,7 +55,8 @@ public class SimProfile implements Profile {
     "building", "building:part", "height", "min_height", "location", "layer", "colour", "color",
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
-    "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en");
+    "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
+    "service", "tracktype", "amenity", "parking");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -80,7 +82,11 @@ public class SimProfile implements Profile {
   static boolean isAreaTags(SourceFeature f) {
     if ("no".equals(s(f, "area")) || "coastline".equals(s(f, "natural"))) return false;
     for (String k : AREA_KEYS) if (f.hasTag(k)) return true;
-    return false;
+    return isCarPark(f);
+  }
+
+  static boolean isCarPark(SourceFeature f) {
+    return "parking".equals(s(f, "amenity"));
   }
 
   /** FULL_FILTER, way statements (relation statements: multipolygons below) */
@@ -93,6 +99,7 @@ public class SimProfile implements Profile {
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||
       find(WATERWAY, s(f, "waterway")) ||
       find(LEISURE, s(f, "leisure")) ||
+      isCarPark(f) ||
       isMast(f);
   }
 
@@ -100,7 +107,8 @@ public class SimProfile implements Profile {
     return f.hasTag("building") || f.hasTag("building:part") ||
       "aerodrome".equals(s(f, "aeroway")) ||
       "water".equals(s(f, "natural")) || "wood".equals(s(f, "natural")) ||
-      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse"));
+      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||
+      isCarPark(f);
   }
 
   static boolean isMast(SourceFeature f) {

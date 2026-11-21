@@ -2,8 +2,8 @@ import { tileBounds, type Tile, type TileBounds } from './geodesy';
 import { isAntenna } from './mast-mesher';
 import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 
-/** the drawn roads (osm-mesher classifyLine), as an Overpass statement without its bbox */
-export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway)$"]';
+/** the drawn roads and paths (osm-mesher classifyLine), as an Overpass statement without its bbox */
+export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$"]';
 /**
  * A near tile also gets the drawn roads this far round it: how a road's ribbon starts or ends
  * (a fork's branches shifted onto the trunk over FORK_TAPER_M, a lane tapering over ROAD_TAPER_M,
@@ -21,7 +21,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 }
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
-// bare rock, parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
+// bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
 // other landuse is not fetched.
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
@@ -37,6 +37,7 @@ const FULL_FILTER = `
   way["natural"="coastline"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["leisure"~"park|pitch|golf_course"];
+  way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
   node["entrance"];
@@ -104,7 +105,7 @@ function isAreaTags(tags: Record<string, string>): boolean {
   if (tags.area === 'no') return false;
   // an island's coastline closes on itself, but it is a line: land on its left (see coast.ts)
   if (tags.natural === 'coastline') return false;
-  return AREA_KEYS.some((k) => tags[k] !== undefined);
+  return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking';
 }
 
 function isLineTags(tags: Record<string, string>): boolean {

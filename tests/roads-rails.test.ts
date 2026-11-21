@@ -5,11 +5,11 @@ import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { parseFilter } from '../src/world/osm-api';
 import {
-  BALLAST_RAMP, BALLAST_WIDTH_M, buildOsmMesh, classifyLine, DIRT_ROAD_RAMP, GRAVEL_ROAD_RAMP, RAIL_ZONE_M, RAIL_ZONE_RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, roadLayer, roadMarks, roadRank,
-  SHOULDER_RAMP, TRACK_EDGE,
+  BALLAST_RAMP, BALLAST_WIDTH_M, buildOsmMesh, CAR_PARK_BIAS, classifyLine, DIRT_ROAD_RAMP, GRAVEL_ROAD_RAMP, RAIL_ZONE_M, RAIL_ZONE_RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, roadLayer, roadMarks, roadRank,
+  PAVING_RAMP, SHOULDER_RAMP, TRACK_EDGE, TRAIL_RAMP,
 } from '../src/world/osm-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
-import { osmFilter } from '../src/world/overpass';
+import { osmFilter, parseOverpass } from '../src/world/overpass';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -42,11 +42,12 @@ function band(m: { vertices: Float32Array; ramps: Uint32Array; vertexCount: numb
 }
 
 describe('road kinds', () => {
-  it('draws service roads, tracks, living streets, pedestrian streets and links; no footways or paths', () => {
-    for (const hw of ['service', 'track', 'living_street', 'pedestrian', 'road', 'busway', 'motorway_link', 'tertiary_link']) {
+  it('draws service roads, tracks, living streets, pedestrian streets, links, footways and paths', () => {
+    for (const hw of ['service', 'track', 'living_street', 'pedestrian', 'road', 'busway', 'motorway_link', 'tertiary_link',
+      'footway', 'path', 'cycleway', 'bridleway', 'steps']) {
       expect(classifyLine({ highway: hw }), hw).toBeDefined();
     }
-    for (const hw of ['footway', 'path', 'cycleway', 'bridleway', 'steps', 'corridor', 'services', 'proposed']) {
+    for (const hw of ['corridor', 'services', 'proposed', 'construction']) {
       expect(classifyLine({ highway: hw }), hw).toBeUndefined();
     }
     expect(classifyLine({ highway: 'pedestrian', area: 'yes' })).toBeUndefined();
@@ -61,11 +62,28 @@ describe('road kinds', () => {
     expect(classifyLine({ highway: 'primary', bridge: 'yes' })?.shoulder).toBe(0);
   });
 
+  it('footways are narrow paving, paths beaten earth, both minor, unpainted and without shoulders', () => {
+    expect(classifyLine({ highway: 'footway' })).toMatchObject({ ramp: PAVING_RAMP, width: 2, shoulder: 0, minor: true, marks: 0, path: true });
+    expect(classifyLine({ highway: 'path' })).toMatchObject({ ramp: TRAIL_RAMP, width: 1.5 });
+    expect(classifyLine({ highway: 'path', surface: 'paving_stones' })?.ramp).toBe(PAVING_RAMP);
+    expect(classifyLine({ highway: 'footway', surface: 'gravel' })?.ramp).toBe(TRAIL_RAMP);
+    expect(classifyLine({ highway: 'cycleway', surface: 'asphalt' })?.ramp).toBe(RAMP.ASPHALT);
+    expect(classifyLine({ highway: 'footway', width: '3' })?.width).toBe(3);
+    // under every road where they meet
+    expect(roadRank({ highway: 'footway' })).toBeLessThan(roadRank({ highway: 'service' }));
+  });
+
+  it('a lit footway gets no street lamps', () => {
+    expect(meshOf({ highway: 'footway', lit: 'yes' }).lampPosts.length).toBe(0);
+    expect(meshOf({ highway: 'residential' }).lampPosts.length).toBeGreaterThan(0);
+  });
+
   it('the full-detail query fetches them (anchored: not highway=services or footway)', () => {
     const sel = parseFilter(osmFilter('full'));
     const fetched = (v: string) => sel.some((s) => s.type === 'way' && s.clauses.some((c) => c.key === 'highway' && c.re?.test(v)));
-    for (const hw of ['motorway', 'motorway_link', 'primary_link', 'residential', 'service', 'track', 'living_street', 'pedestrian']) expect(fetched(hw), hw).toBe(true);
-    for (const hw of ['footway', 'path', 'services', 'cycleway', 'steps']) expect(fetched(hw), hw).toBe(false);
+    for (const hw of ['motorway', 'motorway_link', 'primary_link', 'residential', 'service', 'track', 'living_street', 'pedestrian',
+      'footway', 'path', 'cycleway', 'bridleway', 'steps']) expect(fetched(hw), hw).toBe(true);
+    for (const hw of ['services', 'corridor', 'footway_link', 'proposed']) expect(fetched(hw), hw).toBe(false);
     const rail = (v: string) => sel.some((s) => s.clauses.some((c) => c.key === 'railway' && c.re?.test(v)));
     expect(rail('rail') && rail('narrow_gauge') && rail('light_rail')).toBe(true);
     expect(rail('abandoned')).toBe(false);
@@ -488,5 +506,36 @@ describe('bends between legs of unequal length', () => {
       expect(covered(along, n + 1.8)).toBe(true);
       expect(covered(along, n - 1.8)).toBe(true);
     }
+  });
+});
+
+describe('car parks', () => {
+  const c = tileCenter(TILE), b = tileBounds(TILE);
+  const d = (b.east - b.west) * 0.1;
+  const ring: [number, number][] = [[c.lon - d, c.lat - d / 2], [c.lon + d, c.lat - d / 2], [c.lon + d, c.lat + d / 2], [c.lon - d, c.lat + d / 2], [c.lon - d, c.lat - d / 2]];
+  const meshOfArea = (tags: Record<string, string>) =>
+    buildOsmMesh({ tile: TILE, detail: 'full', data: { areas: [{ rings: [ring], tags }], lines: [], points: [], buildings: [] }, sampleHeight: surface, tin });
+
+  it('an open car park is asphalt, above the ground and under the roads', () => {
+    const a = band(meshOfArea({ amenity: 'parking', parking: 'surface' }), RAMP.ASPHALT);
+    expect(a.n).toBeGreaterThan(0);
+    expect(a.y).toBeCloseTo(CAR_PARK_BIAS, 1);
+    expect(band(meshOfArea({ amenity: 'parking' }), RAMP.ASPHALT).n).toBeGreaterThan(0);
+  });
+
+  it('one under the ground, in a building or on a roof is not drawn', () => {
+    for (const parking of ['underground', 'multi-storey', 'rooftop']) expect(band(meshOfArea({ amenity: 'parking', parking }), RAMP.ASPHALT).n, parking).toBe(0);
+    expect(band(meshOfArea({ amenity: 'parking', layer: '-1' }), RAMP.ASPHALT).n).toBe(0);
+  });
+
+  it('is fetched and parsed as an area, a closed way or a multipolygon', () => {
+    const sel = parseFilter(osmFilter('full'));
+    for (const type of ['way', 'relation'] as const) {
+      expect(sel.some((s) => s.type === type && s.clauses.some((k) => k.key === 'amenity' && k.value === 'parking'))).toBe(true);
+    }
+    const nodes = ring.slice(0, 4).map(([lon, lat], i) => ({ type: 'node' as const, id: i + 1, lon, lat }));
+    const data = parseOverpass({ elements: [...nodes, { type: 'way', id: 9, nodes: [1, 2, 3, 4, 1], tags: { amenity: 'parking' } }] });
+    expect(data.areas).toHaveLength(1);
+    expect(data.lines).toHaveLength(0);
   });
 });

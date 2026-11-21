@@ -14,9 +14,9 @@ const API: OverpassJson = {
     node(8, 0.003, 0.003, { aeroway: 'helipad' }),
     node(9, 0.004, 0.004), node(10, 0.005, 0.005),
     way(100, [1, 2, 3, 4, 1], { building: 'yes' }),
-    way(101, [5, 6], { highway: 'footway' }),
+    way(101, [5, 6], { highway: 'corridor' }),
     way(102, [5, 6], { highway: 'primary_link', name: 'Link' }),
-    way(103, [9, 10], { highway: 'cycleway' }),
+    way(103, [9, 10], { highway: 'proposed' }),
     way(104, [1, 2, 3, 4, 1], { barrier: 'fence' }),
     { type: 'relation', id: 200, members: [{ type: 'way', ref: 104, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'farmland' } },
     { type: 'relation', id: 201, members: [{ type: 'way', ref: 103, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
@@ -46,8 +46,8 @@ describe('filterOsmApi', () => {
 
   it('matches ~ like Overpass (unanchored regex) and = exactly', () => {
     expect(ids(out)).toContain('w102'); // primary_link ~ "^((…|primary|…)(_link)?|…)$"
-    expect(ids(out)).not.toContain('w101'); // footway
-    expect(ids(out)).not.toContain('w103'); // cycleway, only in a bus route
+    expect(ids(out)).not.toContain('w101'); // corridor
+    expect(ids(out)).not.toContain('w103'); // proposed, only in a bus route
   });
 
   it('keeps tags only on matched elements; members and geometry nodes are bare', () => {
@@ -113,9 +113,9 @@ describe('roads round a near tile', () => {
       urls.push(u);
       const elements = urls.length === 1
         ? [node(1, 29.01, 36.01), way(10, [1], { building: 'yes' })]
-        // every strip: a tertiary (node 2 inside the tile's answer already), a footway, a building, a tagged node
+        // every strip: a tertiary (node 2 inside the tile's answer already), a corridor, a building, a tagged node
         : [node(1, 29.01, 36.01), node(2, 29.01, 36.021, { entrance: 'yes' }), node(3, 29.01, 36.0205),
-          way(20, [1, 2], { highway: 'tertiary' }), way(21, [2, 3], { highway: 'footway' }), way(22, [3, 2], { building: 'yes' })];
+          way(20, [1, 2], { highway: 'tertiary' }), way(21, [2, 3], { highway: 'corridor' }), way(22, [3, 2], { building: 'yes' })];
       return new Response(JSON.stringify({ elements }), { status: 200 });
     }) as unknown as typeof fetch;
     const j = await fetchOsmApiTile(B, 'full', f);
