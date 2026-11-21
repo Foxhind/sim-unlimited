@@ -422,9 +422,11 @@ export class ChunkManager {
   }
 
   draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, fogStart: number, fogEnd: number): void {
+    renderer.speckle = true;
     for (const c of this.renderList) {
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, this.stitch ? c.coarse : 0);
     }
+    renderer.speckle = false;
   }
 
   nearReady(cam: LatLon, radiusM: number): boolean {

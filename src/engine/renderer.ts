@@ -97,6 +97,10 @@ export class Renderer {
    * 'glass' dark panes, 'lit' at night with some of them lit, 'off' for every other mesh
    */
   windows: 'off' | 'glass' | 'lit' = 'off';
+  /** rare lighter dots on what drawWorld draws next (WORLD_FS uSpeckle): the terrain and OSM areas */
+  speckle = false;
+  /** the device pixel ratio the canvas was last sized for (resize) */
+  private dpr = 1;
   /** the share of windows lit at night now (palette.ts litShare by the local hour) */
   litShare: number = WINDOWS.LIT_SHARE;
   /** the facade cell width of the far window dots drawLights draws next (palette.ts FAR_WINDOWS; the far OSM ring sets its own) */
@@ -169,7 +173,7 @@ export class Renderer {
     this.worldProg = createProgram(gl, WORLD_VS, WORLD_FS);
     this.worldU = uniformMap(gl, this.worldProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.treeProg = createProgram(gl, TREE_VS, WORLD_FS);
     this.treeU = uniformMap(gl, this.treeProg, [
@@ -277,6 +281,7 @@ export class Renderer {
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
     const w = Math.max(1, Math.round(cssWidth * dpr));
     const h = Math.max(1, Math.round(cssHeight * dpr));
+    this.dpr = dpr;
     if (w === this.width && h === this.height) return;
     this.width = w;
     this.height = h;
@@ -478,6 +483,7 @@ export class Renderer {
     gl.uniform1i(this.worldU.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
     gl.uniform1f(this.worldU.uWinEmit, this.emission('cityLights'));
     gl.uniform1f(this.worldU.uLitShare, this.litShare);
+    gl.uniform1i(this.worldU.uSpeckle, this.speckle ? 1 : 0);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
     if (blend) gl.disable(gl.BLEND);
@@ -677,6 +683,8 @@ export class Renderer {
     this.gl.uniform3f(u.uGlitterCore, g[1], g[2], g[3]);
     this.gl.uniform3f(u.uGlitterEdge, g[4], g[5], g[6]);
     this.gl.uniform1f(u.uTime, this.time);
+    // world dots (shaders.ts worldDot): one CSS pixel, 2 or 3 device pixels on a dense screen
+    this.gl.uniform1f(u.uDotPx, Math.max(1, Math.round(this.dpr)) * (this.msaa ? 2 : 1));
   }
 }
 
@@ -721,7 +729,7 @@ type HdrGl = WebGL2RenderingContext & {
 };
 
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
-const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime'];
+const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime', 'uDotPx'];
 /** the light on faces (shaders.ts SUNLIGHT_GLSL) */
 const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow'];
 

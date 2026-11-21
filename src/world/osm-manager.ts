@@ -426,7 +426,9 @@ export class OsmManager {
     for (const c of this.renderList) {
       // the ground of built-up terrain faces, street-lit (renderer.nightGlow), just above the terrain
       if (c.glow && lightsOn) renderer.drawWorld(c.glow, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      renderer.speckle = false;
     }
     // water over every tile's drape, but leaving no depth: roads (and all drawn after) always win over it
     for (const c of this.renderList) {

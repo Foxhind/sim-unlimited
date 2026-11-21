@@ -255,14 +255,14 @@ vec4 glitter(vec3 d) {
 
 /**
  * The water surface (WORLD_FS water faces, SKY_FS base sea), over its flat lit colour:
+ * - the sky mirrored by the flat surface: the haze (uHaze) lightening toward the horizon in 3 steps
+ *   (Fresnel). Not by the wave normals: their stepped interference read as a wavy moiré.
  * - waves: a few swells and chop moving at their deep-water speed (sqrt(g/k)), each faded out once
- *   its wavelength nears a pixel, tilt the normal; the sky's reflection (uHaze) lightens the faces
- *   turned from the eye in 3 steps (Fresnel), so the surface moves.
+ *   its wavelength nears a pixel, tilt the normal the glints mirror.
  * - glints: the sun (and the moon at night) mirrored by those normals: a stepped hot spot, and
- *   twinkling cells, world-anchored, each lit for a moment, densest round the mirrored sun.
- *   Under overcast the sun's glints dim but stay.
- * - dusk (uGlitter.x, the sky glow): synthwave: the sky's bands mirrored, wobbling with the waves,
- *   then the glitter path.
+ *   twinkling cells, world-anchored, each lit for a moment, densest round the mirrored sun, fainter
+ *   than the hot spot. Under overcast the sun's glints dim but stay.
+ * - dusk (uGlitter.x, the sky glow): synthwave: the sky's bands mirrored, then the glitter path.
  * d: unit ray from the eye; p: the point's world xz; fw: fwidth(p), taken by the caller outside any
  * branch; dist: the point's distance; c: the flat lit colour.
  * Needs uCamPos, uFogStart/End, uHaze, uMoon, uDirect, lutColor, uTime, uGlitter*.
@@ -271,7 +271,23 @@ vec4 glitter(vec3 d) {
 const GLINT_CORE = 0.6;
 const GLINT_MID = 0.3;
 const GLINT_SHEEN = 0.1;
+/**
+ * Speckles on the ground (WORLD_FS, renderer.speckle: terrain and OSM areas): world dots (worldDot)
+ * in their face's colour, lighter: about one per SPECKLE_PER_PX dot pixels on screen, no more
+ * than one per SPECKLE_BASE_M² of ground.
+ */
+const SPECKLE_PER_PX = 120;
+const SPECKLE_BASE_M = 1;
+const SPECKLE_LIFT = 1.3;
+/** the water's twinkles: candidate dots (worldDot), one per TWINKLE_PER_PX dot pixels, each lit now and then */
+const TWINKLE_PER_PX = 40;
+const TWINKLE_BASE_M = 0.25;
+/** the same for the twinkling cells: their brighter and dimmer step */
+const TWINKLE_BRIGHT = 0.25;
+const TWINKLE_DIM = 0.12;
 const WATER_GLSL = `
+// one dot pixel in device pixels: the device pixel ratio (rounded), × 2 with supersampling (worldDot)
+uniform float uDotPx;
 uint waterHash(uvec3 v) {
   v = v * 1664525u + 1013904223u;
   v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
@@ -281,6 +297,59 @@ uint waterHash(uvec3 v) {
 }
 float waterRand(vec2 cell, float salt) {
   return float(waterHash(uvec3(ivec3(ivec2(cell), int(salt)))) & 0xffffu) / 65535.0;
+}
+// a cell of level lvl (cells base * 2^lvl): its hash, salted
+uint dotHash(vec2 cell, float lvl, int salt) {
+  return waterHash(uvec3(ivec3(ivec2(cell), int(lvl) * 64 + salt)));
+}
+/**
+ * World dots: one fixed set of points on the ground, each drawn as a square uDotPx device pixels
+ * across (one CSS pixel, 2 or 3 on a dense screen), about one per perPx dot pixels on screen.
+ * The set is nested by levels: a cell of level L (side base * 2^L) has one dot, that of one of its
+ * 4 children (picked by the cell's hash) and so down to level 0, where it sits at random in its
+ * cell. Farther (a pixel covering more ground) the level rises smoothly: the dots of level L that
+ * are not also of level L + 1 go out one by one, so the dots never jump with the scale.
+ * p: the world xz; jac: (dFdx(p), dFdy(p)). In a dot: true, and id its level-0 cell (the dot's
+ * identity at every level).
+ */
+bool worldDot(vec2 p, vec4 jac, float perPx, float base, out vec2 id) {
+  id = vec2(0.0);
+  float det = abs(jac.x * jac.w - jac.y * jac.z);
+  if (det < 1e-10) return false;
+  // the level whose cell holds about perPx dot pixels
+  float lv = 0.5 * log2(det * uDotPx * uDotPx * perPx / (base * base));
+  float L = max(floor(lv), 0.0);
+  float f = lv < 0.0 ? 0.0 : fract(lv);
+  float size = base * exp2(L);
+  mat2 toPx = inverse(mat2(jac.xy, jac.zw));
+  // the cells the dot under this pixel may sit in: its own, and a neighbour within half a dot
+  vec2 reach = (abs(jac.xy) + abs(jac.zw)) * uDotPx * 0.5;
+  vec2 c0 = floor((p - reach) / size);
+  vec2 c1 = min(floor((p + reach) / size), c0 + 1.0);
+  for (float cy = c0.y; cy <= c1.y; cy += 1.0) {
+    for (float cx = c0.x; cx <= c1.x; cx += 1.0) {
+      vec2 cell = vec2(cx, cy);
+      // the level-0 cell of this cell's dot
+      vec2 cc = cell;
+      for (int i = 0; i < 24; i++) {
+        float l = L - float(i);
+        if (l <= 0.0) break;
+        uint h = dotHash(cc, l, 0);
+        cc = cc * 2.0 + vec2(float(h & 1u), float((h >> 1u) & 1u));
+      }
+      // fading out with the level's fraction, unless the dot is also its parent's
+      if (f > 0.0) {
+        vec2 parent = floor(cell * 0.5);
+        uint h = dotHash(parent, L + 1.0, 0);
+        bool kept = parent * 2.0 + vec2(float(h & 1u), float((h >> 1u) & 1u)) == cell;
+        if (!kept && waterRand(cc, 5.0) < f) continue;
+      }
+      vec2 q = (cc + vec2(waterRand(cc, 1.0), waterRand(cc, 2.0))) * base;
+      vec2 s = toPx * (q - p);
+      if (all(lessThan(abs(s), vec2(uDotPx * 0.5)))) { id = cc; return true; }
+    }
+  }
+  return false;
 }
 // slope (d height / d xz) of the waves at p, the swells' wavelengths over fp (m per pixel)
 vec2 waterSlope(vec2 p, float fp) {
@@ -297,7 +366,8 @@ vec2 waterSlope(vec2 p, float fp) {
   }
   return g;
 }
-vec3 waterSurface(vec3 d, vec2 p, vec2 fw, float dist, vec3 c) {
+vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c) {
+  vec2 fw = abs(jac.xy) + abs(jac.zw);
   if (uGlitter.y <= 0.0 || d.y >= 0.0) return c;
   float fog = clamp((dist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
@@ -311,12 +381,13 @@ vec3 waterSurface(vec3 d, vec2 p, vec2 fw, float dist, vec3 c) {
   r.y = abs(r.y);
   float dusk = uGlitter.x * clamp((uGlitterSun.y + 0.12) / 0.1, 0.0, 1.0);
 
-  // the sky mirrored: at dusk its bands (the wavy synthwave gradient), by day the haze in 3 steps
-  float fres = pow(1.0 - clamp(dot(-d, n), 0.0, 1.0), 4.0);
+  // the sky mirrored by the flat surface: at dusk its bands (the synthwave gradient), by day the
+  // haze in 3 steps
+  float fres = pow(1.0 - clamp(-d.y, 0.0, 1.0), 4.0);
   float fq = floor(fres * 3.0 + 0.5) / 3.0;
   c = mix(c, uHaze, fq * 0.3 * near);
   if (dusk > 0.0) {
-    float h = pow(1.0 - clamp(r.y, 0.0, 1.0), 1.6) * ${SKY_BANDS}.0;
+    float h = pow(1.0 - clamp(-d.y, 0.0, 1.0), 1.6) * ${SKY_BANDS}.0;
     vec3 sky = lutColor(${MAT.SKY * 16}u + uint(min(floor(h), ${SKY_BANDS - 1}.0)));
     c = mix(c, sky * 0.8, 0.75 * dusk);
   }
@@ -332,19 +403,23 @@ vec3 waterSurface(vec3 d, vec2 p, vec2 fw, float dist, vec3 c) {
     float m = max(dot(r, src), 0.0);
     float spot = pow(m, 600.0) * power;
     float sheen = pow(m, 60.0) * power;
-    // twinkles: world cells about 2 px across on each axis (long toward the horizon, as the
-    // pixels are), each lit for a moment now and then
-    vec2 cell = exp2(ceil(log2(max(fw * 2.0, vec2(0.6)))));
-    vec2 ci = floor(p / cell) + vec2(0.0, 4096.0 * log2(cell.x));
-    float rate = 3.0 + 4.0 * waterRand(ci, 7.0);
-    float tick = floor(uTime * rate + 13.0 * waterRand(ci, 3.0));
-    float tw = waterRand(ci + vec2(tick, 0.0), 11.0);
-    // none near the horizon, where a pixel is many times longer than wide and so would the cell be
-    float chance = (0.004 * near + 0.5 * sheen) * smoothstep(0.06, 0.14, -d.y);
-    // stepped, never the full glint colour: the brightest step ${GLINT_CORE}, then ${GLINT_MID}, ${GLINT_SHEEN}
-    if (spot > 0.35 || tw < chance * 0.5) c = mix(c, hot, ${GLINT_CORE});
-    else if (spot > 0.08 || tw < chance) c = mix(c, hot, ${GLINT_MID});
+    // twinkles: world dots (worldDot), each lit for a moment now and then
+    vec2 ci;
+    float tw = 1.0;
+    if (worldDot(p, jac, ${TWINKLE_PER_PX}.0, ${TWINKLE_BASE_M}, ci)) {
+      float rate = 3.0 + 4.0 * waterRand(ci, 7.0);
+      float tick = floor(uTime * rate + 13.0 * waterRand(ci, 3.0));
+      tw = waterRand(ci + vec2(tick * 131.0, 0.0), 11.0);
+    }
+    // none near the horizon, where a pixel is many times longer than wide
+    float chance = min(0.16 * near + 2.0 * sheen, 1.0) * smoothstep(0.06, 0.14, -d.y);
+    // stepped, never the full glint colour: the hot spot ${GLINT_CORE}, then ${GLINT_MID}, ${GLINT_SHEEN};
+    // the twinkles fainter, ${TWINKLE_BRIGHT} and ${TWINKLE_DIM}
+    if (spot > 0.35) c = mix(c, hot, ${GLINT_CORE});
+    else if (spot > 0.08) c = mix(c, hot, ${GLINT_MID});
+    else if (tw < chance * 0.5) c = mix(c, hot, ${TWINKLE_BRIGHT});
     else if (sheen > 0.25) c = mix(c, hot, ${GLINT_SHEEN});
+    else if (tw < chance) c = mix(c, hot, ${TWINKLE_DIM});
   }
 
   // dusk: the glitter path over it all
@@ -755,6 +830,8 @@ uniform float uSelfLit;
 uniform float uEmit;
 // > 0: see-through (1 - renderer.opacity; 0, the default, in every other pass), the blend's source alpha
 uniform float uClear;
+// 1: rare lighter dots on the ground (renderer.speckle: terrain and OSM areas)
+uniform int uSpeckle;
 // the water surface's inputs (WATER_GLSL), shared with WORLD_VS
 uniform vec3 uCamPos;
 uniform float uFogStart;
@@ -772,6 +849,7 @@ void main() {
   // the derivative is taken on every fragment: fwidth is undefined in non-uniform control flow
   vec2 wxz = uCamPos.xz + vRay.xz;
   vec2 fw = fwidth(wxz);
+  vec4 jac = vec4(dFdx(wxz), dFdy(wxz));
   vec2 winFw = fwidth(vWinUV);
   // the face's normal from the ray's derivatives (faces are flat), toward the eye; for the windows
   vec3 faceN = cross(dFdx(vRay), dFdy(vRay));
@@ -780,7 +858,14 @@ void main() {
   if (dot(gWinN, gWinD) > 0.0) gWinN = -gWinN;
   if (vWater > 0.5) {
     float dist = length(vRay);
-    c = waterSurface(vRay / max(dist, 1e-4), wxz, fw, dist, c);
+    c = waterSurface(vRay / max(dist, 1e-4), wxz, jac, dist, c);
+  } else if (uSpeckle == 1) {
+    // speckles: world dots in the face's colour, lighter; fewer into the haze
+    float fog = clamp((length(vRay) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
+    vec2 id;
+    if (fog < 1.0 && worldDot(wxz, jac, ${SPECKLE_PER_PX}.0, ${SPECKLE_BASE_M}.0, id) && waterRand(id, 23.0) >= fog) {
+      c = min(c * ${SPECKLE_LIFT.toFixed(2)} + 0.02, 1.0);
+    }
   }
   float alpha = 1.0 - uSelfLit;
   // TRACK_EDGE, ROAD_EDGE: negative; a facade's edge length is positive
@@ -1058,7 +1143,7 @@ void main() {
     float t = dir.y < 0.0 && disc >= 0.0 ? (a > 1e-12 ? (-dir.y - sqrt(disc)) / a : uGroundH / -dir.y) : uFogEnd;
     seaXZ = uCamPos.xz + dir.xz * t;
   }
-  vec2 seaFw = fwidth(seaXZ);
+  vec4 seaJac = vec4(dFdx(seaXZ), dFdy(seaXZ));
   // Base ground: a flat face colour on the curved Earth below the camera (the world shader's
   // d^2 / 2R drop), out to the true horizon. Drawn here, under every tile, so the horizon and the
   // ground are there before (and between) the terrain tiles; loaded terrain simply covers it.
@@ -1071,7 +1156,7 @@ void main() {
       fog = floor(fog * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
       oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
-      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) oColor.rgb = waterSurface(dir, seaXZ, seaFw, t, oColor.rgb);
+      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) oColor.rgb = waterSurface(dir, seaXZ, seaJac, t, oColor.rgb);
       return;
     }
   }
