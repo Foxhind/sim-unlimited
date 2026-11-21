@@ -72,7 +72,9 @@
 
       <h2>Слои</h2>
       <label><input type="checkbox" id="osm" checked /> OSM: дороги, здания, деревья</label>
-      <label><input type="checkbox" id="night" /> ночные огни</label>
+      <div class="row"><span>ночные огни</span><select id="night" title="как в симуляторе: огни зажигаются, когда солнце ниже 2°">
+        <option value="auto">по солнцу (ниже 2°)</option><option value="on">всегда</option><option value="off">никогда</option>
+      </select></div>
       <label><input type="checkbox" id="stitch" checked /> сшивка швов между уровнями</label>
       <label><input type="checkbox" id="grid" checked /> <span class="tag" style="background:var(--border)"></span>границы тайлов</label>
       <label><input type="checkbox" id="labels" checked /> подписи тайлов</label>

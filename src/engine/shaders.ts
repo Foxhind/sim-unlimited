@@ -229,16 +229,24 @@ vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze
  * light up in the rim colour. uRim: x strength (0: off), y edge power, z backlight power, w sun-side
  * bias; uRimSteps: quantization levels (0: smooth). Faded with the fog.
  */
+/**
+ * The eye of a view (after uView, uOrthoFar and uCamPos). An orthographic view (the relief
+ * inspector) looks along one direction from everywhere, and its uCamPos is the simulator camera
+ * the tiles are chosen by, not the eye: nothing seen may depend on where that camera is, or a patch
+ * of other light follows it over the ground. toEye: from a point toward the eye (the view's own
+ * direction, its vertical exaggeration taken out); eyeDist: how far the eye is for what dims with
+ * distance (rel: the point from uCamPos), none in an orthographic view.
+ */
+const EYE_GLSL = `
+vec3 toEye(vec3 wp) {
+  return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2] / length(uView[1].xyz), uView[2][2]) : uCamPos - wp;
+}
+float eyeDist(vec3 rel) { return uOrthoFar > 0.0 ? 0.0 : length(rel); }
+`;
 const RIM_GLSL = `
 uniform vec4 uRim;
 uniform float uRimSteps;
 uniform vec3 uRimColor;
-// from a point toward the eye. An orthographic view (the relief inspector) looks along one
-// direction from everywhere, and its uCamPos is the simulator camera the tiles are chosen by, not
-// the eye: faces above or beyond that camera must not count as seen from the back.
-vec3 toEye(vec3 wp) {
-  return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2], uView[2][2]) : uCamPos - wp;
-}
 vec3 rimLight(vec3 n, vec3 wp, float fog) {
   if (uRim.x <= 0.0) return vec3(0.0);
   vec3 v = normalize(toEye(wp));
@@ -668,7 +676,7 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
   // shops are lit more often than flats, mostly white; they close at night with the flats going dark
   float open = allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)};
   bool lit = uWindows == 2 && r < open;
-  vec3 shop = emitLight(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));
+  vec3 shop = emitLight(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));
   vec3 glass = paneGlass(c, seed, r, fog);
   if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
     // the whole floor glazed along the edge, mullions every half slot
@@ -718,7 +726,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   bool grow = winRand(seed * 0x2c1b3c6du ^ winHash(uint(k) * 0x297a2d39u + uint(f) * 0x6c8e9cf5u + 101u)) < ${WINDOW_LIGHT.GROW_SHARE};
   bool lit = uWindows == 2 && (r < share || grow);
   vec3 lc = grow ? ${glslRgb(WINDOW_LIGHT.GROW)} : windowLightColour(r / max(share, 1e-6), allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
-  vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));
+  vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));
   // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
   // changed by its owner (residential only), so frames and glass vary up a wall and along it
   uint ws = seed;
@@ -985,7 +993,7 @@ flat out vec3 vWinEdge;
 // what the facade paints in its own colours (WORLD_FS windowAt: the signs)
 flat out vec3 vRef;
 uniform highp int uWindows;
-${GLOW_VS}${RIM_GLSL}${SHADOW_RECEIVE_VS}
+${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 void main() {
   vWinUV = aWinUV;
   vWinEdge = aWinEdge;
@@ -1049,6 +1057,8 @@ uniform float uClear;
 uniform int uSpeckle;
 // the water surface's inputs (WATER_GLSL), shared with WORLD_VS
 uniform vec3 uCamPos;
+// the eye (EYE_GLSL)
+uniform mat4 uView;
 uniform float uFogStart;
 uniform float uFogEnd;
 uniform vec3 uHaze;
@@ -1057,7 +1067,7 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}
+${LOG_DEPTH_FS}${EYE_GLSL}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}
 void main() {
   writeLogDepth();
   // in a cast shadow the face keeps only the sky's light (vShade)
@@ -1069,13 +1079,14 @@ void main() {
   vec2 winFw = fwidth(vWinUV);
   // the face's normal from the ray's derivatives (faces are flat), toward the eye; for the windows
   vec3 faceN = cross(dFdx(vRay), dFdy(vRay));
-  gWinD = vRay / max(length(vRay), 1e-4);
+  vec3 eye = toEye(uCamPos + vRay);
+  gWinD = -eye / max(length(eye), 1e-4);
   gWinN = dot(faceN, faceN) > 1e-12 ? normalize(faceN) : -gWinD;
   if (dot(gWinN, gWinD) > 0.0) gWinN = -gWinN;
 #ifndef NO_WATER
   if (vWater > 0.5) {
     float dist = length(vRay);
-    c = waterSurface(vRay / max(dist, 1e-4), wxz, jac, dist, c);
+    c = waterSurface(gWinD, wxz, jac, dist, c);
   }
 #endif
 #ifndef NO_SPECKLE
@@ -1142,7 +1153,7 @@ out vec3 vRay;
 out vec2 vWinUV;
 flat out vec3 vWinEdge;
 flat out vec3 vRef;
-${GLOW_VS}${RIM_GLSL}${SHADOW_RECEIVE_VS}
+${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 void main() {
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
@@ -1209,7 +1220,7 @@ uniform float uFogStart;
 uniform float uFogEnd;
 flat out vec3 vColor;
 out float vLogW;
-${COLOUR_GLSL}${WINDOW_LIGHT_GLSL}
+${COLOUR_GLSL}${WINDOW_LIGHT_GLSL}${EYE_GLSL}
 void main() {
   vec3 wp = toWorld(aPos);
   vec3 rel = wp - uCamPos;
@@ -1218,7 +1229,9 @@ void main() {
   if (uPull.x + uPull.y > 0.0) {
     vec3 ray = wp - uCamPos;
     float len = length(ray);
-    wp = uCamPos + ray * max(0.0, 1.0 - (uPull.x + uPull.y * len) / max(len, 1.0));
+    wp = uOrthoFar > 0.0
+      ? wp + normalize(toEye(wp)) * (uPull.x + uPull.y * len)
+      : uCamPos + ray * max(0.0, 1.0 - (uPull.x + uPull.y * len) / max(len, 1.0));
   }
   // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
   vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
@@ -1245,8 +1258,9 @@ void main() {
     float cellPx = uCell * uProj[1][1] * 0.5 * uFbH / max(gl_Position.w, 1e-3);
     bool keep = cellPx >= 1.0 || hKeep < cellPx * cellPx;
     // the buildings likely in front of it along the view ray (FAR_WINDOWS.CANOPY_M, FREE_PATH_M)
-    float slope = max(uCamPos.y - wp.y, 1.0) / max(d, 1.0);
-    float run = min(d, ${FAR_WINDOWS.CANOPY_M.toFixed(1)} / slope);
+    vec3 te = toEye(wp);
+    float slope = uOrthoFar > 0.0 ? max(te.y, 0.0) / max(length(te.xz), 1e-4) : max(uCamPos.y - wp.y, 1.0) / max(d, 1.0);
+    float run = min(uOrthoFar > 0.0 ? 1e9 : d, ${FAR_WINDOWS.CANOPY_M.toFixed(1)} / max(slope, 1e-4));
     float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});
     if (!keep || hLit >= ${FAR_WINDOW_LIT_FACTOR.toFixed(3)} * share * seen) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; }
     // at least one framebuffer pixel, as small as a near pane: on a supersampled frame it averages
@@ -1257,7 +1271,7 @@ void main() {
     // half-way into the haze with the fog, in its 12 steps (WORLD_FS windowAt)
     float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
     fog = floor(fog * 12.0) / 12.0;
-    vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(length(rel));
+    vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }

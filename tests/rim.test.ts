@@ -60,7 +60,7 @@ describe('rim light', () => {
       expect(vs).toContain('if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;');
       // the eye: the camera in perspective; in an orthographic view (relief inspector) the one direction it
       // looks from, as uCamPos there is the simulator camera and faces above it would be lit from below
-      expect(vs).toContain('return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2], uView[2][2]) : uCamPos - wp;');
+      expect(vs).toContain('return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2] / length(uView[1].xyz), uView[2][2]) : uCamPos - wp;');
       expect(vs).toContain('vec3 v = normalize(toEye(wp));');
       expect(vs.indexOf('n = -n;')).toBeLessThan(vs.indexOf('vec4 light = sceneLight(n'));
     }

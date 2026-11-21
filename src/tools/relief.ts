@@ -9,6 +9,8 @@ import { buildLUT, lightUniforms, litShare, paletteAt, seasonOf, solarHour, WIND
 import { Renderer } from '../engine/renderer';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
+import { farOsmTiles } from '../world/far-osm';
+import { FarOsmManager } from '../world/far-osm-manager';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
 import { OsmManager } from '../world/osm-manager';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -33,6 +35,8 @@ const SPAN_MIN_M = 200;
 const SPAN_MAX_M = 180000;
 /** the lights' size in the simulator at its usual 1× HUD scale */
 const POINT_SIZE = 3;
+/** the lights are on while the sun is below this, degrees (main.ts lightsOn) */
+const LIGHTS_ON_SUN_DEG = 2;
 const EDGE_NAMES = ['север', 'юг', 'запад', 'восток'];
 /** tile outline by zoom, coarse to fine */
 /** the colour correction is kept between visits (this browser only) */
@@ -102,6 +106,8 @@ const marks = $<HTMLCanvasElement>('marks');
 const renderer = new Renderer(canvas);
 const chunks = new ChunkManager(renderer.gl, state.centre);
 const osm = new OsmManager(renderer.gl, state.centre);
+/** the far ring round the simulator camera, as in flight: building dots by day, window lights by night */
+const farOsm = new FarOsmManager(renderer.gl, state.centre);
 osm.onTileReady = (tile, runways, coast) => {
   // as in the simulator: terrain under a runway or by the coast is rebuilt once its OSM is known
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
@@ -242,17 +248,28 @@ function frame(now: number): void {
   chunks.stitch = checked('stitch');
   // without OSM a detailed tile has nothing to wait for
   chunks.update(cam, view, proj, now, osmOn ? (key) => osm.ready(key) : () => true);
-  if (osmOn) osm.update(cam, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
+  if (osmOn) {
+    osm.update(cam, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
+    const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
+    farOsm.update(cam, view, proj, now, chunks.origin, farOsmTiles(cam.latLon, cam.alt, detailKeys), chunks.shownDetail);
+  }
 
-  const night = checked('night');
+  // the simulator's rule: the lights come on as the sun goes below LIGHTS_ON_SUN_DEG
+  const mode = $<HTMLSelectElement>('night').value;
+  const night = mode === 'on' || (mode === 'auto' && state.sunEl < LIGHTS_ON_SUN_DEG);
   renderer.orthoFar = 2 * EYE_DISTANCE_M;
   renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = night;
+  // the lit windows' flicker and the water's glitter run on it
+  renderer.time = now / 1000;
   renderer.beginFrame(lut, lightUniforms(palette));
   renderer.setSunMoon(sunDir, moonDir);
   // no fog: the view has no single distance to the ground
   chunks.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9);
-  if (osmOn) osm.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9, night, POINT_SIZE * dpr);
+  if (osmOn) {
+    osm.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9, night, POINT_SIZE * dpr);
+    farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr);
+  }
   renderer.beginOverlay();
   renderer.resolve();
 

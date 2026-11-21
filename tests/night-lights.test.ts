@@ -103,8 +103,10 @@ describe('building night lights', () => {
     expect(WORLD_FS).toContain('bool windowAt(');
     expect(WORLD_FS).toContain('vec3 windowLightColour(float t, float kMin)');
     expect(WORLD_FS).toContain('bool lit = uWindows == 2 && (r < share || grow);');
-    expect(WORLD_FS).toContain('windowFade(length(vRay))');
-    expect(POINTS_VS).toContain('windowFade(length(rel))');
+    expect(WORLD_FS).toContain('windowFade(eyeDist(vRay))');
+    expect(POINTS_VS).toContain('windowFade(eyeDist(rel))');
+    // an orthographic view (relief inspector) has no distance to its eye: nothing dims round the simulator camera
+    expect(POINTS_VS).toContain('float eyeDist(vec3 rel) { return uOrthoFar > 0.0 ? 0.0 : length(rel); }');
     expect(WORLD_VS).toContain('layout(location=3) in vec2 aWinUV;');
     expect(TREE_VS).toContain('vWinEdge = vec3(0.0);');
   });
@@ -261,10 +263,10 @@ describe('building night lights', () => {
     // as small as a near pane (one framebuffer pixel), not the far light size: no clipped over-bright pixels
     expect(POINTS_VS).toContain('gl_PointSize = clamp(cellPx, 1.0, ');
     // into the haze with the fog like the near panes
-    expect(POINTS_VS).toContain('vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(length(rel));');
+    expect(POINTS_VS).toContain('vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));');
     // fewer lit the more buildings likely stand in front along a low view ray (no walls hide them)
     expect(POINTS_VS).toContain(`float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});`);
-    expect(WORLD_FS).toContain('vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(length(vRay));');
+    expect(WORLD_FS).toContain('vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));');
   });
 
   it(`buildings over ${TALL_BUILDING_M} m get red lights on the roof (near) and in the air at roof height (far)`, () => {
