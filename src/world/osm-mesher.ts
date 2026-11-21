@@ -834,18 +834,18 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
    * road split in two, or meeting only lower ones there, paints on through.
    */
   /**
-   * A fork at `at`: three roads of standing end there (in `layer`; a driveway or a parking aisle may
-   * join too) — a two-way road and two one-way branches (a dual carriageway begins), or three one-way
-   * roads of which one flows the other way to the other two (a road splits in two, or two merge into
-   * one); the trunk's width and the branches, or undefined
+   * A fork at `at`: three or more roads of standing end there (in `layer`; a driveway or a parking
+   * aisle may join too) — a two-way road and one-way branches (a dual carriageway begins, a ramp
+   * leaving with it), or one-way roads of which one flows the other way to all the rest (a road
+   * splits in two or three, or they merge into one); the trunk and the branches, or undefined
    */
-  const forkAt = (at: LonLat, layer: number): { width: number; branches: { line: OsmLine; half: number }[] } | undefined => {
+  const forkAt = (at: LonLat, layer: number): { width: number; trunk: OsmLine; branches: { line: OsmLine; half: number }[] } | undefined => {
     const here = (roadsAtNode.get(nodeKey(at)) ?? []).filter((o) => o.layer === layer);
     if (!here.length) return undefined;
     // roads below this neither count nor spoil the fork
     const floor = Math.min(Math.max(...here.map((o) => o.rank)), LINK_RANK);
     const big = here.filter((o) => o.rank >= floor);
-    if (big.length !== 3 || big.some((o) => !o.end)) return undefined;
+    if (big.length < 3 || big.some((o) => !o.end)) return undefined;
     const twoWay = big.filter((o) => !isOnewayRoad(o.line.tags));
     let trunk: (typeof big)[number] | undefined;
     if (twoWay.length === 1) trunk = twoWay[0];
@@ -853,10 +853,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       // flowing into the node: it is the way's last point (its first, drawn against the flow)
       const into = (o: (typeof big)[number]) => (nodeKey(o.line.points[o.line.points.length - 1]) === nodeKey(at)) !== (o.line.tags.oneway === '-1');
       const ins = big.filter(into);
-      trunk = ins.length === 1 ? ins[0] : ins.length === 2 ? big.find((o) => !into(o)) : undefined;
+      trunk = ins.length === 1 ? ins[0] : ins.length === big.length - 1 ? big.find((o) => !into(o)) : undefined;
     }
     if (!trunk) return undefined;
-    return { width: trunk.half * 2, branches: big.filter((o) => o !== trunk).map((o) => ({ line: o.line, half: o.half })) };
+    return { width: trunk.half * 2, trunk: trunk.line, branches: big.filter((o) => o !== trunk).map((o) => ({ line: o.line, half: o.half })) };
   };
   /** the unit direction (x, z) a way leaves the node `at` in, over its first FORK_PROBE_M or so */
   const leaving = (line: OsmLine, at: LonLat): [number, number] => {
@@ -887,18 +887,30 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const first = line.points[0], last = line.points[line.points.length - 1];
     const f0 = forkAt(first, layer), f1 = forkAt(last, layer);
     if ((!f0 && !f1) || taper <= 1) return pts;
-    /** +1: shift to the right of the drawing direction at that end, -1 left: away from the sibling */
-    /** the shift there, away from the sibling (+ right of the drawing direction) */
+    /**
+     * The shift there (+ right of the drawing direction): the branches lie across the trunk in the
+     * order they leave the node, side by side, the outer ones' outer edges on the trunk's; whatever
+     * their widths miss or exceed the trunk's by is shared out evenly between them (a median, or
+     * lanes merging), none past the trunk's edges. Two branches: each with its outer edge on the trunk's.
+     */
     const shiftAt = (f: NonNullable<ReturnType<typeof forkAt>>, at: LonLat, atStart: boolean): number => {
-      const me = f.branches.find((b) => b.line === line);
-      if (!me) return 0; // this is the trunk
-      const sib = f.branches.find((b) => b.line !== line);
-      if (!sib) return 0;
-      const [ax, az] = leaving(line, at), [bx, bz] = leaving(sib.line, at);
-      // the right normal of the drawing direction there (leaving at the start, arriving at the end)
-      const [tx, tz] = atStart ? [ax, az] : [-ax, -az];
-      const nx = -tz, nz = tx;
-      return (nx * bx + nz * bz > 0 ? -1 : 1) * Math.max(0, f.width / 2 - me.half);
+      const i = f.branches.findIndex((b) => b.line === line);
+      if (i < 0) return 0; // this is the trunk
+      // the axis: away from the trunk, its right normal (x east, z south)
+      const [tx, tz] = leaving(f.trunk, at), nx = tz, nz = -tx;
+      const across = f.branches
+        .map((b) => { const [bx, bz] = leaving(b.line, at); return { b, s: Math.atan2(nx * bx + nz * bz, -tx * bx - tz * bz) }; })
+        .sort((p, q) => p.s - q.s).map((p) => p.b);
+      const k = across.indexOf(f.branches[i]);
+      const total = across.reduce((a, b) => a + b.half * 2, 0);
+      const gap = (f.width - total) / (across.length - 1);
+      let offset = -f.width / 2 + k * gap + across[k].half;
+      for (let j = 0; j < k; j++) offset += across[j].half * 2;
+      // never past the trunk's edges: a branch wider than the trunk keeps to its axis
+      const room = Math.max(0, f.width / 2 - across[k].half);
+      offset = Math.max(-room, Math.min(room, offset));
+      // right of the axis is right of the drawing direction where it leaves (the start), left where it arrives
+      return atStart ? offset : -offset;
     };
     const o0 = f0 ? shiftAt(f0, first, true) : 0;
     const o1 = f1 ? shiftAt(f1, last, false) : 0;

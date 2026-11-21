@@ -1,6 +1,24 @@
-import { tileBounds, type Tile } from './geodesy';
+import { tileBounds, type Tile, type TileBounds } from './geodesy';
 import { isAntenna } from './mast-mesher';
 import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
+
+/** the drawn roads (osm-mesher classifyLine), as an Overpass statement without its bbox */
+export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway)$"]';
+/**
+ * A near tile also gets the drawn roads this far round it: how a road's ribbon starts or ends
+ * (a fork's branches shifted onto the trunk over FORK_TAPER_M, a lane tapering over ROAD_TAPER_M,
+ * a cap or a mitre) depends on every road at its end node, and the tiles either side of a border
+ * must see the same ones there, or the ribbon steps at the seam. A road crossing a corner of the
+ * tile with no node inside it comes along too.
+ */
+export const ROAD_REACH_M = 100;
+
+/** a tile's bounds grown by ROAD_REACH_M */
+export function roadReachBounds(b: TileBounds): TileBounds {
+  const dLat = ROAD_REACH_M / 111320;
+  const dLon = dLat / Math.max(0.1, Math.cos((((b.north + b.south) / 2) * Math.PI) / 180));
+  return { west: b.west - dLon, south: b.south - dLat, east: b.east + dLon, north: b.north + dLat };
+}
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
 // bare rock, parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
@@ -9,7 +27,7 @@ const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
   relation["type"="building"];
-  way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway)$"];
+  ${ROAD_SELECTOR};
   way["railway"~"^(rail|narrow_gauge|light_rail)$"];
   way["aeroway"~"runway|taxiway|apron|helipad"]; node["aeroway"="helipad"];
   way["aeroway"="aerodrome"]; relation["aeroway"="aerodrome"];
@@ -53,6 +71,8 @@ export function overpassQuery(tile: Tile, detail: OsmDetail): string {
     const wide = `(${b.south - dLat},${b.west - dLon},${b.north + dLat},${b.east + dLon})`;
     // an explicit bbox overrides the global one for its statement
     filter += `  way["aeroway"="aerodrome"]${wide}; relation["aeroway"="aerodrome"]${wide};\n`;
+    const r = roadReachBounds(b);
+    filter += `  ${ROAD_SELECTOR}(${r.south},${r.west},${r.north},${r.east});\n`;
   }
   return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${filter});out body; >; out skel qt;`;
 }

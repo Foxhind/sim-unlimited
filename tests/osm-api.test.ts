@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { RetryableError } from '../src/engine/queue';
-import { completeRelations, fetchOsmApiMap, filterOsmApi, parseFilter, parseRetryAfter, resetOsmApiCooldown } from '../src/world/osm-api';
-import { osmFilter, parseOverpass, type OverpassJson } from '../src/world/overpass';
+import { completeRelations, fetchOsmApiMap, fetchOsmApiTile, filterOsmApi, parseFilter, parseRetryAfter, resetOsmApiCooldown } from '../src/world/osm-api';
+import { osmFilter, overpassQuery, parseOverpass, ROAD_REACH_M, type OverpassJson } from '../src/world/overpass';
 
 const node = (id: number, lon: number, lat: number, tags?: Record<string, string>) => ({ type: 'node' as const, id, lon, lat, ...(tags ? { tags } : {}) });
 const way = (id: number, nodes: number[], tags?: Record<string, string>) => ({ type: 'way' as const, id, nodes, ...(tags ? { tags } : {}) });
@@ -102,6 +102,40 @@ describe('fetchOsmApiMap', () => {
     await expect(fetchOsmApiMap(B, once(reply(400, 'bbox malformed')))).rejects.not.toBeInstanceOf(RetryableError);
     for (const s of [429, 509, 503]) await expect(fetchOsmApiMap(B, once(reply(s, '')))).rejects.toBeInstanceOf(RetryableError);
     await expect(fetchOsmApiMap(B, once(new TypeError('Failed to fetch')))).rejects.toBeInstanceOf(RetryableError);
+  });
+});
+
+describe('roads round a near tile', () => {
+  const B = { west: 29, south: 36, east: 29.02, north: 36.02 };
+  it('the OSM API adds the drawn roads of the strips round the tile, bare nodes only', async () => {
+    const urls: string[] = [];
+    const f = (async (u: string) => {
+      urls.push(u);
+      const elements = urls.length === 1
+        ? [node(1, 29.01, 36.01), way(10, [1], { building: 'yes' })]
+        // every strip: a tertiary (node 2 inside the tile's answer already), a footway, a building, a tagged node
+        : [node(1, 29.01, 36.01), node(2, 29.01, 36.021, { entrance: 'yes' }), node(3, 29.01, 36.0205),
+          way(20, [1, 2], { highway: 'tertiary' }), way(21, [2, 3], { highway: 'footway' }), way(22, [3, 2], { building: 'yes' })];
+      return new Response(JSON.stringify({ elements }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const j = await fetchOsmApiTile(B, 'full', f);
+    expect(urls).toHaveLength(5);
+    expect(j.elements.map((e) => `${e.type}/${e.id}`).sort()).toEqual(['node/1', 'node/2', 'way/10', 'way/20']);
+    expect(j.elements.find((e) => e.id === 2)).not.toHaveProperty('tags');
+    // the strips reach ROAD_REACH_M past the tile
+    const north = new URL(urls[1]).searchParams.get('bbox')!.split(',').map(Number);
+    expect(north[1]).toBeCloseTo(36.02, 6);
+    expect((north[3] - 36.02) * 111320).toBeCloseTo(ROAD_REACH_M, 0);
+    // far tiles: no strips
+    urls.length = 0;
+    await fetchOsmApiTile(B, 'large', f);
+    expect(urls).toHaveLength(1);
+  });
+
+  it('Overpass selects the drawn roads in the grown bbox', () => {
+    const q = overpassQuery({ z: 14, x: 9919, y: 5117 }, 'full');
+    expect(q).toMatch(/way\["highway"~"\^\(\(motorway[^;]*\]\([\d.]+,[\d.]+,[\d.]+,[\d.]+\);/);
+    expect(overpassQuery({ z: 14, x: 9919, y: 5117 }, 'large')).not.toMatch(/\]\([\d.]+,/);
   });
 });
 

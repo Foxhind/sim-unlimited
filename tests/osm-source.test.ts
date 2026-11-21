@@ -39,11 +39,13 @@ describe('OsmSource', () => {
     const calls = stubFetch(() => new Response('', { status: 502 }));
     const src = new OsmSource('auto');
     const data = await src.fetch(TILE, 'full');
-    expect(calls).toEqual(['overpass', 'api']);
+    // the tile, then the four strips of roads round it (ROAD_REACH_M)
+    const API_TILE = ['api', 'api', 'api', 'api', 'api'];
+    expect(calls).toEqual(['overpass', ...API_TILE]);
     expect(data.buildings).toHaveLength(1);
     expect(data.lines).toHaveLength(0); // highway=path is not drawn
     await src.fetch({ ...TILE, x: TILE.x + 1 }, 'full');
-    expect(calls).toEqual(['overpass', 'api', 'api']);
+    expect(calls).toEqual(['overpass', ...API_TILE, ...API_TILE]);
   });
 
   it('caches the filtered answer and serves it without the network', async () => {
@@ -52,7 +54,7 @@ describe('OsmSource', () => {
     const cached = JSON.parse([...store.values()][0]) as { elements: Array<{ id: number }> };
     expect(cached.elements.map((e) => e.id)).toEqual([1, 2, 3, 4, 10]);
     await new OsmSource('osm-api').fetch(TILE, 'full');
-    expect(calls).toEqual(['api']);
+    expect(calls).toEqual(['api', 'api', 'api', 'api', 'api']); // the tile and the strips round it, once
   });
 
   it('far tiles are not served by the API and not cached', async () => {

@@ -322,6 +322,37 @@ describe('one-way splits and merges', () => {
   const centre = tileCenter(TILE);
   const dLon = (b.east - b.west) * 0.15, dLat = (b.north - b.south) * 0.03;
   const node: [number, number] = [(b.west + b.east) / 2, c.lat];
+  it('a one-way road splitting in three: the branches lie across it in order, outer edges on its edges', () => {
+    // a 10.5 m trunk from the west; 3 m, 4 m and 5 m branches fan out north-east, east and south-east
+    const branch = (dl: number, width: string) => ({ points: [node, [node[0] + dLon, c.lat + dl]] as [number, number][], tags: { highway: 'primary', oneway: 'yes', lanes: '1', width } });
+    const m = buildOsmMesh({
+      tile: TILE, detail: 'full', sampleHeight: surface, tin,
+      data: {
+        areas: [], points: [], buildings: [],
+        lines: [
+          { points: [[node[0] - dLon, c.lat], node], tags: { highway: 'primary', oneway: 'yes', lanes: '3' } },
+          branch(dLat, '3'), branch(0, '4'), branch(-dLat, '5'),
+        ],
+      },
+    });
+    const [nx, nn] = latLonToEnu(centre, node[1], node[0], 0);
+    const zsOf = (w: number) => {
+      const zs: number[] = [];
+      for (let i = 0; i < m.roads.vertexCount; i++) {
+        const a = m.roadAttrs.subarray(i * WINDOW_ATTR_FLOATS, (i + 1) * WINDOW_ATTR_FLOATS);
+        if (a[2] > ROAD_EDGE + 0.5 || (a[3] & 1023) * 0.25 !== w || Math.abs(m.roads.vertices[i * 6] - nx) > 1) continue;
+        zs.push(m.roads.vertices[i * 6 + 2] + nn);
+      }
+      return zs;
+    };
+    // 12 m of branches on the 10.5 m trunk: 0.5 m of overlap at each seam, the outer edges on ±5.25
+    const span = (w: number) => { const zs = zsOf(w); expect(zs.length, `${w} m`).toBeGreaterThan(0); return [Math.min(...zs), Math.max(...zs)]; };
+    const [n0, n1] = span(3), [m0, m1] = span(4), [s0, s1] = span(5);
+    expect(n0).toBeCloseTo(-5.25, 0); expect(n1).toBeCloseTo(-2.25, 0);
+    expect(m0).toBeCloseTo(-3, 0); expect(m1).toBeCloseTo(1, 0);
+    expect(s0).toBeCloseTo(0.25, 0); expect(s1).toBeCloseTo(5.25, 0);
+  });
+
   it('a one-way road splitting in two: each branch has its outer edge on the trunk edge', () => {
     const m = buildOsmMesh({
       tile: TILE, detail: 'full', sampleHeight: surface, tin,

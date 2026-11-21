@@ -16,7 +16,7 @@
 import { RetryableError } from '../engine/queue';
 import type { TileBounds } from './geodesy';
 import type { OsmDetail } from './osm-types';
-import { osmFilter, type OverpassJson, type RawNode, type RawRelation, type RawWay } from './overpass';
+import { osmFilter, ROAD_SELECTOR, roadReachBounds, type OverpassJson, type RawNode, type RawRelation, type RawWay } from './overpass';
 
 export const OSM_API = 'https://api.openstreetmap.org/api/0.6';
 export const OSM_API_MAP = `${OSM_API}/map.json`;
@@ -203,7 +203,47 @@ export async function completeRelations(json: OverpassJson, detail: OsmDetail, f
 
 /** a near tile from the API: map, completed relations, then the sim's filter */
 export async function fetchOsmApiTile(b: TileBounds, detail: OsmDetail, fetchImpl: typeof fetch = fetch): Promise<OverpassJson> {
-  return filterOsmApi(await completeRelations(await fetchOsmApiMap(b, fetchImpl), detail, fetchImpl), detail);
+  const tile = filterOsmApi(await completeRelations(await fetchOsmApiMap(b, fetchImpl), detail, fetchImpl), detail);
+  return detail === 'full' ? withRoadReach(tile, b, fetchImpl) : tile;
+}
+
+/** the four strips of ROAD_REACH_M round a tile (north and south full width, east and west between) */
+function reachStrips(b: TileBounds): TileBounds[] {
+  const r = roadReachBounds(b);
+  return [
+    { west: r.west, south: b.north, east: r.east, north: r.north },
+    { west: r.west, south: r.south, east: r.east, north: b.south },
+    { west: r.west, south: b.south, east: b.west, north: b.north },
+    { west: b.east, south: b.south, east: r.east, north: b.north },
+  ];
+}
+
+/**
+ * The tile's elements plus the drawn roads with a node within ROAD_REACH_M round it (overpass
+ * roadReachBounds): `map` of the strips round the tile, only their roads and those roads' nodes
+ */
+async function withRoadReach(tile: OverpassJson, b: TileBounds, fetchImpl: typeof fetch): Promise<OverpassJson> {
+  const roads = parseFilter(`${ROAD_SELECTOR};`);
+  const seen = new Set(tile.elements.map((el) => `${el.type}/${el.id}`));
+  const elements = [...tile.elements];
+  for (const strip of reachStrips(b)) {
+    const raw = (await fetchOsmApiMap(strip, fetchImpl)).elements;
+    const nodes = new Map<number, Element>();
+    for (const el of raw) if (el.type === 'node') nodes.set(el.id, el);
+    for (const el of raw) {
+      if (el.type !== 'way' || !matches(el, roads) || seen.has(`way/${el.id}`)) continue;
+      seen.add(`way/${el.id}`);
+      elements.push(el);
+      for (const id of el.nodes) {
+        const n = nodes.get(id);
+        if (!n || seen.has(`node/${id}`)) continue;
+        seen.add(`node/${id}`);
+        // only its position: a tagged node out here (an entrance, a mast) belongs to another tile
+        elements.push({ type: 'node', id, lat: (n as RawNode).lat, lon: (n as RawNode).lon });
+      }
+    }
+  }
+  return { ...tile, elements };
 }
 
 /** raw `map.json` of a bbox; quarters it (sequentially) when the API reports too many nodes */
