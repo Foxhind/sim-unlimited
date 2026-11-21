@@ -233,9 +233,15 @@ const RIM_GLSL = `
 uniform vec4 uRim;
 uniform float uRimSteps;
 uniform vec3 uRimColor;
+// from a point toward the eye. An orthographic view (the relief inspector) looks along one
+// direction from everywhere, and its uCamPos is the simulator camera the tiles are chosen by, not
+// the eye: faces above or beyond that camera must not count as seen from the back.
+vec3 toEye(vec3 wp) {
+  return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2], uView[2][2]) : uCamPos - wp;
+}
 vec3 rimLight(vec3 n, vec3 wp, float fog) {
   if (uRim.x <= 0.0) return vec3(0.0);
-  vec3 v = normalize(uCamPos - wp);
+  vec3 v = normalize(toEye(wp));
   float edge = pow(1.0 - min(abs(dot(n, v)), 1.0), uRim.y);
   float back = pow(max(dot(-v, uSunDir), 0.0), uRim.z);
   float side = clamp((dot(n, uSunDir) + uRim.w) / (1.0 + uRim.w), 0.0, 1.0);
@@ -991,7 +997,7 @@ void main() {
   vec3 n = normalize(toWorldDir(aNormal));
   // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
   // by the normal of the side the eye sees, not the other side's
-  if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
+  if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
@@ -1153,7 +1159,7 @@ void main() {
   vec3 n = normalize(toWorldDir(ln));
   // two-sided lighting: a face seen from its back (thin plates such as fins, open meshes) is lit
   // by the normal of the side the eye sees, not the other side's
-  if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;
+  if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;

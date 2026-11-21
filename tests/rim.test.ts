@@ -57,7 +57,11 @@ describe('rim light', () => {
     for (const vs of [WORLD_VS, TREE_VS]) {
       expect(vs).toContain('+ rimLight(n, wp, fog)');
       // lit, and rim-lit, by the side the eye sees: the far side of a thin fin does not light this one
-      expect(vs).toContain('if (uTwoSided == 1 && dot(n, uCamPos - wp) < 0.0) n = -n;');
+      expect(vs).toContain('if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;');
+      // the eye: the camera in perspective; in an orthographic view (relief inspector) the one direction it
+      // looks from, as uCamPos there is the simulator camera and faces above it would be lit from below
+      expect(vs).toContain('return uOrthoFar > 0.0 ? vec3(uView[0][2], uView[1][2], uView[2][2]) : uCamPos - wp;');
+      expect(vs).toContain('vec3 v = normalize(toEye(wp));');
       expect(vs.indexOf('n = -n;')).toBeLessThan(vs.indexOf('vec4 light = sceneLight(n'));
     }
     expect(WORLD_POST_FS).toContain(`const float LOG_FAR = ${Math.log2(DEPTH_FAR + 1).toFixed(8)};`);

@@ -5,17 +5,19 @@
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { buildLUT, lightUniforms, paletteAt } from '../engine/palette';
+import { buildLUT, lightUniforms, litShare, paletteAt, seasonOf, solarHour, WINDOWS } from '../engine/palette';
 import { Renderer } from '../engine/renderer';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
 import { OsmManager } from '../world/osm-manager';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
+import { moonPosition, sunPosition } from '../world/sun';
 import { deleteCachedMeshes, isTileMeshKey } from '../world/tile-cache';
+import { solarClock, solarInstant } from '../world/time-of-day';
 import { PRESETS, SOURCE } from './presets';
 
-/** the relief view is lit by the sun alone */
+/** a sun set by hand has no moon with it */
 const NO_MOON = new Float32Array([0, -1, 0]);
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -48,6 +50,11 @@ interface State {
   follow: boolean;
   /** the simulator camera when it does not follow the view */
   pinned: LatLon;
+  /** the sun and the moon stand where they do at `date`, `minutes`; otherwise the sun is at sunAz, sunEl */
+  byTime: boolean;
+  /** local mean solar date (YYYY-MM-DD) and minutes into it at the view's centre */
+  date: string;
+  minutes: number;
   sunAz: number;
   sunEl: number;
   /** Landsat colour correction */
@@ -79,6 +86,10 @@ const state: State = {
   camAlt: 1500,
   follow: true,
   pinned: { lat: PRESETS[0][1], lon: PRESETS[0][2] },
+  byTime: true,
+  // today, mid-morning: a sun high enough to light the ground and low enough to model it
+  date: solarClock(new Date(), 0).date,
+  minutes: 10 * 60,
   sunAz: 150,
   sunEl: 30,
   grade: NEUTRAL_GRADE,
@@ -101,9 +112,15 @@ const view = mat4.create();
 const proj = mat4.create();
 const viewProj = mat4.create();
 const invViewProj = mat4.create();
+/** the true directions of the sun and the moon, and the light the faces are shaded by (the simulator's lightDir) */
 const sunDir = vec3.create();
+const moonDir = vec3.create();
+const lightDir = vec3.create();
 const cam: CameraWorld = { pos: vec3.create(), latLon: state.centre, alt: state.camAlt, velocity: vec3.create() };
-let lut = buildLUT(paletteAt(state.sunEl));
+let palette = paletteAt(state.sunEl);
+let lut = buildLUT(palette);
+/** what the light was last worked out for */
+let lightKey = '';
 let selected: Tile | null = null;
 
 const checked = (id: string) => $<HTMLInputElement>(id).checked;
@@ -158,10 +175,47 @@ const simCamera = () => (state.follow ? state.centre : state.pinned);
 
 // ---------- frame ----------
 
-function setSun(): void {
-  const el = state.sunEl * D2R, az = state.sunAz * D2R;
-  vec3.set(sunDir, Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
-  lut = buildLUT(paletteAt(state.sunEl));
+/** the instant of the chosen solar date and time at the view's centre */
+const sunInstant = (): Date => solarInstant(state, state.centre.lon) ?? new Date();
+
+/**
+ * The light for the current state, worked out again only when what it depends on changed: by date
+ * and time the sun and the moon as the simulator has them over the view's centre (so the light
+ * follows the view), otherwise a sun at the given azimuth and elevation.
+ */
+function updateLight(): void {
+  const key = state.byTime
+    ? `t|${state.date}|${state.minutes}|${state.centre.lat.toFixed(2)}|${state.centre.lon.toFixed(2)}`
+    : `m|${state.sunAz}|${state.sunEl}`;
+  if (key === lightKey) return;
+  lightKey = key;
+  let morning = false;
+  if (state.byTime) {
+    const t = sunInstant();
+    const sun = sunPosition(t, state.centre), moon = moonPosition(t, state.centre);
+    vec3.copy(sunDir, sun.dir);
+    vec3.copy(moonDir, moon.dir);
+    state.sunEl = sun.elevationDeg;
+    state.sunAz = ((Math.atan2(sun.dir[0], -sun.dir[2]) / D2R) + 360) % 360;
+    morning = sunPosition(new Date(t.getTime() + 60000), state.centre).elevationDeg > sun.elevationDeg;
+    // as in the simulator: the faces' light leans from the sun to the moon as the sun goes down
+    const sw = Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6));
+    const mw = Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - sw);
+    if (sw + mw < 1e-3) vec3.copy(lightDir, sunDir);
+    else vec3.normalize(lightDir, vec3.scaleAndAdd(lightDir, vec3.scale(lightDir, sunDir, sw), moonDir, mw));
+    renderer.season = seasonOf(t);
+    renderer.litShare = litShare(solarHour(t, state.centre.lon));
+    syncSun();
+  } else {
+    const el = state.sunEl * D2R, az = state.sunAz * D2R;
+    vec3.set(sunDir, Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
+    vec3.copy(moonDir, NO_MOON);
+    vec3.copy(lightDir, sunDir);
+    renderer.season = 0;
+    renderer.litShare = WINDOWS.LIT_SHARE;
+  }
+  palette = paletteAt(state.sunEl, 0, morning);
+  lut = buildLUT(palette);
 }
 
 let frames = 0;
@@ -182,6 +236,7 @@ function frame(now: number): void {
   place();
   if (chunks.rebaseIfNeeded(cam)) place();
   updateMatrices();
+  updateLight();
 
   const osmOn = checked('osm');
   chunks.stitch = checked('stitch');
@@ -193,11 +248,11 @@ function frame(now: number): void {
   renderer.orthoFar = 2 * EYE_DISTANCE_M;
   renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = night;
-  renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
-  renderer.setSunMoon(sunDir, NO_MOON);
+  renderer.beginFrame(lut, lightUniforms(palette));
+  renderer.setSunMoon(sunDir, moonDir);
   // no fog: the view has no single distance to the ground
-  chunks.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9);
-  if (osmOn) osm.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9, night, POINT_SIZE * dpr);
+  chunks.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9);
+  if (osmOn) osm.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9, night, POINT_SIZE * dpr);
   renderer.beginOverlay();
   renderer.resolve();
 
@@ -435,6 +490,24 @@ function onPaste(e: ClipboardEvent): void {
   syncInputs();
 }
 
+const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+
+/** the sun's inputs: by date and time the azimuth and elevation only show where it stands */
+function syncSun(): void {
+  const set = (id: string, v: number | string) => {
+    const el = $<HTMLInputElement>(id);
+    // not under the user's hands
+    if (document.activeElement !== el) el.value = String(v);
+  };
+  $<HTMLInputElement>('byTime').checked = state.byTime;
+  set('sunDate', state.date);
+  set('sunTime', hhmm(state.minutes));
+  set('sunSlider', state.minutes);
+  set('sunAz', +state.sunAz.toFixed(1));
+  set('sunEl', +state.sunEl.toFixed(1));
+  for (const id of ['sunDate', 'sunTime', 'sunSlider']) $<HTMLInputElement>(id).disabled = !state.byTime;
+}
+
 function syncInputs(): void {
   const set = (id: string, v: number | string) => ($<HTMLInputElement>(id).value = String(v));
   set('lat', state.centre.lat.toFixed(5));
@@ -444,8 +517,7 @@ function syncInputs(): void {
   set('elev', Math.round(90 - state.tilt));
   set('yaw', Math.round(state.yaw));
   set('exag', state.exag);
-  set('sunAz', state.sunAz);
-  set('sunEl', state.sunEl);
+  syncSun();
   set('lsBright', state.grade.brightness);
   set('lsContrast', state.grade.contrast);
   set('lsGamma', state.grade.gamma);
@@ -479,8 +551,36 @@ function init(): void {
   num('elev', MIN_ELEVATION_DEG, 90, (v) => (state.tilt = 90 - v));
   num('yaw', -180, 360, (v) => (state.yaw = v));
   num('exag', 1, 20, (v) => (state.exag = v));
-  num('sunAz', 0, 360, (v) => { state.sunAz = v; setSun(); });
-  num('sunEl', -10, 90, (v) => { state.sunEl = v; setSun(); });
+  // a sun set by hand: the date and time no longer hold
+  num('sunAz', 0, 360, (v) => { state.sunAz = v; state.byTime = false; });
+  num('sunEl', -10, 90, (v) => { state.sunEl = v; state.byTime = false; });
+  $('byTime').addEventListener('change', () => {
+    state.byTime = checked('byTime');
+    syncSun();
+  });
+  $<HTMLInputElement>('sunDate').addEventListener('change', () => {
+    const v = $<HTMLInputElement>('sunDate').value;
+    if (solarInstant({ date: v, minutes: 0 }, 0)) state.date = v;
+    syncSun();
+  });
+  $<HTMLInputElement>('sunTime').addEventListener('change', () => {
+    const m = /^(\d{2}):(\d{2})/.exec($<HTMLInputElement>('sunTime').value);
+    if (m) state.minutes = Math.min(1439, +m[1] * 60 + +m[2]);
+    syncSun();
+  });
+  $<HTMLInputElement>('sunSlider').addEventListener('input', () => {
+    state.minutes = Math.max(0, Math.min(1439, Math.round(+$<HTMLInputElement>('sunSlider').value)));
+    $<HTMLInputElement>('sunTime').value = hhmm(state.minutes);
+  });
+  $('sunNow').onclick = () => {
+    Object.assign(state, solarClock(new Date(), state.centre.lon), { byTime: true });
+    syncSun();
+  };
+  $('sunNoon').onclick = () => {
+    state.minutes = 12 * 60;
+    state.byTime = true;
+    syncSun();
+  };
   num('lsBright', -1, 1, (v) => setGrade({ ...state.grade, brightness: v }));
   num('lsContrast', 0, 4, (v) => setGrade({ ...state.grade, contrast: v }));
   num('lsGamma', 0.2, 5, (v) => setGrade({ ...state.grade, gamma: v }));
@@ -513,7 +613,9 @@ function init(): void {
   $('toSim').onclick = () => {
     const c = simCamera();
     const hdg = ((Math.round(state.yaw) % 360) + 360) % 360;
-    window.open(`index.html#${c.lat.toFixed(5)},${c.lon.toFixed(5)},${Math.round(state.camAlt)},${hdg}`, '_blank');
+    // by date and time the simulator opens at the same moment (its 6th field), otherwise at the current clock
+    const when = state.byTime ? `,,${Math.floor(sunInstant().getTime() / 1000)}` : '';
+    window.open(`index.html#${c.lat.toFixed(5)},${c.lon.toFixed(5)},${Math.round(state.camAlt)},${hdg}${when}`, '_blank');
   };
   $('openTile').onclick = () => selected && openTileInspector(selected);
   $('dropTile').onclick = () => selected && void dropCache([selected]);
@@ -600,7 +702,6 @@ function init(): void {
   const grade = loadGrade();
   if (!isNeutralGrade(grade)) setGrade(grade, 'восстановлена сохранённая коррекция');
   syncInputs();
-  setSun();
   requestAnimationFrame(frame);
 }
 

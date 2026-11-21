@@ -48,3 +48,29 @@ export function timeForPreset(tod: TimeOfDay, loc: LatLon, now: Date): Date {
   }
   return new Date(noon + 6 * HOUR);
 }
+
+/** a calendar day and the minutes into it on the local mean solar clock at a longitude */
+export interface SolarClock {
+  /** YYYY-MM-DD */
+  date: string;
+  /** 0..1439 */
+  minutes: number;
+}
+
+/**
+ * The instant of a local mean solar date and time at `lonDeg` (no time zones: 12:00 is the mean
+ * noon there). An unreadable date gives null.
+ */
+export function solarInstant(clock: SolarClock, lonDeg: number): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(clock.date);
+  if (!m) return null;
+  const day = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  if (!Number.isFinite(day)) return null;
+  return new Date(day + clock.minutes * MIN - (lonDeg / 15) * HOUR);
+}
+
+/** the local mean solar date and time of an instant at `lonDeg` (solarInstant's inverse, to the minute) */
+export function solarClock(time: Date, lonDeg: number): SolarClock {
+  const local = new Date(Math.round((time.getTime() + (lonDeg / 15) * HOUR) / MIN) * MIN);
+  return { date: local.toISOString().slice(0, 10), minutes: local.getUTCHours() * 60 + local.getUTCMinutes() };
+}
