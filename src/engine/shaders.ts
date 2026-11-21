@@ -89,7 +89,8 @@ vec3 shadeRgb(vec3 c, uint s, uint lvl) {
  * horizon as seen from there: a low sun lights the faces turned to it yellow to red while the
  * shade stays blue or violet, and peaks and clouds keep the red light after the ground lost it.
  * uSun / uMoon: the true directions; uSky rgb the skylight's hue, a its share; uDirect x the sun's
- * strength through the weather, y the moon's, z how strongly the colours tint the faces.
+ * strength through the weather, y the moon's, z how strongly the colours tint the faces, w the gain
+ * on the sun's direct light.
  * sceneLight → rgb the tint (luminance 1), a the brightness 0..1 (the lighting step / 11).
  */
 const SUNLIGHT_GLSL = `
@@ -111,7 +112,7 @@ vec4 sunlightAt(float height) {
 vec4 sceneLight(vec3 n, float height) {
   vec4 sun = sunlightAt(height);
   float a = uSky.a;
-  float ds = (1.0 - a) * max(dot(n, uSun), 0.0) * sun.a * uDirect.x;
+  float ds = (1.0 - a) * max(dot(n, uSun), 0.0) * sun.a * uDirect.x * uDirect.w;
   float dm = (1.0 - a) * max(dot(n, uMoon), 0.0) * uDirect.y;
   // the hue goes from the sky's (shade) to the direct light's as a face turns to it
   vec3 dir = (ds * sun.rgb + vec3(dm)) / max(ds + dm, 1e-4);

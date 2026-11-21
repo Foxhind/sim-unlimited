@@ -590,7 +590,7 @@ export interface LightUniforms {
   /**
    * direct light (SUNLIGHT_GLSL uDirect): x the sun's strength through the weather 0..1, y the
    * moon's (its elevation and phase, set per frame by the caller, 0 by default), z how much the
-   * light's colour tints faces 0..1, w unused
+   * light's colour tints faces 0..1, w the gain on the sun's direct light (SUN_GAIN)
    */
   direct: Float32Array;
 }
@@ -600,6 +600,8 @@ const AMBIENT_CLEAR = 0.3;
 const AMBIENT_OVERCAST = 0.55;
 /** how far the light's colour tints faces (1: the full colour of the sun and the sky) */
 const LIGHT_TINT = 0.7;
+/** gain on the sun's direct light on faces (SUNLIGHT_GLSL uDirect.w): above 1 the lit sides come out brighter */
+const SUN_GAIN = 1.35;
 const LUMA: RGB = [0.299, 0.587, 0.114];
 const luma = (c: RGB): number => c[0] * LUMA[0] + c[1] * LUMA[1] + c[2] * LUMA[2];
 /**
@@ -641,7 +643,7 @@ export function lightUniforms(p: PaletteParams, sunny = 1, cloud: RGB = OVERCAST
   return {
     levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p),
     sky: Float32Array.from([hue[0] / y, hue[1] / y, hue[2] / y, lerp(AMBIENT_OVERCAST, AMBIENT_CLEAR, clear)]),
-    direct: Float32Array.from([0.5 + 0.5 * clear, 0, LIGHT_TINT, 0]),
+    direct: Float32Array.from([0.5 + 0.5 * clear, 0, LIGHT_TINT, SUN_GAIN]),
   };
 }
 
