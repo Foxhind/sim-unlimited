@@ -2,7 +2,6 @@ import { vec3 } from 'gl-matrix';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileKey, type LatLon } from './geodesy';
 import { loadTileDem, type HeightSampler } from './terrain-source';
 import { buildTerrainTin, tinSampler } from './terrain-tin';
-import { loadLandsatTerrain } from './landsat-process';
 import { applyPads, loadPads, type Pad } from './aerodrome';
 import { gridForZoom } from './chunks';
 import { getOsmRaw } from './tile-cache';
@@ -116,19 +115,15 @@ export class GroundProbe {
       const { heights: lattice, borders } = dem;
       const pads: Pad[] = data ? await loadPads(data) : [];
       applyPads(dem, tile, grid, pads);
-      // Landsat colour boundaries are part of the TIN; without imagery use the plain TIN for now and
-      // reload the tile later so collision matches the mesh once it is rebuilt with imagery
-      const ls = await loadLandsatTerrain(tile, grid);
+      // the same TIN as the mesh (no colour boundaries: faces are coloured by height × temperature)
       const surface = tinSampler(buildTerrainTin(tile, grid, lattice, {
         borders,
-        colourLines: ls ? { lines: ls.lines, maxVerts: ls.maxVerts } : undefined,
         coast: data ? coastlineWays(data.lines) : undefined,
         pads,
       }), tile);
       this.samplers.set(key, surface);
       if (this.outdated.get(key) === gen) this.outdated.delete(key);
-      if (!ls) this.stale.set(key, now + 10000);
-      else this.stale.delete(key);
+      this.stale.delete(key);
       if (data) {
         try {
           const list: Prism[] = [];

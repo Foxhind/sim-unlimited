@@ -2,11 +2,10 @@ import { mat4, vec3 } from 'gl-matrix';
 import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
 import { Renderer, type BaseGround } from './engine/renderer';
-import { LANDSAT_ATTRIBUTION } from './world/landsat';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, litShare, solarHour, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, seasonOf, litShare, solarHour, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -121,7 +120,7 @@ const camWorld: CameraWorld = {
   velocity: model.vel,
 };
 
-/** live weather at the aircraft; ?temp=-20 in the URL forces the temperature (winter looks anywhere) */
+/** live weather at the aircraft; ?temp=-20 in the URL forces the reported air temperature */
 const weather = new WeatherService();
 {
   const forced = new URLSearchParams(window.location.search).get('temp');
@@ -226,15 +225,14 @@ const dayPalette = () => paletteAt(sun.elevationDeg, sunnyNow(), sunRising());
 /** the moon's light on faces: by its elevation and phase, once the sun no longer lights them */
 const moonLight = (): number =>
   Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
-/** light uniforms of a palette; frozen water has no waves, glints or glitter path */
+/** light uniforms of a palette (frozen water is not drawn as water: no waves, glints or glitter) */
 function lightOf(p: PaletteParams): LightUniforms {
   const l = lightUniforms(p, sunnyNow());
   l.direct[1] = moonLight();
-  if (weather.surface.ice) l.glitter[0] = l.glitter[7] = 0;
   return l;
 }
 let palette = dayPalette();
-let lut = buildLUT(palette, weather.surface);
+let lut = buildLUT(palette);
 let light = lightOf(palette);
 applySunColors(lut, sun.elevationDeg);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
@@ -244,8 +242,6 @@ const skyMat = new Float32Array(9);
 const planetBuf = planetPoints(simTime);
 renderer.setSkyPoints(buildSkyPoints());
 renderer.setSkyPoints(planetBuf, PLANETS_OFFSET);
-/** whether the current LUT was built with frozen water */
-let lutIce = weather.surface.ice;
 let previewKey = '';
 
 function updateLight(): void {
@@ -268,7 +264,7 @@ function updateLight(): void {
   }
   renderer.setSkyPoints(planetPoints(simTime, planetBuf), PLANETS_OFFSET);
   palette = dayPalette();
-  lut = buildLUT(palette, weather.surface);
+  lut = buildLUT(palette);
   light = lightOf(palette);
   applySunColors(lut, sun.elevationDeg);
 }
@@ -873,13 +869,10 @@ function frame(now: number): void {
     sunLoc = camWorld.latLon;
   }
   weather.update(sunLoc, now);
-  const surface = weather.surface;
-  if (surface.ice !== lutIce) lastSunUpdate = 0; // rebuild the LUT now: water freezes or thaws
   // fast clocks need a finer refresh than the 1 s default or the sky visibly steps
   if (now - lastSunUpdate > (menu.config.timeAccel > 1 && state === 'flying' ? 100 : 1000)) {
     lastSunUpdate = now;
     updateLight();
-    lutIce = surface.ice;
   }
   if (menu.screen === 'pause') {
     const hh = simTime.toISOString().slice(0, 16).replace('T', ' ');
@@ -894,7 +887,8 @@ function frame(now: number): void {
   renderer.nightGlow = lightsOn;
   renderer.litShare = litShare(solarHour(simTime, sunLoc.lon));
   renderer.time = now / 1000;
-  renderer.snow = surface.snow;
+  renderer.originLat = chunks.origin.lat;
+  renderer.season = seasonOf(simTime);
   renderer.rim = flashing ? NO_RIM : rimFrame(rim, palette, sunColour(sun.elevationDeg), sun.elevationDeg);
   profiler.stage('небо');
   renderer.drawSky(view, proj, camPos, sunDir, moonDir, baseGround(camPos[1]));
@@ -966,7 +960,7 @@ function frame(now: number): void {
       pad, renderer.height - pad - 34 * u, u, HUD_GREEN,
     );
   }
-  const attr = `© OpenStreetMap contributors · ${OPENFREEMAP_ATTRIBUTION} · ${LANDSAT_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
+  const attr = `© OpenStreetMap contributors · ${OPENFREEMAP_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
   font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
   font.flush();
   vectors.flush();

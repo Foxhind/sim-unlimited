@@ -27,7 +27,51 @@ export const MAT = {
   SEA: 16,
   /** the sunset glow round a low sun (SKY_FS): zenith → skyLow (step 4) → sunGlow (step 8); its rings use steps 5..8 */
   SKY_GLOW: 17,
+  /** frozen inland water: light grey ice */
+  ICE: 18,
+  /** a frozen sea: steel grey */
+  SEA_ICE: 19,
 } as const;
+
+/**
+ * The climate every face is drawn in, by latitude φ, height h (m) and the day of the year d
+ * (0 = 1 Jan): the mean daily temperature
+ *   T = T_POLE + T_AMP·cos φ − LAPSE·h − SEASON_AMP·k·sin φ·cos(2π(d − COLDEST_DAY)/365),
+ * k = 1 north, SEASON_SOUTH south (more ocean, milder seasons); sin φ turns the season over south of
+ * the equator. Fitted by least squares to daily means at 55 points worldwide (tests/fixtures/
+ * climate-normals.json, tools/fit-climate.py): RMSE 5.5 °C, 3.3 °C at the median point; what is left
+ * is mostly continentality (Yakutsk, Lhasa) and the Antarctic plateau. The live weather does not enter.
+ * Faces that snow can lie on are snow at SNOW_C and below, water is ice at ICE_C and below (daily
+ * means: water freezes later than snow settles). Shared by the terrain colours (climate-colour.ts,
+ * annual mean) and the shaders (the sim date, renderer.season).
+ */
+export const CLIMATE = {
+  T_POLE: -24,
+  T_AMP: 53,
+  LAPSE: 0.006,
+  SEASON_AMP: 15,
+  SEASON_SOUTH: 0.65,
+  /** the coldest day of the northern year, days after 1 Jan */
+  COLDEST_DAY: 17,
+  SNOW_C: -3,
+  ICE_C: -6,
+} as const;
+
+const YEAR_DAYS = 365.2425;
+
+/** the season factor of a moment: cos(2π(d − COLDEST_DAY)/year), 1 in the northern midwinter */
+export function seasonOf(date: Date): number {
+  const jan1 = Date.UTC(date.getUTCFullYear(), 0, 1);
+  const d = (date.getTime() - jan1) / 86400000;
+  return Math.cos((2 * Math.PI * (d - CLIMATE.COLDEST_DAY)) / YEAR_DAYS);
+}
+
+/** mean daily temperature, °C, at latitude `latDeg`, `heightM` metres, season factor `season` (seasonOf; 0: the annual mean) */
+export function climateTemperature(latDeg: number, heightM: number, season = 0): number {
+  const phi = (latDeg * Math.PI) / 180;
+  const k = latDeg < 0 ? CLIMATE.SEASON_SOUTH : 1;
+  return CLIMATE.T_POLE + CLIMATE.T_AMP * Math.cos(phi) - CLIMATE.LAPSE * Math.max(0, heightM) - CLIMATE.SEASON_AMP * k * Math.sin(phi) * season;
+}
 
 /**
  * Face colour of a mesh vertex, a packed uint32 (Uint32Array per vertex, `aRamp` in the shaders):
@@ -138,8 +182,8 @@ export function withGlow(packed: number, level: number): number {
 }
 
 /**
- * Winter: a face that snow can lie on (open ground, trees, flat roofs) carries SNOW_FLAG;
- * with snow on, the shader draws it in the snow ramp.
+ * A face that snow can lie on (open ground, trees, flat roofs) carries SNOW_FLAG; the shader draws
+ * it in the snow ramp where the climate at the face is cold enough (CLIMATE.SNOW_C).
  */
 export function snowy(packed: number): number {
   return (packed | SNOW_FLAG) >>> 0;
@@ -149,15 +193,6 @@ export function snowy(packed: number): number {
 export function rampGlowLevel(packed: number): number {
   return (packed >>> GLOW_SHIFT) & GLOW_LEVEL_MASK;
 }
-
-/** what the weather does to the ground (weather.ts) */
-export interface Surface {
-  /** snow on open ground, trees and flat roofs */
-  snow: boolean;
-  /** frozen inland water (light grey ice), steel-grey seas */
-  ice: boolean;
-}
-export const NO_WINTER: Surface = { snow: false, ice: false };
 
 interface MaterialRamp {
   dark: RGB;
@@ -181,7 +216,7 @@ const MATERIALS: MaterialRamp[] = [
 
 /** frozen inland water: light grey ice */
 const ICE: MaterialRamp = { dark: [92, 96, 104], light: [200, 204, 210] };
-/** a sea in hard frost: steel grey instead of blue */
+/** a frozen sea: steel grey instead of blue */
 const SEA_STEEL: MaterialRamp = { dark: [36, 44, 54], light: [104, 118, 132] };
 const WATER_INDEX = 2;
 
@@ -666,10 +701,10 @@ export function shadeColour(c: RGB, s: number, p: PaletteParams, k = 0): RGB {
  * Material ramps: steps 0..11 dark→light (lighting), 12..15 light→haze (fog).
  * The haze end equals the sky horizon color so fogged geometry meets the sky.
  */
-export function buildLUT(p: PaletteParams, surface: Surface = NO_WINTER): Uint8Array {
+export function buildLUT(p: PaletteParams): Uint8Array {
   const lut = new Uint8Array(LUT_ENTRIES * 4);
-  buildPlainLUT(lut, p, surface);
-  for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k), surface);
+  buildPlainLUT(lut, p);
+  for (let k = 1; k <= GLOW_LEVELS; k++) buildPlainLUT(lut.subarray(k * LUT_SIZE * 4, (k + 1) * LUT_SIZE * 4), glowParams(p, k));
   for (const [i, c] of LIGHT_COLORS) writeEntry(lut, i, c);
   // overlay row: row 0 as it is (sky-coloured panels, HUD), material ramps (map colours) by day
   const overlay = lut.subarray(OVERLAY_LUT_BASE * 4);
@@ -687,7 +722,7 @@ export function glowParams(p: PaletteParams, k: number): PaletteParams {
   return { ...p, lightMul: mul, tint: lerpRGB(GLOW_TINT, p.tint, p.lightMul / mul) };
 }
 
-function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_WINTER): void {
+function buildPlainLUT(lut: Uint8Array, p: PaletteParams): void {
   const haze = p.horizon;
   const writeMaterial = (ramp: number, m: MaterialRamp, mirror = 0): void => {
     let dark = scaleRGB(m.dark, p);
@@ -706,10 +741,7 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
     }
   };
 
-  for (let r = 0; r < MATERIALS.length; r++) {
-    const water = r === WATER_INDEX && !surface.ice;
-    writeMaterial(r, surface.ice && r === WATER_INDEX ? ICE : MATERIALS[r], water ? p.waterSky : 0);
-  }
+  for (let r = 0; r < MATERIALS.length; r++) writeMaterial(r, MATERIALS[r], r === WATER_INDEX ? p.waterSky : 0);
 
   for (let s = 0; s < RAMP_STEPS; s++) {
     writeEntry(lut, MAT.SKY * RAMP_STEPS + s, skyColour(p, s));
@@ -724,7 +756,9 @@ function buildPlainLUT(lut: Uint8Array, p: PaletteParams, surface: Surface = NO_
       writeEntry(lut, ramp * RAMP_STEPS + s, lerpRGB(m.dark, m.light, s / (RAMP_STEPS - 1)));
     }
   }
-  writeMaterial(MAT.SEA, surface.ice ? SEA_STEEL : MATERIALS[WATER_INDEX], surface.ice ? 0 : p.waterSky);
+  writeMaterial(MAT.SEA, MATERIALS[WATER_INDEX], p.waterSky);
+  writeMaterial(MAT.ICE, ICE);
+  writeMaterial(MAT.SEA_ICE, SEA_STEEL);
 }
 
 /** water mirroring the sky: brightness of the mirrored zenith (dark end) and half-way band (light end) */

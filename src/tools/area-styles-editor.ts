@@ -166,7 +166,7 @@ function frame(now: number): void {
   if (osmOn) osm.update(cam, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
 
   renderer.orthoFar = 2 * EYE_DISTANCE_M;
-  renderer.snow = false;
+  renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = false;
   renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
   renderer.setSunMoon(sunDir, NO_MOON);

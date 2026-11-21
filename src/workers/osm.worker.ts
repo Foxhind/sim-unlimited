@@ -14,7 +14,8 @@ import { buildTerrainTin, COAST_LEVEL, tinLocator, tinSampler } from '../world/t
 import { greenColour, isMaterial, RAMP } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
 import { gridForZoom } from '../world/chunks';
-import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
+import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
+import { climateFaceColor } from '../world/climate-colour';
 import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
@@ -169,12 +170,10 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const { heights: lattice, borders } = dem;
     const pads = detail === 'full' ? await loadPads(data) : [];
     applyPads(dem, tile, grid, pads);
-    // the same TIN as the terrain mesh, Landsat colour boundaries included; a tile is shown only
-    // with all its data, so without imagery fail as retryable like the terrain worker
-    const ls = await loadLandsatTerrain(tile, grid, grade);
-    if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
+    // the same face colours as the terrain mesh (height × temperature, climate-colour.ts)
+    const ls = { faceColor: climateFaceColor(tile, grid, lattice) };
     // the same TIN as the terrain worker builds from the same OSM: coastline included
-    const tin = buildTerrainTin(tile, grid, lattice, { borders, colourLines: { lines: ls.lines, maxVerts: ls.maxVerts }, coast: coastlineWays(data.lines), pads });
+    const tin = buildTerrainTin(tile, grid, lattice, { borders, coast: coastlineWays(data.lines), pads });
     const drape = tinSampler(tin, tile);
     // foliage: the colour of the land face under the tree, pulled to the nearest green land colour
     const locate = tinLocator(tin, tile);

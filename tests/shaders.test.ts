@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
+import { CLIMATE, MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
+import { seaLevelTemperature } from '../src/world/climate-colour';
 import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 
 describe('logarithmic depth', () => {
@@ -18,15 +19,27 @@ describe('logarithmic depth', () => {
   });
 });
 
-describe('winter snow', () => {
-  it('terrain, drapes, buildings and trees swap faces flagged for snow to the snow ramp', () => {
+describe('snow and ice by climate', () => {
+  it('terrain, drapes, buildings and trees take snow where the climate at the face is cold enough', () => {
     for (const vs of [WORLD_VS, TREE_VS]) {
-      expect(vs).toContain('uniform int uSnow;');
-      expect(vs).toContain(`bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;`);
-      expect(vs).toContain(`uint ramp = snow ? ${MAT.SNOW}u : packedRamp & 16777215u;`);
+      expect(vs).toContain('uniform float uOriginLat;');
+      expect(vs).not.toContain('uSnow');
+      expect(vs).toContain(`bool snow = (packedRamp & ${SNOW_FLAG}u) != 0u && tempC <= ${CLIMATE.SNOW_C.toFixed(1)} && (!water || frozen);`);
+      expect(vs).toContain(`uint ramp = snow ? ${MAT.SNOW}u : frozen ? (id == ${MAT.SEA}u ? ${MAT.SEA_ICE}u : ${MAT.ICE}u) : id;`);
+      expect(vs).toContain('float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));');
       // the snow flag must not leak into the glow level
       expect(vs).toMatch(/>> 24u\) & 7u/);
     }
+    // frozen water is not drawn as water (no waves, glints, glitter)
+    expect(WORLD_VS).toContain('vWater = water && !frozenWater(aRamp, tempC) ? 1.0 : 0.0;');
+  });
+
+  it('the shader climate is the same formula as the terrain colours', () => {
+    expect(WORLD_VS).toContain(`${CLIMATE.T_POLE.toFixed(1)} + ${CLIMATE.T_AMP.toFixed(1)} * cos(lat) - ${CLIMATE.LAPSE} * max(p.y, 0.0)`);
+    expect(WORLD_VS).toContain(`- ${CLIMATE.SEASON_AMP.toFixed(1)} * k * sin(lat) * uSeason;`);
+    expect(WORLD_VS).toContain(`float k = lat < 0.0 ? ${CLIMATE.SEASON_SOUTH} : 1.0;`);
+    expect(WORLD_VS).toContain('uniform float uSeason;');
+    expect(seaLevelTemperature(60)).toBeCloseTo(CLIMATE.T_POLE + CLIMATE.T_AMP * 0.5, 6);
   });
 });
 
@@ -35,7 +48,7 @@ describe('base ground (horizon without tiles)', () => {
     const { SKY_FS } = await import('../src/engine/shaders');
     expect(WORLD_VS).toContain('wp.y -= (d * d) / (2.0 * 6371000.0);');
     expect(SKY_FS).toContain('max(1.0 - dir.y * dir.y, 0.0) / 6371000.0');
-    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir))');
+    expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), tempC)');
     expect(SKY_FS).toContain('fog = floor(fog * 12.0) / 12.0;');
   });
 

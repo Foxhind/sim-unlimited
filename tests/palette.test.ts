@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, LIGHT, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
+  buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
   material, OVERLAY_LUT_BASE, paletteAt, saturate, sunlight, sunniness, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
 } from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
@@ -146,12 +146,6 @@ describe('sunset sky', () => {
     expect(w[0]).toBeGreaterThan(w[1]); // red over green: purple-pink, not blue-grey
     expect(entry(dusk, rampIndex(RAMP.SEA, 9))).toEqual(w);
     expect(blueish(entry(day, rampIndex(RAMP.WATER, 9)))).toBe(true);
-    // frozen water stays ice: it does not mirror the sky
-    const frost = { snow: true, ice: true };
-    for (const ramp of [RAMP.WATER, RAMP.SEA]) {
-      const ice = entry(buildLUT(paletteAt(0), frost), rampIndex(ramp, 9));
-      expect(ice).toEqual(entry(buildLUT({ ...paletteAt(0), waterSky: 0 }, frost), rampIndex(ramp, 9)));
-    }
   });
 });
 
@@ -280,44 +274,34 @@ describe('overlay LUT row', () => {
   });
 });
 
-describe('winter surface (weather)', () => {
+describe('ice ramps (climate)', () => {
   const p = paletteAt(45);
-  const plain = buildLUT(p);
-  const frost = buildLUT(p, { snow: true, ice: false });
-  const ice = buildLUT(p, { snow: true, ice: true });
-  const lit = (lut: Uint8Array, ramp: number) => entry(lut, rampIndex(ramp, LIT_STEP));
+  const lut = buildLUT(p);
   const LIT_STEP = 9;
+  const lit = (ramp: number) => entry(lut, rampIndex(ramp, LIT_STEP));
 
   it('unfrozen seas look like any other water', () => {
-    for (let s = 0; s < RAMP_STEPS; s++) expect(entry(plain, rampIndex(RAMP.SEA, s))).toEqual(entry(plain, rampIndex(RAMP.WATER, s)));
+    for (let s = 0; s < RAMP_STEPS; s++) expect(entry(lut, rampIndex(RAMP.SEA, s))).toEqual(entry(lut, rampIndex(RAMP.WATER, s)));
   });
 
-  it('snow alone does not touch the palette (the shader swaps flagged faces to the snow ramp)', () => {
-    expect(frost).toEqual(plain);
-  });
-
-  it('in hard frost inland water turns light grey and seas steel grey', () => {
-    const [ir, ig, ib] = lit(ice, RAMP.WATER);
+  it('frozen inland water is light grey ice and a frozen sea steel grey, always in the LUT', () => {
+    const [ir, ig, ib] = lit(material(MAT.ICE));
     expect(Math.max(ir, ig, ib) - Math.min(ir, ig, ib)).toBeLessThan(16); // grey, not blue
     expect(ir).toBeGreaterThan(140); // light
-    const [sr, sg, sb] = lit(ice, RAMP.SEA);
+    const [sr, sg, sb] = lit(material(MAT.SEA_ICE));
     expect(sb).toBeGreaterThan(sr); // a cool steel grey
     expect(sb - sr).toBeLessThan(40); // ...not blue water any more
     expect(sr + sg + sb).toBeLessThan(ir + ig + ib); // darker than the ice
-    const [wr, , wb] = lit(plain, RAMP.WATER);
-    expect(wb - wr).toBeGreaterThan(60); // plain water was clearly blue
+    const [wr, , wb] = lit(RAMP.WATER);
+    expect(wb - wr).toBeGreaterThan(60); // open water stays clearly blue
   });
 
-  it('frost changes only the water ramps; the taxiway lights stay blue', () => {
-    const changed = new Set<number>();
-    for (let i = 0; i < LUT_SIZE; i++) {
-      if (entry(ice, i).join() !== entry(plain, i).join()) changed.add(Math.floor(i / RAMP_STEPS));
+  it('ice does not mirror the sky', () => {
+    const plain = buildLUT({ ...paletteAt(0), waterSky: 0 });
+    for (const m of [MAT.ICE, MAT.SEA_ICE]) {
+      expect(entry(buildLUT(paletteAt(0)), rampIndex(material(m), 9))).toEqual(entry(plain, rampIndex(material(m), 9)));
     }
-    expect([...changed].sort((a, b) => a - b)).toEqual([MAT.WATER, MAT.SEA]);
-    const [r, , b] = entry(ice, LIGHT.TAXI_BLUE);
-    expect(b - r).toBeGreaterThan(100);
   });
-
 });
 
 describe('land palette', () => {

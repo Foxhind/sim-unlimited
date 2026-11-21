@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { weatherLines } from '../src/flight/hud';
 import {
-  cloudCode, compassPoint, parseWeather, surfaceFor, WEATHER_MAX_AGE_MS, WeatherService, weatherUrl, type Weather,
+  cloudCode, compassPoint, parseWeather, WEATHER_MAX_AGE_MS, WeatherService, weatherUrl, type Weather,
 } from '../src/world/weather';
 
 const AT = { lat: 55.75, lon: 37.62 };
@@ -11,18 +11,6 @@ const SAMPLE = {
     wind_speed_10m: 5.2, wind_direction_10m: 225, wind_gusts_10m: 11.0,
   },
 };
-
-describe('winter thresholds', () => {
-  it('snow from -4 °C, ice from -15 °C, nothing without data', () => {
-    expect(surfaceFor(-3.9)).toEqual({ snow: false, ice: false });
-    expect(surfaceFor(-4)).toEqual({ snow: true, ice: false });
-    expect(surfaceFor(-14.9)).toEqual({ snow: true, ice: false });
-    expect(surfaceFor(-15)).toEqual({ snow: true, ice: true });
-    expect(surfaceFor(-40)).toEqual({ snow: true, ice: true });
-    expect(surfaceFor(undefined)).toEqual({ snow: false, ice: false });
-    expect(surfaceFor(NaN)).toEqual({ snow: false, ice: false });
-  });
-});
 
 describe('Open-Meteo', () => {
   it('asks only for current conditions: surface temperature, clouds, wind in m/s, pressure, and the air aloft', () => {
@@ -72,7 +60,6 @@ describe('WeatherService', () => {
     await flush();
     expect(f.calls).toHaveLength(1);
     expect(s.tempC).toBe(-16.4);
-    expect(s.surface).toEqual({ snow: true, ice: true });
     s.update({ lat: AT.lat + 0.1, lon: AT.lon }, 1000); // ~11 km
     expect(f.calls).toHaveLength(1);
     s.update({ lat: AT.lat + 0.3, lon: AT.lon }, 2000); // ~33 km
@@ -109,7 +96,6 @@ describe('WeatherService', () => {
     s.update(AT, 0);
     await flush();
     expect(s.tempC).toBe(2);
-    expect(s.surface).toEqual({ snow: false, ice: false });
   });
 });
 

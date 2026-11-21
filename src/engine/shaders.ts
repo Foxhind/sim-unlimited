@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -38,12 +38,14 @@ const EARTH_R = 6371000;
 /**
  * World colour (palette.ts): the world passes write RGB, not palette indices. A face colour is a
  * packed uint: an RGB colour, or (MATERIAL_FLAG) a material ramp looked up in the LUT; bits 24..26
- * the night glow level, SNOW_FLAG the winter flag.
+ * the night glow level, SNOW_FLAG: snow can lie on the face.
  * Lighting stays stepped (12 lit steps, 4 fog steps toward the horizon haze) for both kinds: a
  * material takes its ramp's LUT entry at the step, an RGB colour is shaded by the same law in place
  * (palette.ts shadeColour) with the light of its glow level (uLight) — any colour, no palette snap.
  * With uGlow on, a glowing face is shaded at least at step GLOW_STEP_BASE + level, in that level's
- * street-lit light. With uSnow on, a face flagged SNOW_FLAG is drawn in the snow ramp. A face flagged
+ * street-lit light. The climate at the face (climateTemp, palette.ts CLIMATE) decides snow and ice:
+ * a face flagged SNOW_FLAG is drawn in the snow ramp at CLIMATE.SNOW_C and below, inland water and
+ * seas freeze to the ICE / SEA_ICE ramps at CLIMATE.ICE_C and below. A face flagged
  * SELF_LIT_FLAG (an aircraft light) is its own colour, unlit and unshaded.
  */
 /**
@@ -160,7 +162,10 @@ vec3 skyAt(vec3 dir, vec3 sun) {
  */
 const GLOW_VS = `
 uniform int uGlow;
-uniform int uSnow;
+// latitude of the world origin (chunks.origin), degrees: the world's z runs south from it
+uniform float uOriginLat;
+// season factor of the sim date (palette.ts seasonOf): 1 in the northern midwinter, -1 in its summer
+uniform float uSeason;
 ${COLOUR_GLSL}${SUNLIGHT_GLSL}${SKY_COLOUR_GLSL}
 vec3 hazeAt(vec3 dir) {
   if (uSunGlow <= 0.0) return uHaze;
@@ -173,20 +178,37 @@ vec3 hazeAt(vec3 dir) {
 }
 // tint: the colour of the light on the face (sceneLight), faded out with the fog; street-lit faces
 // keep their own light; haze: the haze along the ray (hazeAt)
-vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze) {
+// mean daily temperature at a world point (x, altitude, z) on the sim date, °C: palette.ts CLIMATE
+float climateTemp(vec3 p) {
+  float lat = radians(clamp(uOriginLat - p.z / 111320.0, -90.0, 90.0));
+  float k = lat < 0.0 ? ${CLIMATE.SEASON_SOUTH} : 1.0;
+  return ${CLIMATE.T_POLE.toFixed(1)} + ${CLIMATE.T_AMP.toFixed(1)} * cos(lat) - ${CLIMATE.LAPSE} * max(p.y, 0.0)
+    - ${CLIMATE.SEASON_AMP.toFixed(1)} * k * sin(lat) * uSeason;
+}
+// water frozen at this temperature
+bool frozenWater(uint packedRamp, float tempC) {
+  uint id = packedRamp & ${PAYLOAD_MASK}u;
+  return (packedRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u) && tempC <= ${CLIMATE.ICE_C.toFixed(1)};
+}
+// tempC: the climate at the face (climateTemp); a high value for what never holds snow or ice
+vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze, float tempC) {
   // a light source: its own colour at full strength, seen through half the haze
   if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), haze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));
   vec3 k = lvl > 0u ? vec3(1.0) : mix(tint, vec3(1.0), clamp((float(s) - 11.0) / 4.0, 0.0, 1.0));
-  bool snow = uSnow == 1 && (packedRamp & ${SNOW_FLAG}u) != 0u;
+  uint id = packedRamp & ${PAYLOAD_MASK}u;
+  bool water = (packedRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
+  bool frozen = frozenWater(packedRamp, tempC);
+  // open water never holds snow; ice does
+  bool snow = (packedRamp & ${SNOW_FLAG}u) != 0u && tempC <= ${CLIMATE.SNOW_C.toFixed(1)} && (!water || frozen);
   // the fog steps 12..15 run from the lit step 11 into the haze (as the LUT ramps do into uHaze)
   float f = clamp((float(s) - 11.0) / 4.0, 0.0, 1.0);
   uint sl = min(s, 11u);
   vec3 lit;
   if (snow || (packedRamp & ${MATERIAL_FLAG}u) != 0u) {
-    uint ramp = snow ? ${MAT.SNOW}u : packedRamp & ${PAYLOAD_MASK}u;
+    uint ramp = snow ? ${MAT.SNOW}u : frozen ? (id == ${MAT.SEA}u ? ${MAT.SEA_ICE}u : ${MAT.ICE}u) : id;
     lit = lutColor(lvl * ${LUT_SIZE}u + ramp * 16u + sl);
   } else {
     lit = shadeRgb(rgbOf(packedRamp), sl, lvl);
@@ -860,13 +882,14 @@ void main() {
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = clamp((length(rel) - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   fog = floor(fog * 12.0) / 12.0;
-  vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
+  float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
+  vColor = min(shadeColour(aRamp, light.a * 11.0, fog, light.rgb, hazeAt(rel), tempC) + rimLight(n, wp, fog), 1.0);
   vRef = uWindows > 0 && aWinEdge.y > 0.0
-    ? shadeColour((aRamp & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | 0xf0f0f0u, light.a * 11.0, fog, light.rgb, hazeAt(rel))
+    ? shadeColour((aRamp & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | 0xf0f0f0u, light.a * 11.0, fog, light.rgb, hazeAt(rel), 99.0)
     : vec3(0.0);
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
-  vWater = water && !(uSnow == 1 && (aRamp & ${SNOW_FLAG}u) != 0u) ? 1.0 : 0.0;
+  vWater = water && !frozenWater(aRamp, tempC) ? 1.0 : 0.0;
   vRay = wp - uCamPos;
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
@@ -1019,7 +1042,8 @@ void main() {
   fog = floor(fog * 12.0) / 12.0;
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
-  vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel)) + rimLight(n, wp, fog), 1.0);
+  float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
+  vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel), tempC) + rimLight(n, wp, fog), 1.0);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);
@@ -1199,7 +1223,7 @@ void main() {
       float t = ca > 1e-12 ? (-dir.y - sqrt(disc)) / ca : uDeckDown / -dir.y;
       float fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uDeckDown);
-      oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
+      oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), 99.0), 1.0);
       return;
     }
   }
@@ -1212,7 +1236,7 @@ void main() {
       fog = floor(clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0) * 12.0) / 12.0;
     }
     vec4 lit = sceneLight(vec3(0.0, -1.0, 0.0), uCamPos.y + uDeckUp);
-    oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
+    oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), 99.0), 1.0);
     return;
   }
   // the base sea's point in world xz and its footprint, taken here where every fragment runs
@@ -1236,8 +1260,10 @@ void main() {
       float fog = clamp((t - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
       fog = floor(fog * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
-      oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir)), 1.0);
-      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u) oColor.rgb = waterSurface(dir, seaXZ, seaJac, t, oColor.rgb);
+      // the base ground's climate: at the camera's latitude, at the ground's height
+      float tempC = climateTemp(vec3(uCamPos.x, uCamPos.y - uGroundH, uCamPos.z));
+      oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), tempC), 1.0);
+      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u && !frozenWater(uGroundRamp, tempC)) oColor.rgb = waterSurface(dir, seaXZ, seaJac, t, oColor.rgb);
       return;
     }
   }

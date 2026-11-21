@@ -62,8 +62,10 @@ export class Renderer {
   private light: LightUniforms | undefined;
   /** night: faces whose ramp carries a glow level are drawn street-lit (palette.ts GLOW_*) */
   nightGlow = false;
-  /** winter: faces flagged SNOW_FLAG are drawn in snow (palette.ts) */
-  snow = false;
+  /** latitude of the world origin, degrees: the shaders take each face's climate from it (snow, ice) */
+  originLat = 0;
+  /** season factor of the sim date (palette.ts seasonOf; 0: the annual mean) */
+  season = 0;
   /** seconds, for the glitter path's flicker (GLITTER_GLSL) */
   time = 0;
   /** far plane of an orthographic projection (near 0); 0 = perspective (see ORTHO_VS) */
@@ -186,7 +188,7 @@ export class Renderer {
     gl.bindVertexArray(null);
 
     const worldNames = [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uCoarse', 'uOrthoFar',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
@@ -197,7 +199,7 @@ export class Renderer {
     // trees have none of the surface effects
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uSnow', 'uOrthoFar',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
@@ -207,7 +209,7 @@ export class Renderer {
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
-      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uSnow',
+      'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uOriginLat', 'uSeason',
       'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uMoonEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, depthed(WORLD_POST_FS));
@@ -407,7 +409,8 @@ export class Renderer {
     gl.uniform1f(this.skyU.uDeckDown, ground.deck?.down ?? 0);
     gl.uniform1ui(this.skyU.uDeckColour, (ground.deck?.colour ?? 0) >>> 0);
     gl.uniform1i(this.skyU.uGlow, 0);
-    gl.uniform1i(this.skyU.uSnow, this.snow ? 1 : 0);
+    gl.uniform1f(this.skyU.uOriginLat, this.originLat);
+    gl.uniform1f(this.skyU.uSeason, this.season);
     this.setLight(this.skyU);
     gl.uniform1f(this.skyU.uSunGlow, this.light?.sunGlow ?? 0);
     gl.uniform1f(this.skyU.uSunEmit, this.emission('sun'));
@@ -488,7 +491,8 @@ export class Renderer {
     gl.uniform1f(u.uFogStart, fogStart);
     gl.uniform1f(u.uFogEnd, fogEnd);
     gl.uniform1i(u.uGlow, this.nightGlow ? 1 : 0);
-    gl.uniform1i(u.uSnow, this.snow ? 1 : 0);
+    gl.uniform1f(u.uOriginLat, this.originLat);
+    gl.uniform1f(u.uSeason, this.season);
     this.setLight(u);
     this.setRim(u, this.selfLit ? 0 : this.rimWeight);
     gl.uniform1i(u.uTwoSided, this.selfLit ? 0 : 1);
@@ -541,7 +545,8 @@ export class Renderer {
     gl.uniform1f(this.treeU.uFogStart, fogStart);
     gl.uniform1f(this.treeU.uFogEnd, fogEnd);
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
-    gl.uniform1i(this.treeU.uSnow, this.snow ? 1 : 0);
+    gl.uniform1f(this.treeU.uOriginLat, this.originLat);
+    gl.uniform1f(this.treeU.uSeason, this.season);
     this.setLight(this.treeU);
     this.setRim(this.treeU, this.rimTreeWeight);
     gl.uniform1i(this.treeU.uTwoSided, 1);

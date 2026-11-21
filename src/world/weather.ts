@@ -1,10 +1,10 @@
 /**
  * Live weather at the aircraft from Open-Meteo (https://open-meteo.com): free, no API key, CORS
  * enabled, data under CC BY 4.0. Only the current conditions are asked for: temperature and dew point
- * at 2 m, total cloud cover and the cover of each layer, wind at 10 m. The temperature decides the
- * winter look of the ground (surfaceFor); the clouds and the dew point shape the cloud layers (clouds.ts).
+ * at 2 m, total cloud cover and the cover of each layer, wind at 10 m. The clouds and the dew point
+ * shape the cloud layers (clouds.ts). Snow and ice on the ground follow the climate, not the weather
+ * (palette.ts CLIMATE).
  */
-import type { Surface } from '../engine/palette';
 import type { LatLon } from './geodesy';
 import type { AirConditions } from '../flight/air';
 
@@ -47,16 +47,6 @@ export interface Weather {
   at: LatLon;
   /** observation time, ms since epoch (UTC) */
   time: number;
-}
-
-/** snow on the ground at this temperature and below */
-export const SNOW_MAX_C = -4;
-/** inland water freezes and seas turn steel grey at this temperature and below */
-export const ICE_MAX_C = -15;
-
-export function surfaceFor(tempC: number | undefined): Surface {
-  if (tempC === undefined || !Number.isFinite(tempC)) return { snow: false, ice: false };
-  return { snow: tempC <= SNOW_MAX_C, ice: tempC <= ICE_MAX_C };
 }
 
 export function weatherUrl(at: LatLon): string {
@@ -161,7 +151,7 @@ type Fetch = (url: string) => Promise<{ ok: boolean; status: number; json(): Pro
  */
 export class WeatherService {
   current: Weather | undefined;
-  /** forced temperature (URL ?temp=-20), for trying the winter looks anywhere */
+  /** forced temperature (URL ?temp=-20) */
   tempOverride: number | undefined;
   private pending = false;
   private fetchedAt = -Infinity;
@@ -173,10 +163,6 @@ export class WeatherService {
   /** temperature in use: the override, else the live value */
   get tempC(): number | undefined {
     return this.tempOverride ?? this.current?.tempC;
-  }
-
-  get surface(): Surface {
-    return surfaceFor(this.tempC);
   }
 
   /** call every frame with the position and performance.now(); starts a request when due */

@@ -8,7 +8,8 @@ import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
 import { applyPads, loadPads, type Pad } from '../world/aerodrome';
-import { isNeutralGrade, loadLandsatTerrain, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
+import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
+import { climateFaceColor } from '../world/climate-colour';
 
 export interface TileRequest {
   type: 'tile';
@@ -76,14 +77,10 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         coast = coastlineWays(data.lines);
       }
     }
-    // Landsat: colour boundaries shape the TIN and faces take the imagery colour. A tile is shown
-    // only with all its data: without imagery it fails as retryable and is requested again later.
-    const ls = await loadLandsatTerrain(tile, grid, grade);
-    if (!ls) throw new RetryableError(5000, `landsat unavailable for ${tile.z}/${tile.x}/${tile.y}`);
+    // experimental: faces coloured by height × temperature at that height (climate-colour.ts), no imagery
     const mesh = buildTerrainMesh({
       tile, grid, heights, borders,
-      faceColor: ls.faceColor,
-      colourLines: { lines: ls.lines, maxVerts: ls.maxVerts },
+      faceColor: climateFaceColor(tile, grid, heights),
       coast,
       pads,
     });

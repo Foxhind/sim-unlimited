@@ -161,7 +161,7 @@ const simCamera = () => (state.follow ? state.centre : state.pinned);
 function setSun(): void {
   const el = state.sunEl * D2R, az = state.sunAz * D2R;
   vec3.set(sunDir, Math.cos(el) * Math.sin(az), Math.sin(el), -Math.cos(el) * Math.cos(az));
-  lut = buildLUT(paletteAt(state.sunEl), { snow: checked('snow'), ice: checked('ice') });
+  lut = buildLUT(paletteAt(state.sunEl));
 }
 
 let frames = 0;
@@ -191,7 +191,7 @@ function frame(now: number): void {
 
   const night = checked('night');
   renderer.orthoFar = 2 * EYE_DISTANCE_M;
-  renderer.snow = checked('snow');
+  renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = night;
   renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
   renderer.setSunMoon(sunDir, NO_MOON);
@@ -481,7 +481,6 @@ function init(): void {
   num('exag', 1, 20, (v) => (state.exag = v));
   num('sunAz', 0, 360, (v) => { state.sunAz = v; setSun(); });
   num('sunEl', -10, 90, (v) => { state.sunEl = v; setSun(); });
-  for (const id of ['snow', 'ice']) $(id).addEventListener('change', setSun);
   num('lsBright', -1, 1, (v) => setGrade({ ...state.grade, brightness: v }));
   num('lsContrast', 0, 4, (v) => setGrade({ ...state.grade, contrast: v }));
   num('lsGamma', 0.2, 5, (v) => setGrade({ ...state.grade, gamma: v }));
