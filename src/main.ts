@@ -930,6 +930,7 @@ function frame(now: number): void {
       autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined, lateral: autopilot.lateral } : null,
       hudMode, nav: hudNav, fovYDeg: 60,
       weather: { data: weatherInForce(), tempC: weather.tempC },
+      time: simTime,
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
     const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);

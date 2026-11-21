@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { weatherLines } from '../src/flight/hud';
+import { clockLine, weatherLines } from '../src/flight/hud';
 import {
   cloudCode, compassPoint, parseWeather, WEATHER_MAX_AGE_MS, WeatherService, weatherUrl, type Weather,
 } from '../src/world/weather';
@@ -116,5 +116,12 @@ describe('HUD weather lines', () => {
     expect(compassPoint(350, 'en')).toBe('N');
     expect(compassPoint(-90, 'ru')).toBe('З');
     expect([0, 10, 40, 80, 100].map(cloudCode)).toEqual(['SKC', 'FEW', 'SCT', 'BKN', 'OVC']);
+  });
+});
+
+describe('HUD clock', () => {
+  it('shows the sim date and time in UTC', () => {
+    expect(clockLine(new Date(Date.UTC(2026, 10, 21, 8, 5, 59)))).toBe('21.11.2026 08:05:59Z');
+    expect(clockLine(new Date(Date.UTC(2027, 0, 1, 23, 59)))).toBe('01.01.2027 23:59:00Z');
   });
 });

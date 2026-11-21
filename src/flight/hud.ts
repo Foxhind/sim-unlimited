@@ -124,6 +124,14 @@ export interface HudState {
   fovYDeg?: number;
   /** live weather (world/weather.ts), shown top right; tempC may be overridden */
   weather?: { data?: Weather; tempC?: number };
+  /** the sim's date and time, shown top right above the weather */
+  time?: Date;
+}
+
+/** the sim date and time in UTC, as aviation keeps it: "21.11.2026 08:45:07Z" */
+export function clockLine(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}.${d.getUTCFullYear()} ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}Z`;
 }
 
 /** wind speed in the HUD: m/s (Russian practice) in metric, knots otherwise */
@@ -171,8 +179,11 @@ function drawAlerts(font: FontRenderer, w: number, y: number, u: number, st: Hud
 
 /** right-aligned weather block from y down */
 function drawWeather(font: FontRenderer, w: number, y: number, u: number, st: HudState, lang: 'ru' | 'en'): void {
-  if (!st.weather) return;
-  weatherLines(st.weather.data, st.weather.tempC, st.units, lang).forEach((line, i) => {
+  const lines = [
+    ...(st.time ? [clockLine(st.time)] : []),
+    ...(st.weather ? weatherLines(st.weather.data, st.weather.tempC, st.units, lang) : []),
+  ];
+  lines.forEach((line, i) => {
     font.text(line, w - font.measure(line, u) - 8 * u, y + i * 18 * u, u, HUD_GREEN);
   });
 }
