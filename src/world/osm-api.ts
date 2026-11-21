@@ -16,7 +16,7 @@
 import { RetryableError } from '../engine/queue';
 import type { TileBounds } from './geodesy';
 import type { OsmDetail } from './osm-types';
-import { osmFilter, ROAD_SELECTOR, roadReachBounds, type OverpassJson, type RawNode, type RawRelation, type RawWay } from './overpass';
+import { osmFilter, REACH_SELECTORS, roadReachBounds, type OverpassJson, type RawNode, type RawRelation, type RawWay } from './overpass';
 
 export const OSM_API = 'https://api.openstreetmap.org/api/0.6';
 export const OSM_API_MAP = `${OSM_API}/map.json`;
@@ -219,11 +219,13 @@ function reachStrips(b: TileBounds): TileBounds[] {
 }
 
 /**
- * The tile's elements plus the drawn roads with a node within ROAD_REACH_M round it (overpass
- * roadReachBounds): `map` of the strips round the tile, only their roads and those roads' nodes
+ * The tile's elements plus the drawn roads, railways, waterways and water (overpass
+ * REACH_SELECTORS) with a node within ROAD_REACH_M round it (roadReachBounds): `map` of the strips
+ * round the tile, only those ways and their nodes. Water mapped as a multipolygon out there is not
+ * completed (a request more for each): a bridge over it by the border may differ across the seam.
  */
 async function withRoadReach(tile: OverpassJson, b: TileBounds, fetchImpl: typeof fetch): Promise<OverpassJson> {
-  const roads = parseFilter(`${ROAD_SELECTOR};`);
+  const roads = parseFilter(REACH_SELECTORS.map((s) => `${s};`).join('\n'));
   const seen = new Set(tile.elements.map((el) => `${el.type}/${el.id}`));
   const elements = [...tile.elements];
   for (const strip of reachStrips(b)) {

@@ -115,12 +115,15 @@ describe('roads round a near tile', () => {
         ? [node(1, 29.01, 36.01), way(10, [1], { building: 'yes' })]
         // every strip: a tertiary (node 2 inside the tile's answer already), a corridor, a building, a tagged node
         : [node(1, 29.01, 36.01), node(2, 29.01, 36.021, { entrance: 'yes' }), node(3, 29.01, 36.0205),
-          way(20, [1, 2], { highway: 'tertiary' }), way(21, [2, 3], { highway: 'corridor' }), way(22, [3, 2], { building: 'yes' })];
+          way(20, [1, 2], { highway: 'tertiary' }), way(21, [2, 3], { highway: 'corridor' }), way(22, [3, 2], { building: 'yes' }),
+          // what a bridge may cross out there (road-levels.ts): railways, waterways, water
+          way(23, [2, 3], { railway: 'rail' }), way(24, [2, 3], { waterway: 'river' }), way(25, [2, 3, 2], { natural: 'water' }),
+          way(26, [2, 3], { railway: 'abandoned' }), way(27, [2, 3, 2], { natural: 'wood' })];
       return new Response(JSON.stringify({ elements }), { status: 200 });
     }) as unknown as typeof fetch;
     const j = await fetchOsmApiTile(B, 'full', f);
     expect(urls).toHaveLength(5);
-    expect(j.elements.map((e) => `${e.type}/${e.id}`).sort()).toEqual(['node/1', 'node/2', 'way/10', 'way/20']);
+    expect(j.elements.map((e) => `${e.type}/${e.id}`).sort()).toEqual(['node/1', 'node/2', 'node/3', 'way/10', 'way/20', 'way/23', 'way/24', 'way/25']);
     expect(j.elements.find((e) => e.id === 2)).not.toHaveProperty('tags');
     // the strips reach ROAD_REACH_M past the tile
     const north = new URL(urls[1]).searchParams.get('bbox')!.split(',').map(Number);

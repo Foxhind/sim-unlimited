@@ -41,6 +41,13 @@ public class SimProfile implements Profile {
   static final int Z = 14;
   /** buildings and points (entrances) reach this far past the tile edge (256 px a tile): a building across the border is whole in both tiles */
   static final int BUILDING_BUFFER_PX = 32;
+  /**
+   * lines and water reach this far past the tile edge: a bridge's lift over what it crosses runs
+   * LIFT_REACH_M = 150 m along the roads (src/world/road-levels.ts), and both tiles of a border must
+   * see the same roads and crossings (overpass.ts ROAD_REACH_M). 32 px of a z14 tile are 150 m or
+   * more up to 60° of latitude
+   */
+  static final int REACH_BUFFER_PX = 32;
 
   /** overpass.ts ROAD_SELECTOR: the drawn roads and paths */
   static final Pattern HIGHWAY = Pattern.compile("^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$");
@@ -174,8 +181,9 @@ public class SimProfile implements Profile {
     if (f.canBePolygon() && (isBuilding(f) || isAreaTags(f))) {
       var feat = withTags(fc.polygon("areas"), tags);
       if (isBuilding(f)) feat.setBufferPixels(BUILDING_BUFFER_PX);
+      else if ("water".equals(s(f, "natural")) || f.hasTag("waterway")) feat.setBufferPixels(REACH_BUFFER_PX);
     } else if (!relation) {
-      withTags(fc.line("lines"), tags);
+      withTags(fc.line("lines"), tags).setBufferPixels(REACH_BUFFER_PX);
     }
   }
 

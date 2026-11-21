@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { tileBounds } from '../src/world/geodesy';
-import { overpassQuery, parseOverpass, type OverpassJson } from '../src/world/overpass';
+import { overpassQuery, parseOverpass, REACH_SELECTORS, ROAD_REACH_M, roadReachBounds, type OverpassJson } from '../src/world/overpass';
+import { LIFT_REACH_M } from '../src/world/road-levels';
 
 const TILE = { z: 14, x: 8800, y: 5500 };
 
@@ -48,6 +49,26 @@ describe('overpassQuery', () => {
     expect(full).toContain('highway');
     expect(large).toContain('motorway|trunk');
     expect(large).not.toContain('tertiary');
+  });
+});
+
+describe('what a near tile sees round itself', () => {
+  it('reaches as far as a lift does (road-levels.ts)', () => {
+    expect(ROAD_REACH_M).toBeGreaterThanOrEqual(LIFT_REACH_M);
+    const b = tileBounds(TILE), r = roadReachBounds(b);
+    expect((r.north - b.north) * 111320).toBeCloseTo(ROAD_REACH_M, 0);
+    expect((b.south - r.south) * 111320).toBeCloseTo(ROAD_REACH_M, 0);
+  });
+
+  it('roads, railways, waterways and water in the grown bbox; not for the far tiles', () => {
+    const r = roadReachBounds(tileBounds(TILE));
+    const box = `(${r.south},${r.west},${r.north},${r.east})`;
+    const full = overpassQuery(TILE, 'full');
+    expect(REACH_SELECTORS.some((s) => s.includes('"railway"'))).toBe(true);
+    expect(REACH_SELECTORS.some((s) => s.includes('"waterway"'))).toBe(true);
+    expect(REACH_SELECTORS.some((s) => s.includes('"natural"="water"'))).toBe(true);
+    for (const s of REACH_SELECTORS) expect(full, s).toContain(`${s}${box};`);
+    expect(overpassQuery(TILE, 'large')).not.toContain(box);
   });
 });
 

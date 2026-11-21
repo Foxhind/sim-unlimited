@@ -10,8 +10,20 @@ export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary
  * a cap or a mitre) depends on every road at its end node, and the tiles either side of a border
  * must see the same ones there, or the ribbon steps at the seam. A road crossing a corner of the
  * tile with no node inside it comes along too.
+ *
+ * A bridge's lift over what it crosses reaches LIFT_REACH_M along the roads (road-levels.ts), on
+ * over the ways that join it: both tiles of a border must see the same crossings too, so the
+ * railways, the waterways and the water come along with the roads (REACH_SELECTORS).
  */
-export const ROAD_REACH_M = 100;
+export const ROAD_REACH_M = 150;
+/** what a near tile is given from ROAD_REACH_M round it, as Overpass statements without their bbox */
+export const REACH_SELECTORS = [
+  ROAD_SELECTOR,
+  'way["railway"~"^(rail|narrow_gauge|light_rail)$"]',
+  'way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"]',
+  'way["natural"="water"]',
+  'relation["natural"="water"]',
+];
 
 /** a tile's bounds grown by ROAD_REACH_M */
 export function roadReachBounds(b: TileBounds): TileBounds {
@@ -73,7 +85,7 @@ export function overpassQuery(tile: Tile, detail: OsmDetail): string {
     // an explicit bbox overrides the global one for its statement
     filter += `  way["aeroway"="aerodrome"]${wide}; relation["aeroway"="aerodrome"]${wide};\n`;
     const r = roadReachBounds(b);
-    filter += `  ${ROAD_SELECTOR}(${r.south},${r.west},${r.north},${r.east});\n`;
+    for (const s of REACH_SELECTORS) filter += `  ${s}(${r.south},${r.west},${r.north},${r.east});\n`;
   }
   return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${filter});out body; >; out skel qt;`;
 }

@@ -12,6 +12,8 @@ import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from 
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import type { TerrainTin } from './terrain-tin';
+import { buildRoadLevels, LIFT_EPS_M } from './road-levels';
+import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 
 export interface OsmMeshOptions {
   tile: Tile;
@@ -47,6 +49,12 @@ const ROUND_ENDS: RibbonEnds = { capStart: true, capEnd: true };
 const SHARP_TURN_COS = Math.SQRT1_2;
 /** a vertex's WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) from its position */
 type VertexAttr = (p: { x: number; z: number }) => [number, number, number, number, number];
+/** metres a vertex of a ribbon is lifted over the ground under it (road-levels.ts), from its position */
+type Lift = (p: { x: number; z: number }) => number;
+/** a lifted ribbon has a vertex at least this often along it: the lift bends between the vertices */
+const LIFT_STEP_M = 10;
+/** a road lifted less than this has nothing built under it */
+const DECK_MIN_LIFT_M = 0.3;
 
 /** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
@@ -101,6 +109,11 @@ export interface OsmMeshData extends TerrainMeshData {
    * comes after (roads first of all) always shows over the water
    */
   water: TerrainMeshData;
+  /**
+   * what carries the lifted roads (bridge-mesher.ts): slabs, parapets and piers of the bridges, the
+   * embankments of their approaches; solid like the buildings, and drawn with them
+   */
+  bridges: TerrainMeshData;
   /** far stand-in for the roads: GL line vertex pairs (x, y, z, palette index) on the terrain */
   roadLines: Float32Array;
   /** pitch markings, drawn near: 1 px GL line vertex pairs (x, y, z, palette index) on the terrain */
@@ -606,20 +619,21 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return rgb;
   };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: AreaFilter, attr?: VertexAttr): void => {
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: AreaFilter, attr?: VertexAttr, lift?: Lift): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
       const piece = clipToTriangle(tri, f.c);
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
+      if (lift) for (const p of pts) p.y += lift(p);
       const under = filter && imageryOf(f);
       const col = under ? withGlow(snowy(colourOf(filterColour(under, filter))), rampGlowLevel(ramp)) : ramp;
       for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out, attr);
     }
   };
   /** a segment cut by the terrain faces it crosses: GL line pairs lying on them */
-  const lineOnFaces = (p: P2, q: P2, bias: number, out: number[], index: number): void => {
+  const lineOnFaces = (p: P2, q: P2, bias: number, out: number[], index: number, lift?: Lift): void => {
     const x0 = Math.min(p[0], q[0]), x1 = Math.max(p[0], q[0]);
     const y0 = Math.min(p[1], q[1]), y1 = Math.max(p[1], q[1]);
     // a box of zero width finds no face: widen it a hair
@@ -628,7 +642,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       if (!t) continue;
       for (const s of t) {
         const v = onFace(f, p[0] + (q[0] - p[0]) * s, p[1] + (q[1] - p[1]) * s, bias);
-        out.push(v.x, v.y, v.z, index);
+        out.push(v.x, v.y + (lift ? lift(v) : 0), v.z, index);
       }
     }
   };
@@ -772,7 +786,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   /** street lamps along a road: pole beside it, arm over it, a light at the arm's end */
-  const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0): void => {
+  const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0, lift?: Lift): void => {
     const p = points.map(([lon, lat]) => enu(lon, lat));
     let next = LAMP_SPACING_M / 2;
     let walked = 0;
@@ -789,7 +803,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         const fx = ax + dx * t + nx * (half + LAMP_SETBACK_M);
         const fz = az + dz * t + nz * (half + LAMP_SETBACK_M);
         const ll = enuToLatLon(center, fx, -fz, 0);
-        const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
+        // on a lifted road the lamp stands on the deck's edge
+        const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0) + (lift ? lift({ x: ax + dx * t, z: az + dz * t }) : 0);
         const top = y0 + LAMP_HEIGHT_M;
         const r = LAMP_SHAPE.POLE_HALF;
         // the post, its arm turned back over the road
@@ -805,6 +820,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
 
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
+
+  /** bridges over what they cross and the approaches to them: near, on the TIN (road-levels.ts) */
+  const levels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
 
   const LINE_BIAS = 1.4;
   /** under a road's carriageway its shoulders, over a railway's right-of-way strip its track */
@@ -1026,7 +1044,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
    *   edge.y  full width / 0.25 m + (start narrowing / 0.5 m) · 1024 + (end narrowing / 0.5 m) · 32768
    *   edge.z  the ROAD_MARK code + (start gap / 0.5 m) << 7 + (end gap / 0.5 m) << 13
    */
-  const paintedRibbon = (line: OsmLine, src: { c: P2; e: [number, number] }[], look: NonNullable<ReturnType<typeof lineLook>>, ends: RibbonEnds): void => {
+  const paintedRibbon = (line: OsmLine, src: { c: P2; e: [number, number] }[], look: NonNullable<ReturnType<typeof lineLook>>, ends: RibbonEnds, lift?: Lift): void => {
     const q = (v: number, step: number, max: number) => Math.max(0, Math.min(max, Math.round(v / step)));
     const wq = q(look.half * 2, 0.25, 1023), width = wq * 0.25;
     const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
@@ -1078,7 +1096,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         return [u, across + widthAt(d0) / 2, ex, ey, ez];
       });
     }
-    ribbon(pts.map((p) => p.c), pts.map((p) => widthAt(p.d) / 2), look.ramp, look.bias, look.out, segs, ends);
+    ribbon(pts.map((p) => p.c), pts.map((p) => widthAt(p.d) / 2), look.ramp, look.bias, look.out, segs, ends, lift);
   };
 
   /**
@@ -1105,6 +1123,56 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return { start: s.dir, end: e.dir, capStart: s.cap, capEnd: e.cap };
   };
 
+  /** a lifted way as the bridge and embankment builder takes it: its centre line and what it looks like */
+  const raisedWays: { line: OsmLine; half: number; bias: number; pts: { c: P2; e: [number, number]; d: number }[] }[] = [];
+  /**
+   * A way the road levels lift: its centre line with a vertex every LIFT_STEP_M where it is lifted
+   * (the lift bends between the vertices of a long straight), and the lift of a ribbon vertex — that
+   * of the point of the centre line nearest to it. Undefined for a way on the ground.
+   */
+  const raise = (line: OsmLine, src: { c: P2; e: [number, number] }[], half: number, bias: number): { pts: { c: P2; e: [number, number] }[]; lift: Lift } | undefined => {
+    if (!levels || levels.maxLift(line) < LIFT_EPS_M) return undefined;
+    // metres along the way itself at each vertex (a fork's shift stretches the drawn line a little)
+    let wayLen = 0;
+    for (let i = 1; i < line.points.length; i++) {
+      const [ax, az] = enu(line.points[i - 1][0], line.points[i - 1][1]), [bx, bz] = enu(line.points[i][0], line.points[i][1]);
+      wayLen += Math.hypot(bx - ax, bz - az);
+    }
+    const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
+    const scale = wayLen / (lens.reduce((a, b) => a + b, 0) || 1);
+    const pts: { c: P2; e: [number, number]; d: number }[] = [];
+    let at = 0;
+    for (let i = 0; i < src.length; i++) {
+      pts.push({ ...src[i], d: at * scale });
+      if (i + 1 === src.length) break;
+      const a = src[i], b = src[i + 1], d0 = at * scale, d1 = (at + lens[i]) * scale;
+      const n = Math.ceil(lens[i] / LIFT_STEP_M);
+      for (let k = 1; k < n; k++) {
+        const f = k / n;
+        // only where it is lifted: the rest of a long way stays as it was
+        if (!levels.liftAt(line, d0 + (d1 - d0) * ((k - 1) / n)) && !levels.liftAt(line, d0 + (d1 - d0) * f) && !levels.liftAt(line, d0 + (d1 - d0) * ((k + 1) / n))) continue;
+        pts.push({ c: [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f], e: [a.e[0] + (b.e[0] - a.e[0]) * f, a.e[1] + (b.e[1] - a.e[1]) * f], d: d0 + (d1 - d0) * f });
+      }
+      at += lens[i];
+    }
+    const lift: Lift = (p) => {
+      let best = Infinity, d = 0;
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const [ax, az] = pts[i].e, [bx, bz] = pts[i + 1].e;
+        const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - ax) * dx + (p.z - az) * dz) / l2)) : 0;
+        const dist = (p.x - ax - dx * t) ** 2 + (p.z - az - dz * t) ** 2;
+        if (dist < best) {
+          best = dist;
+          d = pts[i].d + (pts[i + 1].d - pts[i].d) * t;
+        }
+      }
+      return levels.liftAt(line, d);
+    };
+    raisedWays.push({ line, half, bias, pts });
+    return { pts, lift };
+  };
+
   const buildRibbon = (line: OsmLine): void => {
     const look = lineLook(line);
     if (!look || !tin) return;
@@ -1112,6 +1180,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       .filter((p, i, a) => i === 0 || p.c[0] !== a[i - 1].c[0] || p.c[1] !== a[i - 1].c[1]);
     if (pts.length < 2) return;
     if (look.road) pts = forkShift(line, pts);
+    const raised = look.road || look.rail ? raise(line, pts, look.half + look.shoulder, look.rail ? RAIL_BIAS : look.bias) : undefined;
+    if (raised) pts = raised.pts;
+    const lift = raised?.lift;
     const c = pts.map((p) => p.c);
     const ends = look.road ? roadEnds(line) : ROUND_ENDS;
     // nothing of it reaches this tile: skip the work
@@ -1120,13 +1191,14 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const lit = look.lit ? (ramp: number) => withGlow(ramp, LIT_ROAD_GLOW) : (ramp: number) => ramp;
     // under the carriageway: the right-of-way strip of a railway, the shoulders of a road
     if (look.zone) ribbon(c, look.half + look.zone, RAIL_ZONE_RAMP, ZONE_BIAS, main);
-    if (look.shoulder) ribbon(c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends);
+    // the shoulders of an approach rise with it: the top of its embankment
+    if (look.shoulder) ribbon(c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
     if (!look.rail) {
       if (!look.marks) {
-        ribbon(c, look.half, look.ramp, look.bias, look.out, undefined, ends);
+        ribbon(c, look.half, look.ramp, look.bias, look.out, undefined, ends, lift);
         return;
       }
-      paintedRibbon(line, pts, look, ends);
+      paintedRibbon(line, pts, look, ends, lift);
       return;
     }
     // the track: each segment's vertices carry u along the line (metres from its start) and v across it
@@ -1139,14 +1211,14 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       segs.push((p) => [start + (p.x - ax) * dx + (p.z - az) * dz, (p.z - az) * dx - (p.x - ax) * dz, TRACK_EDGE, 0, 0]);
       u0 += len;
     }
-    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, segs);
+    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, segs, ROUND_ENDS, lift);
   };
 
   /**
    * A ribbon `half` metres wide each side of the lattice polyline `c`, cut by the terrain faces; per
    * segment vertex attributes optional (the caps take the first and last segment's)
    */
-  const ribbon = (c: P2[], half: number | number[], ramp: number, bias: number, out: Out, segs?: VertexAttr[], ends: RibbonEnds = ROUND_ENDS): void => {
+  const ribbon = (c: P2[], half: number | number[], ramp: number, bias: number, out: Out, segs?: VertexAttr[], ends: RibbonEnds = ROUND_ENDS, lift?: Lift): void => {
     const halfAt = (i: number) => (typeof half === 'number' ? half : half[i]);
     // each vertex's edge points as the end of the segment before it (in) and the start of the one
     // after it (out): the same mitred point at a bend, the two segments' own at a sharp turn
@@ -1184,8 +1256,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       inL.push(pIn[0]); inR.push(pIn[1]); outL.push(pOut[0]); outR.push(pOut[1]);
     }
     for (let i = 0; i < c.length - 1; i++) {
-      onFaces([outL[i], outR[i], inL[i + 1]], ramp, bias, out, undefined, segs?.[i]);
-      onFaces([outR[i], inR[i + 1], inL[i + 1]], ramp, bias, out, undefined, segs?.[i]);
+      onFaces([outL[i], outR[i], inL[i + 1]], ramp, bias, out, undefined, segs?.[i], lift);
+      onFaces([outR[i], inR[i + 1], inL[i + 1]], ramp, bias, out, undefined, segs?.[i], lift);
     }
     const caps: [boolean, P2, VertexAttr | undefined, number][] = [
       [ends.capStart, c[0], segs?.[0], halfAt(0)], [ends.capEnd, c[c.length - 1], segs?.[segs.length - 1], halfAt(c.length - 1)],
@@ -1196,7 +1268,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const r = h * latticePerMetre;
       for (let k = 0; k < CAP_SIDES; k++) {
         const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
-        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, bias, out, undefined, attr);
+        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, bias, out, undefined, attr, lift);
       }
     }
   };
@@ -1206,14 +1278,23 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const look = lineLook(line);
     if (!look) return;
     const { half, road, lit, out, ramp } = look;
-    if (lit && !look.path) placeLamps(line.points, half, lampSide(line.tags));
+    // a tile's share of a line: its lift by the tags it shares with the whole way
+    const lift: Lift | undefined = levels?.liftedTags(line.tags) ? (p) => levels.liftNear(line.tags, p.x, p.z) : undefined;
+    if (lit && !look.path) placeLamps(line.points, half, lampSide(line.tags), lift);
 
     if (tin) {
       // far lines: roads but the minor ones, and railways
       if (!(road && !look.minor) && !look.rail) return;
       const index = look.rail ? RAIL_LINE_INDEX : ROAD_LINE_INDEX;
       const c = line.points.map(toLattice).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]);
-      for (let i = 0; i < c.length - 1; i++) lineOnFaces(c[i], c[i + 1], look.bias, roadLines, index);
+      for (let i = 0; i < c.length - 1; i++) {
+        // a lifted line in pieces of LIFT_STEP_M, each end at its own height
+        const n = lift ? Math.max(1, Math.ceil(Math.hypot(c[i + 1][0] - c[i][0], c[i + 1][1] - c[i][1]) / latticePerMetre / LIFT_STEP_M)) : 1;
+        for (let k = 0; k < n; k++) {
+          const at = (f: number): P2 => [c[i][0] + (c[i + 1][0] - c[i][0]) * f, c[i][1] + (c[i + 1][1] - c[i][1]) * f];
+          lineOnFaces(at(k / n), at((k + 1) / n), look.bias, roadLines, index, lift);
+        }
+      }
       return;
     }
     // without the TIN the ribbon is sampled point by point and must clear the relief between them
@@ -1451,12 +1532,89 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     }
   };
 
+  /**
+   * What carries the lifted ways (bridge-mesher.ts), this tile's share: each way's stretches lifted
+   * DECK_MIN_LIFT_M or more, cut at the tile border like its ribbon
+   */
+  const buildBridges = (): { vertices: Float32Array; ramps: Uint32Array } => {
+    if (!levels || !tin || !raisedWays.length) return { vertices: new Float32Array(0), ramps: new Uint32Array(0) };
+    const g = tin.grid;
+    const groundAt = (x: number, z: number): number => {
+      const ll = enuToLatLon(center, x, -z, 0);
+      return Math.max(sampleHeight(ll.lon, ll.lat), 0);
+    };
+    // every drawn road and railway: no pier stands on one
+    const others = opts.data.lines.flatMap((l) => {
+      if ((!l.tags.highway && !l.tags.railway) || isTunnel(l.tags)) return [];
+      const style = classifyLine(l.tags);
+      if (!style) return [];
+      const p = l.points.map(([lon, lat]) => enu(lon, lat));
+      return p.slice(1).map((b, i) => ({ a: p[i], b, reach: style.width / 2 + 1, tags: l.tags }));
+    });
+    interface Raw { e: [number, number]; d: number; lift: number }
+    const runs: DeckRun[] = [];
+    for (const w of raisedWays) {
+      const bridge = !!w.line.tags.bridge && w.line.tags.bridge !== 'no';
+      const lifts = w.pts.map((p) => levels.liftAt(w.line, p.d));
+      const blocked = (x: number, z: number): boolean => others.some((o) => {
+        if (o.tags === w.line.tags) return false;
+        const dx = o.b[0] - o.a[0], dz = o.b[1] - o.a[1], l2 = dx * dx + dz * dz;
+        const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - o.a[0]) * dx + (z - o.a[1]) * dz) / l2)) : 0;
+        return Math.hypot(x - o.a[0] - dx * t, z - o.a[1] - dz * t) < o.reach;
+      });
+      let cur: Raw[] = [];
+      const flush = (): void => {
+        if (cur.length >= 2) {
+          const raw = cur;
+          const stations = raw.map((p, i): DeckStation => {
+            const a = raw[Math.max(0, i - 1)].e, b = raw[Math.min(raw.length - 1, i + 1)].e;
+            const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+            // left of the way's direction (x east, z south)
+            const nx = (b[1] - a[1]) / l, nz = -(b[0] - a[0]) / l;
+            const [x, z] = p.e, ground = groundAt(x, z);
+            return {
+              d: p.d, x, z, y: ground + w.bias * biasScale + p.lift, ground,
+              groundL: groundAt(x + nx * w.half, z + nz * w.half), groundR: groundAt(x - nx * w.half, z - nz * w.half),
+              nx, nz, half: w.half,
+            };
+          });
+          const m = raw[raw.length >> 1].e, ll = enuToLatLon(center, m[0], -m[1], 0);
+          runs.push({ stations, bridge, earth: groundColourAt(ll.lon, ll.lat), blocked });
+        }
+        cur = [];
+      };
+      for (let i = 0; i + 1 < w.pts.length; i++) {
+        const a = w.pts[i], b = w.pts[i + 1];
+        // from the vertex before the lift passes DECK_MIN_LIFT_M: no lifted stretch without a body
+        if (lifts[i] < DECK_MIN_LIFT_M && lifts[i + 1] < DECK_MIN_LIFT_M) { flush(); continue; }
+        // this tile's part of the segment (Liang–Barsky on the lattice square)
+        let t0 = 0, t1 = 1, inside = true;
+        const dx = b.c[0] - a.c[0], dy = b.c[1] - a.c[1];
+        for (const [p, q] of [[-dx, a.c[0]], [dx, g - a.c[0]], [-dy, a.c[1]], [dy, g - a.c[1]]]) {
+          if (p === 0) { if (q < 0) inside = false; continue; }
+          const r = q / p;
+          if (p < 0) t0 = Math.max(t0, r);
+          else t1 = Math.min(t1, r);
+        }
+        if (!inside || t0 >= t1) { flush(); continue; }
+        const at = (t: number): Raw => ({ e: [a.e[0] + (b.e[0] - a.e[0]) * t, a.e[1] + (b.e[1] - a.e[1]) * t], d: a.d + (b.d - a.d) * t, lift: lifts[i] + (lifts[i + 1] - lifts[i]) * t });
+        if (t0 > 0) flush();
+        if (!cur.length) cur.push(at(t0));
+        cur.push(at(t1));
+        if (t1 < 1) flush();
+      }
+      flush();
+    }
+    return buildDecks(runs);
+  };
+
   for (const area of data.areas) buildArea(area);
   if (tin) for (const area of opts.data.areas) if (area.tags.leisure === 'pitch') buildPitch(area);
   for (const line of data.lines) buildLine(line);
   if (tin) for (const line of opts.data.lines) buildRibbon(line);
   for (const p of data.points) buildPoint(p);
   buildPortals();
+  const bridges = buildBridges();
 
   if (opts.buildings !== false && data.buildings.length) {
     const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points });
@@ -1471,6 +1629,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     roads: { vertices: new Float32Array(roads.verts), ramps: new Uint32Array(roads.ramps), vertexCount: roads.ramps.length },
     roadAttrs: new Float32Array(roads.attrs!),
     water: { vertices: new Float32Array(water.verts), ramps: new Uint32Array(water.ramps), vertexCount: water.ramps.length },
+    bridges: { ...bridges, vertexCount: bridges.ramps.length },
     roadLines: new Float32Array(roadLines),
     pitchLines: new Float32Array(pitchLines),
     lamps: new Float32Array(lamps),

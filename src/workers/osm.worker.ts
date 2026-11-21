@@ -6,6 +6,7 @@ import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOAT
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
+import { insertAt } from '../world/bridge-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
@@ -21,7 +22,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 56;
+export const OSM_MESH_SCHEMA = 57;
 
 export interface OsmRequest {
   type: 'osm';
@@ -191,11 +192,14 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points });
     // antenna trusses are drawn with the buildings (near), as lines far away
     const masts = buildMasts(clipped.points, tile, drape);
+    // bridge bodies and embankments (bridge-mesher.ts) are solid like the buildings and drawn with
+    // them: after the buildings' core, as part of it (the far LOD and the shadows draw the core only)
+    const core = houses.coreVertexCount, decks = mesh.bridges.ramps.length;
     const bmesh = {
-      vertices: concatF32(houses.vertices, masts.vertices),
-      ramps: concatU32(houses.ramps, masts.ramps),
-      // masts have no windows
-      windows: concatF32(houses.windows, new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
+      vertices: concatF32(insertAt(houses.vertices, mesh.bridges.vertices, core * 6), masts.vertices),
+      ramps: concatU32(insertAt(houses.ramps, mesh.bridges.ramps, core), masts.ramps),
+      // masts and bridges have no windows
+      windows: concatF32(insertAt(houses.windows, new Float32Array(decks * WINDOW_ATTR_FLOATS), core * WINDOW_ATTR_FLOATS), new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
     };
     const dotData = buildingDots(own, tile, drape);
     // no far window dots: the detailed tiles draw their lit facades at any distance at night
@@ -214,7 +218,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
       // the masts come after the houses: small parts too
-      bCore: houses.coreVertexCount,
+      bCore: core + decks,
       dots: dotData.slice().buffer,
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
