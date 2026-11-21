@@ -44,19 +44,23 @@ public class SimProfile implements Profile {
 
   /** overpass.ts ROAD_SELECTOR: the drawn roads and paths */
   static final Pattern HIGHWAY = Pattern.compile("^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$");
+  static final Pattern RAILWAY = Pattern.compile("^(rail|narrow_gauge|light_rail)$");
   static final Pattern AEROWAY = Pattern.compile("runway|taxiway|apron|helipad");
   static final Pattern NATURAL_WAY = Pattern.compile("water|wood|scrub|beach|bare_rock");
   static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
   static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course");
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
 
-  /** tags the client reads (grep of src/world): the rest are dropped */
+  /**
+   * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
+   * colours (building:material, roof:material, building:colour, roof:colour...) come with KEY_PREFIXES.
+   */
   static final Set<String> KEYS = Set.of(
     "building", "building:part", "height", "min_height", "location", "layer", "colour", "color",
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -93,7 +97,7 @@ public class SimProfile implements Profile {
   static boolean wayWanted(SourceFeature f) {
     return f.hasTag("building") || f.hasTag("building:part") ||
       find(HIGHWAY, s(f, "highway")) ||
-      "rail".equals(s(f, "railway")) ||
+      find(RAILWAY, s(f, "railway")) ||
       find(AEROWAY, s(f, "aeroway")) || "aerodrome".equals(s(f, "aeroway")) ||
       find(NATURAL_WAY, s(f, "natural")) || "coastline".equals(s(f, "natural")) ||
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||

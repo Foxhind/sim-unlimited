@@ -21,7 +21,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 55;
+export const OSM_MESH_SCHEMA = 56;
 
 export interface OsmRequest {
   type: 'osm';
