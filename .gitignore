@@ -3,3 +3,9 @@ dist/
 *.local
 .DS_Store
 tiles/data/
+.agents/
+.claude/
+.qoder/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+skills-lock.json
