@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BASE_DEFAULT_AGL, BASE_MAX_AGL, BASE_MIN_AGL, CLOUD_RGB, DECK_COVER, TILE_M,
-  cloudBaseAgl, cloudDensity, cloudLayers, cumulusTile, deckDensity, deckTile, type CloudLayer,
+  cloudBaseAgl, cloudDensity, DECK_DIM, underDecks, cloudLayers, cumulusTile, deckDensity, deckTile, type CloudLayer,
 } from '../src/world/clouds';
 import { parseWeather } from '../src/world/weather';
 
@@ -124,5 +124,21 @@ describe('deck tiles', () => {
     expect(deckDensity(deck, deck.base - 10)).toBe(0);
     expect(deckDensity(deck, deck.top + 10)).toBe(0);
     expect(deckDensity(deck, (deck.base + deck.top) / 2)).toBe(1);
+  });
+});
+
+describe('the light under overcast decks', () => {
+  const deck = (base: number, top: number): CloudLayer => ({ id: 'low', kind: 'deck', cover: 1, base, top, flat: 1, seed: 1, key: '' });
+  const layers = [deck(1000, 1400), { ...deck(4000, 4200), id: 'mid' as const }];
+  it('each deck overhead takes its share of the light: darker under every one', () => {
+    expect(underDecks(5000, layers)).toEqual({ under: 0, light: 1 });
+    expect(underDecks(3000, layers).light).toBeCloseTo(1 - DECK_DIM, 6);
+    expect(underDecks(500, layers).light).toBeCloseTo((1 - DECK_DIM) ** 2, 6);
+    expect(underDecks(500, layers).under).toBe(1);
+  });
+  it('the light fades through the slab, and broken cloud takes none', () => {
+    expect(underDecks(1200, layers).light).toBeCloseTo((1 - DECK_DIM) * (1 - DECK_DIM / 2), 6);
+    expect(underDecks(4100, layers).under).toBeCloseTo(0.5, 6);
+    expect(underDecks(0, [{ ...deck(1000, 1400), kind: 'cumulus', cover: 0.5 }])).toEqual({ under: 0, light: 1 });
   });
 });

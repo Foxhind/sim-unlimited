@@ -74,6 +74,26 @@ export const CLOUD_RGB = 0xf2f4f7;
 const step = (v: number, s: number): number => Math.round(v / s) * s;
 const clamp = (v: number, a: number, b: number): number => Math.max(a, Math.min(b, v));
 
+/** the share of the daylight an overcast deck keeps from what is under it */
+export const DECK_DIM = 0.18;
+
+/**
+ * What the overcast decks over a height do to the light there: `light` the share left (each deck
+ * overhead takes DECK_DIM, so it is darker under every one than above it), `under` 0..1 how much
+ * the nearest of them closes the sky (no blue horizon under overcast). Both fade through a slab,
+ * from its top to its base. Broken cloud (cumulus) takes nothing.
+ */
+export function underDecks(alt: number, layers: readonly CloudLayer[]): { under: number; light: number } {
+  let under = 0, light = 1;
+  for (const l of layers) {
+    if (l.kind !== 'deck') continue;
+    const w = clamp((l.top - alt) / Math.max(1, l.top - l.base), 0, 1);
+    light *= 1 - DECK_DIM * w;
+    under = Math.max(under, w);
+  }
+  return { under, light };
+}
+
 /** height of the low cloud base above the ground from the temperature and dew point, m */
 export function cloudBaseAgl(tempC: number | undefined, dewPointC: number | undefined): number {
   if (tempC === undefined || dewPointC === undefined || !Number.isFinite(tempC) || !Number.isFinite(dewPointC)) return BASE_DEFAULT_AGL;

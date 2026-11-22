@@ -70,6 +70,8 @@ export function gloom(w: Falling): number {
   return w.precipKind && w.precipKind !== 'none' ? Math.min(0.6, Math.max(0, w.precipMmH ?? 0) / 10) : 0;
 }
 export const GLOOM_LIGHT = 0.3;
+/** the share of windows lit by day under a thunderstorm: a few, as people turn the lights on */
+export const STORM_DAY_LIT = 0.1;
 
 /**
  * How the particles move past the camera, m/s in world axes (x east, y up, z = -north): they fall

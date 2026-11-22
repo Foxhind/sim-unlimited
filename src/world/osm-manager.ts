@@ -448,6 +448,8 @@ export class OsmManager {
     fogEnd: number,
     lightsOn: boolean,
     pointSize: number,
+    /** some windows of the near facades are lit though it is day (a thunderstorm's gloom) */
+    dayWindows = false,
   ): void {
     for (const c of this.renderList) {
       // the ground of built-up terrain faces, street-lit (renderer.nightGlow), just above the terrain
@@ -471,7 +473,7 @@ export class OsmManager {
         const houses = slant - c.radius * 0.71 < BUILDING_DETAIL_M ? c.bmesh : c.bcore;
         if (houses) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
-          renderer.windows = lightsOn ? 'lit' : 'glass';
+          renderer.windows = lightsOn || dayWindows ? 'lit' : 'glass';
           renderer.drawWorld(houses, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
           renderer.windows = 'off';
         }

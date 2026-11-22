@@ -25,10 +25,10 @@ import { buildSkyPoints, limitingMagnitude, PLANETS_OFFSET, planetPoints, skyMat
 import { moonPosition, sunPosition } from './world/sun';
 import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
-import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
+import { CLOUD_RGB, cloudLayers, underDecks, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
 import { applyPreset, parsePreset, type WeatherPreset } from './world/weather-preset';
-import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM } from './world/precipitation';
+import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM, STORM_DAY_LIT } from './world/precipitation';
 import { boltPath, Lightning } from './world/lightning';
 import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
@@ -220,6 +220,9 @@ let fogStartM: number = FOG_CLEAR.start;
 let fogEndM: number = FOG_CLEAR.end;
 /** how much of the precipitation reaches the camera, 0..1: all below the cloud base, none above it */
 let wetHere = 0;
+/** the overcast decks over the camera (clouds.ts underDecks), and what the palette in use was built for */
+let decksHere = { under: 0, light: 1 };
+let decksLit = decksHere;
 /** rain and snow round the camera: its motion, and how far the particles have moved against it, m */
 const camMotion = new CameraMotion();
 const precipOffset = vec3.create();
@@ -263,8 +266,20 @@ const dayPalette = (): PaletteParams => {
   // rain, snow and above all a thunderstorm darken the day under the clouds
   const w = weatherInForce();
   const g = w ? gloom(w) * wetHere : 0;
-  return g > 0 ? brighter(p, -GLOOM_LIGHT * g) : p;
+  decksLit = decksHere;
+  // every overcast deck overhead takes light, and closes the sky: grey to the horizon, no blue
+  const k = (1 - GLOOM_LIGHT * g) * decksHere.light - 1;
+  const q = decksHere.under > 0 ? overcastSky(p, decksHere.under) : p;
+  return k < 0 ? brighter(q, k) : q;
 };
+/** a palette whose sky is the grey of a closed cloud deck by `under` (0..1), each colour at its own brightness */
+function overcastSky(p: PaletteParams, under: number): PaletteParams {
+  const grey = (c: readonly [number, number, number]): [number, number, number] => {
+    const y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    return [c[0] + (0.98 * y - c[0]) * under, c[1] + (0.99 * y - c[1]) * under, c[2] + (1.03 * y - c[2]) * under];
+  };
+  return { ...p, zenith: grey(p.zenith), skyMid: grey(p.skyMid), skyLow: grey(p.skyLow), horizon: grey(p.horizon), sunGlow: grey(p.sunGlow), glow: p.glow * (1 - under) };
+}
 /** a palette with its light and sky scaled by 1 + k (k < 0 darker) */
 function brighter(p: PaletteParams, k: number): PaletteParams {
   const m = (c: readonly [number, number, number]): [number, number, number] => [Math.min(255, c[0] * (1 + k)), Math.min(255, c[1] * (1 + k)), Math.min(255, c[2] * (1 + k))];
@@ -910,6 +925,7 @@ function frame(now: number): void {
   let cloudBase: number | undefined;
   for (const l of clouds.current) if (cloudBase === undefined || l.base < cloudBase) cloudBase = l.base;
   wetHere = wx ? precipAltitudeFactor(camPos[1], cloudBase, baseY) : 0;
+  decksHere = underDecks(camPos[1], clouds.current);
   {
     // the fog eases toward what the weather lets one see from here
     const seen = Math.min(wx?.visibilityM ?? Infinity, precipVisibilityM(falling, fallRate));
@@ -953,6 +969,8 @@ function frame(now: number): void {
   }
   weather.update(sunLoc, now);
   // fast clocks need a finer refresh than the 1 s default or the sky visibly steps
+  // climbing or sinking through a deck changes the light at once, not at the next refresh
+  if (Math.abs(decksHere.light - decksLit.light) > 0.01 || Math.abs(decksHere.under - decksLit.under) > 0.03) lastSunUpdate = 0;
   if (now - lastSunUpdate > (menu.config.timeAccel > 1 && state === 'flying' ? 100 : 1000)) {
     lastSunUpdate = now;
     updateLight();
@@ -986,7 +1004,9 @@ function frame(now: number): void {
   renderer.beginFrame(flashing ? flashLut : frameLut, flashing ? FLASH_LIGHT : frameLight);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
-  renderer.litShare = litShare(solarHour(simTime, sunLoc.lon));
+  // by day under a thunderstorm people turn the lights on: a few windows, nothing else
+  const stormDay = !lightsOn && weatherInForce()?.thunder === true;
+  renderer.litShare = stormDay ? STORM_DAY_LIT : litShare(solarHour(simTime, sunLoc.lon));
   renderer.time = now / 1000;
   renderer.originLat = chunks.origin.lat;
   renderer.season = seasonOf(simTime);
@@ -1003,7 +1023,7 @@ function frame(now: number): void {
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
-  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u);
+  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u, stormDay);
   farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM);
   profiler.stage('облака');
   clouds.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
