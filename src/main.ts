@@ -3,7 +3,7 @@ import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
 import { Renderer, type BaseGround } from './engine/renderer';
 import { DEPTH_FAR } from './engine/shaders';
-import { FontRenderer, HUD_AMBER, HUD_GREEN, parseHex } from './engine/font';
+import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
 import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, seasonOf, litShare, solarHour, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
@@ -27,6 +27,9 @@ import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
 import { CLOUD_RGB, cloudLayers, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
+import { applyPreset, parsePreset, type WeatherPreset } from './world/weather-preset';
+import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM } from './world/precipitation';
+import { boltPath, Lightning } from './world/lightning';
 import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { approachSpeed, Autopilot } from './flight/autopilot';
@@ -53,11 +56,13 @@ interface Start {
   /** national markings and loadout ids (empty: the aircraft's defaults) */
   insignia?: string;
   loadout?: string;
+  /** the weather flown in: the real one or a preset picked on the start screen */
+  weather: WeatherPreset;
 }
 
-/** Q18: #lat,lon,alt,hdg,aircraft,time,insignia,loadout — alt may be omitted for air start, the last three left empty. */
+/** Q18: #lat,lon,alt,hdg,aircraft,time,insignia,loadout,weather — alt may be omitted for air start, the last four left empty. */
 function parseStart(): Start {
-  const fallback: Start = { latLon: { lat: 47.2603, lon: 11.3439 }, hdg: 0, aircraft: 'su27' };
+  const fallback: Start = { latLon: { lat: 47.2603, lon: 11.3439 }, hdg: 0, aircraft: 'su27', weather: 'real' };
   const hash = window.location.hash.slice(1);
   if (!hash) return fallback;
   const parts = hash.split(',');
@@ -81,6 +86,7 @@ function parseStart(): Start {
     time,
     insignia: parts[6] || undefined,
     loadout: parts[7] || undefined,
+    weather: parsePreset(parts[8]?.trim()),
   };
 }
 
@@ -145,20 +151,39 @@ const [cloudsOverride, cloudBaseOverride] = ((): [number | undefined, number | u
   if (!Number.isFinite(pct)) return [undefined, undefined];
   return [Math.max(0, Math.min(100, pct)), Number.isFinite(base) ? Math.max(50, base) : undefined];
 })();
-/** what the clouds are made from: the live weather's layers, or one forced layer (?clouds=) */
-function cloudInput(): CloudInput | undefined {
+/**
+ * The live weather, or the preset picked on the start screen in its place (Q48). On the start
+ * screen the choice shows at once in the backdrop; in flight it is the one the link carries.
+ */
+let presetNow: WeatherPreset = start.weather;
+let presetFor: Weather | undefined | null = null;
+let presetKey: WeatherPreset = 'real';
+let presetOut: Weather | undefined;
+function presetWeather(): Weather | undefined {
   const w = weather.current;
+  const preset = presetNow;
+  if (preset === 'real') return w;
+  if (w !== presetFor || preset !== presetKey) {
+    presetFor = w;
+    presetKey = preset;
+    presetOut = applyPreset(w, preset, start.latLon, Date.now());
+  }
+  return presetOut;
+}
+/** what the clouds are made from: the weather's layers, or one forced layer (?clouds=) */
+function cloudInput(): CloudInput | undefined {
+  const w = presetWeather();
   const elevation = w?.elevation ?? Math.max(0, ground.heightAt(camWorld.latLon.lon, camWorld.latLon.lat) ?? 0);
   if (cloudsOverride !== undefined) {
     return { cloudPct: cloudsOverride, tempC: w?.tempC, dewPointC: w?.dewPointC, elevation, baseAgl: cloudBaseOverride };
   }
   return w ? { ...w, elevation } : undefined;
 }
-/** the weather in force: live data with the URL overrides applied (shown on the HUD, flown through) */
+/** the weather in force: live data or the preset, with the URL overrides applied (shown on the HUD, flown through) */
 let inForceFor: Weather | undefined | null = null;
 let inForce: Weather | undefined;
 function weatherInForce(): Weather | undefined {
-  const w = weather.current;
+  const w = presetWeather();
   if (!windOverride && cloudsOverride === undefined) return w;
   if (w !== inForceFor) {
     inForceFor = w;
@@ -170,6 +195,7 @@ function weatherInForce(): Weather | undefined {
         at: w?.at ?? start.latLon, time: w?.time ?? Date.now(),
         // a forced wind replaces the whole column: the measured winds aloft no longer belong to it
         windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
+        precipKind: w?.precipKind, precipMmH: w?.precipMmH, thunder: w?.thunder, visibilityM: w?.visibilityM,
       };
   }
   return inForce;
@@ -186,9 +212,20 @@ const sunDir = vec3.clone(sun.dir);
 const moonDir = vec3.clone(moon.dir);
 /** direction the terrain is shaded from: the sun by day, the moon (weighted by phase) when the sun is down */
 const lightDir = vec3.clone(sunDir);
-/** distance fog of every world pass, m */
-const FOG_START_M = 15000;
-const FOG_END_M = 55000;
+/**
+ * Distance fog of every world pass, m: 15-55 km in clear weather, drawn in by rain, snow and a low
+ * reported visibility (precipitation.ts fogRange) and eased over a couple of seconds
+ */
+let fogStartM: number = FOG_CLEAR.start;
+let fogEndM: number = FOG_CLEAR.end;
+/** how much of the precipitation reaches the camera, 0..1: all below the cloud base, none above it */
+let wetHere = 0;
+/** rain and snow round the camera: its motion, and how far the particles have moved against it, m */
+const camMotion = new CameraMotion();
+const precipOffset = vec3.create();
+const precipStreak = vec3.create();
+const lightning = new Lightning();
+const boltPoint = vec3.create();
 /** the base ground's height and kind from the last known DEM under the camera (land at 0 m until known) */
 let baseY = 0;
 let baseSea = false;
@@ -211,7 +248,7 @@ function baseGround(camY: number): BaseGround {
     if (l.top < camY && (down === 0 || camY - l.top < down)) down = camY - l.top;
   }
   return {
-    y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), fogStart: FOG_START_M, fogEnd: FOG_END_M,
+    y: baseY, ramp: baseSea ? RAMP.SEA : snowy(BASE_LAND), fogStart: fogStartM, fogEnd: fogEndM,
     deck: { up, down, colour: CLOUD_RGB },
   };
 }
@@ -221,7 +258,18 @@ const sunRising = (): boolean => sunPosition(new Date(simTime.getTime() + 60000)
 /** how sunny the weather in force is (palette.ts sunniness) */
 const sunnyNow = () => sunniness(cloudsOverride ?? weatherInForce()?.cloudPct);
 /** day palette for the sun now and the weather in force: sunnier the clearer the sky, cool colours in the morning */
-const dayPalette = () => paletteAt(sun.elevationDeg, sunnyNow(), sunRising());
+const dayPalette = (): PaletteParams => {
+  const p = paletteAt(sun.elevationDeg, sunnyNow(), sunRising());
+  // rain, snow and above all a thunderstorm darken the day under the clouds
+  const w = weatherInForce();
+  const g = w ? gloom(w) * wetHere : 0;
+  return g > 0 ? brighter(p, -GLOOM_LIGHT * g) : p;
+};
+/** a palette with its light and sky scaled by 1 + k (k < 0 darker) */
+function brighter(p: PaletteParams, k: number): PaletteParams {
+  const m = (c: readonly [number, number, number]): [number, number, number] => [Math.min(255, c[0] * (1 + k)), Math.min(255, c[1] * (1 + k)), Math.min(255, c[2] * (1 + k))];
+  return { ...p, lightMul: p.lightMul * (1 + k), zenith: m(p.zenith), skyMid: m(p.skyMid), skyLow: m(p.skyLow), horizon: m(p.horizon) };
+}
 /** the moon's light on faces: by its elevation and phase, once the sun no longer lights them */
 const moonLight = (): number =>
   Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
@@ -447,7 +495,7 @@ const menu = new Menu(font, vectors, settings, {
     const alt = onRunway ? '0' : '';
     // 'real' leaves the time field empty so a reload always starts at the current clock
     const when = fc.timeOfDay === 'real' ? '' : Math.floor(timeForPreset(fc.timeOfDay, ll, new Date()).getTime() / 1000);
-    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when},${fc.insignia},${fc.loadout}`;
+    window.location.hash = `${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${alt},${af?.hdg ?? 0},${fc.aircraft},${when},${fc.insignia},${fc.loadout},${fc.weather === 'real' ? '' : fc.weather}`;
     window.location.reload();
   },
   onConsent: (allow) => {
@@ -483,7 +531,7 @@ document.addEventListener('paste', (e) => {
 
 if (import.meta.env.DEV) {
   (window as unknown as Record<string, unknown>).__sim = {
-    renderer, chunks, osm, farOsm, clouds, font, vectors, model, rig, aircraftRenderer, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air,
+    renderer, chunks, osm, farOsm, clouds, font, vectors, model, rig, aircraftRenderer, ground, controls, settings, audio, sunDir, moonDir, camWorld, menu, weather, air, lightning, camMotion, precipOffset, precipStreak,
     get state() { return state; },
     get simTime() { return simTime; },
     get palette() { return palette; },
@@ -650,6 +698,7 @@ function frame(now: number): void {
   font.setScreenSize(renderer.width, renderer.height);
   vectors.setScreenSize(renderer.width, renderer.height);
 
+  presetNow = state === 'menu' ? menu.config.weather : start.weather;
   let flight: FlightControls = controls.update(dt, input, settings, canvas.clientWidth, canvas.clientHeight);
   if (controls.justPressed('autopilot') && state === 'flying') {
     apOn = !apOn;
@@ -854,6 +903,40 @@ function frame(now: number): void {
   const camLatLon = enuToLatLon(chunks.origin, camPos[0], -camPos[2], camPos[1]);
   clouds.update(camLatLon, chunks.origin, view, proj);
 
+  profiler.stage('осадки, видимость, гроза');
+  const wx = weatherInForce();
+  const falling = wx?.precipKind ?? 'none';
+  const fallRate = wx?.precipMmH ?? 0;
+  let cloudBase: number | undefined;
+  for (const l of clouds.current) if (cloudBase === undefined || l.base < cloudBase) cloudBase = l.base;
+  wetHere = wx ? precipAltitudeFactor(camPos[1], cloudBase, baseY) : 0;
+  {
+    // the fog eases toward what the weather lets one see from here
+    const seen = Math.min(wx?.visibilityM ?? Infinity, precipVisibilityM(falling, fallRate));
+    const target = FOG_CLEAR.end + (fogRange(seen).end - FOG_CLEAR.end) * wetHere;
+    fogEndM += (target - fogEndM) * (1 - Math.exp(-dt / 2));
+    fogStartM = (fogEndM * FOG_CLEAR.start) / FOG_CLEAR.end;
+  }
+  // the particles fall and drift with the wind while the camera flies through them
+  const particles = precipParticles(falling, fallRate);
+  const moving = state === 'paused' || rimLab.frozen ? 0 : dt;
+  camMotion.update(camPos, moving);
+  if (particles.count > 0) {
+    const wind = air.meanWind(camPos[1], Math.max(0, camPos[1] - baseY));
+    // the menu's and the wreck's orbits are not flights through the air: there the camera stands
+    const flown = state === 'menu' || state === 'crashed' ? undefined : camMotion.vel;
+    const rel = precipDrift(wind, particles.fall, flown);
+    const reach = Math.min(1, particles.box / 3 / Math.max(1e-6, Math.hypot(rel[0], rel[1], rel[2]) * particles.exposure));
+    for (let i = 0; i < 3; i++) {
+      precipOffset[i] = (((precipOffset[i] + rel[i] * moving) % particles.box) + particles.box) % particles.box;
+      precipStreak[i] = rel[i] * particles.exposure * reach;
+    }
+  }
+  // a thunderstorm strikes in real time; its thunder follows by the distance
+  const strike = lightning.update(now / 1000, wx?.thunder === true && state !== 'paused');
+  if (strike && state === 'flying') audio.thunder(strike.distanceM);
+  const skyFlash = lightning.flash(now / 1000);
+
   profiler.stage('солнце, погода, палитра');
   if (state === 'menu' && menu.screen === 'start') {
     // live backdrop follows the chosen place and time of day
@@ -889,8 +972,18 @@ function frame(now: number): void {
     renderer.endShadows();
   }
   profiler.stage('начало кадра: LUT, очистка');
-  applyFlameColors(lut, now / 1000);
-  renderer.beginFrame(flashing ? flashLut : lut, flashing ? FLASH_LIGHT : light);
+  // lightning: the frame is lit brighter for the instants of its flashes
+  let frameLut = lut;
+  let frameLight = light;
+  let framePalette = palette;
+  if (skyFlash > 0 && !flashing) {
+    framePalette = brighter(palette, (wetHere > 0.5 ? 0.9 : 0.4) * skyFlash);
+    frameLut = buildLUT(framePalette);
+    frameLight = lightOf(framePalette);
+    applySunColors(frameLut, sun.elevationDeg);
+  }
+  applyFlameColors(frameLut, now / 1000);
+  renderer.beginFrame(flashing ? flashLut : frameLut, flashing ? FLASH_LIGHT : frameLight);
   const lightsOn = sun.elevationDeg < 2;
   renderer.nightGlow = lightsOn;
   renderer.litShare = litShare(solarHour(simTime, sunLoc.lon));
@@ -906,20 +999,29 @@ function frame(now: number): void {
   }
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
-  chunks.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
+  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
-  osm.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M, lightsOn, 3 * u);
-  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, FOG_START_M, FOG_END_M);
+  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u);
+  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM);
   profiler.stage('облака');
-  clouds.draw(renderer, view, proj, camPos, lightDir, FOG_START_M, FOG_END_M);
+  clouds.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
   renderer.rimWeight = rim.aircraft;
   profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
   }
 
+  if (particles.count > 0 && wetHere > 0 && !flashing) {
+    profiler.stage('осадки');
+    const snow = falling === 'snow';
+    const c = shadeColour(snow ? [246, 248, 252] : [206, 220, 238], 11, framePalette);
+    renderer.drawPrecip(view, proj, camPos, {
+      count: particles.count * wetHere, box: particles.box, offset: precipOffset, streak: precipStreak,
+      widthPx: snow ? 2 * u : u, rgb: [c[0] / 255, c[1] / 255, c[2] / 255],
+    });
+  }
   // inside a cloud: white out (not in the menu backdrop, whose orbit may cut through one)
   if (state !== 'menu' && !flashing) {
     const veil = clouds.density(camLatLon, camPos[1]);
@@ -930,6 +1032,26 @@ function frame(now: number): void {
   }
   profiler.stage('пост-проход: силуэт, MSAA');
   renderer.beginOverlay();
+  // the bolt of a strike, seen from under the clouds while it flashes: from the cloud base to the ground
+  if (skyFlash > 0 && wetHere > 0.5 && lightning.last && !flashing) {
+    const s = lightning.last;
+    const b = (s.bearingDeg * Math.PI) / 180;
+    const height = Math.max(300, (cloudBase ?? baseY + 2000) - baseY);
+    const pts: [number, number][] = [];
+    for (const [side, up] of boltPath(s.seed)) {
+      vec3.set(
+        boltPoint,
+        camPos[0] + s.distanceM * Math.sin(b) + side * height * Math.cos(b),
+        baseY + up * height,
+        camPos[2] - s.distanceM * Math.cos(b) + side * height * Math.sin(b),
+      );
+      vec3.transformMat4(boltPoint, boltPoint, view);
+      if (boltPoint[2] > -1) { pts.length = 0; break; } // behind the camera
+      vec3.transformMat4(boltPoint, boltPoint, proj);
+      pts.push([(boltPoint[0] * 0.5 + 0.5) * renderer.width, (0.5 - boltPoint[1] * 0.5) * renderer.height]);
+    }
+    if (pts.length > 1) vectors.polyline(pts, 2 * u, HUD_WHITE);
+  }
   profiler.stage('HUD, меню, карта');
   const pad = 8 * u;
   if (spawned && state === 'flying' && rimLab.hud) {
@@ -937,7 +1059,7 @@ function frame(now: number): void {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound,
       autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined, lateral: autopilot.lateral } : null,
       hudMode, nav: hudNav, fovYDeg: 60,
-      weather: { data: weatherInForce(), tempC: weather.tempC },
+      weather: { data: weatherInForce(), tempC: weather.tempOverride ?? weatherInForce()?.tempC },
       time: simTime,
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
@@ -984,7 +1106,7 @@ function frame(now: number): void {
     // on the ground the link is a ground start (alt 0), not an air start at ground level
     history.replaceState(
       null, '',
-      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${model.onGround ? 0 : Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)},${cfg.insigniaId ?? ''},${cfg.loadoutId ?? ''}`,
+      `#${ll.lat.toFixed(5)},${ll.lon.toFixed(5)},${model.onGround ? 0 : Math.round(model.pos[1])},${Math.round(model.headingDeg)},${cfg.id},${Math.floor(simTime.getTime() / 1000)},${cfg.insigniaId ?? ''},${cfg.loadoutId ?? ''},${start.weather === 'real' ? '' : start.weather}`,
     );
   }
   profiler.frameEnd();

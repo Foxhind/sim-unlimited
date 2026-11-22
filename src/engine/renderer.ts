@@ -3,7 +3,7 @@ import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
-import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -41,6 +41,9 @@ export class Renderer {
   private resolveProg: WebGLProgram;
   private resolveU: Uniforms;
   private veilProg: WebGLProgram;
+  private precipProg: WebGLProgram;
+  private precipU: Uniforms;
+  private precipVao: WebGLVertexArrayObject;
   private veilU: Uniforms;
   private starsProg: WebGLProgram;
   private starsU: Uniforms;
@@ -238,6 +241,27 @@ export class Renderer {
     ]);
     this.veilProg = createProgram(gl, FULLSCREEN_VS, VEIL_FS);
     this.veilU = uniformMap(gl, this.veilProg, ['uDensity', 'uColor', 'uScale']);
+    this.precipProg = createProgram(gl, depthed(PRECIP_VS), depthed(PRECIP_FS));
+    this.precipU = uniformMap(gl, this.precipProg, ['uView', 'uProj', 'uCamPos', 'uOffset', 'uStreak', 'uBox', 'uScreen', 'uColor', 'uOrthoFar']);
+    // a quad a particle (strip), and every particle's fixed random place in its cube
+    this.precipVao = must(gl.createVertexArray(), 'precipitation VAO');
+    gl.bindVertexArray(this.precipVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, must(gl.createBuffer(), 'precipitation quad'));
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-0.5, 0, 0.5, 0, -0.5, 1, 0.5, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const seeds = new Float32Array(PRECIP_MAX * 3);
+    let rnd = 0x9e3779b9 | 0;
+    for (let i = 0; i < seeds.length; i++) {
+      rnd = (Math.imul(rnd, 1664525) + 1013904223) | 0;
+      seeds[i] = (rnd >>> 8) / 16777216;
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, must(gl.createBuffer(), 'precipitation seeds'));
+    gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(1, 1);
+    gl.bindVertexArray(null);
     this.starsProg = createProgram(gl, STARS_VS, STARS_FS);
     this.starsU = uniformMap(gl, this.starsProg, [
       'uSky', 'uViewProj', 'uSunDir', 'uMoonDir', 'uLimit', 'uPx', 'uGroundH', 'uDeckUp', 'uDeckDown',
@@ -772,6 +796,38 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST);
   }
 
+  /**
+   * Rain or snow round the camera (Q48, PRECIP_VS): `count` particles wrapped in a cube of side
+   * `box` m, moved by `offset` (m, accumulated motion of the particles against the camera), each
+   * drawn back along `streak` (m), `widthPx` device pixels wide, in `rgb` (0..1). Call after the
+   * world passes, before drawVeil.
+   */
+  drawPrecip(
+    view: mat4, proj: mat4, camPos: vec3,
+    p: { count: number; box: number; offset: ArrayLike<number>; streak: ArrayLike<number>; widthPx: number; rgb: ArrayLike<number> },
+  ): void {
+    const count = Math.min(PRECIP_MAX, Math.floor(p.count));
+    if (count <= 0) return;
+    const gl = this.gl;
+    const s = this.msaa ? 2 : 1;
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.precipProg);
+    gl.uniformMatrix4fv(this.precipU.uView, false, view);
+    gl.uniformMatrix4fv(this.precipU.uProj, false, proj);
+    gl.uniform3fv(this.precipU.uCamPos, camPos);
+    gl.uniform3f(this.precipU.uOffset, p.offset[0], p.offset[1], p.offset[2]);
+    gl.uniform3f(this.precipU.uStreak, p.streak[0], p.streak[1], p.streak[2]);
+    gl.uniform1f(this.precipU.uBox, p.box);
+    gl.uniform3f(this.precipU.uScreen, this.width * s, this.height * s, p.widthPx * s);
+    gl.uniform3f(this.precipU.uColor, p.rgb[0], p.rgb[1], p.rgb[2]);
+    gl.uniform1f(this.precipU.uOrthoFar, this.orthoFar);
+    gl.bindVertexArray(this.precipVao);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.depthMask(true);
+  }
+
   /** Overlay passes (font, vectors: 8-bit palette indices) run between drawWorld and resolve with depth disabled. */
   beginOverlay(): void {
     const gl = this.gl;
@@ -875,6 +931,9 @@ export class Renderer {
 }
 
 /** the base ground under the tiles (drawSky) */
+/** the most rain or snow particles drawn (precipitation.ts precipParticles) */
+export const PRECIP_MAX = 4000;
+
 export interface BaseGround {
   /** its height in world y (m above sea level) */
   y: number;

@@ -1,12 +1,14 @@
 /**
  * Live weather at the aircraft from Open-Meteo (https://open-meteo.com): free, no API key, CORS
  * enabled, data under CC BY 4.0. Only the current conditions are asked for: temperature and dew point
- * at 2 m, total cloud cover and the cover of each layer, wind at 10 m. The clouds and the dew point
- * shape the cloud layers (clouds.ts). Snow and ice on the ground follow the climate, not the weather
- * (palette.ts CLIMATE).
+ * at 2 m, total cloud cover and the cover of each layer, wind at 10 m, precipitation, the WMO weather
+ * code and the visibility. The clouds and the dew point shape the cloud layers (clouds.ts); rain,
+ * snow and thunderstorms come from the precipitation and the code (precipitation.ts, lightning.ts).
+ * Snow and ice on the ground follow the climate, not the weather (palette.ts CLIMATE).
  */
 import type { LatLon } from './geodesy';
 import type { AirConditions } from '../flight/air';
+import { stormTurbulence } from './precipitation';
 
 export const WEATHER_ATTRIBUTION = 'Weather: Open-Meteo.com';
 const ENDPOINT = 'https://api.open-meteo.com/v1/forecast';
@@ -20,6 +22,34 @@ export interface WeatherLevel {
   tempC: number;
   windFromDeg: number;
   windMs: number;
+}
+
+export type PrecipKind = 'none' | 'rain' | 'snow';
+
+/** WMO weather codes (Open-Meteo weather_code) that are snow, and the least each code's intensity stands for */
+const SNOW_CODES = new Set([71, 73, 75, 77, 85, 86]);
+const LIGHT_CODES = new Set([51, 56, 61, 66, 71, 77, 80, 85]);
+const MODERATE_CODES = new Set([53, 63, 73, 81, 95]);
+const HEAVY_CODES = new Set([55, 57, 65, 67, 75, 82, 86, 96, 99]);
+const THUNDER_CODES = new Set([95, 96, 99]);
+
+/**
+ * What falls and how hard, from the WMO code and the sums of the last `intervalS` seconds:
+ * `precipMm` everything (water equivalent), `rainMm` rain and showers, `snowfallCm` snow. The rate
+ * is mm of water an hour; a code that says it is raining or snowing while the sum is still zero
+ * gives the least rate that code stands for. Thunder: codes 95, 96, 99.
+ */
+export function precipitationOf(
+  code: number | undefined, precipMm: number, rainMm: number, snowfallCm: number, intervalS: number,
+): { kind: PrecipKind; mmH: number; thunder: boolean } {
+  const perHour = 3600 / (intervalS > 0 ? intervalS : 900);
+  const floor = code === undefined ? 0 : LIGHT_CODES.has(code) ? 0.5 : MODERATE_CODES.has(code) ? 2 : HEAVY_CODES.has(code) ? 8 : 0;
+  const mmH = Math.round(Math.max(Math.max(0, precipMm) * perHour, floor) * 100) / 100;
+  const thunder = code !== undefined && THUNDER_CODES.has(code);
+  if (mmH <= 0) return { kind: 'none', mmH: 0, thunder };
+  // a precipitation code names the kind itself; under any other code the sums do
+  const snow = code !== undefined && floor > 0 ? SNOW_CODES.has(code) : snowfallCm > 0 && rainMm <= 0;
+  return { kind: snow ? 'snow' : 'rain', mmH, thunder };
 }
 
 export interface Weather {
@@ -43,6 +73,13 @@ export interface Weather {
   pressureHpa?: number;
   /** wind and temperature aloft, lowest first (empty when the service gave none) */
   levels?: WeatherLevel[];
+  /** what falls, and how hard in mm of water an hour */
+  precipKind?: PrecipKind;
+  precipMmH?: number;
+  /** a thunderstorm */
+  thunder?: boolean;
+  /** horizontal visibility the service reports, m */
+  visibilityM?: number;
   /** where and when the data is for */
   at: LatLon;
   /** observation time, ms since epoch (UTC) */
@@ -56,6 +93,7 @@ export function weatherUrl(at: LatLon): string {
     current: [
       'temperature_2m,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m,surface_pressure',
       'dew_point_2m,cloud_cover_low,cloud_cover_mid,cloud_cover_high',
+      'precipitation,rain,showers,snowfall,weather_code,visibility',
       ...WEATHER_LEVELS_HPA.map((p) => `temperature_${p}hPa,wind_speed_${p}hPa,wind_direction_${p}hPa,geopotential_height_${p}hPa`),
     ].join(','),
     wind_speed_unit: 'ms',
@@ -86,7 +124,14 @@ export function parseWeather(json: unknown, at: LatLon): Weather | undefined {
   }
   levels.sort((a, b) => a.alt - b.alt);
   const elevation = (json as { elevation?: unknown }).elevation;
+  const fall = precipitationOf(
+    num('weather_code'), num('precipitation') ?? 0, (num('rain') ?? 0) + (num('showers') ?? 0), num('snowfall') ?? 0, num('interval') ?? 900,
+  );
   return {
+    precipKind: fall.kind,
+    precipMmH: fall.mmH,
+    thunder: fall.thunder,
+    visibilityM: num('visibility'),
     elevation: typeof elevation === 'number' && Number.isFinite(elevation) ? elevation : undefined,
     pressureHpa: num('surface_pressure'),
     levels,
@@ -125,6 +170,7 @@ export function airConditions(w: Weather, tempOverride?: number, groundElevation
       tempC: forced ? l.tempC + (tempOverride - w.tempC) * Math.max(0, 1 - i / all.length) : l.tempC,
     })),
     lat: w.at.lat,
+    turbulence: stormTurbulence(w),
   };
 }
 

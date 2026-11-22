@@ -39,6 +39,8 @@ export interface AirConditions {
   levels?: AirLevel[];
   /** latitude: decides which way the wind turns with height when there is no data aloft */
   lat?: number;
+  /** extra roughness of the air on top of the gusts, m/s (a thunderstorm, heavy rain) */
+  turbulence?: number;
 }
 
 export interface AirSample {
@@ -116,7 +118,7 @@ export class Air {
       this.pressureRatio = (c.pressureHpa * 100) / atmosphere(c.elevation).pressure;
     }
     // a reported gust is roughly a 3-sigma peak over the mean; a steady wind is still a little rough
-    this.sigma = Math.max(0, c.gustMs - c.windMs) / 3 + 0.03 * c.windMs;
+    this.sigma = Math.max(0, c.gustMs - c.windMs) / 3 + 0.03 * c.windMs + Math.max(0, c.turbulence ?? 0);
   }
 
   get calm(): boolean {

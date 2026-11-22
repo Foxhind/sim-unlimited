@@ -8,6 +8,7 @@ import { AIRFIELDS, Minimap } from './minimap';
 import { MAP_SOURCE_NAME, parseMapLink } from './map-links';
 import type { LatLon } from '../world/geodesy';
 import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
+import { WEATHER_PRESETS, type WeatherPreset } from '../world/weather-preset';
 import { AIRCRAFT, type AircraftId } from '../flight/aircraft';
 import { DEFAULT_BINDINGS, type Action } from '../flight/controls';
 
@@ -23,6 +24,8 @@ export interface FlightConfig {
   startMode: 'runway' | 'air';
   timeAccel: number;
   timeOfDay: TimeOfDay;
+  /** the weather flown in: the real one, or a preset in its place (world/weather-preset.ts) */
+  weather: WeatherPreset;
 }
 
 export interface MenuCallbacks {
@@ -52,12 +55,15 @@ const TIME_STEPS = [1, 10, 60, 600];
 const TOD_KEY: Record<TimeOfDay, StringKey> = {
   real: 'todReal', morning: 'todMorning', day: 'todDay', evening: 'todEvening', night: 'todNight',
 };
+const WX_KEY: Record<WeatherPreset, StringKey> = {
+  real: 'wxReal', clear: 'wxClear', cloudy: 'wxCloudy', rain: 'wxRain', snow: 'wxSnow', storm: 'wxStorm',
+};
 const PANEL = rampIndex(RAMP.SKY, 2);
 const DIM = rampIndex(RAMP.HUD_GREEN, 6);
 
 export class Menu {
   screen: MenuScreen = 'none';
-  config: FlightConfig = { aircraft: 'su27', insignia: '', loadout: '', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1, timeOfDay: 'real' };
+  config: FlightConfig = { aircraft: 'su27', insignia: '', loadout: '', location: 'LOWI', customPoint: null, startMode: 'air', timeAccel: 1, timeOfDay: 'real', weather: 'real' };
   readonly minimap = new Minimap();
   crashReason = '';
   /** sim clock / sun / moon summary shown on the pause screen */
@@ -235,6 +241,8 @@ export class Menu {
     row(TIME_STEPS.map((s) => [`x${s}`, () => { cfg.timeAccel = s; }, cfg.timeAccel === s] as [string, () => void, boolean]));
     label('timeOfDay');
     row(TIMES_OF_DAY.map((k) => [t(L, TOD_KEY[k]), () => { cfg.timeOfDay = k; }, cfg.timeOfDay === k] as [string, () => void, boolean]));
+    label('weather');
+    row(WEATHER_PRESETS.map((k) => [t(L, WX_KEY[k]), () => { cfg.weather = k; }, cfg.weather === k] as [string, () => void, boolean]));
 
     // minimap: click to pick an arbitrary point (Q29)
     const size = Math.min(w * 0.42, h * 0.52);

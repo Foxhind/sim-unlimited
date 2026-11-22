@@ -426,6 +426,32 @@ export class FlightAudio {
     src.stop(t + duration);
   }
 
+  /**
+   * Thunder of a strike `distanceM` away (Q48): a low rolling rumble that arrives after the sound
+   * has travelled there (340 m/s), quieter the further off.
+   */
+  thunder(distanceM: number): void {
+    if (!this.ctx || !this.master || !this.bank) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + Math.max(0, distanceM) / 340;
+    const level = Math.max(0.15, Math.min(1, 1.2 - distanceM / 15000));
+    const duration = 2 + 2 * Math.min(1, distanceM / 15000);
+    const src = loop(ctx, this.bank.white);
+    // a near strike cracks before it rolls; far away only the low rumble is left
+    const f = filter(ctx, 'lowpass', 90 + 500 * level * level);
+    const g = ctx.createGain();
+    // silent until the sound arrives (the looped noise is already running)
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.9 * level, t + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.25 * level, t + 0.5);
+    g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+    f.frequency.setValueAtTime(90 + 500 * level * level, t);
+    f.frequency.exponentialRampToValueAtTime(70, t + duration);
+    src.connect(f).connect(g).connect(this.master);
+    src.stop(t + duration);
+  }
+
   gear(): void {
     this.burst(600, 0.5, 0.25);
   }

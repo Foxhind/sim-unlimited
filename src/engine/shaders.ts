@@ -1296,6 +1296,59 @@ void main() {
 }
 `;
 
+/**
+ * Rain and snow (Q48, precipitation.ts): one instanced quad a particle. A particle is a fixed
+ * random point of a cube of side uBox round the camera, moved by uOffset and wrapped into the
+ * cube, so the same few thousand fall for ever. On screen it runs from where it is to where it was
+ * uStreak ago (its motion against the camera over the exposure), uWidth pixels wide and at least
+ * as long: a square flake when slow, a streak when fast. Opaque, depth-tested, no depth write.
+ */
+export const PRECIP_VS = `#version 300 es
+precision highp float;
+/** x: across the streak, -0.5..0.5; y: 0 the head, 1 the tail */
+layout(location=0) in vec2 aCorner;
+layout(location=1) in vec3 aSeed;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform vec3 uCamPos;
+uniform vec3 uOffset;
+uniform vec3 uStreak;
+uniform float uBox;
+/** xy: the target's size in pixels, z: the width of a particle in pixels */
+uniform vec3 uScreen;
+${ORTHO_VS}
+out float vLogW;
+void main() {
+  vec3 rel = mod(aSeed * uBox + uOffset, uBox) - 0.5 * uBox;
+  vec4 head = uProj * uView * vec4(uCamPos + rel, 1.0);
+  vec4 tail = uProj * uView * vec4(uCamPos + rel - uStreak, 1.0);
+  if (head.w < 0.3 || tail.w < 0.3) {
+    vLogW = 1.0;
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
+  vec2 a = head.xy / head.w * 0.5 * uScreen.xy;
+  vec2 b = tail.xy / tail.w * 0.5 * uScreen.xy;
+  vec2 along = b - a;
+  float len = length(along);
+  vec2 dir = len > 1e-3 ? along / len : vec2(0.0, 1.0);
+  vec2 px = a + dir * max(len, uScreen.z) * aCorner.y + vec2(-dir.y, dir.x) * aCorner.x * uScreen.z;
+  vLogW = logW(head);
+  gl_Position = vec4(px / (0.5 * uScreen.xy) * head.w, depthZ(head), head.w);
+}
+`;
+
+export const PRECIP_FS = `#version 300 es
+precision highp float;
+uniform vec3 uColor;
+out vec4 oColor;
+${LOG_DEPTH_FS}
+void main() {
+  writeLogDepth();
+  oColor = vec4(uColor, 1.0);
+}
+`;
+
 export const FULLSCREEN_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec2 aPos;

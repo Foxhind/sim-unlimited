@@ -156,7 +156,20 @@ export function weatherLines(data: Weather | undefined, tempC: number | undefine
     ? `${ru ? 'ВЕТЕР' : 'WIND'} ${ru ? 'ШТИЛЬ' : 'CALM'}`
     : `${ru ? 'ВЕТЕР' : 'WIND'} ${dir}\u00B0 ${compassPoint(data.windFromDeg, lang)} ${spd}${gust > spd + 2 ? `G${gust}` : ''} ${unit}`;
   const cloud = `${ru ? 'ОБЛ' : 'CLD'} ${cloudCode(data.cloudPct)} ${Math.round(data.cloudPct)}%`;
-  return [t, wind, cloud];
+  const fall = precipLine(data, units, lang);
+  return fall ? [t, wind, cloud, fall] : [t, wind, cloud];
+}
+
+/** "RAIN 2.4 MM/H", "SNOW …", "TSTM …" (a thunderstorm) for what falls; '' in dry weather */
+export function precipLine(data: Weather, units: Units, lang: 'ru' | 'en'): string {
+  const ru = lang === 'ru';
+  const falling = data.precipKind !== undefined && data.precipKind !== 'none' && (data.precipMmH ?? 0) > 0;
+  if (!falling && !data.thunder) return '';
+  const name = data.thunder ? (ru ? 'ГРОЗА' : 'TSTM') : data.precipKind === 'snow' ? (ru ? 'СНЕГ' : 'SNOW') : (ru ? 'ДОЖДЬ' : 'RAIN');
+  if (!falling) return name;
+  const mmH = data.precipMmH ?? 0;
+  if (units === 'imperial') return `${name} ${(mmH / 25.4).toFixed(2)} IN/H`;
+  return `${name} ${mmH >= 10 ? Math.round(mmH) : mmH.toFixed(1)} ${ru ? 'ММ/Ч' : 'MM/H'}`;
 }
 
 /** "LOST: LEFT WING, RIGHT FIN" for the parts that have separated, in the order they went; '' when intact */
