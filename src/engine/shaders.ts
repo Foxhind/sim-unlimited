@@ -5,7 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { CLIMATE, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -202,6 +202,11 @@ bool frozenWater(uint packedRamp, float tempC) {
 vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze, float tempC) {
   // a light source: its own colour at full strength, seen through half the haze
   if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), haze, 0.5 * fog);
+  // the exhaust flame's ramps (applyFlameColors): their flame step whatever the light, the weather or
+  // the hour, untinted, seen through half the haze like any light source
+  uint fid = packedRamp & ${PAYLOAD_MASK}u;
+  if ((packedRamp & ${MATERIAL_FLAG}u) != 0u && (fid == ${MAT.EMISSIVE}u || fid == ${MAT.HUD_AMBER}u))
+    return mix(lutColor(fid * 16u + ${FLAME_STEP}u), haze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
   uint s = uint(clamp(mix(litStep, 15.0, fog) + 0.5, 0.0, 15.0));

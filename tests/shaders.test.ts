@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLIMATE, MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
+import { CLIMATE, FLAME_STEP, MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
 import { seaLevelTemperature } from '../src/world/climate-colour';
 import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 
@@ -79,5 +79,16 @@ describe('aircraft lights', () => {
     expect(WORLD_VS).toContain(`if ((packedRamp & ${SELF_LIT_FLAG}u) != 0u) return mix(rgbOf(packedRamp), haze, 0.5 * fog);`);
     // checked before the glow level and the lit step are applied
     expect(WORLD_VS.indexOf(`${SELF_LIT_FLAG}u`)).toBeLessThan(WORLD_VS.indexOf('litStep = max(litStep'));
+  });
+});
+
+describe('the exhaust flame is a light source', () => {
+  it('its ramps take their flame step whatever the light, weather or hour, untinted, half hazed', () => {
+    for (const vs of [WORLD_VS, TREE_VS]) {
+      expect(vs).toContain(`(fid == ${MAT.EMISSIVE}u || fid == ${MAT.HUD_AMBER}u))`);
+      expect(vs).toContain(`return mix(lutColor(fid * 16u + ${FLAME_STEP}u), haze, 0.5 * fog);`);
+      // before the light step, the glow level or the tint can touch it
+      expect(vs.indexOf('fid * 16u')).toBeLessThan(vs.indexOf('uint lvl = uGlow'));
+    }
   });
 });
