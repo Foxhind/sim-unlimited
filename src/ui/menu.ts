@@ -2,6 +2,7 @@ import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE } from '../engine/font';
 import { VectorRenderer } from '../engine/vector';
 import { RAMP, rampIndex } from '../engine/palette';
 import type { Input } from '../engine/input';
+import type { HdrBlocker } from '../engine/output-mode';
 import { t, type StringKey } from './i18n';
 import { saveSettings, type Settings } from './settings';
 import { AIRFIELDS, Minimap } from './minimap';
@@ -35,6 +36,8 @@ export interface MenuCallbacks {
   onRestart(): void;
   onNewPoint(): void;
   onSettingsChanged(): void;
+  /** why the frame is SDR though XDR may be on (renderer.hdrBlocker); null: it is HDR */
+  hdrStatus(): HdrBlocker | null;
 }
 
 interface Button {
@@ -299,6 +302,13 @@ export class Menu {
     onOff('sound', () => s.sound, (v) => { s.sound = v; });
     onOff('msaa', () => s.msaa, (v) => { s.msaa = v; });
     onOff('hdr', () => s.hdr, (v) => { s.hdr = v; });
+    // XDR on, but the frame is SDR: say why (the browser, the screen, or still starting)
+    const blocker = s.hdr ? this.cb.hdrStatus() : null;
+    if (blocker !== null && blocker !== 'setting') {
+      const why: Record<Exclude<HdrBlocker, 'setting'>, StringKey> = { browser: 'hdrNoBrowser', display: 'hdrNoDisplay', pending: 'hdrPending' };
+      this.text(t(L, why[blocker]), x0, y - 6 * u, u, DIM);
+      y += 12 * u;
+    }
 
     // key bindings (Q37): two columns
     const kx = w * 0.46, kw = w * 0.49, colW = kw / 2, rowH = 24 * u;

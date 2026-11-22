@@ -3,6 +3,7 @@ import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
+import { hdrBlocker, hdrDisplayQuery, outputMode, type HdrBlocker, type HdrConditions, type OutputMode } from './output-mode';
 import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
@@ -144,12 +145,15 @@ export class Renderer {
   readonly hdrSupported: boolean;
   /** depth is reversed-Z, written by the vertex shaders (EXT_clip_control; shaders.ts LOG_DEPTH_FS) */
   readonly reversedZ: boolean;
-  /** XDR is on: buffers are half-float and light sources are written above 1.0 */
+  /** XDR is on (output 'hdr'): buffers are half-float and light sources are written above 1.0 */
   hdr = false;
   private hdrWanted = false;
+  /** the screen shows HDR now (output-mode.ts); followed as it changes */
+  private hdrDisplay = false;
   /** puts the page in HDR mode where WebGL has no extended tone mapping (xdr-trigger.ts) */
   private trigger: XdrTrigger | null = null;
   private triggerPending = false;
+  private triggerFailed = false;
 
   constructor(readonly canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -173,6 +177,9 @@ export class Renderer {
       clip.clipControlEXT(clip.LOWER_LEFT_EXT, clip.ZERO_TO_ONE_EXT);
       gl.depthFunc(gl.GREATER);
     }
+    const q = hdrDisplayQuery();
+    this.hdrDisplay = q?.matches ?? false;
+    q?.addEventListener('change', (e) => { this.hdrDisplay = e.matches; this.updateHdr(); });
     const depthed = (src: string, defines: readonly string[] = []) => {
       const defs = [...(this.reversedZ ? ['REVERSED_Z'] : []), ...defines].map((d) => `#define ${d} 1\n`).join('');
       return src.replace('#version 300 es\n', `#version 300 es\n${defs}`);
@@ -426,29 +433,58 @@ export class Renderer {
   }
 
   /**
-   * Experimental XDR output (see hdr). No-op where the browser lacks drawingBufferStorage or
-   * float colour buffers. With WebGL drawingBufferToneMapping the canvas itself is put in extended
-   * mode; without it (Chrome) a tiny WebGPU canvas puts the page in HDR mode (xdr-trigger.ts), which
-   * takes a moment to set up: hdr turns on when it is ready, and stays off where WebGPU can't.
+   * Experimental XDR output (see hdr): on only where output-mode.ts allows it, SDR everywhere else.
+   * With WebGL drawingBufferToneMapping the canvas itself is put in extended mode; without it (Chrome)
+   * a tiny WebGPU canvas puts the page in HDR mode (xdr-trigger.ts), which takes a moment to set up:
+   * hdr turns on when it is ready, and stays off where WebGPU can't.
    */
   setHdr(enabled: boolean): void {
-    this.hdrWanted = enabled && this.hdrSupported;
-    const native = typeof (this.gl as HdrGl).drawingBufferToneMapping === 'function';
-    if (!this.hdrWanted || native) {
-      this.trigger?.destroy();
+    this.hdrWanted = enabled;
+    this.updateHdr();
+  }
+
+  /** what decides the output now (output-mode.ts) */
+  private hdrConditions(): HdrConditions {
+    return {
+      wanted: this.hdrWanted,
+      browser: this.hdrSupported && !this.triggerFailed,
+      display: this.hdrDisplay,
+      page: this.nativeToneMapping() || this.trigger !== null,
+    };
+  }
+
+  private nativeToneMapping(): boolean {
+    return typeof (this.gl as HdrGl).drawingBufferToneMapping === 'function';
+  }
+
+  /** the output this frame: 'hdr' or 'sdr' */
+  get output(): OutputMode {
+    return this.hdr ? 'hdr' : 'sdr';
+  }
+
+  /** why the output is SDR, null when it is HDR (the settings screen says it) */
+  get hdrBlocker(): HdrBlocker | null {
+    return hdrBlocker(this.hdrConditions());
+  }
+
+  private updateHdr(): void {
+    const c = this.hdrConditions();
+    // the page is put in extended range only while HDR could otherwise be shown
+    const needTrigger = c.wanted && c.browser && c.display && !this.nativeToneMapping();
+    if (!needTrigger && this.trigger) {
+      this.trigger.destroy();
       this.trigger = null;
-      this.applyHdr(this.hdrWanted);
-      return;
     }
-    if (this.trigger || this.triggerPending) return;
-    this.triggerPending = true;
-    void XdrTrigger.create().then((t) => {
-      this.triggerPending = false;
-      if (!t) return;
-      if (!this.hdrWanted) { t.destroy(); return; }
-      this.trigger = t;
-      this.applyHdr(true);
-    });
+    if (needTrigger && !this.trigger && !this.triggerPending) {
+      this.triggerPending = true;
+      void XdrTrigger.create().then((t) => {
+        this.triggerPending = false;
+        if (!t) this.triggerFailed = true;
+        else this.trigger = t;
+        this.updateHdr();
+      });
+    }
+    this.applyHdr(outputMode(this.hdrConditions()) === 'hdr');
   }
 
   private applyHdr(on: boolean): void {

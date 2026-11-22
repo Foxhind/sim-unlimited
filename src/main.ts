@@ -534,6 +534,7 @@ const menu = new Menu(font, vectors, settings, {
     renderer.setMsaa(settings.msaa);
     renderer.setHdr(settings.hdr);
   },
+  hdrStatus: () => renderer.hdrBlocker,
 });
 if (state === 'menu') menu.screen = consent === null ? 'consent' : 'start';
 
