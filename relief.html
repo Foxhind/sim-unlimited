@@ -33,7 +33,7 @@
       canvas { display: block; width: 100%; height: 100%; }
       #marks { position: absolute; inset: 0; pointer-events: none; }
       #screen { cursor: grab; }
-      .overlay { position: absolute; left: 8px; bottom: 8px; background: rgba(16,19,24,.85); padding: 6px 8px; border: 1px solid var(--line); pointer-events: none; }
+      .overlay { position: absolute; left: 8px; bottom: 8px; white-space: pre-line; background: rgba(16,19,24,.85); padding: 6px 8px; border: 1px solid var(--line); pointer-events: none; }
       .title { position: absolute; left: 8px; top: 6px; color: var(--dim); pointer-events: none; }
       .tag { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
       @media (max-width: 900px) {
@@ -69,6 +69,10 @@
       <div class="row"><button data-turn="-15">↺ −15°</button><button data-turn="15">↻ +15°</button></div>
       <div class="row"><span>превышение ×</span><input id="exag" type="number" min="1" max="20" step="1" /></div>
       <div class="row"><button id="topDown">Сверху, на север</button></div>
+
+      <h2>Свободный полёт</h2>
+      <div class="row"><button id="fly">Свободный полёт</button></div>
+      <div class="hint">Перспективная камера: W A S D — вперёд, назад, вбок; Space / Z — вверх, вниз; Shift — быстрее; колесо — скорость. Мышь захватывается щелчком по виду, Esc её отпускает. Уровни детализации выбираются от этой камеры; превышение рельефа в полёте не применяется.</div>
 
       <h2>Слои</h2>
       <label><input type="checkbox" id="osm" checked /> OSM: дороги, здания, деревья</label>
@@ -115,7 +119,7 @@
     <main>
       <div class="pane">
         <canvas id="screen"></canvas><canvas id="marks"></canvas>
-        <div class="title">Ортографическая проекция</div><div id="hover" class="overlay"></div>
+        <div id="viewTitle" class="title">Ортографическая проекция</div><div id="hover" class="overlay"></div>
       </div>
     </main>
     <script type="module" src="/src/tools/relief.ts"></script>

@@ -5,18 +5,21 @@
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { buildLUT, lightUniforms, litShare, paletteAt, seasonOf, solarHour, WINDOWS } from '../engine/palette';
+import { BASE_LAND, buildLUT, lightUniforms, litShare, paletteAt, seasonOf, snowy, solarHour, WINDOWS } from '../engine/palette';
 import { Renderer } from '../engine/renderer';
+import { DEPTH_FAR, REVERSED_NEAR } from '../engine/shaders';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { farOsmTiles } from '../world/far-osm';
 import { FarOsmManager } from '../world/far-osm-manager';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
 import { OsmManager } from '../world/osm-manager';
+import { FOG_CLEAR } from '../world/precipitation';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { moonPosition, sunPosition } from '../world/sun';
 import { deleteCachedMeshes, isTileMeshKey } from '../world/tile-cache';
 import { solarClock, solarInstant } from '../world/time-of-day';
+import { cruiseSpeed, FLY_KEY_CODES, flyStep, look, noKeys, type FlyKeys } from './fly-camera';
 import { PRESETS, SOURCE } from './presets';
 
 /** a sun set by hand has no moon with it */
@@ -129,6 +132,39 @@ let lut = buildLUT(palette);
 let lightKey = '';
 let selected: Tile | null = null;
 
+/**
+ * Free flight: a perspective camera at `latLon`, `alt` m above sea level, flown with W A S D,
+ * Space / Z and the captured mouse (fly-camera.ts). Its position is kept as a place, not as world
+ * coordinates, so the world origin can move under it (chunks.rebaseIfNeeded).
+ */
+const fly = {
+  on: false,
+  latLon: state.centre,
+  alt: 1500,
+  yaw: 0,
+  pitch: 0,
+  /** the wheel's factor on the cruising speed */
+  speedFactor: 1,
+  keys: noKeys() as FlyKeys,
+  mouseDX: 0,
+  mouseDY: 0,
+  last: 0,
+};
+const FLY_FOV_RAD = (60 * Math.PI) / 180;
+const FLY_ALT_MAX_M = 30000;
+const FLY_SPEED_FACTOR_MIN = 1 / 16;
+const FLY_SPEED_FACTOR_MAX = 16;
+const locked = () => document.pointerLockElement === canvas;
+/** capture the mouse; the browser may refuse (too soon after Esc, an embedded page): a click retries */
+function capture(): void {
+  try {
+    const p = canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+    p?.catch?.(() => {});
+  } catch {
+    // refused: the hint still says to click
+  }
+}
+
 const checked = (id: string) => $<HTMLInputElement>(id).checked;
 
 function world(ll: LatLon): vec3 {
@@ -138,6 +174,18 @@ function world(ll: LatLon): vec3 {
 
 /** view and projection for the current state (and the canvas size in CSS pixels) */
 function updateMatrices(): void {
+  if (fly.on) {
+    const eye = world(fly.latLon);
+    eye[1] = fly.alt;
+    const cp = Math.cos(fly.pitch);
+    const ahead = vec3.fromValues(Math.sin(fly.yaw) * cp, Math.sin(fly.pitch), -Math.cos(fly.yaw) * cp);
+    mat4.lookAt(view, eye, vec3.add(vec3.create(), eye, ahead), [0, 1, 0]);
+    const aspect = Math.max(1, canvas.clientWidth) / Math.max(1, canvas.clientHeight);
+    mat4.perspective(proj, FLY_FOV_RAD, aspect, REVERSED_NEAR, DEPTH_FAR);
+    mat4.multiply(viewProj, proj, view);
+    mat4.invert(invViewProj, viewProj);
+    return;
+  }
   const target = world(state.centre);
   const th = state.tilt * D2R, ps = state.yaw * D2R;
   const ahead = vec3.fromValues(Math.sin(ps), 0, -Math.cos(ps)); // the ground direction at the top of the screen
@@ -233,11 +281,14 @@ function frame(now: number): void {
   const dpr = window.devicePixelRatio || 1;
   renderer.resize(canvas.clientWidth, canvas.clientHeight, dpr);
 
-  cam.latLon = simCamera();
-  cam.alt = state.camAlt;
+  if (fly.on) flyFrame(now);
+  else fly.last = 0;
+  // in free flight the levels of detail are chosen from the flying camera itself
+  cam.latLon = fly.on ? fly.latLon : simCamera();
+  cam.alt = fly.on ? fly.alt : state.camAlt;
   const place = () => {
     const [e, n] = latLonToEnu(chunks.origin, cam.latLon.lat, cam.latLon.lon, 0);
-    vec3.set(cam.pos, e, state.camAlt, -n);
+    vec3.set(cam.pos, e, cam.alt, -n);
   };
   place();
   if (chunks.rebaseIfNeeded(cam)) place();
@@ -257,18 +308,25 @@ function frame(now: number): void {
   // the simulator's rule: the lights come on as the sun goes below LIGHTS_ON_SUN_DEG
   const mode = $<HTMLSelectElement>('night').value;
   const night = mode === 'on' || (mode === 'auto' && state.sunEl < LIGHTS_ON_SUN_DEG);
-  renderer.orthoFar = 2 * EYE_DISTANCE_M;
+  renderer.orthoFar = fly.on ? 0 : 2 * EYE_DISTANCE_M;
   renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = night;
   // the lit windows' flicker and the water's glitter run on it
   renderer.time = now / 1000;
   renderer.beginFrame(lut, lightUniforms(palette));
   renderer.setSunMoon(sunDir, moonDir);
-  // no fog: the view has no single distance to the ground
-  chunks.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9);
+  // in free flight the sky and the clear-weather fog of the simulator; from above no fog: the view
+  // has no single distance to the ground
+  const [fogStart, fogEnd] = fly.on ? [FOG_CLEAR.start, FOG_CLEAR.end] : [1e9, 2e9];
+  if (fly.on) {
+    renderer.drawSky(view, proj, cam.pos, sunDir, moonDir, {
+      y: 0, ramp: snowy(BASE_LAND), fogStart, fogEnd,
+    });
+  }
+  chunks.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd);
   if (osmOn) {
-    osm.draw(renderer, view, proj, cam.pos, lightDir, 1e9, 2e9, night, POINT_SIZE * dpr);
-    farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr);
+    osm.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, night, POINT_SIZE * dpr);
+    farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr, fogStart, fogEnd);
   }
   renderer.beginOverlay();
   renderer.resolve();
@@ -282,6 +340,12 @@ function frame(now: number): void {
     fpsSince = now;
     showStats(osmOn);
     showTile();
+    if (fly.on) {
+      for (const [id, v] of [['lat', fly.latLon.lat], ['lon', fly.latLon.lon]] as const) {
+        const el = $<HTMLInputElement>(id);
+        if (document.activeElement !== el) el.value = v.toFixed(5);
+      }
+    }
   }
   if (now - hashAt > 700) {
     hashAt = now;
@@ -289,6 +353,91 @@ function frame(now: number): void {
     if (h !== location.hash) history.replaceState(null, '', h);
   }
   requestAnimationFrame(frame);
+}
+
+// ---------- free flight ----------
+
+/** move and turn the flying camera by this frame's keys and mouse */
+function flyFrame(now: number): void {
+  const dt = fly.last ? Math.min(0.1, (now - fly.last) / 1000) : 0;
+  fly.last = now;
+  // a place chosen in the panel (a preset, «Перейти», a pasted link) moves the camera there
+  if (state.centre !== fly.latLon) fly.latLon = state.centre;
+  if (fly.mouseDX || fly.mouseDY) {
+    Object.assign(fly, look(fly.yaw, fly.pitch, fly.mouseDX, fly.mouseDY));
+    fly.mouseDX = fly.mouseDY = 0;
+  }
+  const speed = cruiseSpeed(fly.alt) * fly.speedFactor;
+  const d = flyStep(fly.yaw, fly.pitch, fly.keys, speed, dt);
+  if (d[0] || d[1] || d[2]) {
+    const p = world(fly.latLon);
+    const ll = enuToLatLon(chunks.origin, p[0] + d[0], -(p[2] + d[2]), 0);
+    fly.latLon = { lat: Math.max(-85, Math.min(85, ll.lat)), lon: ((ll.lon + 540) % 360) - 180 };
+    fly.alt = Math.max(1, Math.min(FLY_ALT_MAX_M, fly.alt + d[1]));
+  }
+  // the light, the address and the panel follow the camera
+  state.centre = fly.latLon;
+  const heading = ((Math.round(fly.yaw / D2R) % 360) + 360) % 360;
+  $('hover').textContent = [
+    `${fly.latLon.lat.toFixed(5)}, ${fly.latLon.lon.toFixed(5)} · высота ${Math.round(fly.alt)} м · курс ${heading}° · ${Math.round(speed)} м/с`,
+    locked() ? 'Esc — отпустить мышь' : 'щёлкните по виду — захватить мышь',
+  ].join('\n');
+}
+
+function setFly(on: boolean): void {
+  if (on === fly.on) return;
+  fly.on = on;
+  fly.keys = noKeys();
+  fly.mouseDX = fly.mouseDY = 0;
+  if (on) {
+    // from the view's centre, looking at it 30° down from a height that suits the width of the view
+    const pitch = -30 * D2R;
+    fly.alt = Math.max(300, Math.min(FLY_ALT_MAX_M, state.span * 0.1));
+    fly.yaw = state.yaw * D2R;
+    fly.pitch = pitch;
+    const back = fly.alt / Math.tan(-pitch);
+    const c = world(state.centre);
+    const ll = enuToLatLon(chunks.origin, c[0] - Math.sin(fly.yaw) * back, -(c[2] + Math.cos(fly.yaw) * back), 0);
+    fly.latLon = { lat: Math.max(-85, Math.min(85, ll.lat)), lon: ll.lon };
+    state.centre = fly.latLon;
+    capture();
+  } else {
+    if (locked()) document.exitPointerLock();
+    state.yaw = Math.round(((fly.yaw / D2R + 540) % 360) - 180);
+    $('hover').textContent = '';
+  }
+  canvas.style.cursor = on ? 'crosshair' : '';
+  $('viewTitle').textContent = on ? 'Перспектива · свободный полёт' : 'Ортографическая проекция';
+  const b = $<HTMLButtonElement>('fly');
+  b.textContent = on ? 'Вернуться к виду сверху' : 'Свободный полёт';
+  // Space must not press the button again
+  b.blur();
+  syncInputs();
+}
+
+function initFly(): void {
+  $('fly').onclick = () => setFly(!fly.on);
+  const typing = (e: Event) => e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement;
+  window.addEventListener('keydown', (e) => {
+    if (!fly.on || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = FLY_KEY_CODES[e.code];
+    if (!k) return;
+    fly.keys[k] = true;
+    e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => {
+    const k = FLY_KEY_CODES[e.code];
+    if (k) fly.keys[k] = false;
+  });
+  window.addEventListener('blur', () => (fly.keys = noKeys()));
+  document.addEventListener('pointerlockchange', () => {
+    if (!locked()) fly.mouseDX = fly.mouseDY = 0;
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!fly.on || !locked()) return;
+    fly.mouseDX += e.movementX;
+    fly.mouseDY += e.movementY;
+  });
 }
 
 function corners(t: Tile): Array<[number, number]> {
@@ -305,6 +454,8 @@ function drawMarks(dpr: number): void {
   const g = marks.getContext('2d')!;
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
+  // the tile outlines are drawn for the view from above only
+  if (fly.on) return;
   g.font = '11px ui-monospace, Menlo, monospace';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
@@ -383,7 +534,9 @@ function showStats(osmOn: boolean): void {
     `треугольников ${Math.round(verts / 3)}`,
     `рельеф: загружено ${st.chunks}, в очереди ${st.pending}`,
     osmOn ? `OSM: загружено ${os.chunks}, в очереди ${os.pending}, ошибок ${os.errors}` : 'OSM: выключен',
-    `масштаб ${(state.span / canvas.clientWidth).toFixed(1)} м/пкс`,
+    fly.on
+      ? `скорость ×${+fly.speedFactor.toFixed(3)} (колесо), высота ${Math.round(fly.alt)} м`
+      : `масштаб ${(state.span / canvas.clientWidth).toFixed(1)} м/пкс`,
   ].join('\n');
 }
 
@@ -657,10 +810,15 @@ function init(): void {
   };
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   canvas.addEventListener('mousedown', (e) => {
+    if (fly.on) {
+      if (!locked()) capture();
+      return;
+    }
     const [x, y] = at(e);
     drag = { x: e.clientX, y: e.clientY, rotate: e.button === 2 || e.altKey, grab: groundAt(x, y), moved: 0 };
   });
   window.addEventListener('mousemove', (e) => {
+    if (fly.on) return;
     const [x, y] = at(e);
     if (drag) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
@@ -684,7 +842,7 @@ function init(): void {
   window.addEventListener('mouseup', (e) => {
     const d = drag;
     drag = null;
-    if (!d || d.moved > 4 || d.rotate || e.target !== canvas) return;
+    if (fly.on || !d || d.moved > 4 || d.rotate || e.target !== canvas) return;
     const [x, y] = at(e);
     const ll = groundAt(x, y);
     if (e.shiftKey) {
@@ -697,12 +855,19 @@ function init(): void {
     }
   });
   canvas.addEventListener('dblclick', (e) => {
+    if (fly.on) return;
     const [x, y] = at(e);
     const c = tileAt(groundAt(x, y));
     if (c) openTileInspector(c.tile);
   });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
+    if (fly.on) {
+      // the wheel sets the speed, by steps of ×1.25
+      const f = fly.speedFactor * 1.25 ** -Math.sign(e.deltaY);
+      fly.speedFactor = Math.max(FLY_SPEED_FACTOR_MIN, Math.min(FLY_SPEED_FACTOR_MAX, f));
+      return;
+    }
     const [x, y] = at(e);
     const g = groundAt(x, y);
     state.span = Math.max(SPAN_MIN_M, Math.min(SPAN_MAX_M, state.span * Math.exp(e.deltaY * 0.0015)));
@@ -711,6 +876,7 @@ function init(): void {
   }, { passive: false });
 
   document.addEventListener('paste', onPaste);
+  initFly();
   window.addEventListener('hashchange', () => {
     Object.assign(state, parseHash());
     syncInputs();
