@@ -96,16 +96,30 @@ describe('ribbonGeom', () => {
     expect(g.tris.length).toBe(3 * g.triSeg.length);
   });
 
+  it('keeps a cover’s round end within its outline on a stretch shorter than its half width: the cap’s half beyond the end only', () => {
+    // a stretch of a road 1.5 m long, 4.5 m wide each side, round at its start and square at its end
+    // (a bridge's cover cut where its deck lifts): a whole disc reached 3 m past the square end
+    const g = ribbonGeom([[10, 32], [10 + 1.5 * M, 32]], 4.5, { capStart: true, capEnd: false }, M, 0.05);
+    let east = -Infinity;
+    for (const p of g.tris) east = Math.max(east, p[0]);
+    expect(east).toBeCloseTo(10 + 1.5 * M, 9);
+    expect(outlineOnBoundary(g)).toBe(true);
+    expect(closed(g)).toBe(true);
+  });
   it('rounds a cap to a tolerance: as few sides as keep its arc within it, never more than twelve', () => {
-    /** the sides of each cap fan and the deepest of their chords below the circle, metres */
+    /**
+     * the sides of the caps (a full turn of the widest chord, round its centre) and the deepest of
+     * their chords below the circle, metres; with a tolerance a cap is its half beyond the end only
+     */
     const caps = (g: RibbonGeom, r: number) => {
       const fan = g.tris.slice(6);
-      let sag = 0;
+      let sag = 0, widest = 0;
       for (let k = 0; k + 2 < fan.length; k += 3) {
         const [e, p, q] = fan.slice(k, k + 3);
         sag = Math.max(sag, r - Math.hypot((p[0] + q[0]) / 2 - e[0], (p[1] + q[1]) / 2 - e[1]) / M);
+        widest = Math.max(widest, Math.abs(Math.atan2((p[0] - e[0]) * (q[1] - e[1]) - (p[1] - e[1]) * (q[0] - e[0]), (p[0] - e[0]) * (q[0] - e[0]) + (p[1] - e[1]) * (q[1] - e[1]))));
       }
-      return { sides: fan.length / 3 / 2, sag };
+      return { sides: Math.round((2 * Math.PI) / widest), sag };
     };
     // a path's end, 0.75 m round: 9 sides keep the arc within 5 cm
     const path = ribbonGeom([[10, 32], [12, 32]], 0.75, ROUND_ENDS, M, 0.05);
@@ -118,7 +132,8 @@ describe('ribbonGeom', () => {
     expect(caps(ribbonGeom([[10, 32], [12, 32]], 0.75, ROUND_ENDS, M), 0.75).sides).toBe(12);
     // a sharp turn's disc too
     const turn = ribbonGeom([[10, 32], [12, 32], [11, 32.6]], 0.75, ROUND_ENDS, M, 0.05);
-    expect(turn.tris.length).toBe(3 * (4 + 3 * 9));
+    // its disc whole (nine sides round the turn's vertex), its ends' caps halves
+    expect(turn.tris.filter((p, k) => k % 3 === 0 && p[0] === 12 && p[1] === 32).length).toBe(9);
     expect(outlineOnBoundary(turn)).toBe(true);
     expect(closed(turn)).toBe(true);
   });

@@ -159,6 +159,15 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
     inL.push(pIn[0]); inR.push(pIn[1]); outL.push(pOut[0]); outR.push(pOut[1]);
   }
 
+  /** an end: the arc beyond the body where it is round, else straight across; h away from the body */
+  const endArc = (i: number, l: P2, r: P2, inward: P2): P2[] => {
+    if (!(i === 0 ? ends.capStart : ends.capEnd) && !joints.includes(i)) return [l, r];
+    const v = sub(r, l), len = Math.hypot(v[0], v[1]) || 1;
+    let h: P2 = [-v[1] / len, v[0] / len];
+    if (dot(h, inward) > 0) h = [-h[0], -h[1]];
+    return capArc(c[i], halfAt(i) * latticePerMetre, l, r, h, h, capSides(halfAt(i), capTol));
+  };
+
   const tris: P2[] = [], triSeg: number[] = [];
   for (let i = 0; i < c.length - 1; i++) {
     tris.push(outL[i], outR[i], inL[i + 1]); triSeg.push(i);
@@ -169,8 +178,19 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
     [ends.capStart, c[0], 0, halfAt(0)], [ends.capEnd, c[c.length - 1], lastSeg, halfAt(c.length - 1)],
     ...joints.map((i): [boolean, P2, number, number] => [true, c[i], Math.min(i, lastSeg), halfAt(i)]),
   ];
-  for (const [cap, e, seg, h] of caps) {
+  for (const [ci, [cap, e, seg, h]] of caps.entries()) {
     if (!cap) continue;
+    if (capTol !== undefined && ci < 2) {
+      // a cover's end (its triangles are what it holds): the cap's half beyond the end only, fanned
+      // over its outline's arc; a whole disc reached past the other end of a stretch shorter than it
+      const arc = ci === 0 ? endArc(0, outL[0], outR[0], sub(c[1], c[0])) : endArc(c.length - 1, inL[c.length - 1], inR[c.length - 1], sub(c[c.length - 2], c[c.length - 1]));
+      for (let k = 1; k < arc.length; k++) {
+        if (Math.abs(cross(sub(arc[k - 1], e), sub(arc[k], e))) < 1e-18) continue;
+        tris.push(e, arc[k - 1], arc[k]);
+        triSeg.push(seg);
+      }
+      continue;
+    }
     const r = h * latticePerMetre, n = capSides(h, capTol);
     for (let k = 0; k < n; k++) {
       const a0 = (k / n) * 2 * Math.PI, a1 = ((k + 1) / n) * 2 * Math.PI;
@@ -204,15 +224,7 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
     }
     outline.push(line);
   }
-  /** an end: the arc beyond the body where it is round, else straight across; h away from the body */
-  const end = (i: number, l: P2, r: P2, inward: P2): P2[] => {
-    if (!(i === 0 ? ends.capStart : ends.capEnd) && !joints.includes(i)) return [l, r];
-    const v = sub(r, l), len = Math.hypot(v[0], v[1]) || 1;
-    let h: P2 = [-v[1] / len, v[0] / len];
-    if (dot(h, inward) > 0) h = [-h[0], -h[1]];
-    return capArc(c[i], halfAt(i) * latticePerMetre, l, r, h, h, capSides(halfAt(i), capTol));
-  };
-  outline.push(end(0, outL[0], outR[0], sub(c[1], c[0])), end(n - 1, inL[n - 1], inR[n - 1], sub(c[n - 2], c[n - 1])));
+  outline.push(endArc(0, outL[0], outR[0], sub(c[1], c[0])), endArc(n - 1, inL[n - 1], inR[n - 1], sub(c[n - 2], c[n - 1])));
 
   const cuts: P2[][] = [], cutAt: number[] = [];
   for (let i = 1; i < n - 1; i++) {

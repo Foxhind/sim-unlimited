@@ -132,9 +132,23 @@ describe('ground cover', () => {
     const c = buildGroundCover(TILE, GRID, data([road({ highway: 'footway' }, [[10, 32], [20, 32]]), road({ highway: 'service' }, [[10, 40], [20, 40]])]));
     const path = c.shapes.find((sh) => sh.kind === 'path')!, asphalt = c.shapes.find((sh) => sh.kind === 'carriageway')!;
     const half = classifyLine({ highway: 'footway' })!.width / 2;
-    expect(path.tris.length / 6).toBe(2 + 2 * capSides(half, 0.05));
+    /** the widest angle a chord of a shape's end arcs spans round its end point (x 10 or 20, its line's y) */
+    const step = (sh: CoverShape, y: number) => {
+      let worst = 0;
+      for (const arc of sh.outline.slice(2)) {
+        const e: [number, number] = [Math.abs(arc[0][0] - 10) < 1 ? 10 : 20, y];
+        for (let k = 1; k < arc.length; k++) {
+          const a = Math.atan2(arc[k - 1][1] - e[1], arc[k - 1][0] - e[0]), b = Math.atan2(arc[k][1] - e[1], arc[k][0] - e[0]);
+          worst = Math.max(worst, Math.abs(Math.atan2(Math.sin(b - a), Math.cos(b - a))));
+        }
+      }
+      return worst;
+    };
     expect(capSides(half, 0.05)).toBeLessThan(12);
-    expect(asphalt.tris.length / 6).toBe(2 + 2 * 12);
+    expect(step(path, 32)).toBeCloseTo((2 * Math.PI) / capSides(half, 0.05), 6);
+    expect(step(asphalt, 40)).toBeCloseTo((2 * Math.PI) / 12, 6);
+    // the half of each cap beyond the end: the triangles hold what the outline does, once
+    for (const sh of [path, asphalt]) expect(triArea(sh)).toBeCloseTo(shoelace(loops(sh.outline)[0]), 9);
   });
   it('cuts a road across only where it turns or its paint or width bends, and drops the points its edges run straight through', () => {
     // an unpainted lane through a node on its straight line, then bending at another
@@ -255,9 +269,8 @@ describe('ground cover', () => {
       expect(ls.length).toBe(1);
       const [a, b] = [ls[0][0], ls[0][ls[0].length - 1]];
       expect(Math.hypot(a[0] - b[0], a[1] - b[1])).toBeLessThan(1e-9);
-      // the body and half a 12-gon: the triangles less the half of the cap under the body
-      const r = (s.kind === 'ballast' ? 3 : 11) * M;
-      expect(shoelace(ls[0])).toBeCloseTo(triArea(s) - 1.5 * r * r, 9);
+      // the body and half a 12-gon beyond its round end: the triangles, once
+      expect(shoelace(ls[0])).toBeCloseTo(triArea(s), 9);
     }
   });
   it('a bridge the levels leave on the ground is a cover like any way: a taxiway bridge, an aqueduct', () => {
