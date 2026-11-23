@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -201,5 +201,78 @@ describe('buildProps lights (Q7)', () => {
   it('ignores non-aeroway lines', () => {
     const data: OsmTileData = { ...empty, lines: [{ points: runwayLine(), tags: { highway: 'primary' } }] };
     expect(props(data).lights.length).toBe(0);
+  });
+});
+
+describe('orchards (landuse=orchard)', () => {
+  const center = tileCenter(TILE);
+  const M = 111320;
+  const cos = Math.cos((center.lat * Math.PI) / 180);
+  /** a w × h m rectangle about (dx, dy) m from the tile centre, its long side turned by `turn` radians */
+  function plot(w: number, h: number, turn = 0, dx = 0, dy = 0): [number, number][] {
+    const c = Math.cos(turn), s = Math.sin(turn);
+    const pts = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2], [-w / 2, -h / 2]];
+    return pts.map(([x, y]) => [center.lon + (dx + x * c - y * s) / (M * cos), center.lat + (dy + x * s + y * c) / M]);
+  }
+  const orchard = (ring: [number, number][], tags: Record<string, string> = {}): OsmTileData => ({
+    ...empty, areas: [{ rings: [ring], tags: { landuse: 'orchard', ...tags } }],
+  });
+  /** every tree: [x, z, height, type] */
+  function trees(t: Float32Array): [number, number, number, number][] {
+    const out: [number, number, number, number][] = [];
+    for (let i = 0; i < t.length; i += TREE_STRIDE) out.push([t[i], t[i + 2], t[i + 3], t[i + 5]]);
+    return out;
+  }
+
+  it('plants low broadleaves in rows at the orchard spacing', () => {
+    const all = trees(props(orchard(plot(120, 60))).trees);
+    const expected = (120 * 60) / (ORCHARD.ROW_M * ORCHARD.TREE_M);
+    expect(all.length).toBeGreaterThan(expected * 0.8);
+    expect(all.length).toBeLessThan(expected * 1.2);
+    for (const [, , h, type] of all) {
+      expect(type).toBe(TREE.BROADLEAF);
+      expect(h).toBeGreaterThanOrEqual(ORCHARD.HEIGHT_M[0]);
+      expect(h).toBeLessThanOrEqual(ORCHARD.HEIGHT_M[1]);
+    }
+  });
+
+  it('lines the rows up with the long side of the plot', () => {
+    for (const turn of [0, 0.5, 1.2]) {
+      const all = trees(props(orchard(plot(150, 60, turn))).trees);
+      // across the rows (the short side) the trees fall into bands ROW_M apart, jitter aside
+      const across = all.map(([x, z]) => -x * Math.sin(turn) - z * Math.cos(turn));
+      const phase = across.map((v) => ((v % ORCHARD.ROW_M) + ORCHARD.ROW_M) % ORCHARD.ROW_M);
+      const ref = phase[0];
+      for (const p of phase) {
+        const d = Math.min(Math.abs(p - ref), ORCHARD.ROW_M - Math.abs(p - ref));
+        // + a few cm: the orchard's flat frame and the tile's ENU differ that much over 150 m
+        expect(d).toBeLessThanOrEqual(2 * ORCHARD.JITTER_M + 0.05);
+      }
+    }
+  });
+
+  it('keeps the same trees on both sides of a tile border', () => {
+    const b = tileBounds(TILE);
+    const next: Tile = { ...TILE, x: TILE.x + 1 };
+    // a plot across the east border
+    const dx = (b.east - center.lon) * M * cos;
+    const data = orchard(plot(200, 80, 0.3, dx, 0));
+    const here = props(data).trees;
+    const there = buildProps({ tile: next, detail: 'full', data, sampleHeight: flat }).trees;
+    expect(here.length).toBeGreaterThan(0);
+    expect(there.length).toBeGreaterThan(0);
+    const whole = (200 * 80) / (ORCHARD.ROW_M * ORCHARD.TREE_M);
+    expect(here.length / TREE_STRIDE + there.length / TREE_STRIDE).toBeGreaterThan(whole * 0.8);
+    expect(here.length / TREE_STRIDE + there.length / TREE_STRIDE).toBeLessThan(whole * 1.2);
+  });
+
+  it('thins a huge orchard instead of planting without end', () => {
+    expect(props(orchard(plot(900, 900))).trees.length / TREE_STRIDE).toBeLessThanOrEqual(ORCHARD.MAX_TREES);
+  });
+
+  it('palms for trees=palm_trees, nothing on vineyards', () => {
+    for (const [, , , type] of trees(props(orchard(plot(60, 40), { trees: 'palm_trees' })).trees)) expect(type).toBe(TREE.PALM);
+    const vineyard: OsmTileData = { ...empty, areas: [{ rings: [plot(60, 40)], tags: { landuse: 'vineyard' } }] };
+    expect(props(vineyard).trees.length).toBe(0);
   });
 });

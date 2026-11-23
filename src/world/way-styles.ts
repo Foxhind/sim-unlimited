@@ -81,6 +81,9 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
   if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, 'rock');
   if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, 'farmland');
+  // the orchard's trees are props (props-mesher plantOrchard); the ground between the rows is tinted
+  if (landuse === 'orchard') return ground(RAMP.FIELD, 0.6, 'orchard');
+  if (landuse === 'vineyard') return ground(RAMP.FIELD, 0.6, 'vineyard');
   if (leisure === 'pitch') {
     // over the park it lies in; a tagged surface solid, natural grass the imagery in a grass filter
     const surface = pitchSurface(tags);

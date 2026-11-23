@@ -34,7 +34,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
 // bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
-// other landuse is not fetched.
+// orchards for their rows of trees and a tint, vineyards for a tint; other landuse is not fetched.
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -48,6 +48,7 @@ const FULL_FILTER = `
   way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"];
   way["natural"="coastline"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
+  way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];
   way["leisure"~"park|pitch|golf_course"];
   way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];

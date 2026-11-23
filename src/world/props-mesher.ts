@@ -257,6 +257,87 @@ function pickType(w: number[], r: number): number {
   return w.length - 1 - [...w].reverse().findIndex((v) => v > 0);
 }
 
+/**
+ * Orchards (landuse=orchard): from the air an orchard is its rows. Olives and citrus of the
+ * Mediterranean stand about 5 m apart in rows about 6 m apart, low and round-crowned.
+ */
+export const ORCHARD = {
+  /** between the rows, m */
+  ROW_M: 6,
+  /** between the trees of a row, m */
+  TREE_M: 5,
+  /** a tree stands up to this far off its grid point along each axis, m */
+  JITTER_M: 0.4,
+  HEIGHT_M: [3, 5] as [number, number],
+  /** a larger orchard gets its spacing widened to keep to this many trees */
+  MAX_TREES: 6000,
+} as const;
+
+/** deterministic 0..1 hash of two integers and a salt (the same in every tile) */
+function hash2(i: number, j: number, salt: number): number {
+  let h = Math.imul(i | 0, 73856093) ^ Math.imul(j | 0, 19349663) ^ Math.imul(salt | 0, 83492791);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/**
+ * The trees of one orchard that stand in `tile`. The grid is the whole orchard's (from its outline,
+ * not the tile's piece of it), so the rows run on unbroken across tile borders: origin at the first
+ * vertex of the outer ring, rows along its longest edge, every tree's jitter and height hashed from
+ * its row and place in the row.
+ */
+function plantOrchard(
+  area: { rings: LonLat[][]; tags: Record<string, string> },
+  tile: Tile,
+  sampleHeight: HeightSampler,
+  enu: (lon: number, lat: number) => [number, number],
+  treeRamp: ((lon: number, lat: number) => number) | undefined,
+  out: number[][],
+): void {
+  const outer = area.rings[0];
+  if (!outer || outer.length < 3) return;
+  const b = tileBounds(tile);
+  const [lon0, lat0] = outer[0];
+  const kx = 111320 * Math.cos((lat0 * Math.PI) / 180), ky = 111320;
+  const local = ([lon, lat]: LonLat): [number, number] => [(lon - lon0) * kx, (lat - lat0) * ky];
+  // the rows run along the longest edge
+  let ux = 1, uy = 0, longest = -1;
+  for (let i = 0; i + 1 < outer.length; i++) {
+    const [ax, ay] = local(outer[i]), [bx, by] = local(outer[i + 1]);
+    const len = Math.hypot(bx - ax, by - ay);
+    if (len > longest) [longest, ux, uy] = [len, (bx - ax) / len, (by - ay) / len];
+  }
+  const vx = -uy, vy = ux;
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const p of outer) {
+    const [x, y] = local(p);
+    const u = x * ux + y * uy, v = x * vx + y * vy;
+    minU = Math.min(minU, u); maxU = Math.max(maxU, u); minV = Math.min(minV, v); maxV = Math.max(maxV, v);
+  }
+  const areaM2 = ringAreaM2(outer, Math.cos((lat0 * Math.PI) / 180));
+  const widen = Math.sqrt(Math.max(1, areaM2 / (ORCHARD.ROW_M * ORCHARD.TREE_M) / ORCHARD.MAX_TREES));
+  const rowM = ORCHARD.ROW_M * widen, treeM = ORCHARD.TREE_M * widen;
+  const type = area.tags.trees === 'palm_trees' ? TREE.PALM : TREE.BROADLEAF;
+  const [h0, h1] = ORCHARD.HEIGHT_M;
+  const salt = Math.round(lon0 * 1e6) ^ Math.round(lat0 * 1e6);
+  for (let i = Math.ceil(minV / rowM); i * rowM <= maxV; i++) {
+    for (let j = Math.ceil(minU / treeM); j * treeM <= maxU; j++) {
+      const u = j * treeM + (hash2(i, j, salt) * 2 - 1) * ORCHARD.JITTER_M;
+      const v = i * rowM + (hash2(i, j, salt + 1) * 2 - 1) * ORCHARD.JITTER_M;
+      const lon = lon0 + (u * ux + v * vx) / kx;
+      const lat = lat0 + (u * uy + v * vy) / ky;
+      if (lon < b.west || lon >= b.east || lat <= b.south || lat > b.north) continue;
+      if (!insideRing(lon, lat, outer) || area.rings.slice(1).some((hole) => insideRing(lon, lat, hole))) continue;
+      const y = sampleHeight(lon, lat);
+      if (y <= 0) continue;
+      const [x, z] = enu(lon, lat);
+      const packed = snowy(treeRamp?.(lon, lat) ?? RAMP.FOREST);
+      pushInstance(out[type], x, y, z, h0 + hash2(i, j, salt + 2) * (h1 - h0), packed, type, yawAt(x, z));
+    }
+  }
+}
+
 /** Q36 instanced trees of several types + Q7 runway/taxiway light points, deterministic per tile. */
 export function buildProps(opts: PropsOptions): PropsData {
   const { tile, data, sampleHeight } = opts;
@@ -299,6 +380,10 @@ export function buildProps(opts: PropsOptions): PropsData {
       pushInstance(byType[type], x, y, z, h0 + rng() * (h1 - h0), packed, type, yawAt(x, z));
       placed++;
     }
+  }
+  // orchards from their whole outlines (plantOrchard keeps the trees inside the tile)
+  for (const area of data.areas) {
+    if (area.tags.landuse === 'orchard') plantOrchard(area, tile, sampleHeight, enu, opts.treeRamp, byType);
   }
 
   const lights: number[] = [];

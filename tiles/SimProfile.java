@@ -57,6 +57,7 @@ public class SimProfile implements Profile {
   static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
   static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course");
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
+  static final Pattern ORCHARD = Pattern.compile("^(orchard|vineyard)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -67,7 +68,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -107,7 +108,7 @@ public class SimProfile implements Profile {
       find(RAILWAY, s(f, "railway")) ||
       find(AEROWAY, s(f, "aeroway")) || "aerodrome".equals(s(f, "aeroway")) ||
       find(NATURAL_WAY, s(f, "natural")) || "coastline".equals(s(f, "natural")) ||
-      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||
+      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
       find(WATERWAY, s(f, "waterway")) ||
       find(LEISURE, s(f, "leisure")) ||
       isCarPark(f) ||
@@ -118,7 +119,7 @@ public class SimProfile implements Profile {
     return f.hasTag("building") || f.hasTag("building:part") ||
       "aerodrome".equals(s(f, "aeroway")) ||
       "water".equals(s(f, "natural")) || "wood".equals(s(f, "natural")) ||
-      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) ||
+      "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
       isCarPark(f);
   }
 

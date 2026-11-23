@@ -50,6 +50,11 @@ describe('overpassQuery', () => {
     expect(large).toContain('motorway|trunk');
     expect(large).not.toContain('tertiary');
   });
+
+  it('fetches orchards and vineyards near (their trees and filters), not far', () => {
+    expect(overpassQuery(TILE, 'full')).toContain('way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];');
+    expect(overpassQuery(TILE, 'large')).not.toContain('orchard');
+  });
 });
 
 describe('what a near tile sees round itself', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { blend, BLEND_MODES, softLight, type RGB } from '../src/engine/palette';
 import { AREA_KINDS, DEFAULT_AREA_STYLES, filterColour, isDefaultAreaStyles } from '../src/world/area-styles';
+import { classifyArea } from '../src/world/way-styles';
 
 const BASE: RGB = [90, 120, 60];
 const TOP: RGB = [200, 80, 160];
@@ -47,5 +48,14 @@ describe('area styles', () => {
   it('a changed style is not the default (the worker skips its cache)', () => {
     expect(isDefaultAreaStyles(DEFAULT_AREA_STYLES)).toBe(true);
     expect(isDefaultAreaStyles({ ...DEFAULT_AREA_STYLES, park: { ...DEFAULT_AREA_STYLES.park, mode: 'multiply' } })).toBe(false);
+  });
+
+  it('orchards and vineyards are filtered ground of their own kinds', () => {
+    for (const [landuse, kind] of [['orchard', 'orchard'], ['vineyard', 'vineyard']] as const) {
+      const style = classifyArea({ landuse }, DEFAULT_AREA_STYLES);
+      expect(style?.water).toBe(false);
+      expect(style?.filter).toBe(DEFAULT_AREA_STYLES[kind]);
+      expect(AREA_KINDS.some((k) => k.kind === kind)).toBe(true);
+    }
   });
 });

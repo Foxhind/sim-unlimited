@@ -6,7 +6,7 @@ import { blend, type BlendMode, type RGB } from '../engine/palette';
  * blended with the kind's colour in the kind's mode, `strength` 0..1 of the way from the imagery.
  * Area style editor (areas.html) tunes them; the game uses DEFAULT_AREA_STYLES.
  */
-export type AreaKind = 'scrub' | 'beach' | 'rock' | 'farmland' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland';
+export type AreaKind = 'scrub' | 'beach' | 'rock' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland';
 
 export interface AreaFilter {
   colour: RGB;
@@ -23,6 +23,8 @@ export const AREA_KINDS: ReadonlyArray<{ kind: AreaKind; name: string; tags: str
   { kind: 'golf', name: 'Гольф-поле', tags: 'leisure=golf_course' },
   { kind: 'pitch', name: 'Спортплощадка, трава', tags: 'leisure=pitch без surface' },
   { kind: 'farmland', name: 'Пашня', tags: 'landuse=farmland' },
+  { kind: 'orchard', name: 'Фруктовый сад', tags: 'landuse=orchard' },
+  { kind: 'vineyard', name: 'Виноградник', tags: 'landuse=vineyard' },
   { kind: 'scrub', name: 'Кустарник', tags: 'natural=scrub' },
   { kind: 'wetland', name: 'Болото', tags: 'natural=wetland' },
   { kind: 'beach', name: 'Пляж', tags: 'natural=beach' },
@@ -36,6 +38,9 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   golf: { colour: [104, 192, 80], mode: 'soft-light', strength: 1 },
   pitch: { colour: [50, 80, 42], mode: 'screen', strength: 0.44 },
   farmland: { colour: [16, 16, 9], mode: 'screen', strength: 1 },
+  // first guesses, not yet tuned in areas.html: the trees carry an orchard, the filter only tints the soil
+  orchard: { colour: [150, 130, 90], mode: 'soft-light', strength: 0.6 },
+  vineyard: { colour: [170, 150, 100], mode: 'soft-light', strength: 0.8 },
   scrub: { colour: [104, 192, 80], mode: 'color-burn', strength: 0.2 },
   wetland: { colour: [88, 144, 112], mode: 'soft-light', strength: 1 },
   beach: { colour: [179, 164, 122], mode: 'normal', strength: 0.74 },
