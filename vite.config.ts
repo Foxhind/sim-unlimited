@@ -75,5 +75,9 @@ export default defineConfig({
       },
     },
   },
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    // the simulator and the tools it links to (relief → inspector, both → the simulator)
+    rollupOptions: { input: { main: 'index.html', relief: 'relief.html', inspector: 'inspector.html' } },
+  },
 });
