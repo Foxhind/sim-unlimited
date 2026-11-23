@@ -18,6 +18,7 @@ import type { LonLat, OsmLine } from './osm-types';
 import { EARTH_R, mercatorYToLat, type Tile } from './geodesy';
 import { ROAD_WINDOW_M, roadWindow } from './road-heights';
 import { NET_STEP_M, type NetWay, type RoadNet } from './road-net';
+import { classifyLine, isBridge, isTunnel } from './way-styles';
 
 /** the roads of a tile with the height of each network sample: H and the lift */
 export interface RoadSurface {
@@ -25,6 +26,8 @@ export interface RoadSurface {
   z: Float64Array;
   /** the raw DEM at each sample (the base relief under a bridge: bridgeDecks); without it every bridge is lifted whole */
   dem?: ArrayLike<number>;
+  /** per way (its index), a bridge's stretches over a mapped way it crosses (bridgeCrossings), the network's metres along it */
+  over?: ReadonlyArray<ReadonlyArray<[number, number]>>;
 }
 
 export interface RoadPull {
@@ -148,6 +151,66 @@ const DECK_PROBE_M = 0.5;
 const DECK_EDGE_M = 0.01;
 /** a bridge's low stretch shorter than this is lifted with the rest, metres (its deck's ends meet its approaches) */
 const DECK_LOW_MIN_M = 1;
+
+/** a bridge's deck is lifted this far either side of a way it crosses, past that way's half width, metres */
+const CROSSING_REACH_M = 2;
+
+/**
+ * Per way of `net` (its index), where a bridge crosses a mapped way (a road, a path, a railway or
+ * a waterway, not a bridge or a tunnel, not joined to it): the stretch of it within that way's half
+ * width and CROSSING_REACH_M of the crossing, the network's metres along it. From the two ways'
+ * nodes alone, on a plane round the bridge's first point: every tile that has both agrees (a canal
+ * cut below the raw DEM under a bridge level with its banks: 14/9517/6397)
+ */
+export function bridgeCrossings(net: RoadNet, lines: ReadonlyArray<OsmLine>): Array<Array<[number, number]>> {
+  const out = net.ways.map((): Array<[number, number]> => []);
+  /** each line's nodes, to tell a joined one */
+  const nodes = new Map<OsmLine, Set<string>>();
+  const keysOf = (l: OsmLine) => nodes.get(l) ?? nodes.set(l, new Set(l.points.map((p) => `${p[0]},${p[1]}`))).get(l)!;
+  const under = lines.flatMap((l) => {
+    const style = classifyLine(l.tags);
+    if (!style || l.points.length < 2 || isBridge(l.tags) || isTunnel(l.tags) || (l.tags.tunnel && l.tags.tunnel !== 'no')) return [];
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [lon, lat] of l.points) { x0 = Math.min(x0, lon); x1 = Math.max(x1, lon); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat); }
+    return [{ l, half: style.width / 2 + (style.shoulder ?? 0), box: [x0, x1, y0, y1] }];
+  });
+  net.ways.forEach((w, wi) => {
+    if (!w.bridge || w.count < 2) return;
+    const pts = w.line.points, own = keysOf(w.line);
+    const [lon0, lat0] = pts[0], ky = (EARTH_R * Math.PI) / 180, kx = ky * Math.cos((lat0 * Math.PI) / 180);
+    const plane = ([lon, lat]: LonLat): [number, number] => [(lon - lon0) * kx, (lat - lat0) * ky];
+    // the network's metres at each of its points (its samples there)
+    const at = [net.samples[w.first].d];
+    let k = w.first;
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i][0] !== pts[i - 1][0] || pts[i][1] !== pts[i - 1][1]) {
+        do k++;
+        while (k + 1 < w.first + w.count && (net.samples[k].lon !== pts[i][0] || net.samples[k].lat !== pts[i][1]));
+      }
+      at.push(net.samples[k].d);
+    }
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const [lon, lat] of pts) { x0 = Math.min(x0, lon); x1 = Math.max(x1, lon); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat); }
+    for (const { l, half, box } of under) {
+      if (l === w.line || box[1] < x0 || box[0] > x1 || box[3] < y0 || box[2] > y1 || l.points.some((p) => own.has(`${p[0]},${p[1]}`))) continue;
+      const q = l.points.map(plane);
+      for (let i = 1; i < pts.length; i++) {
+        const a = plane(pts[i - 1]), b = plane(pts[i]);
+        for (let j = 1; j < q.length; j++) {
+          const c = q[j - 1], d = q[j];
+          const den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0]);
+          if (den === 0) continue;
+          const t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den;
+          const u = ((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) / den;
+          if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+          const nd = at[i - 1] + (at[i] - at[i - 1]) * t - net.samples[w.first].d, r = half + CROSSING_REACH_M;
+          out[wi].push([nd - r, nd + r]);
+        }
+      }
+    }
+  });
+  return out;
+}
 
 const pulls = new WeakMap<RoadSurface, Map<string, RoadPull>>();
 /**
@@ -824,9 +887,10 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
 
   /**
    * Each network bridge with its heights (and the raw DEM `dem`): its lifted stretches into `decks`,
-   * where its deck lies DECK_CLEAR_M or more over the raw DEM under it (a function of the way alone,
-   * so every tile that has it agrees: the pulled ground under it is the tile's, and a low stretch cut
-   * where one tile's view ended broke the seam); probed every DECK_PROBE_M, each end found to
+   * over a mapped way it crosses (RoadSurface.over: a canal cut below the raw DEM, 14/9517/6397) and
+   * where its deck lies DECK_CLEAR_M or more over the raw DEM under it (from its own data and the
+   * ways it crosses alone, so every tile that has them agrees: the pulled ground under it is the
+   * tile's, and a low stretch cut where one tile's view ended broke the seam); probed every DECK_PROBE_M, each end found to
    * DECK_EDGE_M, a low stretch under DECK_LOW_MIN_M with the deck. Its low stretches (a cover like
    * any way: ground-cover) then pull as roads at the deck's height, square at their ends, after the
    * network's ways: the asphalt there is the deck's height, the road outranks the water under it and
@@ -847,7 +911,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
       // its own data alone (its samples' heights and the raw DEM under them, the same in every tile
       // that has it): the pulled ground under it, and the tile's view of it, differ from tile to tile
       // and so would its low stretches, which pull
+      const over = roads.over?.[wi] ?? [];
       const lifted = (d: number): boolean => {
+        if (over.some(([a, b]) => d >= a && d <= b)) return true;
         const { i, t } = along(first, last, d);
         return z[i] + (z[i + 1] - z[i]) * t - (dem[i] + (dem[i + 1] - dem[i]) * t) >= DECK_CLEAR_M;
       };

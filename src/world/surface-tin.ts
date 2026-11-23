@@ -14,7 +14,7 @@ import type { P2 } from './ribbon-shapes';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
 import { buildRoadNet, type NetWay, type RoadNet } from './road-net';
-import { BED_MARGIN_M, BED_PLAN_TOL_M, roadPullOf, snapBorder, type RoadSurface } from './road-pull';
+import { BED_MARGIN_M, BED_PLAN_TOL_M, bridgeCrossings, roadPullOf, snapBorder, type RoadSurface } from './road-pull';
 import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 import { classifyLine, roadPriority, tieBreak } from './way-styles';
 
@@ -493,5 +493,5 @@ export function roadSurfaceOf(tile: Tile, data: { lines: OsmLine[]; areas: OsmAr
   const ky = (EARTH_R * Math.PI) / 180, kx = ky * Math.cos((c.lat * Math.PI) / 180);
   const levels = buildRoadLevels(data.lines, data.areas, ([lon, lat]) => [(lon - c.lon) * kx, -(lat - c.lat) * ky], { height: heightAt });
   const z = Float64Array.from(net.samples, (s, i) => h[i] + levels.liftAt(net.ways[s.way].line, s.d));
-  return { net, z, dem };
+  return { net, z, dem, over: bridgeCrossings(net, data.lines) };
 }

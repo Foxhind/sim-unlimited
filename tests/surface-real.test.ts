@@ -7,13 +7,13 @@ import { describe, expect, it } from 'vitest';
 import { coastlineWays } from '../src/world/coast';
 import { buildGroundCover } from '../src/world/ground-cover';
 import type { Pad } from '../src/world/aerodrome';
-import { latLonToEnu, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
+import { latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, classifyLine, type OsmMeshOptions } from '../src/world/osm-mesher';
-import { tinSampler } from '../src/world/terrain-tin';
+import { tinLocator, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, type SurfaceStats } from '../src/world/surface-tin';
-import { roadPullOf } from '../src/world/road-pull';
+import { bridgeDecks, roadPullOf } from '../src/world/road-pull';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { TinDebug } from '../src/world/terrain-tin';
 import { cracks } from './roads-helpers';
@@ -71,28 +71,32 @@ describe('real dense tiles in the surface budget', () => {
     // cover's stretch shorter than its width reached past its square end (a bridge's cover cut where
     // its deck lifts) until its caps were halves
     const SNAP = 1.1e-3, mPer = 1 / (tin.grid / tileSizeMeters(fixtureTile));
-    const off: { kind: string; reach: number }[] = [];
+    const off: { kind: string; into: string; reach: number }[] = [];
     tin.tris.forEach((t, f) => {
       const cx = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, cy = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
       const own = tin.cover![f] < 0 ? coverAt(cx, cy) : tin.cover![f];
       if (![t.a, t.b, t.c].some((v) => coverAt((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) return;
       // how far into the face the other cover reaches (from its sides), lattice cells
       const P = [t.a, t.b, t.c].map((v) => [tin.vx[v], tin.vy[v]]);
-      let reach = 0;
+      let reach = 0, into = own;
       for (let i = 0; i <= 30; i++) for (let j = 0; i + j <= 30; j++) {
         const a = i / 30, b = j / 30, c = 1 - a - b, x = a * P[0][0] + b * P[1][0] + c * P[2][0], y = a * P[0][1] + b * P[1][1] + c * P[2][1];
-        if (coverAt(x, y) === own) continue;
-        reach = Math.max(reach, Math.min(...[0, 1, 2].map((e) => {
+        const at = coverAt(x, y);
+        if (at === own) continue;
+        const d = Math.min(...[0, 1, 2].map((e) => {
           const [ax, ay] = P[e], [bx, by] = P[(e + 1) % 3], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
           const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
           return Math.hypot(x - ax - dx * u, y - ay - dy * u);
-        })));
+        }));
+        if (d > reach) [reach, into] = [d, at];
       }
-      off.push({ kind: own < 0 ? 'ground' : cover.shapes[own].kind, reach });
+      const kindOf = (si: number) => (si < 0 ? 'ground' : cover.shapes[si].kind);
+      off.push({ kind: kindOf(own), into: kindOf(into), reach });
     });
     const deep = off.filter((o) => o.reach > SNAP);
     expect(deep.length).toBeLessThanOrEqual(4);
-    expect(deep.filter((o) => !['carriageway', 'shoulder', 'path'].includes(o.kind))).toEqual([]);
+    // each between a road's cover and what it meets (a bridge's approach's shoulder mitred onto its lifted deck reaches 11–16 cm past its end line)
+    expect(deep.filter((o) => ![o.kind, o.into].some((k) => ['carriageway', 'shoulder', 'path'].includes(k)))).toEqual([]);
     expect(Math.max(0, ...off.map((o) => o.reach)) * mPer).toBeLessThan(0.2);
     expect(off.length).toBeLessThanOrEqual(12);
   });
@@ -112,6 +116,28 @@ describe('real dense tiles in the surface budget', () => {
       }
     });
     expect(wet).toEqual([]);
+  });
+
+  it('Fethiye 14/9517/6397: the deck of Celal Bayar Caddesi lifted over the canal it crosses, the canal’s water under it, no road’s cover over the water', async () => {
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
+    const c = tileCenter(fx.tile), enu = ([lon, lat]: [number, number]): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
+    const net = roads!.net, w = net.ways.find((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4)!;
+    const runs = bridgeDecks(fx.tile, fx.grid, roads!, enu).get(w.line)!;
+    const pull = roadPullOf(fx.tile, fx.grid, roads!, true), toL = tileLattice(fx.tile, fx.grid), locate = tinLocator(tin, fx.tile);
+    const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]], len = Math.hypot(...([0, 1] as const).map((k) => enu(b)[k] - enu(a)[k]) as [number, number]);
+    let water = 0;
+    for (let d = 0.05; d < len; d += 0.1) {
+      const p: [number, number] = [a[0] + ((b[0] - a[0]) * d) / len, a[1] + ((b[1] - a[1]) * d) / len], [x, y] = toL(p);
+      // over the canal's water (its level, whatever the relief): the deck lifted, the face under it the canal's, at its level
+      const level = pull.surface(x, y, 0);
+      if (level !== pull.surface(x, y, 1000) || level === pull.surface(x, y, 0, () => true)) continue;
+      expect(runs.some(([r0, r1]) => d >= r0 && d <= r1)).toBe(true);
+      const f = locate(p[0], p[1])!.tri, own = tin.cover![f], kind = own >= 0 ? cover.shapes[own].kind : pull.bank(x, y) ? 'bank' : 'ground';
+      // the water, or its bank down from a road's cover's edge; never a road's cover
+      expect(['water', 'bank']).toContain(kind);
+      if (kind === 'water') water++;
+    }
+    expect(water).toBeGreaterThan(5);
   });
 
   it('Fethiye 14/9517/6397: over the deck of Celal Bayar Caddesi (its bridge over the canal) one asphalt within 0.3 m of the deck, no step where it lifts', async () => {
