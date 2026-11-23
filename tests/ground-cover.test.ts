@@ -5,8 +5,11 @@ import { buildOsmMesh } from '../src/world/osm-mesher';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M } from '../src/world/road-levels';
+import { capSides } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
+import { classifyLine } from '../src/world/way-styles';
+import { ROAD_TAPER_M } from '../src/engine/palette';
 import {
   data, demOf, edgeOffsetAtFork, forkFixture, GRID, M, metresOf, park, parkWithHole, pointOnLiftedApproach, pond, rail, railOverRoad, road,
   roadUnderRailBridge, square, TILE, trunkHalfWidth,
@@ -124,6 +127,36 @@ describe('ground cover', () => {
     expect(shoelace(ls[0])).toBeCloseTo(2 * r * 40 + 3 * r * r, 6);
     expect(s.attr).toBeUndefined();
     expect(s.prio).toBeGreaterThan(0);
+  });
+  it('rounds a path’s dead ends to 5 cm, a wide road’s with twelve sides', () => {
+    const c = buildGroundCover(TILE, GRID, data([road({ highway: 'footway' }, [[10, 32], [20, 32]]), road({ highway: 'service' }, [[10, 40], [20, 40]])]));
+    const path = c.shapes.find((sh) => sh.kind === 'path')!, asphalt = c.shapes.find((sh) => sh.kind === 'carriageway')!;
+    const half = classifyLine({ highway: 'footway' })!.width / 2;
+    expect(path.tris.length / 6).toBe(2 + 2 * capSides(half, 0.05));
+    expect(capSides(half, 0.05)).toBeLessThan(12);
+    expect(asphalt.tris.length / 6).toBe(2 + 2 * 12);
+  });
+  it('cuts a road across only where it turns or its paint or width bends, and drops the points its edges run straight through', () => {
+    // an unpainted lane through a node on its straight line, then bending at another
+    const lane = road({ highway: 'service' }, [[10, 32], [20, 32], [30, 32], [40, 36]]);
+    // a painted road (a vertex at its middle, where u turns) narrowing into the way that continues it
+    const wide = road({ highway: 'trunk', oneway: 'yes', lanes: '5' }, [[10, 48], [30, 48]]);
+    const narrow = road({ highway: 'trunk', oneway: 'yes', lanes: '4' }, [[30, 48], [50, 48]]);
+    const c = buildGroundCover(TILE, GRID, data([lane, wide, narrow]));
+    const asphalt = (way: OsmLine) => c.shapes.find((sh) => sh.kind === 'carriageway' && sh.source === way)!;
+    /** the x of each cut's middle (two points across the centre line's y), between the way's ends */
+    const cuts = (way: OsmLine, y: number, from: number, to: number) => asphalt(way).outline
+      .filter((l) => l.length === 2 && Math.abs(l[0][0] - l[1][0]) < 0.5 && Math.abs((l[0][1] + l[1][1]) / 2 - y) < 1e-6)
+      .map((l) => (l[0][0] + l[1][0]) / 2).filter((x) => x > from + 0.5 && x < to - 0.5).sort((a, b) => a - b);
+    expect(cuts(lane, 32, 10, 40)).toEqual([expect.closeTo(30, 9)]);
+    // the lane's sides have no point at the straight node
+    expect(asphalt(lane).outline.flat().some((p) => Math.abs(p[0] - 20) < 0.5)).toBe(false);
+    // the wide road: its middle, and where it starts to narrow (ROAD_TAPER_M before its end)
+    expect(cuts(wide, 48, 10, 30)).toEqual([expect.closeTo(20, 9), expect.closeTo(30 - ROAD_TAPER_M * M, 2)]);
+    expect(cuts(narrow, 48, 30, 50)).toEqual([expect.closeTo(40, 9)]);
+    // an area's ring loses a point on a straight side
+    const p = buildGroundCover(TILE, GRID, data([], [park([[10, 10], [15, 10], [20, 10], [20, 20], [10, 20]])])).shapes[0];
+    expect(p.outline).toEqual([[[10, 10], [20, 10], [20, 20], [10, 20], [10, 10]].map(([x, y]) => [expect.closeTo(x, 9), expect.closeTo(y, 9)])]);
   });
   it('ends the ballast where the approach starts to rise, square', () => {
     const lines = railOverRoad();

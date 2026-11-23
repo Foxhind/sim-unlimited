@@ -96,6 +96,33 @@ describe('ribbonGeom', () => {
     expect(g.tris.length).toBe(3 * g.triSeg.length);
   });
 
+  it('rounds a cap to a tolerance: as few sides as keep its arc within it, never more than twelve', () => {
+    /** the sides of each cap fan and the deepest of their chords below the circle, metres */
+    const caps = (g: RibbonGeom, r: number) => {
+      const fan = g.tris.slice(6);
+      let sag = 0;
+      for (let k = 0; k + 2 < fan.length; k += 3) {
+        const [e, p, q] = fan.slice(k, k + 3);
+        sag = Math.max(sag, r - Math.hypot((p[0] + q[0]) / 2 - e[0], (p[1] + q[1]) / 2 - e[1]) / M);
+      }
+      return { sides: fan.length / 3 / 2, sag };
+    };
+    // a path's end, 0.75 m round: 9 sides keep the arc within 5 cm
+    const path = ribbonGeom([[10, 32], [12, 32]], 0.75, ROUND_ENDS, M, 0.05);
+    expect(caps(path, 0.75)).toEqual({ sides: 9, sag: expect.closeTo(0.75 * (1 - Math.cos(Math.PI / 9)), 9) });
+    expect(caps(path, 0.75).sag).toBeLessThanOrEqual(0.05);
+    expect(outlineOnBoundary(path)).toBe(true);
+    expect(closed(path)).toBe(true);
+    // a wide road keeps twelve; without a tolerance every cap has twelve
+    expect(caps(ribbonGeom([[10, 32], [12, 32]], 3.5, ROUND_ENDS, M, 0.05), 3.5).sides).toBe(12);
+    expect(caps(ribbonGeom([[10, 32], [12, 32]], 0.75, ROUND_ENDS, M), 0.75).sides).toBe(12);
+    // a sharp turn's disc too
+    const turn = ribbonGeom([[10, 32], [12, 32], [11, 32.6]], 0.75, ROUND_ENDS, M, 0.05);
+    expect(turn.tris.length).toBe(3 * (4 + 3 * 9));
+    expect(outlineOnBoundary(turn)).toBe(true);
+    expect(closed(turn)).toBe(true);
+  });
+
   it('takes a half width per vertex', () => {
     const g = ribbonGeom([[10, 32], [30, 32], [50, 32]], [1, 2, 3], { capStart: false, capEnd: false }, 1);
     expect(triArea(g.tris)).toBeCloseTo(20 * (1 + 2) + 20 * (2 + 3), 9);

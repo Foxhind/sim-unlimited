@@ -56,6 +56,13 @@ export interface GroundCover {
    * ground); the shapes `skip` returns true for are passed over (the surface's dropped ribbons)
    */
   locate(x: number, y: number, skip?: (shape: number) => boolean): number;
+  /**
+   * The pieces of lattice polyline `line` outside every shape before `before` (in the shapes'
+   * order, the seniors of shape `before`) that `over` returns true for (any without it), their
+   * edges counting as inside: a piece ends exactly where the line enters one, on its edge; the
+   * line's own points are kept as they are
+   */
+  outside(line: ReadonlyArray<P2>, before: number, over?: (shape: number) => boolean): P2[][];
 }
 
 /** a floodlit pitch: its whole outline (the shape's source) is big enough (pitch-markings isLitPitch, as the mesh) */
@@ -98,6 +105,15 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
 const LIFT_PROBE_M = 10;
 /** where a way starts or stops being lifted, found to within this, metres */
 const LIFT_SNAP_M = 0.5;
+/** a cover's round caps and joint discs keep their chords this close to the circle, metres (ribbonGeom capTol) */
+const CAP_TOL_M = 0.05;
+/**
+ * a cover's edge loses the points it runs straight through to this, metres; a road its cuts across
+ * where its paint stays linear to this past them (the vertex attributes of a face across one)
+ */
+const THIN_M = 0.02;
+/** a road is cut across where its centre line turns by this much or more, radians (1°) */
+const CUT_TURN = Math.PI / 180;
 /** pitch paint: strips this wide each side of a marking line, metres */
 const PAINT_HALF_M = 0.06;
 /** a helipad point: a square this far each way round it, metres */
@@ -108,6 +124,13 @@ const MAX_CELLS = 256;
 const ON_EDGE = 1e-10;
 /** a triangle's cells reach this far past it (lattice cells): a point on its edge finds it in either cell */
 const CELL_PAD = 1e-9;
+/** a line this close to a triangle's edge (lattice cells) runs along it: inside (GroundCover.outside) */
+const ALONG_EDGE = 1e-7;
+/**
+ * GroundCover.outside: stretches of a line inside the shapes closer together than this (lattice
+ * cells, about 3 mm) are one, and a stretch inside them shorter than ALONG_EDGE is none (a corner touched)
+ */
+const MERGE_GAP = 1e-4;
 
 const SQUARE_ENDS: RibbonEnds = { capStart: false, capEnd: false };
 
@@ -120,6 +143,55 @@ function holds(t: Float64Array, o: number, x: number, y: number): boolean {
   return s * ((bx - ax) * (y - ay) - (by - ay) * (x - ax)) >= -ON_EDGE
     && s * ((cx - bx) * (y - by) - (cy - by) * (x - bx)) >= -ON_EDGE
     && s * ((ax - cx) * (y - cy) - (ay - cy) * (x - cx)) >= -ON_EDGE;
+}
+
+/**
+ * The share [t0, t1] of segment a + t·(dx, dy), t in [0, 1], inside triangle `o` of `t` with its
+ * edges (ALONG_EDGE wide), or undefined
+ */
+function within(t: Float64Array, o: number, ax: number, ay: number, dx: number, dy: number): [number, number] | undefined {
+  const turn = (t[o + 2] - t[o]) * (t[o + 5] - t[o + 1]) - (t[o + 4] - t[o]) * (t[o + 3] - t[o + 1]);
+  if (turn === 0) return undefined;
+  const s = turn > 0 ? 1 : -1;
+  let t0 = 0, t1 = 1;
+  for (let e = 0; e < 3; e++) {
+    const px = t[o + 2 * e], py = t[o + 2 * e + 1], ex = t[o + (2 * e + 2) % 6] - px, ey = t[o + (2 * e + 3) % 6] - py;
+    // on the inner side of the edge (to ALONG_EDGE): f0 + g·t ≥ 0
+    const f0 = s * (ex * (ay - py) - ey * (ax - px)) + ALONG_EDGE * Math.hypot(ex, ey), g = s * (ex * dy - ey * dx);
+    if (g === 0) {
+      if (f0 < 0) return undefined;
+    } else if (g > 0) t0 = Math.max(t0, -f0 / g);
+    else t1 = Math.min(t1, -f0 / g);
+    if (t1 <= t0) return undefined;
+  }
+  return [t0, t1];
+}
+
+/** distance from p to segment a–b */
+function toSegment(p: P2, a: P2, b: P2): number {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+  const f = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l2)) : 0;
+  return Math.hypot(p[0] - a[0] - dx * f, p[1] - a[1] - dy * f);
+}
+
+/**
+ * Polyline `line` without the points it runs straight through: each point dropped whose
+ * neighbours kept round it leave every dropped one within `tol` (lattice cells) of the segment
+ * between them, but its ends and the points in `keep`
+ */
+export function thinLine(line: P2[], tol: number, keep?: ReadonlySet<P2>): P2[] {
+  if (line.length <= 2) return line;
+  const out: P2[] = [line[0]];
+  let a = 0;
+  for (let j = 2; j < line.length; j++) {
+    let straight = !keep?.has(line[j - 1]);
+    for (let k = a + 1; straight && k < j; k++) straight = toSegment(line[k], line[a], line[j]) <= tol;
+    if (straight) continue;
+    out.push(line[j - 1]);
+    a = j - 1;
+  }
+  out.push(line[line.length - 1]);
+  return out;
 }
 
 /** squared distance from (x, y) to triangle `o` of `t` (0 inside) */
@@ -164,6 +236,25 @@ function slice(c: P2[], cum: number[], half: number | number[], s0: number, s1: 
     half: typeof half === 'number' ? half : [a.h, ...half.slice(i0 + 1, i1 + 1), b.h],
     first: i0,
   };
+}
+
+/**
+ * Whether a ribbon along centre line `c` (lattice), `half` metres wide each side (per vertex, or one
+ * for all), needs its cut across at inner vertex i: a face across the vertex takes the vertex
+ * attributes of one segment at all three corners, so the cut stays where the line turns by
+ * CUT_TURN or more, or the other segment strays more than THIN_M from the line of this one (to its
+ * far end), or its width bends by more than THIN_M there
+ */
+export function cutNeeded(c: ReadonlyArray<P2>, half: number | number[], i: number, latticePerMetre: number): boolean {
+  const ax = c[i][0] - c[i - 1][0], ay = c[i][1] - c[i - 1][1], bx = c[i + 1][0] - c[i][0], by = c[i + 1][1] - c[i][1];
+  const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+  if (la === 0 || lb === 0) return true;
+  const sin = Math.abs(ax * by - ay * bx) / (la * lb), cos = (ax * bx + ay * by) / (la * lb);
+  const far = Math.max(la, lb) / latticePerMetre;
+  if (Math.atan2(sin, cos) >= CUT_TURN || far * sin > THIN_M) return true;
+  if (typeof half === 'number') return false;
+  const sa = (half[i] - half[i - 1]) / (la / latticePerMetre), sb = (half[i + 1] - half[i]) / (lb / latticePerMetre);
+  return Math.abs(sa - sb) * far > THIN_M;
 }
 
 /**
@@ -333,10 +424,28 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   const net = lineNetwork(data.lines, enu, toLattice, latticePerMetre);
   const lifted = coverLifted(roads, buildRoadLevels(data.lines, data.areas, ([lon, lat]) => enu(lon, lat)));
   const joints = liftedJoints(data.lines, enu, toLattice, lifted);
+  /**
+   * the nodes a way's lifted run ends at (a bridge ending on the middle of the bank road), by their
+   * lattice point: a way through one keeps its cut and its edges' points there, so the mesh's deck
+   * gives way to the junction's faces as before (osm-mesher onJunction, face by face)
+   */
+  const liftedEnds = new Set<string>();
+  const latticeKey = (p: P2) => `${p[0]},${p[1]}`;
+  for (const line of data.lines) {
+    if (line.points.length < 2 || isTunnel(line.tags) || !classifyLine(line.tags)) continue;
+    let len = 0;
+    for (let i = 1; i < line.points.length; i++) {
+      const [ax, az] = enu(line.points[i - 1][0], line.points[i - 1][1]), [bx, bz] = enu(line.points[i][0], line.points[i][1]);
+      len += Math.hypot(bx - ax, bz - az);
+    }
+    if (lifted(line, 0)) liftedEnds.add(latticeKey(toLattice(line.points[0])));
+    if (lifted(line, len)) liftedEnds.add(latticeKey(toLattice(line.points[line.points.length - 1])));
+  }
 
   interface Draft { shape: CoverShape; rank: number; tie: number; triSeg?: Int32Array; index: number }
   const drafts: Draft[] = [];
-  const add = (kind: CoverKind, source: CoverShape['source'], prio: number, tris: Float64Array, outline: P2[][], tie = 0, segs?: VertexAttr[], triSeg?: Int32Array): void => {
+  /** a cover's shape; its edge thinned to THIN_M, the points in `keep` kept */
+  const add = (kind: CoverKind, source: CoverShape['source'], prio: number, tris: Float64Array, edge: P2[][], tie = 0, segs?: VertexAttr[], triSeg?: Int32Array, keep?: ReadonlySet<P2>): void => {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (let k = 0; k < tris.length; k += 2) {
       x0 = Math.min(x0, tris[k]); x1 = Math.max(x1, tris[k]);
@@ -344,6 +453,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     }
     // nothing of it in the tile (none at all: no triangles)
     if (!(x1 >= 0 && x0 <= grid && y1 >= 0 && y0 <= grid)) return;
+    const outline = edge.map((l) => thinLine(l, THIN_M * latticePerMetre, keep));
     // equal roads by their first point; anything else keeps its place
     const road = kind === 'carriageway' || kind === 'shoulder';
     const draft: Draft = { shape: { kind, source, prio, tris, outline }, rank: COVER_RANK[kind], tie: road ? tie : 0, triSeg, index: -1 };
@@ -356,12 +466,25 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     return out;
   };
 
-  /** a ribbon's shape; its triangles' segments offset by `first` (it is a stretch of a longer centre line) */
-  const ribbon = (kind: CoverKind, line: OsmLine, c: P2[], half: number | number[], ends: RibbonEnds, prio: number, tie: number, segs?: VertexAttr[], first = 0): void => {
+  /**
+   * A ribbon's shape; its triangles' segments offset by `first` (it is a stretch of a longer centre
+   * line). A carriageway, ballast or runway is cut across at an inner vertex of it but where its
+   * paint stays linear past it (cutNeeded), or `breaks` has it (its index in the longer line), or a
+   * lifted run ends there (liftedEnds).
+   */
+  const ribbon = (kind: CoverKind, line: OsmLine, c: P2[], half: number | number[], ends: RibbonEnds, prio: number, tie: number, segs?: VertexAttr[], first = 0, breaks?: ReadonlySet<number>): void => {
     if (c.length < 2) return;
-    const g = ribbonGeom(c, half, ends, latticePerMetre);
-    const outline = kind === 'carriageway' || kind === 'ballast' || kind === 'runway' ? [...g.outline, ...g.cuts] : g.outline;
-    add(kind, line, prio, flat(g.tris), outline, tie, segs, segs ? Int32Array.from(g.triSeg, (s) => s + first) : undefined);
+    const g = ribbonGeom(c, half, ends, latticePerMetre, CAP_TOL_M);
+    const keep = new Set<P2>(), cuts: P2[][] = [];
+    if (kind === 'carriageway' || kind === 'ballast' || kind === 'runway') {
+      g.cuts.forEach((cut, k) => {
+        const i = g.cutAt[k];
+        if (!breaks?.has(first + i) && !liftedEnds.has(latticeKey(c[i])) && !cutNeeded(c, half, i, latticePerMetre)) return;
+        cuts.push(cut);
+        for (const p of cut) keep.add(p);
+      });
+    }
+    add(kind, line, prio, flat(g.tris), [...g.outline, ...cuts], tie, segs, segs ? Int32Array.from(g.triSeg, (s) => s + first) : undefined, keep);
   };
 
   const buildLine = (line: OsmLine): void => {
@@ -386,11 +509,11 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
      * a ribbon along each stretch on the ground: centre line cl (a stretch at the same share of its
      * length as of the way's), its own ends at the way's ends, square where the lift begins
      */
-    const along = (kind: CoverKind, cl: P2[], w: number | number[], ways: RibbonEnds, prio = 0, segs?: VertexAttr[]): void => {
+    const along = (kind: CoverKind, cl: P2[], w: number | number[], ways: RibbonEnds, prio = 0, segs?: VertexAttr[], breaks?: ReadonlySet<number>): void => {
       const cum = cumulative(cl), ends = joints(line, ways);
       for (const [d0, d1] of runs) {
         const part = runPart(cl, cum, w, ends, d0, d1, len);
-        ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first);
+        ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first, breaks);
       }
     };
     if (style.rail) {
@@ -412,7 +535,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     if (style.marks) {
       // narrowing into a narrower continuation; its paint per segment of the whole way
       const p = painted(line, pts, half, style.marks, net);
-      if (p.c.length >= 2) along('carriageway', p.c, p.half, ends, prio, p.segs);
+      if (p.c.length >= 2) along('carriageway', p.c, p.half, ends, prio, p.segs, new Set(p.breaks));
     } else along('carriageway', c, half, ends, prio);
     if (shoulder) along('shoulder', c, half + shoulder, ends, prio);
   };
@@ -519,11 +642,18 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     }
   };
   const start = new Int32Array(cells * cells + 1);
+  /** each triangle's box: x0, y0, x1, y1 */
+  const triBox = new Float64Array(count * 4);
   let g = 0;
   shapes.forEach((s, si) => {
     for (let k = 0; k < s.tris.length / 6; k++, g++) {
       triShape[g] = si;
       triLocal[g] = k;
+      const t = s.tris, o = 6 * k;
+      triBox[4 * g] = Math.min(t[o], t[o + 2], t[o + 4]) - CELL_PAD;
+      triBox[4 * g + 1] = Math.min(t[o + 1], t[o + 3], t[o + 5]) - CELL_PAD;
+      triBox[4 * g + 2] = Math.max(t[o], t[o + 2], t[o + 4]) + CELL_PAD;
+      triBox[4 * g + 3] = Math.max(t[o + 1], t[o + 3], t[o + 5]) + CELL_PAD;
       eachCell(s.tris, 6 * k, (cell) => { start[cell + 1]++; });
     }
   });
@@ -539,6 +669,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     const cell = cellOf(y) * cells + cellOf(x);
     for (let e = start[cell]; e < start[cell + 1]; e++) {
       const gi = entries[e], si = triShape[gi];
+      if (x < triBox[4 * gi] || y < triBox[4 * gi + 1] || x > triBox[4 * gi + 2] || y > triBox[4 * gi + 3]) continue;
       if (only >= 0 ? si !== only : skip?.(si)) continue;
       if (holds(shapes[si].tris, 6 * triLocal[gi], x, y)) return gi;
     }
@@ -558,11 +689,67 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     return seg;
   }
 
+  /** per triangle: the segment it was last tried against (GroundCover.outside) */
+  const tried = new Int32Array(count).fill(-1);
+  let tries = 0;
+  const seg = new Float64Array(6);
+  const outside = (line: ReadonlyArray<P2>, before: number, over?: (shape: number) => boolean): P2[][] => {
+    const pieces: P2[][] = [];
+    let cur: P2[] = [];
+    const flush = () => {
+      if (cur.length >= 2) pieces.push(cur);
+      cur = [];
+    };
+    for (let k = 1; k < line.length; k++) {
+      const a = line[k - 1], b = line[k], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+      if (len === 0) continue;
+      // the shares of the segment inside the seniors' triangles along it
+      const spans: [number, number][] = [];
+      const stamp = tries++;
+      const sx0 = Math.min(a[0], b[0]), sy0 = Math.min(a[1], b[1]), sx1 = Math.max(a[0], b[0]), sy1 = Math.max(a[1], b[1]);
+      seg[0] = a[0]; seg[1] = a[1]; seg[2] = seg[4] = b[0]; seg[3] = seg[5] = b[1];
+      eachCell(seg, 0, (cell) => {
+        // a cell's triangles come in the shapes' order: the seniors first
+        for (let e = start[cell]; e < start[cell + 1]; e++) {
+          const gi = entries[e], si = triShape[gi];
+          if (si >= before) break;
+          if (sx1 < triBox[4 * gi] || sy1 < triBox[4 * gi + 1] || sx0 > triBox[4 * gi + 2] || sy0 > triBox[4 * gi + 3]) continue;
+          if (tried[gi] === stamp || (over && !over(si))) continue;
+          tried[gi] = stamp;
+          const span = within(shapes[si].tris, 6 * triLocal[gi], a[0], a[1], dx, dy);
+          if (span && (span[1] - span[0]) * len > ALONG_EDGE) spans.push(span);
+        }
+      });
+      // what is left of it: the gaps between the shares, merged across MERGE_GAP
+      spans.sort((p, q) => p[0] - q[0]);
+      const gap = MERGE_GAP / len;
+      let at = 0;
+      const keep = (from: number, to: number) => {
+        // an end within MERGE_GAP of the segment's is that end
+        const t0 = from <= gap ? 0 : from, t1 = to >= 1 - gap ? 1 : to;
+        if (t1 - t0 <= gap) return;
+        if (t0 > 0) flush();
+        if (!cur.length) cur.push(t0 > 0 ? [a[0] + dx * t0, a[1] + dy * t0] : a as P2);
+        cur.push(t1 < 1 ? [a[0] + dx * t1, a[1] + dy * t1] : b as P2);
+        if (t1 < 1) flush();
+      };
+      for (const [t0, t1] of spans) {
+        if (t0 > at + gap) keep(at, t0);
+        at = Math.max(at, t1);
+      }
+      if (at < 1 - gap) keep(at, 1);
+      else flush();
+    }
+    flush();
+    return pieces;
+  };
+
   return {
     shapes,
     locate: (x, y, skip) => {
       const gi = find(x, y, -1, skip);
       return gi < 0 ? -1 : triShape[gi];
     },
+    outside,
   };
 }

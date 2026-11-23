@@ -21,6 +21,18 @@ const SHARP_TURN_COS = Math.SQRT1_2;
 export type VertexAttr = (p: { x: number; z: number }) => [number, number, number, number, number];
 /** points of a round cap around an end of a ribbon (lattice units); 12 sides */
 const CAP_SIDES = 12;
+/** a cap rounded to a tolerance has at least this many sides */
+const MIN_CAP_SIDES = 6;
+
+/**
+ * The sides of a cap `half` metres round: CAP_SIDES, or with a tolerance (metres) as few as keep
+ * its chords within it of the circle (at least MIN_CAP_SIDES, never more than CAP_SIDES)
+ */
+export function capSides(half: number, tol?: number): number {
+  if (tol === undefined) return CAP_SIDES;
+  if (tol >= half) return MIN_CAP_SIDES;
+  return Math.max(MIN_CAP_SIDES, Math.min(CAP_SIDES, Math.ceil(Math.PI / Math.acos(1 - tol / half) - 1e-9)));
+}
 /** a fork branch's direction is taken over its first this many metres */
 const FORK_PROBE_M = 15;
 
@@ -38,6 +50,8 @@ export interface RibbonGeom {
   outline: P2[][];
   /** across it at each inner vertex of the centre line: the end of the segment before, and the start of the one after where it differs */
   cuts: P2[][];
+  /** the vertex of the centre line each cut is at */
+  cutAt: number[];
 }
 
 const dot = (a: P2, b: P2): number => a[0] * b[0] + a[1] * b[1];
@@ -45,17 +59,17 @@ const cross = (a: P2, b: P2): number => a[0] * b[1] - a[1] * b[0];
 const sub = (a: P2, b: P2): P2 => [a[0] - b[0], a[1] - b[1]];
 const same = (a: P2, b: P2): boolean => a[0] === b[0] && a[1] === b[1];
 
-/** the k-th corner of the cap polygon round e, as its triangles have it */
-const capCorner = (e: P2, r: number, k: number): P2 => {
-  const a = (k / CAP_SIDES) * 2 * Math.PI;
+/** the k-th corner of the cap polygon of n sides round e, as its triangles have it */
+const capCorner = (e: P2, r: number, k: number, n: number): P2 => {
+  const a = (k / n) * 2 * Math.PI;
   return [e[0] + Math.cos(a) * r, e[1] + Math.sin(a) * r];
 };
 
-/** where the ray from e (inside the cap polygon) towards p leaves the polygon */
-const capExit = (e: P2, r: number, p: P2): P2 => {
+/** where the ray from e (inside the cap polygon of n sides) towards p leaves the polygon */
+const capExit = (e: P2, r: number, p: P2, n: number): P2 => {
   const d = sub(p, e);
-  for (let k = 0; k < CAP_SIDES; k++) {
-    const a = capCorner(e, r, k), w = sub(capCorner(e, r, (k + 1) % CAP_SIDES), a);
+  for (let k = 0; k < n; k++) {
+    const a = capCorner(e, r, k, n), w = sub(capCorner(e, r, (k + 1) % n, n), a);
     const den = cross(d, w);
     if (Math.abs(den) < 1e-300) continue;
     const s = cross(sub(a, e), w) / den, t = cross(sub(a, e), d) / den;
@@ -65,11 +79,11 @@ const capExit = (e: P2, r: number, p: P2): P2 => {
 };
 
 /**
- * The edge of the cap polygon round e where the body does not cover it: the part where
+ * The edge of the cap polygon of n sides round e where the body does not cover it: the part where
  * (p − e)·h1 > 0 and (p − e)·h2 > 0, from `from` (on the line (p − e)·h1 = 0) to `to` (on (p − e)·h2 = 0),
  * through the crossings of those lines with the polygon and its corners between them
  */
-const capArc = (e: P2, r: number, from: P2, to: P2, h1: P2, h2: P2): P2[] => {
+const capArc = (e: P2, r: number, from: P2, to: P2, h1: P2, h2: P2, n: number): P2[] => {
   const eps = 1e-9 * r;
   const f = sub(from, e), sense = Math.sign(cross(f, [h1[0] + h2[0], h1[1] + h2[1]])) || 1;
   const turn = (p: P2): number => {
@@ -77,12 +91,12 @@ const capArc = (e: P2, r: number, from: P2, to: P2, h1: P2, h2: P2): P2[] => {
     return a < 0 ? a + 2 * Math.PI : a;
   };
   const corners: P2[] = [];
-  for (let k = 0; k < CAP_SIDES; k++) {
-    const v = capCorner(e, r, k);
+  for (let k = 0; k < n; k++) {
+    const v = capCorner(e, r, k, n);
     if (dot(sub(v, e), h1) > eps && dot(sub(v, e), h2) > eps) corners.push(v);
   }
   corners.sort((a, b) => turn(a) - turn(b));
-  const pts = [from, capExit(e, r, from), ...corners, capExit(e, r, to), to];
+  const pts = [from, capExit(e, r, from, n), ...corners, capExit(e, r, to, n), to];
   // the crossings fall on the end points or the corners where those lie on the polygon
   const near = (a: P2, b: P2) => Math.hypot(a[0] - b[0], a[1] - b[1]) <= eps;
   const out: P2[] = [from];
@@ -105,9 +119,10 @@ const crossing = (a0: P2, a1: P2, b0: P2, b1: P2): P2 | undefined => {
  * than SHARP_TURN_COS is not mitred (a spike): each segment keeps its full width up to the vertex,
  * and a disc round it fills the outer wedge. Each end is capped round, mitred onto the way that
  * continues it, or square (`ends`): OSM splits roads and rivers into ways that meet at an angle, and
- * square ends left a wedge open outside every such bend.
+ * square ends left a wedge open outside every such bend. The caps and discs have CAP_SIDES sides, or
+ * with `capTol` (metres) as few as keep them within it of the circle (capSides).
  */
-export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, latticePerMetre: number): RibbonGeom {
+export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, latticePerMetre: number, capTol?: number): RibbonGeom {
   const halfAt = (i: number) => (typeof half === 'number' ? half : half[i]);
   // each vertex's edge points as the end of the segment before it (in) and the start of the one
   // after it (out): the same mitred point at a bend, the two segments' own at a sharp turn
@@ -156,9 +171,9 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
   ];
   for (const [cap, e, seg, h] of caps) {
     if (!cap) continue;
-    const r = h * latticePerMetre;
-    for (let k = 0; k < CAP_SIDES; k++) {
-      const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
+    const r = h * latticePerMetre, n = capSides(h, capTol);
+    for (let k = 0; k < n; k++) {
+      const a0 = (k / n) * 2 * Math.PI, a1 = ((k + 1) / n) * 2 * Math.PI;
       tris.push(e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]);
       triSeg.push(seg);
     }
@@ -177,7 +192,7 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
       // the left side is the outer one where the centre line turns right (towards the right side)
       const dIn = dirOf(j - 1), dOut = dirOf(j);
       if ((cross(dIn, dOut) < 0) === left || cross(dIn, dOut) === 0) {
-        line.push(...capArc(c[j], halfAt(j) * latticePerMetre, ins[j], outs[j], dIn, [-dOut[0], -dOut[1]]).slice(1));
+        line.push(...capArc(c[j], halfAt(j) * latticePerMetre, ins[j], outs[j], dIn, [-dOut[0], -dOut[1]], capSides(halfAt(j), capTol)).slice(1));
         continue;
       }
       const p = crossing(line[line.length - 2], ins[j], outs[j], ins[j + 1]);
@@ -195,16 +210,20 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
     const v = sub(r, l), len = Math.hypot(v[0], v[1]) || 1;
     let h: P2 = [-v[1] / len, v[0] / len];
     if (dot(h, inward) > 0) h = [-h[0], -h[1]];
-    return capArc(c[i], halfAt(i) * latticePerMetre, l, r, h, h);
+    return capArc(c[i], halfAt(i) * latticePerMetre, l, r, h, h, capSides(halfAt(i), capTol));
   };
   outline.push(end(0, outL[0], outR[0], sub(c[1], c[0])), end(n - 1, inL[n - 1], inR[n - 1], sub(c[n - 2], c[n - 1])));
 
-  const cuts: P2[][] = [];
+  const cuts: P2[][] = [], cutAt: number[] = [];
   for (let i = 1; i < n - 1; i++) {
     cuts.push([inL[i], inR[i]]);
-    if (!same(inL[i], outL[i]) || !same(inR[i], outR[i])) cuts.push([outL[i], outR[i]]);
+    cutAt.push(i);
+    if (!same(inL[i], outL[i]) || !same(inR[i], outR[i])) {
+      cuts.push([outL[i], outR[i]]);
+      cutAt.push(i);
+    }
   }
-  return { tris, triSeg, outline, cuts };
+  return { tris, triSeg, outline, cuts, cutAt };
 }
 
 /** where roads meet: how their ribbons end, shift onto a fork and stop their paint */
@@ -411,10 +430,11 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
 /**
  * A painted road (WORLD_FS roadMarkAt) `half` metres wide each side, with paint `marks` (the
  * ROAD_MARK code): its centre line, half widths and per segment vertex attributes, nothing where it
- * is shorter than a millimetre. Where the way that continues it is narrower (a lane fewer: the
- * speed-change lanes at ramps), this one narrows to its width at the shared node, linearly over
- * ROAD_TAPER_M (at most half its length): the dropped lane closes on the right, the lines measured
- * from the left edge stay put. Vertex attributes:
+ * is shorter than a millimetre; `breaks` the vertices where the paint is not linear across (u turns
+ * at the middle, the width bends where a taper begins or ends). Where the way that continues it is
+ * narrower (a lane fewer: the speed-change lanes at ramps), this one narrows to its width at the
+ * shared node, linearly over ROAD_TAPER_M (at most half its length): the dropped lane closes on the
+ * right, the lines measured from the left edge stay put. Vertex attributes:
  *   u   ROAD_U_BASE + metres from the start in the first half, -(ROAD_U_BASE + metres from the end)
  *       in the second (a vertex at the middle, so no triangle spans both)
  *   v   metres from the left edge (in the driving direction of a one-way road)
@@ -422,12 +442,12 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
  *   edge.y  full width / 0.25 m + (start narrowing / 0.5 m) · 1024 + (end narrowing / 0.5 m) · 32768
  *   edge.z  the ROAD_MARK code + (start gap / 0.5 m) << 7 + (end gap / 0.5 m) << 13
  */
-export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork): { c: P2[]; half: number[]; segs: VertexAttr[] } {
+export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork): { c: P2[]; half: number[]; segs: VertexAttr[]; breaks: number[] } {
   const q = (v: number, step: number, max: number) => Math.max(0, Math.min(max, Math.round(v / step)));
   const wq = q(half * 2, 0.25, 1023), width = wq * 0.25;
   const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
   const length = lens.reduce((a, b) => a + b, 0);
-  if (length < 1e-3) return { c: [], half: [], segs: [] };
+  if (length < 1e-3) return { c: [], half: [], segs: [], breaks: [] };
   const first = line.points[0], last = line.points[line.points.length - 1];
   const narrow = (at: LonLat) => {
     const w = net.continuationWidth(line, at);
@@ -474,7 +494,8 @@ export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, ma
       return [u, across + widthAt(d0) / 2, ex, ey, ez];
     });
   }
-  return { c: pts.map((p) => p.c), half: pts.map((p) => widthAt(p.d) / 2), segs };
+  const breaks = pts.flatMap((p, i) => (cuts.some((d) => Math.abs(p.d - d) <= 1e-3) ? [i] : []));
+  return { c: pts.map((p) => p.c), half: pts.map((p) => widthAt(p.d) / 2), segs, breaks };
 }
 
 /** a railway track: each segment's vertices carry u along the line (metres from its start) and v across it */
