@@ -17,7 +17,7 @@ import type { Pt } from './contours';
 import type { LonLat, OsmLine } from './osm-types';
 import { EARTH_R, mercatorYToLat, type Tile } from './geodesy';
 import { ROAD_WINDOW_M, roadWindow } from './road-heights';
-import { NET_STEP_M, type RoadNet } from './road-net';
+import { NET_STEP_M, type NetWay, type RoadNet } from './road-net';
 import { classifyLine } from './way-styles';
 
 /** the roads of a tile with the height of each network sample: H and the lift */
@@ -31,6 +31,15 @@ export interface RoadSurface {
 export interface RoadPull {
   /** how far the ground at lattice point (x, y) is pulled to the roads: 1 on a bed, 0 beyond every band */
   weight(x: number, y: number): number;
+  /**
+   * the ways: the network's, then (covered, with the raw DEM) each low stretch of its bridges as a
+   * way of its own (its `line` the bridge's): beds' and banks' `way` index this
+   */
+  ways: NetWay[];
+  /** covered, with the raw DEM: per network bridge (its index) its lifted stretches, metres along it (the network's) */
+  decks: Map<number, Array<[number, number]>>;
+  /** covered: whether lattice point (x, y) is on a road's bank (BANK_M from its cover's edge into a river's water): its faces are ground */
+  bank(x: number, y: number): boolean;
   /** the ground there, given the base relief's height (as if the ways in `skip` were not there) */
   height(x: number, y: number, base: number, skip?: ReadonlySet<number>): number;
   /** the bed outline of each road inside the tile (lattice), the senior first; cut out of more senior beds */
@@ -83,17 +92,24 @@ const MITRE_MAX = 4;
  */
 export const ROAD_BED_REACH_M = BED_MARGIN_M + BED_PLAN_TOL_M + 0.05;
 /**
- * a river's bed as it holds the water: a hair beyond its edge, so the vertices of its cover's edge
- * (on that edge, thinned by 2 cm) take the water's level, not the bank's beyond it (else a water face
- * ran from the water up to a vertex on its edge at the ground's height)
+ * a river's bed as it holds the water: a little beyond its edge, so the vertices of its cover's edge
+ * take the water's level, not the bank's beyond it (else a water face ran from the water up to a
+ * vertex on its edge at the ground's height): that edge is thinned by 2 cm, its vertices snap by 3
+ * cm, and they lay up to 15 cm off at 14/9517/6397
  */
-const WATER_BED_REACH_M = 0.05;
+const WATER_BED_REACH_M = 0.2;
 /**
  * a way's bed stops this far past its end at a bridge or a tunnel, metres: the vertices on its
  * cover's square end there take its height, not what lies beyond (a culvert's portal)
  */
 const END_SLACK_M = 0.05;
-/** a road's bank: its water row this far beyond its bed's reach, metres ... */
+/**
+ * covered (the roads' covers' outer edges are their beds' edges): a road's bed reaches this far past
+ * that edge where a river's water lies beyond it, metres: the vertices of the cover's edge (thinned
+ * by 2 cm) take the road's height, and the bank falls from there
+ */
+export const ROAD_EDGE_M = 0.05;
+/** a road's bank: its water row this far beyond its bed's reach (covered: its cover's edge), metres ... */
 export const BANK_M = 0.3;
 /** ... its road row this far inside it */
 const BANK_IN_M = 0.05;
@@ -129,51 +145,32 @@ const DECK_EDGE_M = 0.01;
 const DECK_LOW_MIN_M = 1;
 
 const pulls = new WeakMap<RoadSurface, Map<string, RoadPull>>();
-/** the pull of a tile's roads on its lattice, built once: the cover, the surface and the mesh share it */
-export function roadPullOf(tile: Tile, grid: number, roads: RoadSurface): RoadPull {
-  const key = `${tile.z}/${tile.x}/${tile.y}/${grid}`;
+/**
+ * The pull of a tile's roads on its lattice, built once: the cover, the surface and the mesh share
+ * it; `covered` with the roads' covers in the surface (buildRoadPull)
+ */
+export function roadPullOf(tile: Tile, grid: number, roads: RoadSurface, covered = false): RoadPull {
+  const key = `${tile.z}/${tile.x}/${tile.y}/${grid}/${covered}`;
   let byTile = pulls.get(roads);
   if (!byTile) pulls.set(roads, (byTile = new Map()));
   let pull = byTile.get(key);
-  if (!pull) byTile.set(key, (pull = buildRoadPull(tile, grid, roads)));
+  if (!pull) byTile.set(key, (pull = buildRoadPull(tile, grid, roads, covered)));
   return pull;
 }
 
 /**
- * The lifted stretches of each network bridge with its heights (and the raw DEM): where its deck
- * lies DECK_CLEAR_M or more over the pulled ground (on the raw DEM along it) under its centre line
- * and both its edges, its approaches left out; metres along its points in `enu` (as ground-cover
- * measures a way), probed every DECK_PROBE_M and each end found to DECK_EDGE_M. Elsewhere it is a
- * cover like any way: a deck level with the bank roads over a canal's channel (14/9517/6397) drew
- * its asphalt in the water faces at its own height. Under one edge only, the deck lay a hair over the
- * water there; so the cover runs on until the deck clears its whole width (the asphalt follows the
- * bank down at a corner). Off the tile and its margin, where the pull sees no roads, a bridge is
- * lifted as without this. A bridge missing here is lifted whole (no DEM: tests' roads).
+ * The lifted stretches of each network bridge with its heights and the raw DEM (the covered pull's
+ * `decks`), metres along its points in `enu` (as ground-cover measures a way). Elsewhere a bridge is
+ * a cover like any way: a deck level with the bank roads over a canal's channel (14/9517/6397) drew
+ * its asphalt in the water faces at its own height. A bridge missing here is lifted whole (no DEM:
+ * tests' roads).
  */
 export function bridgeDecks(tile: Tile, grid: number, roads: RoadSurface, enu: (p: LonLat) => [number, number]): Map<OsmLine, Array<[number, number]>> {
   const out = new Map<OsmLine, Array<[number, number]>>();
-  const { net, z, dem } = roads;
-  if (!dem || !net.ways.some((w) => w.bridge)) return out;
-  const pull = roadPullOf(tile, grid, roads), n = 2 ** tile.z, cellM = (2 * Math.PI * EARTH_R) / n / grid;
-  const lattice = (lon: number, lat: number): [number, number] => {
-    const sin = Math.sin((lat * Math.PI) / 180);
-    return [(((lon + 180) / 360) * n - tile.x) * grid, ((0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * n - tile.y) * grid];
-  };
-  for (const w of net.ways) {
-    if (!w.bridge || w.count < 2) continue;
-    // its approaches (the ways of its class at its ends): the ground under it as if they were not
-    // there (their beds stop square at its ends, under the deck's edge where it turns off them)
-    const approaches = new Set<number>();
-    for (const e of [w.first, w.first + w.count - 1]) {
-      for (const [o, m] of net.next[e]) {
-        const a = net.samples[o].way;
-        if (m === 0 && !net.ways[a].bridge && net.ways[a].line.tags.highway === w.line.tags.highway) approaches.add(a);
-      }
-    }
-    let finite = true;
-    for (let i = w.first; i < w.first + w.count; i++) if (!Number.isFinite(z[i]) || !Number.isFinite(dem[i])) finite = false;
-    if (!finite) continue;
-    const pts = w.line.points;
+  const { net } = roads;
+  if (!roads.dem || !net.ways.some((w) => w.bridge)) return out;
+  for (const [wi, runs] of roadPullOf(tile, grid, roads, true).decks) {
+    const w = net.ways[wi], pts = w.line.points;
     // metres along its points in ENU, and the network's metres at each point (its samples there)
     const along = [0], at = [0];
     let k = w.first;
@@ -184,75 +181,28 @@ export function bridgeDecks(tile: Tile, grid: number, roads: RoadSurface, enu: (
         do k++;
         while (k + 1 < w.first + w.count && (net.samples[k].lon !== pts[i][0] || net.samples[k].lat !== pts[i][1]));
       }
-      at.push(net.samples[k].d);
+      at.push(net.samples[k].d - net.samples[w.first].d);
     }
-    const len = along[along.length - 1];
-    /** the network's metres along it, d metres along its points; and where that is */
-    const where = (d: number): { nd: number; lon: number; lat: number; i: number } => {
+    const enuAt = (nd: number): number => {
       let i = 0;
-      while (i + 2 < along.length && along[i + 1] < d) i++;
-      const t = along[i + 1] > along[i] ? Math.max(0, Math.min(1, (d - along[i]) / (along[i + 1] - along[i]))) : 0;
-      return { nd: at[i] + (at[i + 1] - at[i]) * t, lon: pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, lat: pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t, i };
+      while (i + 2 < at.length && at[i + 1] < nd) i++;
+      const t = at[i + 1] > at[i] ? Math.max(0, Math.min(1, (nd - at[i]) / (at[i + 1] - at[i]))) : 0;
+      return along[i] + (along[i + 1] - along[i]) * t;
     };
-    /** a sample array at the network's metres nd along it */
-    const value = (a: ArrayLike<number>, nd: number): number => {
-      let i = w.first;
-      const last = w.first + w.count - 1;
-      while (i < last && net.samples[i + 1].d < nd) i++;
-      if (i >= last) return a[last];
-      const s0 = net.samples[i].d, s1 = net.samples[i + 1].d, t = s1 > s0 ? Math.max(0, Math.min(1, (nd - s0) / (s1 - s0))) : 0;
-      return a[i] + (a[i + 1] - a[i]) * t;
-    };
-    /** the deck's half width (its carriageway's: a lifted ribbon has no shoulders), lattice cells */
-    const half = (classifyLine(w.line.tags)?.width ?? 2 * w.half) / 2 / (cellM * Math.cos((net.samples[w.first].lat * Math.PI) / 180));
-    /** lifted: the deck DECK_CLEAR_M or more over the ground on its centre line and under both its edges */
-    const lifted = (d: number): boolean => {
-      const { nd, lon, lat, i } = where(d), [x, y] = lattice(lon, lat);
-      // off the tile and its margin the pull sees no roads
-      if (x < -1 || x > grid + 1 || y < -1 || y > grid + 1) return true;
-      const [ax, ay] = lattice(pts[i][0], pts[i][1]), [bx, by] = lattice(pts[i + 1][0], pts[i + 1][1]), l = Math.hypot(bx - ax, by - ay) || 1;
-      const nx = -(by - ay) / l, ny = (bx - ax) / l, deck = value(z, nd), base = value(dem, nd);
-      return [0, 1, -1].every((k) => deck - pull.height(x + nx * half * k, y + ny * half * k, base, approaches) >= DECK_CLEAR_M);
-    };
-    const runs: Array<[number, number]> = [];
-    const steps = Math.max(1, Math.ceil(len / DECK_PROBE_M));
-    let prev = 0, was = lifted(0), start = was ? 0 : NaN;
-    for (let s = 1; s <= steps; s++) {
-      const d = (len * s) / steps, is = lifted(d);
-      if (is !== was) {
-        let lo = prev, hi = d;
-        while (hi - lo > DECK_EDGE_M) {
-          const m = (lo + hi) / 2;
-          if (lifted(m) === was) lo = m;
-          else hi = m;
-        }
-        // each run to the lifted side of its end
-        if (was) runs.push([start, lo]);
-        else start = hi;
-      }
-      prev = d;
-      was = is;
-    }
-    if (was) runs.push([start, len]);
-    // a low stretch shorter than DECK_LOW_MIN_M goes with the deck (its end over its approach's bed's end)
-    const merged: Array<[number, number]> = [];
-    for (const r of runs) {
-      const last = merged[merged.length - 1];
-      if (last && r[0] - last[1] < DECK_LOW_MIN_M) last[1] = r[1];
-      else merged.push([...r]);
-    }
-    if (merged.length && merged[0][0] < DECK_LOW_MIN_M) merged[0][0] = 0;
-    if (merged.length && len - merged[merged.length - 1][1] < DECK_LOW_MIN_M) merged[merged.length - 1][1] = len;
-    out.set(w.line, merged);
+    out.set(w.line, runs.map(([a, b]): [number, number] => [enuAt(a), enuAt(b)]));
   }
   return out;
 }
 
-export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): RoadPull {
-  const { net, z } = roads;
+export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, covered = false): RoadPull {
+  const { net } = roads;
+  /** the ways: the network's, and after them the low stretches of its bridges (covered: liftDecks) */
+  const ways: NetWay[] = [...net.ways];
+  /** each sample's height (the low stretches' after the network's) */
+  let z: Float64Array = roads.z;
   const n = 2 ** tile.z;
   // lattice coordinates of every sample
-  const sx = new Float64Array(net.samples.length), sy = new Float64Array(net.samples.length);
+  let sx = new Float64Array(net.samples.length), sy = new Float64Array(net.samples.length);
   net.samples.forEach((s, k) => {
     sx[k] = (((s.lon + 180) / 360) * n - tile.x) * grid;
     const sin = Math.sin((s.lat * Math.PI) / 180);
@@ -270,7 +220,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
 
   // the stretches that pull: not bridges or tunnels, both ends with a height
   const segs: Seg[] = [];
-  net.ways.forEach((w, wi) => {
+  ways.forEach((w, wi) => {
     if (w.bridge || w.tunnel) return;
     for (let k = w.first; k + 1 < w.first + w.count; k++) {
       if (Number.isFinite(z[k]) && Number.isFinite(z[k + 1])) segs.push({ i: k, j: k + 1, way: wi });
@@ -282,9 +232,10 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   const cells = new Map<number, number[]>();
   const ckey = (cx: number, cy: number) => (cx + 4096) * 8192 + (cy + 4096);
   const maxScale = Math.max(bandScale(0), bandScale(grid));
-  for (let s = 0; s < segs.length; s++) {
+  /** stretch s into the cells its reach touches */
+  const register = (s: number): void => {
     const { i, j, way } = segs[s];
-    const w = net.ways[way];
+    const w = ways[way];
     const r = ((w.half + w.band * maxScale) / Math.min(mpc(0), mpc(grid))) * 1.01;
     const x0 = Math.floor((Math.min(sx[i], sx[j]) - r) / CELL), x1 = Math.floor((Math.max(sx[i], sx[j]) + r) / CELL);
     const y0 = Math.floor((Math.min(sy[i], sy[j]) - r) / CELL), y1 = Math.floor((Math.max(sy[i], sy[j]) + r) / CELL);
@@ -298,7 +249,8 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         else cells.set(k, [s]);
       }
     }
-  }
+  };
+  for (let s = 0; s < segs.length; s++) register(s);
   const near = (x: number, y: number): number[] => cells.get(ckey(Math.floor(x / CELL), Math.floor(y / CELL))) ?? [];
   /** the rivers' stretches by the (quarter) cells their beds reach into (and a metre more): where a road's bank may be */
   const WET_CELL = 0.25;
@@ -306,7 +258,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   /** the cells a road's bank by a river may lie in (its bed, a road's half width and its rows further) */
   const damp = new Set<number>();
   segs.forEach(({ i, j, way }, q) => {
-    const w = net.ways[way];
+    const w = ways[way];
     if (!w.water) return;
     const rd = ((w.half + DAMP_M) / Math.min(mpc(0), mpc(grid))) * 1.01;
     for (let cx = Math.floor((Math.min(sx[i], sx[j]) - rd) / CELL); cx <= Math.floor((Math.max(sx[i], sx[j]) + rd) / CELL); cx++) {
@@ -324,11 +276,16 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
 
   // the stretches' geometry, flat: start, direction, squared length, length (lattice cells) and
   // the box their reach can touch
-  const nSeg = segs.length;
-  const gAx = new Float64Array(nSeg), gAy = new Float64Array(nSeg), gDx = new Float64Array(nSeg), gDy = new Float64Array(nSeg);
-  const gL2 = new Float64Array(nSeg), gLen = new Float64Array(nSeg);
-  const gX0 = new Float64Array(nSeg), gX1 = new Float64Array(nSeg), gY0 = new Float64Array(nSeg), gY1 = new Float64Array(nSeg);
-  {
+  let nSeg = 0;
+  let gAx = new Float64Array(0), gAy = gAx, gDx = gAx, gDy = gAx, gL2 = gAx, gLen = gAx, gX0 = gAx, gX1 = gAx, gY0 = gAx, gY1 = gAx;
+  /** the stretch starting at each sample, −1 for none */
+  let segOf = new Int32Array(0);
+  /** (again, once the low stretches are in) */
+  const geometry = (): void => {
+    nSeg = segs.length;
+    gAx = new Float64Array(nSeg); gAy = new Float64Array(nSeg); gDx = new Float64Array(nSeg); gDy = new Float64Array(nSeg);
+    gL2 = new Float64Array(nSeg); gLen = new Float64Array(nSeg);
+    gX0 = new Float64Array(nSeg); gX1 = new Float64Array(nSeg); gY0 = new Float64Array(nSeg); gY1 = new Float64Array(nSeg);
     const cellsPerM = 1 / Math.min(mpc(0), mpc(grid));
     for (let q = 0; q < nSeg; q++) {
       const { i, j, way } = segs[q];
@@ -338,16 +295,16 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       gDy[q] = sy[j] - sy[i];
       gL2[q] = gDx[q] * gDx[q] + gDy[q] * gDy[q];
       gLen[q] = Math.sqrt(gL2[q]);
-      const w = net.ways[way], r = (w.half + BED_GRACE_M + w.band * maxScale) * cellsPerM * 1.01;
+      const w = ways[way], r = (w.half + BED_GRACE_M + w.band * maxScale) * cellsPerM * 1.01;
       gX0[q] = Math.min(sx[i], sx[j]) - r;
       gX1[q] = Math.max(sx[i], sx[j]) + r;
       gY0[q] = Math.min(sy[i], sy[j]) - r;
       gY1[q] = Math.max(sy[i], sy[j]) + r;
     }
-  }
-  /** the stretch starting at each sample, −1 for none */
-  const segOf = new Int32Array(net.samples.length).fill(-1);
-  segs.forEach((g, q) => (segOf[g.i] = q));
+    segOf = new Int32Array(sx.length).fill(-1);
+    segs.forEach((g, q) => (segOf[g.i] = q));
+  };
+  geometry();
   /** the last projection: distance (lattice cells), how far it was clamped (cells), the unclamped fraction */
   let pDist = 0, pOver = 0, pRaw = 0;
   /** project (x, y) on stretch q (into pDist, pOver, pRaw) */
@@ -363,7 +320,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   /** the box each river's stretch's bed reaches (lattice; a road's: empty) */
   const gX0w = new Float64Array(nSeg).fill(Infinity), gX1w = new Float64Array(nSeg).fill(-Infinity), gY0w = new Float64Array(nSeg).fill(Infinity), gY1w = new Float64Array(nSeg).fill(-Infinity);
   for (let q = 0; q < nSeg; q++) {
-    const { i, j, way } = segs[q], w = net.ways[way];
+    const { i, j, way } = segs[q], w = ways[way];
     if (!w.water) continue;
     const r = ((w.half + WATER_BED_REACH_M) / Math.min(mpc(0), mpc(grid))) * 1.01;
     gX0w[q] = Math.min(sx[i], sx[j]) - r;
@@ -380,7 +337,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     if (!list) {
       const r = 1 / Math.min(mpc(0), mpc(grid));
       list = near(x, y).filter((q) => {
-        const w = net.ways[segs[q].way];
+        const w = ways[segs[q].way];
         if (w.water) return false;
         const pad = (w.half + ROAD_BED_REACH_M) * r * 1.01;
         return !(Math.max(gAx[q], gAx[q] + gDx[q]) + pad < cx * WET_CELL || Math.min(gAx[q], gAx[q] + gDx[q]) - pad > (cx + 1) * WET_CELL
@@ -391,7 +348,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     for (const q of list) {
       if (reachOf(segs[q].way, x, y, m) < 0) continue;
       project(q, x, y);
-      if (pDist * m <= net.ways[segs[q].way].half + ROAD_BED_REACH_M) return true;
+      if (pDist * m <= ways[segs[q].way].half + (covered ? ROAD_EDGE_M : ROAD_BED_REACH_M)) return true;
     }
     return false;
   };
@@ -413,20 +370,20 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   const outOfReach = (q: number, x: number, y: number): boolean => x < gX0[q] || x > gX1[q] || y < gY0[q] || y > gY1[q];
   // seniority: priority, then the order in the network (only the outlines' cutting uses the order;
   // heights never do: two tiles may list the ways differently)
-  const senior = (a: number, b: number) => net.ways[a].prio > net.ways[b].prio || (net.ways[a].prio === net.ways[b].prio && a < b);
+  const senior = (a: number, b: number) => ways[a].prio > ways[b].prio || (ways[a].prio === ways[b].prio && a < b);
 
   // A way's end at a bridge or a tunnel (a sample shared with one): nothing of it reaches past that
   // end, into the bridge's span — not its bed, not its band (faded out over STRUCTURE_FADE_M before
   // the end): the ground under a bridge is left as it was, and the road or river under it with it.
-  const atStructure = new Uint8Array(net.samples.length);
+  let atStructure = new Uint8Array(net.samples.length);
   net.samples.forEach((_, k) => {
     for (const [o, m] of net.next[k]) {
-      const w = net.ways[net.samples[o].way];
+      const w = ways[net.samples[o].way];
       if (m === 0 && (w.bridge || w.tunnel)) atStructure[k] = 1;
     }
   });
   /** per way: its ends at a structure — the end point and the unit direction out of the way there */
-  const structureEnds: Array<Array<[number, number, number, number]>> = net.ways.map((w) => {
+  const endsOf = (w: NetWay): Array<[number, number, number, number]> => {
     const ends: Array<[number, number, number, number]> = [];
     if (w.bridge || w.tunnel || w.count < 2) return ends;
     for (const [e, o] of [[w.first, w.first + 1], [w.first + w.count - 1, w.first + w.count - 2]]) {
@@ -435,15 +392,16 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       if (l > 0) ends.push([sx[e], sy[e], dx / l, dy / l]);
     }
     return ends;
-  });
+  };
+  const structureEnds: Array<Array<[number, number, number, number]>> = ways.map(endsOf);
   /** 1 well inside a way's reach, falling to 0 at an end at a structure; −1 past it (nothing there) */
-  const reachOf = (way: number, x: number, y: number, m: number): number => {
+  const reachOf = (way: number, x: number, y: number, m: number, slack = END_SLACK_M): number => {
     const ends = structureEnds[way];
     if (!ends.length) return 1;
     let f = 1;
     for (const [ex, ey, dx, dy] of ends) {
       const past = ((x - ex) * dx + (y - ey) * dy) * m;
-      if (past > END_SLACK_M) return -1;
+      if (past > slack) return -1;
       f = Math.min(f, smoothStep(-past / STRUCTURE_FADE_M));
     }
     return f;
@@ -471,12 +429,12 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     const m = mpc(y), scale = bandScale(y);
     if (scale === 0) return { w: 0, bed: false, r: NaN };
     const list = skip?.size ? near(x, y).filter((si) => !skip.has(segs[si].way)) : near(x, y);
-    let topRoad = -Infinity, topWater = -Infinity;
+    let topRoad = -Infinity, topWater = -Infinity, topMargin = -Infinity;
     let wR = 0, scR = 0, sczR = 0, wW = 0, scW = 0, sczW = 0;
     for (const si of list) {
       if (outOfReach(si, x, y)) continue;
       const s = segs[si];
-      const way = net.ways[s.way];
+      const way = ways[s.way];
       const reach = reachOf(s.way, x, y, m);
       if (reach < 0) continue;
       project(si, x, y);
@@ -485,6 +443,8 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       // does not take the outline down to the water
       if (d <= way.half + (way.water ? WATER_BED_REACH_M : ROAD_BED_REACH_M)) {
         if (way.water) topWater = Math.max(topWater, way.prio);
+        // covered: past its cover's edge (ROAD_EDGE_M) a road's bed gives way to a river's water
+        else if (covered && d > way.half + ROAD_EDGE_M) topMargin = Math.max(topMargin, way.prio);
         else topRoad = Math.max(topRoad, way.prio);
         continue;
       }
@@ -503,6 +463,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         sczR += c * zz;
       }
     }
+    if (topRoad === -Infinity && topWater === -Infinity) topRoad = topMargin;
     const top = topRoad > -Infinity ? topRoad : topWater;
     if (top === -Infinity) {
       if (wR > 0) return { w: wR, bed: false, r: sczR / scR };
@@ -516,7 +477,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     for (const si of list) {
       if (outOfReach(si, x, y)) continue;
       const s = segs[si];
-      const way = net.ways[s.way];
+      const way = ways[s.way];
       if (way.prio !== top || reachOf(s.way, x, y, m) < 0) continue;
       project(si, x, y);
       const d = pDist * m;
@@ -534,6 +495,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     if (e.bed) return e.r;
     return e.w > 0 ? base + e.w * (e.r - base) : base;
   };
+  /** per network bridge (its way's index): its lifted stretches, metres along it (the network's) */
+  const decks = new Map<number, Array<[number, number]>>();
+  if (covered && roads.dem) liftDecks(roads.dem);
   const borderPoints: Pt[] = [];
   /** each sample's latitude and the band scale there */
   const latAt = Float64Array.from(sy, (y) => latOf(y));
@@ -552,7 +516,26 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   const rowPoints: Pt[] = [];
   const banks: Array<{ way: number; lines: Pt[][] }> = [];
   const beds = bedOutlines();
-  return { weight, height, beds, banks, borderPoints, bandPoints };
+  /**
+   * covered: on a river's bed within BANK_M (and a hair) of a road's cover's edge or square end (or
+   * between that edge, a round end's chords, and the bed's: ROAD_EDGE_M)
+   */
+  const bank = (x: number, y: number): boolean => {
+    if (!covered) return false;
+    const m = mpc(y), far = BANK_M + 0.02, list = near(x, y);
+    let road = false, water = false;
+    for (const q of list) {
+      if (outOfReach(q, x, y)) continue;
+      const w = ways[segs[q].way];
+      if (reachOf(segs[q].way, x, y, m, w.water ? END_SLACK_M : far) < 0) continue;
+      project(q, x, y);
+      if (w.water) water ||= pDist * m <= w.half + WATER_BED_REACH_M;
+      else road ||= pDist * m <= w.half + far;
+      if (road && water) return true;
+    }
+    return false;
+  };
+  return { weight, height, beds, banks, borderPoints, bandPoints, ways, decks, bank };
 
   /** where the polyline crosses the tile border: shared points (the neighbour has them too) */
   function crossBorder(pts: Pt[]): void {
@@ -640,7 +623,8 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
    * the rungs past the water, so the rows cross what bounds it there (its edge, another road's rows).
    */
   function bankLines(run: number[], half: number, normals: Array<Array<[number, number]>>): Pt[][] {
-    const rIn = half + ROAD_BED_REACH_M - BANK_IN_M, rOut = half + ROAD_BED_REACH_M + BANK_M;
+    // covered, the road's row is its cover's edge (the bed's): the water row BANK_M beyond it
+    const rIn = half + ROAD_BED_REACH_M - BANK_IN_M, rOut = half + (covered ? 0 : ROAD_BED_REACH_M) + BANK_M;
     // the samples a river's bed comes near (within the water row's reach and half the samples' spacing):
     // none, no bank; elsewhere no stretch of the rows is probed
     const close = new Set<number>();
@@ -675,7 +659,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         const l = Math.hypot(sx[e] - sx[o], sy[e] - sy[o]), ux = (sx[e] - sx[o]) / l, uy = (sy[e] - sy[o]) / l;
         if (atStructure[e]) {
           // square: the bed stops on the line across the end (reachOf), the road row a hair short of it
-          const back = cells(e, BANK_IN_M), fore = cells(e, END_SLACK_M + BANK_M);
+          const back = cells(e, BANK_IN_M), fore = cells(e, covered ? BANK_M : END_SLACK_M + BANK_M);
           const onto = (r: Rung) => {
             r.a = { x: r.a.x - ux * back, y: r.a.y - uy * back };
             r.b = { x: r.b.x + ux * fore, y: r.b.y + uy * fore };
@@ -711,7 +695,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         for (const g of wet.get(c) ?? []) {
           // the box its bed reaches first
           if (Math.max(p.x, q.x) < gX0w[g] || Math.min(p.x, q.x) > gX1w[g] || Math.max(p.y, q.y) < gY0w[g] || Math.min(p.y, q.y) > gY1w[g]) continue;
-          if (!out.includes(g) && segDist(p, q, g) * m <= net.ways[segs[g].way].half + WATER_BED_REACH_M) out.push(g);
+          if (!out.includes(g) && segDist(p, q, g) * m <= ways[segs[g].way].half + WATER_BED_REACH_M) out.push(g);
         }
       }
       return out;
@@ -722,11 +706,11 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       if (!near.length) return false;
       // probed every half the narrowest's width, BANK_PROBE_M at least: a stream narrower than the
       // rungs apart is crossed
-      const m = mpc(p.y), step = Math.max(BANK_PROBE_M, Math.min(...near.map((g) => net.ways[segs[g].way].half)));
+      const m = mpc(p.y), step = Math.max(BANK_PROBE_M, Math.min(...near.map((g) => ways[segs[g].way].half)));
       const n = Math.max(1, Math.ceil((Math.hypot(q.x - p.x, q.y - p.y) * m) / step));
       for (let j = 0; j <= n; j++) {
         const x = p.x + ((q.x - p.x) * j) / n, y = p.y + ((q.y - p.y) * j) / n;
-        if (near.some((g) => reachOf(segs[g].way, x, y, m) >= 0 && (project(g, x, y), pDist * m <= net.ways[segs[g].way].half + WATER_BED_REACH_M)) && !onRoadBed(x, y)) return true;
+        if (near.some((g) => reachOf(segs[g].way, x, y, m) >= 0 && (project(g, x, y), pDist * m <= ways[segs[g].way].half + WATER_BED_REACH_M)) && !onRoadBed(x, y)) return true;
       }
       return false;
     };
@@ -748,42 +732,70 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         pieces.push(piece);
       }
     }
+    // each row of each piece (covered: the water's alone, its cover's edge the road's) cut at the
+    // tile's square from the rows as laid, its crossings shared (the neighbour cuts the same rows
+    // there), then thinned
     const out: Pt[][] = [];
     for (const piece of pieces) {
-      const kept = thinBank(piece.filter((r, i) => i === 0 || r.a.x !== piece[i - 1].a.x || r.a.y !== piece[i - 1].a.y));
-      if (kept.length >= 2) out.push(kept.map((r) => r.a), kept.map((r) => r.b));
+      for (const row of covered ? [piece.map((r) => ({ ...r.b, k: r.k }))] : [piece.map((r) => ({ ...r.a, k: r.k })), piece.map((r) => ({ ...r.b, k: r.k }))]) {
+        for (const part of inTile(row)) {
+          const kept = thinRow(part);
+          if (kept.length >= 2) out.push(kept.map(({ x, y }) => ({ x, y })));
+        }
+      }
     }
     return out;
 
+    /** the pieces of a row inside the tile, cut where it crosses the tile's border (those points shared: borderPoints) */
+    function inTile(row: PtK[]): PtK[][] {
+      const parts: PtK[][] = [];
+      let cur: PtK[] = [];
+      for (let k = 1; k < row.length; k++) {
+        const a = row[k - 1], b = row[k];
+        if (a.x === b.x && a.y === b.y) continue;
+        const ts = [0, 1, ...squareCuts(a, b)].sort((p, q) => p - q);
+        for (let c = 1; c < ts.length; c++) {
+          if (ts[c] - ts[c - 1] < 1e-9) continue;
+          const p = { ...snapBorder(lerp(a, b, ts[c - 1]), grid), k: a.k }, q = { ...snapBorder(lerp(a, b, ts[c]), grid), k: ts[c] === 1 ? b.k : a.k };
+          const mx = (p.x + q.x) / 2, my = (p.y + q.y) / 2;
+          if (mx >= 0 && mx <= grid && my >= 0 && my <= grid) {
+            if (!cur.length) cur.push(p);
+            cur.push(q);
+            for (const r of [p, q]) if (r.x === 0 || r.x === grid || r.y === 0 || r.y === grid) borderPoints.push({ x: r.x, y: r.y });
+          } else if (cur.length) {
+            parts.push(cur);
+            cur = [];
+          }
+        }
+      }
+      if (cur.length) parts.push(cur);
+      return parts.filter((part) => part.length >= 2);
+    }
+
     /**
-     * Douglas–Peucker on a piece's rungs: a rung goes where both rows run straight through it to
+     * Douglas–Peucker on a row: a point goes where the row runs straight through it to
      * BANK_PLAN_TOL_M and the road's height along it is linear to BED_HEIGHT_TOL_M (no chord longer
-     * than BED_MAX_SEG_M): the rows keep the bank where the road and its bed bend
+     * than BED_MAX_SEG_M): the rows keep the bank where the road and its bed bend; the ends kept
      */
-    function thinBank(piece: Rung[]): Rung[] {
-      const keep = new Uint8Array(piece.length);
-      keep[0] = keep[piece.length - 1] = 1;
-      const stack: Array<[number, number]> = [[0, piece.length - 1]];
+    function thinRow(row: PtK[]): PtK[] {
+      const keep = new Uint8Array(row.length);
+      keep[0] = keep[row.length - 1] = 1;
+      const stack: Array<[number, number]> = [[0, row.length - 1]];
       while (stack.length) {
         const [i, j] = stack.pop()!;
         if (j - i < 2) continue;
-        const m = mpc((piece[i].a.y + piece[j].a.y) / 2);
+        const a = row[i], b = row[j], m = mpc((a.y + b.y) / 2), dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
         let worst = 0, at = -1;
-        const off = (p: Pt, a: Pt, b: Pt) => {
-          const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
-          const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
-          return { d: Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) * m, t };
-        };
         for (let k = i + 1; k < j; k++) {
-          const oa = off(piece[k].a, piece[i].a, piece[j].a), ob = off(piece[k].b, piece[i].b, piece[j].b);
-          const zk = z[piece[k].k], zi = z[piece[i].k], zj = z[piece[j].k];
-          const e = Math.max(oa.d / BANK_PLAN_TOL_M, ob.d / BANK_PLAN_TOL_M, Math.abs(zk - (zi + (zj - zi) * oa.t)) / BED_HEIGHT_TOL_M);
+          const p = row[k], t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+          const plan = (Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) * m) / BANK_PLAN_TOL_M;
+          const e = Math.max(plan, Math.abs(z[p.k] - (z[a.k] + (z[b.k] - z[a.k]) * t)) / BED_HEIGHT_TOL_M);
           if (e > worst) {
             worst = e;
             at = k;
           }
         }
-        if (worst <= 1 && Math.hypot(piece[j].a.x - piece[i].a.x, piece[j].a.y - piece[i].a.y) * m > BED_MAX_SEG_M) {
+        if (worst <= 1 && Math.sqrt(l2) * m > BED_MAX_SEG_M) {
           worst = 2;
           at = (i + j) >> 1;
         }
@@ -792,8 +804,136 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
           stack.push([i, at], [at, j]);
         }
       }
-      return piece.filter((_, k) => keep[k]);
+      return row.filter((_, k) => keep[k]);
     }
+  }
+
+  /**
+   * Each network bridge with its heights (and the raw DEM `dem`): its lifted stretches into `decks`,
+   * where its deck lies DECK_CLEAR_M or more over the pulled ground (on the raw DEM along it) under
+   * its centre line and both its edges, its approaches left out; probed every DECK_PROBE_M, each
+   * end found to DECK_EDGE_M, a low stretch under DECK_LOW_MIN_M with the deck. Off the tile and its
+   * margin, where the pull sees no roads, it is lifted. Its low stretches (a cover like any way:
+   * ground-cover) then pull as roads at the deck's height, square at their ends, after the network's
+   * ways: the asphalt there is the deck's height, the road outranks the water under it and the bank
+   * falls at its cover's edge (followed down the bank, the asphalt fell 2.6 m inside the deck's
+   * footprint at 14/9517/6397, and stepped where it met the lifted deck)
+   */
+  function liftDecks(dem: ArrayLike<number>): void {
+    const lows: Array<{ way: number; a: number; b: number }> = [];
+    const nWays = ways.length;
+    for (let wi = 0; wi < nWays; wi++) {
+      const w = ways[wi];
+      if (!w.bridge || w.tunnel || w.count < 2) continue;
+      const first = w.first, last = first + w.count - 1;
+      let finite = true;
+      for (let i = first; i <= last; i++) if (!Number.isFinite(z[i]) || !Number.isFinite(dem[i])) finite = false;
+      if (!finite) continue;
+      // its approaches (the ways of its class at its ends): the ground under it as if they were not
+      // there (their beds stop square at its ends, under the deck's edge where it turns off them)
+      const approaches = new Set<number>();
+      for (const e of [first, last]) {
+        for (const [o, m] of net.next[e]) {
+          const a = net.samples[o].way;
+          if (m === 0 && !ways[a].bridge && ways[a].line.tags.highway === w.line.tags.highway) approaches.add(a);
+        }
+      }
+      const len = net.samples[last].d - net.samples[first].d;
+      /** the carriageway's half width, metres (a lifted ribbon has no shoulders) */
+      const halfM = (classifyLine(w.line.tags)?.width ?? 2 * w.half) / 2;
+      const lifted = (d: number): boolean => {
+        const { i, t } = along(first, last, d);
+        const x = sx[i] + (sx[i + 1] - sx[i]) * t, y = sy[i] + (sy[i + 1] - sy[i]) * t;
+        if (x < -1 || x > grid + 1 || y < -1 || y > grid + 1) return true;
+        const dx = sx[i + 1] - sx[i], dy = sy[i + 1] - sy[i], l = Math.hypot(dx, dy) || 1, h = halfM / mpc(y);
+        const deck = z[i] + (z[i + 1] - z[i]) * t, base = dem[i] + (dem[i + 1] - dem[i]) * t;
+        return [0, 1, -1].every((k) => deck - height(x - (dy / l) * h * k, y + (dx / l) * h * k, base, approaches) >= DECK_CLEAR_M);
+      };
+      const runs: Array<[number, number]> = [];
+      const steps = Math.max(1, Math.ceil(len / DECK_PROBE_M));
+      let prev = 0, was = lifted(0), start = was ? 0 : NaN;
+      for (let k = 1; k <= steps; k++) {
+        const d = (len * k) / steps, is = lifted(d);
+        if (is !== was) {
+          let lo = prev, hi = d;
+          while (hi - lo > DECK_EDGE_M) {
+            const m = (lo + hi) / 2;
+            if (lifted(m) === was) lo = m;
+            else hi = m;
+          }
+          // each run to the lifted side of its end
+          if (was) runs.push([start, lo]);
+          else start = hi;
+        }
+        prev = d;
+        was = is;
+      }
+      if (was) runs.push([start, len]);
+      // a low stretch shorter than DECK_LOW_MIN_M goes with the deck (its end over its approach's bed's end)
+      const merged: Array<[number, number]> = [];
+      for (const r of runs) {
+        const prevRun = merged[merged.length - 1];
+        if (prevRun && r[0] - prevRun[1] < DECK_LOW_MIN_M) prevRun[1] = r[1];
+        else merged.push([...r]);
+      }
+      if (merged.length && merged[0][0] < DECK_LOW_MIN_M) merged[0][0] = 0;
+      if (merged.length && len - merged[merged.length - 1][1] < DECK_LOW_MIN_M) merged[merged.length - 1][1] = len;
+      decks.set(wi, merged);
+      // what they leave low
+      let at = 0;
+      for (const [a, b] of merged) {
+        if (a > at) lows.push({ way: wi, a: at, b: a });
+        at = b;
+      }
+      if (at < len) lows.push({ way: wi, a: at, b: len });
+    }
+    if (!lows.length) return;
+    // the low stretches as ways of their own, on samples of their own after the network's
+    const xs = Array.from(sx), ys = Array.from(sy), zs = Array.from(z), ends: number[] = [];
+    for (const { way, a, b } of lows) {
+      const w = ways[way], first = w.first, last = first + w.count - 1, d0 = net.samples[first].d;
+      const k0 = xs.length;
+      const put = (d: number) => {
+        const { i, t } = along(first, last, d);
+        xs.push(sx[i] + (sx[i + 1] - sx[i]) * t);
+        ys.push(sy[i] + (sy[i + 1] - sy[i]) * t);
+        zs.push(z[i] + (z[i + 1] - z[i]) * t);
+      };
+      put(a);
+      for (let i = first + 1; i < last; i++) if (net.samples[i].d - d0 > a + 1e-6 && net.samples[i].d - d0 < b - 1e-6) put(net.samples[i].d - d0);
+      put(b);
+      const v = ways.push({ ...w, bridge: false, first: k0, count: xs.length - k0 }) - 1;
+      ends.push(k0, xs.length - 1);
+      for (let k = k0; k + 1 < xs.length; k++) segs.push({ i: k, j: k + 1, way: v });
+    }
+    sx = Float64Array.from(xs);
+    sy = Float64Array.from(ys);
+    z = Float64Array.from(zs);
+    const old = atStructure;
+    atStructure = new Uint8Array(xs.length);
+    atStructure.set(old);
+    for (const k of ends) atStructure[k] = 1;
+    // their ends square: nothing of them past (reachOf)
+    for (let v = nWays; v < ways.length; v++) {
+      const w = ways[v], out: Array<[number, number, number, number]> = [];
+      for (const [e, o] of [[w.first, w.first + 1], [w.first + w.count - 1, w.first + w.count - 2]]) {
+        const dx = sx[e] - sx[o], dy = sy[e] - sy[o], l = Math.hypot(dx, dy);
+        if (l > 0) out.push([sx[e], sy[e], dx / l, dy / l]);
+      }
+      structureEnds.push(out);
+    }
+    const firstNew = nSeg;
+    geometry();
+    for (let q = firstNew; q < segs.length; q++) register(q);
+  }
+
+  /** the stretch of samples first..last d metres (the network's) along from first: its index and fraction */
+  function along(first: number, last: number, d: number): { i: number; t: number } {
+    const d0 = net.samples[first].d;
+    let i = first;
+    while (i + 1 < last && net.samples[i + 1].d - d0 < d) i++;
+    const s0 = net.samples[i].d - d0, s1 = net.samples[i + 1].d - d0;
+    return { i, t: s1 > s0 ? Math.max(0, Math.min(1, (d - s0) / (s1 - s0))) : 0 };
   }
 
   /** the band rows' points thinned to at most `limit` (closer than BAND_SPACING_M, more if need be), off every bed */
@@ -832,9 +972,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   function bedOutlines(): Array<{ way: number; edges: Pt[][] }> {
     const out: Array<{ way: number; edges: Pt[][] }> = [];
     if (bandScale(grid / 2) === 0) return out;
-    const order = net.ways.map((_, k) => k).filter((k) => !net.ways[k].bridge && !net.ways[k].tunnel);
+    const order = ways.map((_, k) => k).filter((k) => !ways[k].bridge && !ways[k].tunnel);
     order.sort((a, b) => (senior(a, b) ? -1 : senior(b, a) ? 1 : 0));
-    const rank = new Int32Array(net.ways.length).fill(-1);
+    const rank = new Int32Array(ways.length).fill(-1);
     order.forEach((w, k) => (rank[w] = k));
     // the outline segments laid so far (of more senior beds), by cell
     const laid: Array<[Pt, Pt]> = [];
@@ -854,7 +994,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       }
     };
     for (const wi of order) {
-      const way = net.ways[wi];
+      const way = ways[wi];
       const edges: Pt[][] = [];
       // runs of samples with a height
       let run: number[] = [];
@@ -903,7 +1043,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
           const s = segs[si], rs = rank[s.way];
           if (rs < 0 || rs >= r || outOfReach(si, x, y) || reachOf(s.way, x, y, m) < 0) continue;
           project(si, x, y);
-          if (pDist * m <= net.ways[s.way].half + BED_MARGIN_M + 0.05) return true;
+          if (pDist * m <= ways[s.way].half + BED_MARGIN_M + 0.05) return true;
         }
         return false;
       };
@@ -1003,7 +1143,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
 
     /** way wi's bed height at (x, y) near its sample k: the bed blend over its stretches round k */
     function ownHeight(wi: number, k: number, x: number, y: number): number {
-      const w = net.ways[wi], m = mpc(y);
+      const w = ways[wi], m = mpc(y);
       let kz = 0, kk = 0;
       for (let i = Math.max(w.first, k - 2); i < Math.min(w.first + w.count - 1, k + 2); i++) {
         const q = segOf[i];

@@ -7,7 +7,9 @@ import { describe, expect, it } from 'vitest';
 import { coastlineWays } from '../src/world/coast';
 import { buildGroundCover } from '../src/world/ground-cover';
 import type { Pad } from '../src/world/aerodrome';
-import { tileSizeMeters, type Tile } from '../src/world/geodesy';
+import { latLonToEnu, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
+import { buildOsmMesh, classifyLine, type OsmMeshOptions } from '../src/world/osm-mesher';
+import { tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, type SurfaceStats } from '../src/world/surface-tin';
@@ -36,7 +38,7 @@ async function surfaceOf(name: string) {
   const cover = buildGroundCover(fx.tile, fx.grid, fx.data, roads);
   const stats = {} as SurfaceStats, debug = {} as TinDebug;
   const tin = buildSurfaceTin(fx.tile, fx.grid, f32(fx.heights), { borders, coast: coastlineWays(fx.data.lines), pads: fx.pads, roads, cover, stats, debug });
-  return { tin, cover, stats, debug };
+  return { tin, cover, stats, debug, roads, fx };
 }
 
 /** Fethiye's tile */
@@ -59,6 +61,8 @@ describe('real dense tiles in the surface budget', () => {
 
   it('Fethiye 14/9517/6397: each face lies in its own cover (the canal along the bank roads at 36.64774, 29.12803 included)', async () => {
     const { tin, cover } = await surfaceOf('surface-14-9517-6397');
+    // the shape under each face's centre (a road's bank is the ground's, in the water's shape)
+    const coverAt = (x: number, y: number): number => cover.locate(x, y);
     // halfway from a face's centre to each corner: in the face's cover, but in faces the fixed lines'
     // snapping (insertFixedLines, 1e-3 lattice: 3 cm here) left a sliver of another cover in. At
     // most four reach further, carriageway, shoulder or path, none 20 cm: before the tuning some 750
@@ -68,15 +72,15 @@ describe('real dense tiles in the surface budget', () => {
     const SNAP = 1.1e-3, mPer = 1 / (tin.grid / tileSizeMeters(fixtureTile));
     const off: { kind: string; reach: number }[] = [];
     tin.tris.forEach((t, f) => {
-      const own = tin.cover![f];
       const cx = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, cy = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
-      if (![t.a, t.b, t.c].some((v) => cover.locate((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) return;
+      const own = tin.cover![f] < 0 ? coverAt(cx, cy) : tin.cover![f];
+      if (![t.a, t.b, t.c].some((v) => coverAt((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) return;
       // how far into the face the other cover reaches (from its sides), lattice cells
       const P = [t.a, t.b, t.c].map((v) => [tin.vx[v], tin.vy[v]]);
       let reach = 0;
       for (let i = 0; i <= 30; i++) for (let j = 0; i + j <= 30; j++) {
         const a = i / 30, b = j / 30, c = 1 - a - b, x = a * P[0][0] + b * P[1][0] + c * P[2][0], y = a * P[0][1] + b * P[1][1] + c * P[2][1];
-        if (cover.locate(x, y) === own) continue;
+        if (coverAt(x, y) === own) continue;
         reach = Math.max(reach, Math.min(...[0, 1, 2].map((e) => {
           const [ax, ay] = P[e], [bx, by] = P[(e + 1) % 3], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
           const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
@@ -92,6 +96,30 @@ describe('real dense tiles in the surface budget', () => {
     expect(off.length).toBeLessThanOrEqual(12);
   });
 
+  it('Fethiye 14/9517/6397: over the deck of Celal Bayar Caddesi (its bridge over the canal) one asphalt within 0.3 m of the deck, no step where it lifts', async () => {
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
+    const c = tileCenter(fx.tile);
+    const enu = (lon: number, lat: number): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
+    const m = buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: tinSampler(tin, fx.tile), tin, buildings: false, roads, cover, faceColor: () => 0 } as OsmMeshOptions).roads;
+    const net = roads!.net, w = net.ways.find((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4)!;
+    const deck = Array.from(roads!.z.subarray(w.first, w.first + w.count));
+    const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]].map(([lon, lat]) => enu(lon, lat));
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uz = (b[1] - a[1]) / len, half = classifyLine(w.line.tags)!.width / 2 - 0.1;
+    const off: string[] = [];
+    let worstStep = 0;
+    for (let o = -half; o <= half + 1e-9; o += half / 4) {
+      let prev: number | undefined;
+      for (let d = 0.05; d < len - 0.05; d += 0.1) {
+        const hs = surfacesOver(m, a[0] + ux * d - uz * o, a[1] + uz * d + ux * o);
+        if (hs.length !== 1 || hs[0] < Math.min(...deck) - 0.3 || hs[0] > Math.max(...deck) + 0.05) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))}`);
+        if (hs.length === 1 && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
+        prev = hs.length === 1 ? hs[0] : undefined;
+      }
+    }
+    expect(off).toEqual([]);
+    expect(worstStep).toBeLessThanOrEqual(0.05);
+  }, 30_000);
+
   it('Innsbruck 14/8710/5744: the budget filled in one build, no road above a service road nor a track’s ballast left out, no crack', async () => {
     const { tin, cover, stats, debug } = await surfaceOf('surface-14-8710-5744');
     expect(cracks(tin)).toBe(0);
@@ -104,3 +132,18 @@ describe('real dense tiles in the surface budget', () => {
     expect(cover.shapes.filter((s) => s.kind === 'ballast' && loose.has(s.source as OsmLine))).toEqual([]);
   });
 });
+
+/** the heights of the mesh's triangles over (x, z) (tile-centre metres), on none of their sides */
+function surfacesOver(m: { vertices: Float32Array; vertexCount: number }, x: number, z: number): number[] {
+  const v = m.vertices, out: number[] = [];
+  for (let t = 0; t + 2 < m.vertexCount; t += 3) {
+    const p = [0, 1, 2].map((k) => [v[(t + k) * 6], v[(t + k) * 6 + 1], v[(t + k) * 6 + 2]]);
+    const det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+    if (Math.abs(det) < 1e-9) continue;
+    const w1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (z - p[0][2])) / det;
+    const w2 = ((p[1][0] - p[0][0]) * (z - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+    if (w1 < 1e-7 || w2 < 1e-7 || w1 + w2 > 1 - 1e-7) continue;
+    out.push(p[0][1] * (1 - w1 - w2) + p[1][1] * w1 + p[2][1] * w2);
+  }
+  return out;
+}

@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { buildRoadNet, type RoadNet } from '../src/world/road-net';
-import { BANK_M, BED_MARGIN_M, buildRoadPull, ROAD_BED_REACH_M } from '../src/world/road-pull';
+import { BANK_M, BED_MARGIN_M, buildRoadPull, ROAD_BED_REACH_M, ROAD_EDGE_M } from '../src/world/road-pull';
 import { GRID, M, road, TILE } from './roads-helpers';
 
 const flatAt = (h: number) => (net: RoadNet) => ({ net, z: new Float64Array(net.samples.length).fill(h) });
@@ -147,4 +147,26 @@ it('lays no bank where a road’s bed meets no water', () => {
   const net = buildRoadNet([road({ highway: 'residential' }, [[4, 32], [60, 32]]), road({ waterway: 'canal' }, [[4, 32 + 30 * M], [60, 32 + 30 * M]])]);
   const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) });
   expect(pull.banks).toEqual([]);
+});
+it('covered: gives a road’s bed up to a river’s water just past its cover’s edge, the bank its water row alone, BANK_M beyond that edge', () => {
+  // a residential at 506 m, a canal (18 m wide) 10 m off it at 497.5 m: its bed reaches under the road's
+  const main = road({ highway: 'residential' }, [[4, 32], [60, 32]]), canal = road({ waterway: 'canal', width: '18' }, [[-4, 32 + 10 * M], [68, 32 + 10 * M]]);
+  const net = buildRoadNet([main, canal]);
+  const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) }, true);
+  const half = net.ways[0].half;
+  // its cover's edge at the road's height, the water a hair past it; no water the other side: its outline's
+  expect(pull.height(32, 32 + half * M, 503)).toBeCloseTo(506, 6);
+  expect(pull.height(32, 32 + (half + ROAD_EDGE_M + 0.01) * M, 503)).toBeCloseTo(497.5, 6);
+  expect(pull.height(32, 32 - (half + 0.5) * M, 503)).toBeCloseTo(506, 6);
+  const lines = pull.banks.filter((b) => b.way === 0).flatMap((b) => b.lines);
+  expect(lines.length).toBeGreaterThanOrEqual(1);
+  for (const p of lines.flat()) {
+    const off = Math.hypot(p.x - Math.max(4, Math.min(60, p.x)), p.y - 32) / M;
+    expect(off - half).toBeCloseTo(BANK_M, 6);
+    if (Math.abs(p.y - 32 - 10 * M) / M < 9) expect(pull.height(p.x, p.y, 503)).toBeCloseTo(497.5, 6);
+  }
+  // between the edge and the water row: the bank, the ground's
+  expect(pull.bank(32, 32 + (half + 0.15) * M)).toBe(true);
+  expect(pull.bank(32, 32 + (half + 1) * M)).toBe(false);
+  expect(pull.bank(32, 32 - (half + 0.15) * M)).toBe(false);
 });

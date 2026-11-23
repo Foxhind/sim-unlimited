@@ -13,7 +13,7 @@ import type { OsmArea, OsmLine } from './osm-types';
 import type { P2 } from './ribbon-shapes';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
-import { buildRoadNet, type RoadNet } from './road-net';
+import { buildRoadNet, type NetWay, type RoadNet } from './road-net';
 import { BED_MARGIN_M, BED_PLAN_TOL_M, roadPullOf, snapBorder, type RoadSurface } from './road-pull';
 import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 import { classifyLine, roadPriority, tieBreak } from './way-styles';
@@ -108,13 +108,13 @@ export const Z14_RELIEF_TOL_M = 5;
 export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
   const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, stats, ...given } = opts;
   const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
-  const pull = roads && roads.net.ways.length ? roadPullOf(tile, grid, roads) : undefined;
+  const pull = roads && roads.net.ways.length ? roadPullOf(tile, grid, roads, !!cover) : undefined;
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
   // where the covers' edges cross the tile border, whether kept or not: the neighbour has them too
   const coverBorder: Pt[] = [];
   const units = cover
-    ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], pull?.banks ?? [], roads?.net, grid / tileSizeMeters(tile))
-    : bedUnits(pull!.beds, pull!.banks, roads!.net, grid, coverBorder);
+    ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], pull?.banks ?? [], pull?.ways ?? [], grid / tileSizeMeters(tile))
+    : bedUnits(pull!.beds, pull!.banks, pull!.ways, grid, coverBorder);
   let picked = 0;
   const tin = buildTerrainTin(tile, grid, heights, {
     ...tinOpts,
@@ -200,7 +200,8 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
       passed.push(si);
       si = cover.locate(x, y, skip);
     }
-    faces[f] = si;
+    // a road's bank (between its cover's edge and the water row BANK_M beyond it) is the ground's
+    faces[f] = si >= 0 && cover.shapes[si].kind === 'water' && pull?.bank(x, y) ? -1 : si;
   });
   return { ...out, cover: faces };
 }
@@ -209,13 +210,13 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
  * each road's or river's bed outline alone, the senior first (as road-pull lays them), a road's
  * bank with it (cut to the tile, where it crosses the border into `border`)
  */
-function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: ReadonlyArray<{ way: number; lines: Pt[][] }>, net: RoadNet, grid: number, border: Pt[]): Unit[] {
-  const units = beds.map((b, i): Unit => ({ lines: [...b.edges], count: 0, shapes: [], way: net.ways[b.way].line, rank: 0, prio: 0, tie: 0, first: i }));
+function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: ReadonlyArray<{ way: number; lines: Pt[][] }>, ways: ReadonlyArray<NetWay>, grid: number, border: Pt[]): Unit[] {
+  const units = beds.map((b, i): Unit => ({ lines: [...b.edges], count: 0, shapes: [], way: ways[b.way].line, rank: 0, prio: 0, tie: 0, first: i }));
   const byWay = new Map(beds.map((b, i) => [b.way, units[i]]));
   for (const b of banks) {
     let u = byWay.get(b.way);
     if (!u) {
-      u = { lines: [], count: 0, shapes: [], way: net.ways[b.way].line, rank: 0, prio: 0, tie: 0, first: units.length };
+      u = { lines: [], count: 0, shapes: [], way: ways[b.way].line, rank: 0, prio: 0, tie: 0, first: units.length };
       byWay.set(b.way, u);
       units.push(u);
     }
@@ -238,7 +239,7 @@ function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: Re
  */
 function coverUnits(
   cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: ReadonlyArray<{ way: number; lines: Pt[][] }>,
-  net: RoadNet | undefined, latticePerMetre: number,
+  ways: ReadonlyArray<NetWay>, latticePerMetre: number,
 ): Unit[] {
   const units: Unit[] = [];
   /** each covered way's bed outline: its points go onto the way's own edges when it is picked */
@@ -281,7 +282,7 @@ function coverUnits(
     };
   });
   beds.forEach((b, i) => {
-    const line = net!.ways[b.way].line;
+    const line = ways[b.way].line;
     // a way with covers: their edge is the bed's, its points the bed's
     const own = bySource.get(line);
     if (own) {
@@ -298,7 +299,7 @@ function coverUnits(
   });
   // a road's bank goes with its covers, or with its bed alone (a bank without either: on its own, as a bed)
   banks.forEach((b, i) => {
-    const line = net!.ways[b.way].line;
+    const line = ways[b.way].line;
     const pieces = b.lines.flatMap((l) => clipToTile(l.map((p): P2 => [p.x, p.y]), grid, border));
     if (!pieces.length) return;
     let u = bySource.get(line);

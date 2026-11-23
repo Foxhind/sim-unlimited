@@ -436,6 +436,20 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
    */
   const structureNodes = new Set<string>();
   for (const w of roads?.net.ways ?? []) if (w.bridge || w.tunnel) for (const p of w.line.points) structureNodes.add(`${p[0]},${p[1]}`);
+  /**
+   * the ends of the network's bridges that are low (a cover there, not a deck: road-pull
+   * bridgeDecks): a road ending there ends square, as its bed does (a round end reached on under
+   * the bridge, past where its deck lifts, down the bank there)
+   */
+  const lowEnds = new Set<string>();
+  for (const w of roads?.net.ways ?? []) {
+    if (!w.bridge || w.line.points.length < 2) continue;
+    const pts = w.line.points;
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) { const [ax, az] = enu(pts[i - 1][0], pts[i - 1][1]), [bx, bz] = enu(pts[i][0], pts[i][1]); len += Math.hypot(bx - ax, bz - az); }
+    if (!lifted(w.line, 0)) lowEnds.add(`${pts[0][0]},${pts[0][1]}`);
+    if (!lifted(w.line, len)) lowEnds.add(`${pts[pts.length - 1][0]},${pts[pts.length - 1][1]}`);
+  }
   const joints = liftedJoints(data.lines, enu, toLattice, lifted);
   /**
    * the nodes a way's lifted run ends at (a bridge ending on the middle of the bank road), by their
@@ -540,7 +554,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       along(water ? 'water' : 'runway', c, half, { capStart: !at(line.points[0]), capEnd: !at(line.points[line.points.length - 1]) });
       return;
     }
-    const ends = net.roadEnds(line);
+    const own = net.roadEnds(line), low = (p: LonLat) => !isBridge(line.tags) && lowEnds.has(`${p[0]},${p[1]}`);
+    const ends = { ...own, capStart: own.capStart && !low(line.points[0]), capEnd: own.capEnd && !low(line.points[line.points.length - 1]) };
     if (style.path) {
       along('path', c, half, ends);
       return;

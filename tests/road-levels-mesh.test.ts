@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, withGlow } from '../src/engine/palette';
-import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, type Tile } from '../src/world/geodesy';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, classifyLine } from '../src/world/osm-mesher';
 import type { LonLat, OsmLine, OsmTileData } from '../src/world/osm-types';
 import { LEVEL_M, LIFT_GRADE } from '../src/world/road-levels';
@@ -424,5 +424,36 @@ describe('lifted roads in the mesh', () => {
     let asphalt = 0;
     for (let i = 0; i < m.vertexCount; i++) if (withGlow(m.ramps[i], 0) === withGlow(RAMP.ASPHALT, 0) && m.vertices[i * 6 + 1] - GROUND > LEVEL_M) asphalt++;
     expect(asphalt).toBeGreaterThan(0);
+  });
+
+  it('a bridge’s deck level with the bank roads over an oblique canal: its asphalt at the deck’s height over its whole footprint, no step where the deck lifts', () => {
+    // flat ground at 500 m: a tertiary bridge running south over a canal (8 m wide, its water 2.5 m
+    // down) crossing it at 45°, from a street along one bank (12 m off the canal) to one along the other
+    const M = COVER_GRID / tileSizeMeters(COVER_TILE), k = (12 * M) / Math.SQRT2, s = 2 * k;
+    const lines = [
+      road({ highway: 'tertiary' }, [[32, 4], [32, 32 - s]]), road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[32, 32 - s], [32, 32 + s]]),
+      road({ highway: 'tertiary' }, [[32, 32 + s], [32, 60]]), road({ waterway: 'canal' }, [[4, 4], [60, 60]]),
+      road({ highway: 'residential' }, [[4 + k, 4 - k], [32, 32 - s], [60 + k, 60 - k]]), road({ highway: 'residential' }, [[4 - k, 4 + k], [32, 32 + s], [60 - k, 60 + k]]),
+    ];
+    const { opts, cover } = osmMeshOf({ lines, areas: [], points: [] }, () => 500);
+    const net = opts.roads!.net, b = net.ways.findIndex((w) => w.line === lines[1]);
+    const deck = Math.max(...Array.from(opts.roads!.z.subarray(net.ways[b].first, net.ways[b].first + net.ways[b].count)));
+    const m = buildOsmMesh({ ...opts, cover }).roads;
+    const [ax, az] = coverEnu(32, 32 - s), [bx, bz] = coverEnu(32, 32 + s), len = Math.hypot(bx - ax, bz - az), ux = (bx - ax) / len, uz = (bz - az) / len;
+    const half = classifyLine({ highway: 'tertiary' })!.width / 2 - 0.1;
+    const off: string[] = [];
+    let worstStep = 0;
+    for (const o of [-half, -half / 2, 0, half / 2, half]) {
+      let prev: number | undefined;
+      for (let d = 0.05; d < len - 0.05; d += 0.1) {
+        const hs = surfacesOver(m, ax + ux * d - uz * o, az + uz * d + ux * o);
+        // one surface: the deck's ribbon or the bridge's asphalt on the ground pulled to it
+        if (hs.length !== 1 || Math.abs(hs[0] - deck) > 0.3) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))}`);
+        if (hs.length === 1 && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
+        prev = hs.length === 1 ? hs[0] : undefined;
+      }
+    }
+    expect(off).toEqual([]);
+    expect(worstStep).toBeLessThanOrEqual(0.05);
   });
 });
