@@ -11,7 +11,7 @@ export { PITCH_LIT_MIN_M2 } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
-import type { TerrainMeshData } from './terrain-mesher';
+import { latticeToWorld, type TerrainMeshData } from './terrain-mesher';
 import type { SurfaceTin } from './surface-tin';
 import { coverRamp, cumulative, liftedJoints, liftedRuns, runPart, type CoverKind, type GroundCover } from './ground-cover';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './road-levels';
@@ -196,12 +196,15 @@ function clipToTriangle(subject: P2[], clip: [P2, P2, P2]): P2[] {
   return out;
 }
 
-interface Pt {
-  lon: number;
-  lat: number;
+/** a mesh vertex: tile-centre world metres */
+interface Vtx {
   x: number;
   z: number;
   y: number;
+}
+interface Pt extends Vtx {
+  lon: number;
+  lat: number;
 }
 
 /** the floodlight poles stand this far out from the pitch's corners, metres */
@@ -267,7 +270,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return { lon, lat, x, z, y };
   };
 
-  const emitTri = (a: Pt, b: Pt, c: Pt, ramp: number, out: Out = main, attr?: VertexAttr): void => {
+  const emitTri = (a: Vtx, b: Vtx, c: Vtx, ramp: number, out: Out = main, attr?: VertexAttr): void => {
     const e1x = b.x - a.x, e1y = b.y - a.y, e1z = b.z - a.z;
     const e2x = c.x - a.x, e2y = c.y - a.y, e2z = c.z - a.z;
     let nx = e1y * e2z - e1z * e2y;
@@ -1249,12 +1252,14 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const buildCoverFaces = (): void => {
     if (!cover || !tin?.cover) return;
     const of = tin.cover, styles = opts.areaStyles ?? DEFAULT_AREA_STYLES;
-    const at: (Pt | undefined)[] = new Array(tin.vx.length);
-    const vertex = (k: number): Pt => {
+    // on the terrain mesh's own vertices, bit for bit (latticeToWorld): no pinhole along a road's or the water's edge
+    const world = latticeToWorld(tile, tin.grid);
+    const at: (Vtx | undefined)[] = new Array(tin.vx.length);
+    const vertex = (k: number): Vtx => {
       let p = at[k];
       if (!p) {
-        const ll = gridLatLon(tile, tin.vx[k], tin.vy[k], tin.grid);
-        p = at[k] = makePt(ll.lon, ll.lat, Math.max(0, tin.vh[k]));
+        const [x, z] = world(tin.vx[k], tin.vy[k]);
+        p = at[k] = { x, z, y: Math.max(0, tin.vh[k]) };
       }
       return p;
     };

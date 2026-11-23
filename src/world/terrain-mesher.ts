@@ -65,8 +65,14 @@ function faceRamp(avgH: number, ny: number): number {
   return RAMP.GRASS;
 }
 
-/** lattice coords → tile-centre world x/z of every TIN vertex (bilinear inside the lattice cell) */
-export function tinToWorld(tile: Tile, grid: number, vx: number[], vy: number[]): { wx: number[]; wz: number[] } {
+/**
+ * Lattice coords → tile-centre world x/z of a point of the tile (bilinear inside the lattice cell).
+ * The one projection of a TIN vertex for every mesh drawn on its faces: the terrain's own and the
+ * OSM mesh's road and water faces stand on the same float32 positions, bit for bit (a vertex
+ * projected on its own, gridLatLon → latLonToEnu, came out a float32 step off: pinholes along the
+ * road edges)
+ */
+export function latticeToWorld(tile: Tile, grid: number): (gx: number, gy: number) => [number, number] {
   const center = tileCenter(tile);
   const side = grid + 1;
   const nx = new Float64Array(side * side);
@@ -79,7 +85,7 @@ export function tinToWorld(tile: Tile, grid: number, vx: number[], vy: number[])
       nz[j * side + i] = -n;
     }
   }
-  const world = (gx: number, gy: number): [number, number] => {
+  return (gx, gy) => {
     const i = Math.min(grid - 1, Math.floor(gx));
     const j = Math.min(grid - 1, Math.floor(gy));
     const tx = gx - i, ty = gy - j;
@@ -90,6 +96,11 @@ export function tinToWorld(tile: Tile, grid: number, vx: number[], vy: number[])
       nz[k00] * w00 + nz[k10] * w10 + nz[k01] * w01 + nz[k11] * w11,
     ];
   };
+}
+
+/** lattice coords → tile-centre world x/z of every TIN vertex (latticeToWorld) */
+export function tinToWorld(tile: Tile, grid: number, vx: number[], vy: number[]): { wx: number[]; wz: number[] } {
+  const world = latticeToWorld(tile, grid);
   const wx: number[] = [];
   const wz: number[] = [];
   for (let k = 0; k < vx.length; k++) {
