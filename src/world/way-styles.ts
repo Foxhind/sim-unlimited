@@ -68,9 +68,12 @@ export const POOL_RGB: RGB = [62, 196, 214];
 /** over the areas round it on the drape (no cover) */
 export const POOL_BIAS = 0.62;
 
-/** a pool seen from the air: not indoor, covered, on a roof or underground */
+/**
+ * A pool seen from the air: not indoor, on a roof or underground. A covered one stays: its cover is
+ * mostly a light shade or a sliding roof over the water.
+ */
 export function isOpenPool(tags: Record<string, string>): boolean {
-  if (tags.indoor === 'yes' || tags.covered === 'yes' || tags.building !== undefined) return false;
+  if (tags.indoor === 'yes' || tags.building !== undefined) return false;
   const loc = tags.location;
   return loc !== 'indoor' && loc !== 'roof' && loc !== 'rooftop' && loc !== 'underground';
 }

@@ -345,6 +345,8 @@ describe('ground cover', () => {
     const indoor = buildGroundCover(TILE, GRID, data([], [{ ...pool, tags: { leisure: 'swimming_pool', indoor: 'yes' } }]));
     expect(indoor.shapes).toEqual([]);
     expect(isOpenPool({ leisure: 'swimming_pool', location: 'roof' })).toBe(false);
+    // a covered pool is still drawn
+    expect(isOpenPool({ leisure: 'swimming_pool', covered: 'yes' })).toBe(true);
     expect(overpassQuery(TILE, 'full')).toContain('way["leisure"~"park|pitch|golf_course|swimming_pool"];');
   });
 });
