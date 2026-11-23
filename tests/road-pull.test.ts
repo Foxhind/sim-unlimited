@@ -170,3 +170,15 @@ it('covered: gives a road’s bed up to a river’s water just past its cover’
   expect(pull.bank(32, 32 + (half + 1) * M)).toBe(false);
   expect(pull.bank(32, 32 - (half + 0.15) * M)).toBe(false);
 });
+it('gives a road’s cover the ground as if no river were there: no road vertex at the water’s level', () => {
+  // a residential at 506 m, a canal (18 m wide) 10 m off it at 497.5 m; a point 0.2 m past its bed's
+  // edge (a cover's edge shifted or snapped past it) on the canal's bed
+  const main = road({ highway: 'residential' }, [[4, 32], [60, 32]]), canal = road({ waterway: 'canal', width: '18' }, [[-4, 32 + 10 * M], [68, 32 + 10 * M]]);
+  const net = buildRoadNet([main, canal]);
+  const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) }, true);
+  const y = 32 + (net.ways[0].half + 0.2) * M;
+  expect(pull.surface(32, y, 503)).toBeCloseTo(497.5, 6);
+  expect(pull.surface(32, y, 503, () => true)).toBeGreaterThan(505.9);
+  // off the water a road's cover changes nothing
+  expect(pull.surface(32, 32 - (net.ways[0].half + 0.2) * M, 503, () => true)).toBeCloseTo(pull.height(32, 32 - (net.ways[0].half + 0.2) * M, 503), 9);
+});

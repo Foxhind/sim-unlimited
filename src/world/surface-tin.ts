@@ -43,6 +43,10 @@ const MAX_BAND_POINTS = 4500;
 const ROADS_Z = 14;
 /** the covers drawn along a way: dropped from the surface, the way's ribbon lies over it (SurfaceTin.loose) */
 const RIBBON_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['runway', 'ballast', 'carriageway', 'shoulder', 'path', 'railZone']);
+/** a vertex this close to a road's cover is under it (its edge thinned by 2 cm, its vertices snapped by 3), metres */
+const COVER_SNAP_M = 0.06;
+/** the covers of a road: under them a river gives way (RoadPull.surface) */
+const ROAD_COVERS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'shoulder', 'path']);
 
 export interface SurfaceOptions extends TinOptions {
   roads?: RoadSurface;
@@ -115,6 +119,15 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   const units = cover
     ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], pull?.banks ?? [], pull?.ways ?? [], grid / tileSizeMeters(tile))
     : bedUnits(pull!.beds, pull!.banks, pull!.ways, grid, coverBorder);
+  /**
+   * whether a road's cover (carriageway, shoulder, path) holds lattice point (x, y), or within
+   * COVER_SNAP_M of it: a vertex of its edge, thinned and snapped, may lie a hair outside it
+   */
+  const snap = (COVER_SNAP_M * grid) / tileSizeMeters(tile);
+  const roadAt = cover ? (x: number, y: number): boolean => [[0, 0], [snap, 0], [-snap, 0], [0, snap], [0, -snap]].some(([dx, dy]) => {
+    const si = cover.locate(x + dx, y + dy);
+    return si >= 0 && ROAD_COVERS.has(cover.shapes[si].kind);
+  }) : undefined;
   let picked = 0;
   const tin = buildTerrainTin(tile, grid, heights, {
     ...tinOpts,
@@ -164,7 +177,7 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
       };
       return {
         extraPoints: points,
-        reshape: pull ? (x, y, h) => pull.height(x, y, h) : (_x, _y, h) => h,
+        reshape: pull ? (x, y, h) => pull.surface(x, y, h, roadAt) : (_x, _y, h) => h,
         next: (vertices) => {
           if (vertices === undefined) return pick();
           if (vertices <= maxSurfaceVerts || picked === 0 || ++attempt >= 6) return undefined;

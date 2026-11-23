@@ -39,6 +39,12 @@ export interface RoadPull {
   decks: Map<number, Array<[number, number]>>;
   /** covered: whether lattice point (x, y) is on a road's bank (BANK_M from its cover's edge into a river's water): its faces are ground */
   bank(x: number, y: number): boolean;
+  /**
+   * the ground the surface takes at a vertex: `height`, but where that is a river's water and
+   * `roadAt` says a road's cover holds the point (its edge thinned and snapped, or shifted onto a
+   * trunk past its bed's), the ground as if no river were there: no road cover takes the water's level
+   */
+  surface(x: number, y: number, base: number, roadAt?: (x: number, y: number) => boolean): number;
   /** the ground there, given the base relief's height (as if the ways in `skip` were not there) */
   height(x: number, y: number, base: number, skip?: ReadonlySet<number>): number;
   /** the bed outline of each road inside the tile (lattice), the senior first; cut out of more senior beds */
@@ -494,6 +500,15 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
     if (e.bed) return e.r;
     return e.w > 0 ? base + e.w * (e.r - base) : base;
   };
+  /** the rivers (their ways' indices) */
+  const rivers = new Set(ways.flatMap((w, k) => (w.water ? [k] : [])));
+  const surface = (x: number, y: number, base: number, roadAt?: (x: number, y: number) => boolean) => {
+    const e = evaluate(x, y);
+    // under a road's cover the river gives way, as everywhere: the ground as if it were not there
+    if (e.bed && e.water && roadAt?.(x, y)) return height(x, y, base, rivers);
+    if (e.bed) return e.r;
+    return e.w > 0 ? base + e.w * (e.r - base) : base;
+  };
   /** per network bridge (its way's index): its lifted stretches, metres along it (the network's) */
   const decks = new Map<number, Array<[number, number]>>();
   if (covered && roads.dem) liftDecks(roads.dem);
@@ -534,7 +549,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
     }
     return false;
   };
-  return { weight, height, beds, banks, borderPoints, bandPoints, ways, decks, bank };
+  return { weight, height, surface, beds, banks, borderPoints, bandPoints, ways, decks, bank };
 
   /** where the polyline crosses the tile border: shared points (the neighbour has them too) */
   function crossBorder(pts: Pt[]): void {

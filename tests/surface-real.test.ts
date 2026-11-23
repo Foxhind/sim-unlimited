@@ -13,6 +13,7 @@ import { tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, type SurfaceStats } from '../src/world/surface-tin';
+import { roadPullOf } from '../src/world/road-pull';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { TinDebug } from '../src/world/terrain-tin';
 import { cracks } from './roads-helpers';
@@ -94,6 +95,23 @@ describe('real dense tiles in the surface budget', () => {
     expect(deep.filter((o) => !['carriageway', 'shoulder', 'path'].includes(o.kind))).toEqual([]);
     expect(Math.max(0, ...off.map((o) => o.reach)) * mPer).toBeLessThan(0.2);
     expect(off.length).toBeLessThanOrEqual(12);
+  });
+
+  it('Fethiye 14/9517/6397: no face of a road’s cover falls more than 0.5 m to a river’s water: no road-cover vertex takes its level', async () => {
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
+    const pull = roadPullOf(fx.tile, fx.grid, roads!, true);
+    const wet: string[] = [];
+    tin.tris.forEach((t, f) => {
+      const own = tin.cover![f];
+      if (own < 0 || !['carriageway', 'shoulder', 'path'].includes(cover.shapes[own].kind)) return;
+      const top = Math.max(...[t.a, t.b, t.c].map((v) => tin.vh[v]));
+      for (const v of [t.a, t.b, t.c]) {
+        const x = tin.vx[v], y = tin.vy[v], water = pull.surface(x, y, 0), land = pull.surface(x, y, 0, () => true);
+        // on a river's water (its level, whatever the relief) and at it, below the face's top
+        if (water !== land && water === pull.surface(x, y, 1000) && Math.abs(tin.vh[v] - water) < 1e-3 && top - tin.vh[v] > 0.5) wet.push(`${cover.shapes[own].kind} ${x.toFixed(3)},${y.toFixed(3)} ${tin.vh[v].toFixed(2)} under ${top.toFixed(2)}`);
+      }
+    });
+    expect(wet).toEqual([]);
   });
 
   it('Fethiye 14/9517/6397: over the deck of Celal Bayar Caddesi (its bridge over the canal) one asphalt within 0.3 m of the deck, no step where it lifts', async () => {
