@@ -1,10 +1,12 @@
 /** shared set-up of the road tests: a z14 tile over a relief given in metres, roads in lattice units */
 import { enuToLatLon, gridLatLon, tileSizeMeters, type Tile } from '../src/world/geodesy';
-import type { LonLat, OsmLine } from '../src/world/osm-types';
+import type { LonLat, OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { tinLatticeSampler, type TerrainTin } from '../src/world/terrain-tin';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { Pad } from '../src/world/aerodrome';
 import type { RoadNet } from '../src/world/road-net';
+import type { GroundCover } from '../src/world/ground-cover';
+import { classifyLine } from '../src/world/way-styles';
 
 export const TILE: Tile = { z: 14, x: 9000, y: 6000 };
 /** the tests' own lattice (their geometry is laid out on it) */
@@ -33,10 +35,87 @@ export function bordersOf(fn: (xm: number, ym: number) => number, tile: Tile = T
   };
 }
 
+/** lattice points of `tile` as lon/lat */
+function lonLats(pts: [number, number][], tile: Tile = TILE): LonLat[] {
+  return pts.map(([x, y]): LonLat => { const ll = gridLatLon(tile, x, y, GRID); return [ll.lon, ll.lat]; });
+}
+
 /** an OSM way through lattice points of `tile` */
 export function road(tags: Record<string, string>, pts: [number, number][], tile: Tile = TILE): OsmLine {
-  return { tags, points: pts.map(([x, y]): LonLat => { const ll = gridLatLon(tile, x, y, GRID); return [ll.lon, ll.lat]; }) };
+  return { tags, points: lonLats(pts, tile) };
 }
+
+/** a railway through lattice points of TILE */
+export function rail(pts: [number, number][], tags: Record<string, string> = {}): OsmLine {
+  return road({ railway: 'rail', ...tags }, pts);
+}
+
+/** the OSM of TILE as buildGroundCover takes it; lists of lines among the lines are flattened */
+export function data(lines: (OsmLine | OsmLine[])[], areas: OsmArea[] = [], points: OsmPoint[] = []): { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] } {
+  return { lines: lines.flat(), areas, points };
+}
+
+/** a square ring of lattice points, `h` cells each way round (cx, cy) */
+export function square(cx: number, cy: number, h: number): [number, number][] {
+  return [[cx - h, cy - h], [cx + h, cy - h], [cx + h, cy + h], [cx - h, cy + h]];
+}
+
+/** a park: an outer ring and holes, lattice points of TILE */
+export function park(ring: [number, number][], ...holes: [number, number][][]): OsmArea {
+  return { tags: { leisure: 'park' }, rings: [ring, ...holes].map((r) => lonLats(r)) };
+}
+
+/** a park round the middle of TILE with a pond in a hole of it (pond: the same ring) */
+export function parkWithHole(): OsmArea {
+  return park(square(32, 32, 12), square(32, 32, 5.5));
+}
+export function pond(): OsmArea {
+  return { tags: { natural: 'water' }, rings: [lonLats(square(32, 32, 5.5))] };
+}
+
+/** half the two-way secondary trunk of forkFixture, metres */
+export const trunkHalfWidth = classifyLine({ highway: 'secondary' })!.width / 2;
+/**
+ * A two-way secondary from the west ending at (32, 32), where its two one-way carriageways begin:
+ * `branch-right` eastbound to the south (right of the trunk's flow), `branch-left` westbound into the node
+ */
+export function forkFixture(): OsmLine[] {
+  return [
+    road({ highway: 'secondary', name: 'trunk' }, [[10, 32], [32, 32]]),
+    road({ highway: 'secondary', oneway: 'yes', name: 'branch-right' }, [[32, 32], [54, 33]]),
+    road({ highway: 'secondary', oneway: 'yes', name: 'branch-left' }, [[54, 31], [32, 32]]),
+  ];
+}
+/**
+ * How far from the trunk's axis (y = 32) the asphalt edge of the named branch lies at the fork node,
+ * metres: the farthest point of its carriageway's outline within half a metre of the node along the axis
+ */
+export function edgeOffsetAtFork(c: GroundCover, name: string): number {
+  const s = c.shapes.find((sh) => sh.kind === 'carriageway' && (sh.source as OsmLine).tags.name === name);
+  if (!s) throw new Error(`no carriageway ${name}`);
+  let best = -Infinity;
+  for (const line of s.outline) {
+    for (const [x, y] of line) if (Math.abs(x - 32) <= 0.5 * M) best = Math.max(best, Math.abs(y - 32) / M);
+  }
+  return best;
+}
+
+/**
+ * A railway over a tertiary road on a short bridge (layer 1) at x = 20: the bridge from x = 19 to 21
+ * along y = 16, its approaches to the west and east on the ground, lifted near it (road-levels.ts)
+ */
+export function railOverRoad(): OsmLine[] {
+  return [
+    rail([[4, 16], [19, 16]]),
+    rail([[19, 16], [21, 16]], { bridge: 'yes', layer: '1' }),
+    rail([[21, 16], [60, 16]]),
+    road({ highway: 'tertiary' }, [[20, 4], [20, 28]]),
+  ];
+}
+/** on the western approach of railOverRoad, a lattice cell (about 28 m) before its bridge: lifted ~2 m */
+export const pointOnLiftedApproach: [number, number] = [18, 16];
+/** on the road under the rail bridge of railOverRoad */
+export const roadUnderRailBridge: [number, number] = [20, 16];
 
 /** metres east and south of TILE's north-west corner at lon/lat */
 export function metresOf(lon: number, lat: number): [number, number] {

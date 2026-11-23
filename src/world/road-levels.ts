@@ -17,6 +17,7 @@
  */
 import { classifyLine, isTunnel, roadLayer } from './osm-mesher';
 import type { LonLat, OsmArea, OsmLine } from './osm-types';
+import type { RoadSurface } from './road-pull';
 
 /** a road or railway under a bridge: the deck this far over it; and a level of a stack of bridges */
 export const LEVEL_M = 6;
@@ -494,4 +495,23 @@ export function buildRoadLevels(
       return lift;
     },
   };
+}
+
+/**
+ * Whether a way is lifted off the ground cover `d` metres from its start (ground-cover.ts): a way of
+ * the network with its own heights (every sample a number) only where it is a bridge, its approaches
+ * lying on the ground pulled up to it; any other way where the plain levels lift it LIFT_EPS_M or
+ * more. From geometry and tags alone, no TIN: every tile that sees the way agrees.
+ */
+export function coverLifted(roads: RoadSurface | undefined, plain: RoadLevels): (line: OsmLine, d: number) => boolean {
+  /** the network's ways with heights: whether each is a bridge */
+  const own = new Map<OsmLine, boolean>();
+  if (roads) {
+    const { net, z } = roads;
+    net.ways.forEach((w) => {
+      for (let i = w.first; i < w.first + w.count; i++) if (!Number.isFinite(z[i])) return;
+      own.set(w.line, w.bridge);
+    });
+  }
+  return (line, d) => own.get(line) ?? plain.liftAt(line, d) >= LIFT_EPS_M;
 }
