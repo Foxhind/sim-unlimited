@@ -3,6 +3,11 @@ import { tileBounds, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import { buildProps } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
+import { buildGroundCover } from '../src/world/ground-cover';
+import { solveRoadHeights } from '../src/world/road-heights';
+import { buildRoadNet } from '../src/world/road-net';
+import { buildSurfaceTin } from '../src/world/surface-tin';
+import { bordersOf, demOf, GRID, lattice, randomTown, TILE as Z14_TILE, townFixture } from './roads-helpers';
 
 // §10: tile generation in a worker < 200 ms for a dense city centre (mesher part only, no network/PNG decode).
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -46,5 +51,35 @@ describe('§10 tile generation budget', () => {
     const times = Array.from({ length: 5 }, run).sort((a, b) => a - b);
     console.log('dense tile ms', times.map((t) => t.toFixed(0)).join(' '));
     expect(times[2]).toBeLessThan(200);
+  });
+});
+
+// One-layer ground: the z14 surface with its covers (road net and heights are built outside the timed part, as the
+// workers get them from the DEM beforehand).
+const relief = (x: number, y: number) => 500 + 25 * Math.sin(x / 300) + 0.06 * y;
+function surfaceMedian(label: string, town: ReturnType<typeof townFixture>): number {
+  const net = buildRoadNet(town.lines), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+  const h = lattice(relief), borders = bordersOf(relief);
+  const run = (): number => {
+    const t0 = performance.now();
+    const cover = buildGroundCover(Z14_TILE, GRID, town, roads);
+    buildSurfaceTin(Z14_TILE, GRID, h, { borders, roads, cover });
+    return performance.now() - t0;
+  };
+  run();
+  const times = Array.from({ length: 5 }, run).sort((a, b) => a - b);
+  console.log(label, 'ms', times.map((t) => t.toFixed(0)).join(' '));
+  return times[2];
+}
+
+describe('one-layer ground budgets', () => {
+  // randomTown: 40 ways of every class sharing 30 nodes plus 25 overlapping areas of every kind, spilling past the tile:
+  // the closest fixture to a city centre (many junctions and overlapping covers), unlike denseTown's artificial park grid.
+  it('the surface with the covers of a dense town in < 250 ms', () => {
+    expect(surfaceMedian('dense town surface', randomTown(10))).toBeLessThan(250);
+  });
+
+  it('the surface with the covers of an ordinary tile in < 120 ms', () => {
+    expect(surfaceMedian('ordinary tile surface', townFixture())).toBeLessThan(120);
   });
 });
