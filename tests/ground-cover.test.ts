@@ -6,10 +6,22 @@ import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M } from '../src/world/road-levels';
 import { buildRoadNet } from '../src/world/road-net';
+import { solveRoadHeights } from '../src/world/road-heights';
 import {
-  data, edgeOffsetAtFork, forkFixture, GRID, M, metresOf, park, parkWithHole, pointOnLiftedApproach, pond, rail, railOverRoad, road,
+  data, demOf, edgeOffsetAtFork, forkFixture, GRID, M, metresOf, park, parkWithHole, pointOnLiftedApproach, pond, rail, railOverRoad, road,
   roadUnderRailBridge, square, TILE, trunkHalfWidth,
 } from './roads-helpers';
+
+/** the roads of `lines` with heights over a flat 100 m relief */
+function roadsOf(lines: OsmLine[]) {
+  const net = buildRoadNet(lines);
+  return { net, z: solveRoadHeights(net, demOf(net, () => 100)) };
+}
+/** ENU metres (x east, z south) about TILE's centre */
+const enuOf = ([lon, lat]: [number, number]): [number, number] => {
+  const [e, n] = latLonToEnu(tileCenter(TILE), lat, lon, 0);
+  return [e, -n];
+};
 
 /** the summed area of a shape's triangles, lattice cells² */
 function triArea(s: CoverShape): number {
@@ -67,8 +79,9 @@ describe('ground cover', () => {
     const c = buildGroundCover(TILE, GRID, data(forkFixture()));   // two-way trunk ending where two one-way branches begin
     expect(edgeOffsetAtFork(c, 'branch-right')).toBeCloseTo(trunkHalfWidth, 1);
   });
-  it('leaves no cover on a bridge, and none past the start of a rail approach', () => {
-    const c = buildGroundCover(TILE, GRID, data([road({ highway: 'primary', bridge: 'yes' }, [[10, 32], [54, 32]]), railOverRoad()]));
+  it('leaves no cover on a lifted bridge, and none past the start of a rail approach', () => {
+    // the bridge over a road: lifted (a bridge over nothing the levels leave on the ground)
+    const c = buildGroundCover(TILE, GRID, data([road({ highway: 'primary', bridge: 'yes' }, [[10, 32], [54, 32]]), road({ highway: 'tertiary' }, [[32, 20], [32, 44]]), railOverRoad()]));
     expect(c.shapes.some((s) => (s.source as OsmLine).tags?.bridge === 'yes')).toBe(false);
     expect(c.locate(...pointOnLiftedApproach)).toBe(-1);   // Review Focus 3
     expect(c.shapes[c.locate(...roadUnderRailBridge)].kind).toBe('carriageway');
@@ -214,6 +227,30 @@ describe('ground cover', () => {
       expect(shoelace(ls[0])).toBeCloseTo(triArea(s) - 1.5 * r * r, 9);
     }
   });
+  it('a bridge the levels leave on the ground is a cover like any way: a taxiway bridge, an aqueduct', () => {
+    // (a road bridge is never on the ground: MIN_BRIDGE_LIFT_M)
+    const taxiway = road({ aeroway: 'taxiway', bridge: 'yes' }, [[10, 20], [54, 20]]);
+    const aqueduct = road({ waterway: 'canal', bridge: 'aqueduct' }, [[10, 44], [54, 44]]);
+    for (const roads of [undefined, roadsOf([taxiway, aqueduct])]) {
+      const c = buildGroundCover(TILE, GRID, data([taxiway, aqueduct]), roads);
+      const lifted = coverLifted(roads, buildRoadLevels([taxiway, aqueduct], [], enuOf));
+      expect(lifted(aqueduct, 100) || lifted(taxiway, 100)).toBe(false);
+      expect(c.shapes[c.locate(32, 44)].kind).toBe('water');
+      expect(c.shapes[c.locate(32, 20)].kind).toBe('runway');
+    }
+  });
+
+  it('ends a way’s cover square where it meets a lifted bridge: nothing of it past the joint', () => {
+    const west = road({ highway: 'tertiary', name: 'west' }, [[10, 32], [30, 32]]);
+    const lines = [west, road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[30, 32], [34, 32]]), road({ highway: 'tertiary' }, [[34, 32], [54, 32]]), road({ highway: 'residential' }, [[32, 20], [32, 44]])];
+    const c = buildGroundCover(TILE, GRID, data(lines), roadsOf(lines));
+    const s = c.shapes.find((sh) => sh.kind === 'carriageway' && sh.source === west)!;
+    let east = -Infinity;
+    for (let k = 0; k < s.tris.length; k += 2) east = Math.max(east, s.tris[k]);
+    expect(east).toBeLessThan(30 + 1e-6);
+    expect(east).toBeGreaterThan(30 - 1e-6);
+  });
+
   it('skips what lies wholly outside the tile', () => {
     const c = buildGroundCover(TILE, GRID, data([road({ highway: 'primary' }, [[-40, -10], [-20, -10]]), rail([[70, 70], [90, 70]])], [park(square(-20, 30, 5))]));
     expect(c.shapes).toEqual([]);

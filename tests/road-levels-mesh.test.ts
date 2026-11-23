@@ -42,46 +42,72 @@ function heights(m: { vertices: Float32Array; vertexCount: number }, x0: number,
   return out;
 }
 
+/** the heights of a mesh's triangles over (x, z), tile-centre metres; `strict`: (x, z) inside, not on an edge */
+function surfacesOver(m: { vertices: Float32Array; vertexCount: number }, x: number, z: number, strict = false): number[] {
+  const v = m.vertices, eps = strict ? -1e-7 : 1e-6, out: number[] = [];
+  for (let t = 0; t + 2 < m.vertexCount; t += 3) {
+    const p = [0, 1, 2].map((k) => [v[(t + k) * 6], v[(t + k) * 6 + 1], v[(t + k) * 6 + 2]]);
+    const det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+    if (Math.abs(det) < 1e-9) continue;
+    const w1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (z - p[0][2])) / det;
+    const w2 = ((p[1][0] - p[0][0]) * (z - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+    if (w1 < -eps || w2 < -eps || w1 + w2 > 1 + eps) continue;
+    out.push(p[0][1] * (1 - w1 - w2) + p[1][1] * w1 + p[2][1] * w2);
+  }
+  return out;
+}
+
+/** a lattice point of roads-helpers' tile in its tile-centre metres */
+function coverEnu(x: number, y: number): [number, number] {
+  const ll = gridLatLon(COVER_TILE, x, y, COVER_GRID);
+  const [e, n] = latLonToEnu(tileCenter(COVER_TILE), ll.lat, ll.lon, 0);
+  return [e, -n];
+}
+
+/** the joints of the deck-step test's bridge (lattice of roads-helpers' tile) */
+const DECK_JOINTS: [number, number][] = [[15.9, 30.1], [19.7, 30.1]];
+
 /**
- * At both joints of the bridge of the deck-step test (lattice x 15.9 and 19.7 on y 30.1 of
- * roads-helpers' tile), on the axis and a few metres off it: how far the deck's ribbon (the top of the
- * road mesh 5 cm into the bridge) lies from the approach's face (its bottom 5 cm into the approach)
+ * At both joints of the deck-step test's bridge, on the axis and a few metres off it: the spread of
+ * the road mesh's heights 5 cm either side of the joint (the deck against the approach's face)
  */
 function deckEndStep(m: { roads: { vertices: Float32Array; vertexCount: number } }): number {
-  const c = tileCenter(COVER_TILE);
-  const enuOf = (x: number, y: number): [number, number] => {
-    const ll = gridLatLon(COVER_TILE, x, y, COVER_GRID);
-    const [e, n] = latLonToEnu(c, ll.lat, ll.lon, 0);
-    return [e, -n];
-  };
-  const v = m.roads.vertices;
-  /** the heights of the mesh's triangles over (x, z) */
-  const over = (x: number, z: number): number[] => {
-    const out: number[] = [];
-    for (let t = 0; t + 2 < m.roads.vertexCount; t += 3) {
-      const p = [0, 1, 2].map((k) => [v[(t + k) * 6], v[(t + k) * 6 + 1], v[(t + k) * 6 + 2]]);
-      const det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
-      if (Math.abs(det) < 1e-9) continue;
-      const w1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (z - p[0][2])) / det;
-      const w2 = ((p[1][0] - p[0][0]) * (z - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
-      if (w1 < -1e-6 || w2 < -1e-6 || w1 + w2 > 1 + 1e-6) continue;
-      out.push(p[0][1] * (1 - w1 - w2) + p[1][1] * w1 + p[2][1] * w2);
-    }
-    return out;
-  };
   let worst = 0;
-  // the bridge lies east of its western joint and west of its eastern one
-  for (const [jx, east] of [[15.9, 1], [19.7, -1]]) {
-    const [x, z] = enuOf(jx, 30.1);
+  for (const j of DECK_JOINTS) {
+    const [x, z] = coverEnu(...j);
     for (const across of [-2.5, 0, 2.5]) {
-      // the deck on top on its side; on the other the approach's face, under the deck's round end
-      const deck = over(x + east * 0.05, z + across), approach = over(x - east * 0.05, z + across);
-      if (!deck.length || !approach.length) return Infinity;
-      worst = Math.max(worst, Math.abs(Math.max(...deck) - Math.min(...approach)));
+      const hs = [...surfacesOver(m.roads, x - 0.05, z + across), ...surfacesOver(m.roads, x + 0.05, z + across)];
+      if (hs.length < 2) return Infinity;
+      worst = Math.max(worst, Math.max(...hs) - Math.min(...hs));
     }
   }
   return worst;
 }
+
+/**
+ * How many surfaces of the road mesh lie over each probe within 4 m along and 2.9 m across of each
+ * joint (x, z: tile-centre metres) of a way running east–west: off the seams, so one is one
+ */
+function surfacesAtJoints(m: { vertices: Float32Array; vertexCount: number }, joints: [number, number][]): number[] {
+  const counts: number[] = [];
+  for (const [x, z] of joints) {
+    for (const along of [-3.93, -2.71, -1.13, -0.37, -0.06, 0.07, 0.41, 1.27, 2.63, 3.89]) {
+      for (const across of [-2.87, -1.07, 0.31, 1.83, 2.77]) counts.push(surfacesOver(m, x + along, z + across, true).length);
+    }
+  }
+  return counts;
+}
+
+/** the deck-step test's bridge: a tertiary over a river on a slope */
+function deckStepLines(): OsmLine[] {
+  return [
+    road({ highway: 'tertiary', name: 'west' }, [[4.2, 30.1], [15.9, 30.1]]),
+    road({ highway: 'tertiary', bridge: 'yes', layer: '1', name: 'bridge' }, [[15.9, 30.1], [19.7, 30.1]]),
+    road({ highway: 'tertiary', name: 'east' }, [[19.7, 30.1], [30.3, 30.1]]),
+    road({ waterway: 'river' }, [[17.6, 4.3], [17.9, 60.2]]),
+  ];
+}
+const deckRelief = (x: number, y: number) => 300 + x / 25 + 10 * Math.sin(y / 90);
 
 describe('lifted roads in the mesh', () => {
   it('a road without crossings is unchanged, whatever is lifted elsewhere', () => {
@@ -250,16 +276,29 @@ describe('lifted roads in the mesh', () => {
   });
 
   it('meets a bridge’s deck with its approach without a step', () => {
-    // a tertiary over a river on a slope, the roads with their heights (the approaches on the ground pulled up to it)
-    const lines = [
-      road({ highway: 'tertiary', name: 'west' }, [[4.2, 30.1], [15.9, 30.1]]),
-      road({ highway: 'tertiary', bridge: 'yes', layer: '1', name: 'bridge' }, [[15.9, 30.1], [19.7, 30.1]]),
-      road({ highway: 'tertiary', name: 'east' }, [[19.7, 30.1], [30.3, 30.1]]),
-      road({ waterway: 'river' }, [[17.6, 4.3], [17.9, 60.2]]),
-    ];
-    const { opts, cover } = osmMeshOf({ lines, areas: [], points: [] }, (x, y) => 300 + x / 25 + 10 * Math.sin(y / 90));
-    const bridgeOpts = opts;
+    // the roads with their heights: the approaches on the ground pulled up to the bridge
+    const { opts: bridgeOpts, cover } = osmMeshOf({ lines: deckStepLines(), areas: [], points: [] }, deckRelief);
     expect(deckEndStep(buildOsmMesh({ ...bridgeOpts, cover }))).toBeLessThan(0.02);
+  });
+
+  it('one surface over every point at a bridge’s joints: square ends, no cap over or under the other', () => {
+    // the roads with their heights: the bridge's ribbon against its approaches' faces
+    const { opts, cover } = osmMeshOf({ lines: deckStepLines(), areas: [], points: [] }, deckRelief);
+    const withHeights = surfacesAtJoints(buildOsmMesh({ ...opts, cover }).roads, DECK_JOINTS.map((j) => coverEnu(...j)));
+    expect(withHeights.every((n) => n === 1), `${withHeights}`).toBe(true);
+    // plain levels: the bridge's ribbon against its approaches' lifted ribbons
+    const lines: OsmLine[] = [
+      { tags: { highway: 'primary' }, points: [at(-300, 0), at(-20, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(-20, 0), at(20, 0)] },
+      { tags: { highway: 'primary' }, points: [at(20, 0), at(300, 0)] },
+      under,
+    ];
+    const data: OsmTileData = { areas: [], points: [], buildings: [], lines };
+    const plainCover = buildGroundCover(TILE, GRID, data);
+    const tin = buildSurfaceTin(TILE, GRID, new Float32Array((GRID + 1) * (GRID + 1)).fill(GROUND), { cover: plainCover });
+    const m = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: tinSampler(tin, TILE), tin, cover: plainCover });
+    const plain = surfacesAtJoints(m.roads, [[-20, 0], [20, 0]]);
+    expect(plain.every((n) => n === 1), `${plain}`).toBe(true);
   });
 
   it('the lift keeps the ribbon the colour of the road', () => {

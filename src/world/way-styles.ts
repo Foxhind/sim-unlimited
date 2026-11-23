@@ -305,6 +305,11 @@ export function classifyLine(tags: Record<string, string>): LineStyle | undefine
   return undefined;
 }
 
+/** a way on a bridge (bridge=yes, viaduct, aqueduct...: anything but no) */
+export function isBridge(tags: Record<string, string>): boolean {
+  return !!tags.bridge && tags.bridge !== 'no';
+}
+
 /**
  * A road or railway under the ground: no ribbon over the hill above it, only its portals.
  * `building_passage` runs under a building and is open to the sky on both sides of it.

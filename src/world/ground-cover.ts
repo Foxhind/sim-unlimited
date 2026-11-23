@@ -4,19 +4,21 @@
  * car parks, pitches and their paint, parks and fields — as shapes in the tile's lattice, the senior
  * first (COVER_RANK). A shape has its triangles (what it covers: `locate` finds the senior one at a
  * point) and its edge (what the surface TIN takes as fixed edges). Built from the whole ways and
- * areas, not the tile's share of them, so the tiles round a border agree. Bridges, tunnels and the
- * lifted stretches of the ways (the approaches to the bridges) cover nothing: they run over it.
+ * areas, not the tile's share of them, so the tiles round a border agree. Tunnels and the lifted
+ * stretches of the ways (coverLifted: the bridges and the approaches to them) cover nothing: they
+ * run over it; a bridge the levels leave on the ground is a cover like any way. A way ends square
+ * where it meets a lifted one (squareAt).
  */
 import earcut from 'earcut';
 import { colourOf, RAMP, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-styles';
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
-import type { OsmArea, OsmLine, OsmPoint } from './osm-types';
+import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted } from './road-levels';
 import type { RoadSurface } from './road-pull';
-import { BALLAST_RAMP, classifyArea, classifyLine, isLitRoad, isOpenCarPark, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'area';
 
@@ -108,7 +110,6 @@ const ON_EDGE = 1e-10;
 const CELL_PAD = 1e-9;
 
 const SQUARE_ENDS: RibbonEnds = { capStart: false, capEnd: false };
-const isBridge = (tags: Record<string, string>): boolean => !!tags.bridge && tags.bridge !== 'no';
 
 /** whether triangle `o` of `t` (six numbers each) holds (x, y), its edges included */
 function holds(t: Float64Array, o: number, x: number, y: number): boolean {
@@ -228,6 +229,39 @@ export function runPart(cl: P2[], cum: number[], half: number | number[], ends: 
   };
 }
 
+/** a node of the ways by its lon/lat */
+const nodeKey = (p: LonLat): string => `${p[0]},${p[1]}`;
+
+/**
+ * The nodes of the drawn ways (tunnels aside) where one of them is lifted (`lifted`, metres along
+ * its points in ENU), by nodeKey
+ */
+export function liftedNodes(lines: ReadonlyArray<OsmLine>, enu: (lon: number, lat: number) => P2, lifted: (line: OsmLine, d: number) => boolean): Set<string> {
+  const nodes = new Set<string>();
+  for (const line of lines) {
+    if (line.points.length < 2 || isTunnel(line.tags) || !classifyLine(line.tags)) continue;
+    let d = 0, prev = enu(line.points[0][0], line.points[0][1]);
+    line.points.forEach((p, i) => {
+      const e = enu(p[0], p[1]);
+      if (i) d += Math.hypot(e[0] - prev[0], e[1] - prev[1]);
+      prev = e;
+      if (lifted(line, d)) nodes.add(nodeKey(p));
+    });
+  }
+  return nodes;
+}
+
+/**
+ * A way's ends where it meets a lifted way (or is lifted itself) at a node of `nodes` (liftedNodes):
+ * square, no round end and no mitre, its cover and its ribbon alike, so that neither lies over or
+ * under the other surface there; its own ends elsewhere
+ */
+export function squareAt(line: OsmLine, ends: RibbonEnds, nodes: ReadonlySet<string>): RibbonEnds {
+  const a = nodes.has(nodeKey(line.points[0])), b = nodes.has(nodeKey(line.points[line.points.length - 1]));
+  if (!a && !b) return ends;
+  return { start: a ? undefined : ends.start, capStart: !a && ends.capStart, end: b ? undefined : ends.end, capEnd: !b && ends.capEnd };
+}
+
 /** the kind of cover of an area classifyArea draws, in classifyArea's order */
 function areaKind(tags: Record<string, string>, style: AreaStyle): CoverKind {
   if (style.water) return 'water';
@@ -261,6 +295,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   const latticePerMetre = grid / tileSizeMeters(tile);
   const net = lineNetwork(data.lines, enu, toLattice, latticePerMetre);
   const lifted = coverLifted(roads, buildRoadLevels(data.lines, data.areas, ([lon, lat]) => enu(lon, lat)));
+  const nodes = liftedNodes(data.lines, enu, lifted);
 
   interface Draft { shape: CoverShape; rank: number; tie: number; triSeg?: Int32Array; index: number }
   const drafts: Draft[] = [];
@@ -294,7 +329,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
 
   const buildLine = (line: OsmLine): void => {
     const style = classifyLine(line.tags);
-    if (!style || line.points.length < 2 || isTunnel(line.tags) || isBridge(line.tags)) return;
+    if (!style || line.points.length < 2 || isTunnel(line.tags)) return;
     const road = !!line.tags.highway;
     const e = line.points.map((ll) => enu(ll[0], ll[1]));
     let pts = line.points.map((ll, i) => ({ c: toLattice(ll), e: e[i] }))
@@ -302,7 +337,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     if (pts.length < 2) return;
     if (road) pts = net.forkShift(line, pts);
     const c = pts.map((p) => p.c);
-    const half = style.width / 2, shoulder = style.shoulder ?? 0, zone = style.rail ? RAIL_ZONE_M : 0;
+    // no right-of-way strip on a bridge (as the mesh: it would paint what the bridge crosses)
+    const half = style.width / 2, shoulder = style.shoulder ?? 0, zone = style.rail && !isBridge(line.tags) ? RAIL_ZONE_M : 0;
     // nothing of it reaches the tile: skip the work
     const r = (half + shoulder + zone) * latticePerMetre;
     if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > grid + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > grid + r)) return;
@@ -313,8 +349,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
      * a ribbon along each stretch on the ground: centre line cl (a stretch at the same share of its
      * length as of the way's), its own ends at the way's ends, square where the lift begins
      */
-    const along = (kind: CoverKind, cl: P2[], w: number | number[], ends: RibbonEnds, prio = 0, segs?: VertexAttr[]): void => {
-      const cum = cumulative(cl);
+    const along = (kind: CoverKind, cl: P2[], w: number | number[], ways: RibbonEnds, prio = 0, segs?: VertexAttr[]): void => {
+      const cum = cumulative(cl), ends = squareAt(line, ways, nodes);
       for (const [d0, d1] of runs) {
         const part = runPart(cl, cum, w, ends, d0, d1, len);
         ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first);

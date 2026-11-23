@@ -13,13 +13,13 @@ import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from 
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import type { SurfaceTin } from './surface-tin';
-import { coverRamp, cumulative, liftedRuns, runPart, type CoverKind, type GroundCover } from './ground-cover';
+import { coverRamp, cumulative, liftedNodes, liftedRuns, runPart, squareAt, type CoverKind, type GroundCover } from './ground-cover';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './road-levels';
 import type { RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import {
-  AEROWAY_LINE_BIAS, classifyArea, classifyLine, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
+  AEROWAY_LINE_BIAS, classifyArea, classifyLine, isBridge, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
   RAIL_ZONE_RAMP, ROAD_LAYER_STEP_M, ROAD_RANK_STEP_M, ROAD_TIE_M, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW,
 } from './way-styles';
 export {
@@ -57,12 +57,14 @@ export interface OsmMeshOptions {
    */
   roads?: RoadSurface;
   /**
-   * The ground covers the TIN was built with (its `cover` per face). With both, the ground is one
-   * layer: the carriageway, ballast and runway faces of the TIN go to `roads` and its water faces to
-   * `water`, on its own vertices, lifted by nothing; the areas, the pitch markings and the helipads
-   * are the terrain's (terrain-mesher), not drawn here; of a way only its lifted stretches are
-   * ribbons (with their lift, no bias), but a way the TIN's budget dropped (`tin.loose`), drawn over
-   * the ground as without the cover
+   * The ground covers the TIN was built with (its `cover` per face); used near ('full') only. With
+   * both, the ground is one layer: the carriageway, ballast and runway faces of the TIN go to
+   * `roads` and its water faces to `water`, on its own vertices, lifted by nothing; the areas, the
+   * pitch markings and the helipads are the terrain's (terrain-mesher), not drawn here; of a way only
+   * its lifted stretches are ribbons (with their lift, no bias, square where they meet the ground's
+   * ways), but a way the TIN's budget dropped (`tin.loose`), drawn over the ground as without the
+   * cover. Areas are known for the cover's by their tags object (the same object in `data`, as
+   * clip.ts keeps it): the cover must be built from this very `data`, in the same worker.
    */
   cover?: GroundCover;
 }
@@ -281,7 +283,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   // --- areas on the terrain's own faces ---
   const tin = opts.tin;
   /** the covers of the TIN's faces: with them the ground is one layer (OsmMeshOptions.cover) */
-  const cover = opts.cover && tin?.cover ? opts.cover : undefined;
+  const cover = opts.detail === 'full' && opts.cover && tin?.cover ? opts.cover : undefined;
   /** the areas with a shape among the covers (by the tags object of the whole, which the clipped share keeps): the terrain draws them */
   const coveredAreas = cover ? new Set(cover.shapes.filter((s) => 'rings' in s.source).map((s) => s.source.tags)) : undefined;
   const faces = tin
@@ -521,7 +523,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
   const levels = plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels;
   /** with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts) */
-  const coverLift = cover ? coverLifted(opts.roads, plainLevels ?? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat))) : undefined;
+  const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels) : undefined;
+  /** with the cover: the nodes where a way is lifted, where every way ends square (ground-cover squareAt) */
+  const coverNodes = coverLift ? liftedNodes(opts.data.lines, enu, coverLift) : undefined;
   /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */
   const ownHeight = (line: OsmLine): boolean => !!opts.roads && !!levels && 'own' in levels && (levels as RoadLevels & { own(l: OsmLine): boolean }).own(line);
   /** the ground under a mesh point (world metres), as the TIN's faces draw it */
@@ -616,7 +620,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     if (!style || line.points.length < 2 || isTunnel(line.tags)) return undefined;
     const road = !!line.tags.highway;
     const lit = road && isLitRoad(line.tags);
-    const bridge = !!line.tags.bridge && line.tags.bridge !== 'no';
+    const bridge = isBridge(line.tags);
     return {
       half: style.width / 2,
       road,
@@ -751,13 +755,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   /**
-   * With the cover: a way's lifted stretches (what its cover leaves of it, ground-cover liftedRuns; a
-   * bridge whole) as ribbons with their lift and no bias, square where a stretch ends inside the way;
-   * no shoulders or right-of-way strip on them
+   * With the cover: a way's lifted stretches (what its cover leaves of it, ground-cover liftedRuns)
+   * as ribbons with their lift and no bias, square where a stretch ends inside the way or meets a
+   * lifted way at a node (squareAt); no shoulders or right-of-way strip on them
    */
   const liftedRibbons = (line: OsmLine, look: NonNullable<ReturnType<typeof lineLook>>, pts: { c: P2; e: [number, number] }[], lift?: Lift): void => {
-    const bridge = !!line.tags.bridge && line.tags.bridge !== 'no';
-    const { runs, len } = liftedRuns(line, line.points.map(([lon, lat]) => enu(lon, lat)), bridge ? () => true : coverLift!);
+    const { runs, len } = liftedRuns(line, line.points.map(([lon, lat]) => enu(lon, lat)), coverLift!);
     if (!runs.length) return;
     let cl = pts.map((p) => p.c), half: number | number[] = look.half, segs: VertexAttr[] | undefined;
     if (look.rail) segs = trackSegs(pts);
@@ -768,7 +771,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       half = p.half;
       segs = p.segs;
     }
-    const ends = look.road ? net.roadEnds(line) : ROUND_ENDS, cum = cumulative(cl);
+    const ends = squareAt(line, look.road ? net.roadEnds(line) : ROUND_ENDS, coverNodes!), cum = cumulative(cl);
     for (const [d0, d1] of runs) {
       const part = runPart(cl, cum, half, ends, d0, d1, len);
       if (part.c.length >= 2) ribbon(part.c, part.half, look.ramp, 0, look.rail ? roads : look.out, segs?.slice(part.first), part.ends, lift);
@@ -1069,7 +1072,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     interface Raw { e: [number, number]; d: number; lift: number }
     const runs: DeckRun[] = [];
     for (const w of raisedWays) {
-      const bridge = !!w.line.tags.bridge && w.line.tags.bridge !== 'no';
+      const bridge = isBridge(w.line.tags);
       const lifts = w.pts.map((p) => levels.liftAt(w.line, p.d));
       const blocked = (x: number, z: number): boolean => others.some((o) => {
         if (o.tags === w.line.tags) return false;

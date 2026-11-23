@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { colour, RAMP, snowy, withGlow } from '../src/engine/palette';
+import { colour, rampGlowLevel, RAMP, snowy, withGlow } from '../src/engine/palette';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, isTunnel, osmWidthM } from '../src/world/osm-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
-import type { GroundCover } from '../src/world/ground-cover';
-import type { SurfaceTin } from '../src/world/surface-tin';
-import { areaOf, fnv, GRID as COVER_GRID, osmMeshOf, polygon, road as coverRoad, TILE as COVER_TILE, townFixture } from './roads-helpers';
+import { buildGroundCover, coverRamp, type GroundCover } from '../src/world/ground-cover';
+import { buildSurfaceTin, type SurfaceTin } from '../src/world/surface-tin';
+import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
+import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
+import { LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/way-styles';
+import {
+  areaOf, bordersOf, fnv, GRID as COVER_GRID, lattice, osmMeshOf, polygon, road as coverRoad, TILE as COVER_TILE, townFixture, vertexOfFace,
+} from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -544,7 +549,48 @@ describe('roads and water as the terrain’s own faces', () => {
     expect(m.roads.vertexCount).toBe(3 * facesOf(tin, cover, ['carriageway', 'ballast', 'runway']));
     expect(m.roads.vertexCount).toBeGreaterThan(0);
     expect(maxLiftOverTin(m.roads, tin)).toBeLessThan(1e-4);
-    expect(m.roadAttrs.length).toBe(m.roads.vertexCount * 5);
+    expect(m.roadAttrs.length).toBe(m.roads.vertexCount * WINDOW_ATTR_FLOATS);
+  });
+
+  it('colours a road face as coverRamp does: the street-lit glow and the unlit one', () => {
+    const { opts, tin, cover } = osmMeshOf(townFixture(), rolling);
+    const m = buildOsmMesh({ ...opts, cover });
+    const glows = new Set<number>();
+    tin.tris.forEach((_, f) => {
+      const s = tin.cover![f];
+      if (s < 0 || cover.shapes[s].kind !== 'carriageway') return;
+      const v = vertexOfFace(m.roads, tin, f);
+      expect(v).toBeGreaterThanOrEqual(0);
+      for (let k = 0; k < 3; k++) expect(m.roads.ramps[v + k]).toBe(coverRamp(cover.shapes[s], DEFAULT_AREA_STYLES, undefined));
+      glows.add(rampGlowLevel(m.roads.ramps[v]));
+    });
+    expect([...glows].sort()).toEqual([LIT_ROAD_GLOW, UNLIT_ROAD_GLOW].sort());
+  });
+
+  it('draws a bridge the levels leave on the ground as faces, no ribbon over them', () => {
+    // a taxiway bridge and an aqueduct: road-levels lifts neither (a road bridge it always does)
+    const d = { lines: [coverRoad({ aeroway: 'taxiway', bridge: 'yes' }, [[10.3, 20.2], [54.1, 21.7]]), coverRoad({ waterway: 'canal', bridge: 'aqueduct' }, [[10.2, 44.3], [54.4, 43.1]])], areas: [], points: [] };
+    const withRoads = osmMeshOf(d, rolling);
+    const plainCover = buildGroundCover(COVER_TILE, COVER_GRID, d);
+    const plainTin = buildSurfaceTin(COVER_TILE, COVER_GRID, lattice(rolling), { borders: bordersOf(rolling), cover: plainCover });
+    const plain = { opts: { ...withRoads.opts, roads: undefined, tin: plainTin, sampleHeight: tinSampler(plainTin, COVER_TILE) }, tin: plainTin, cover: plainCover };
+    for (const { opts, tin, cover } of [withRoads, plain]) {
+      const m = buildOsmMesh({ ...opts, cover });
+      expect(m.vertexCount).toBe(0);
+      expect(m.roads.vertexCount).toBe(3 * facesOf(tin, cover, ['runway']));
+      expect(m.water.vertexCount).toBe(3 * facesOf(tin, cover, ['water']));
+      expect(m.roads.vertexCount).toBeGreaterThan(0);
+      expect(m.water.vertexCount).toBeGreaterThan(0);
+      expect(maxLiftOverTin(m.roads, tin)).toBeLessThan(1e-4);
+      expect(maxLiftOverTin(m.water, tin)).toBeLessThan(1e-4);
+      expect(m.bridges.vertexCount).toBe(0);
+    }
+  });
+
+  it('far (detail large) the cover is not used: the mesh of today', () => {
+    const { opts, cover } = osmMeshOf(bridgedTown(), rolling);
+    const far = { ...opts, detail: 'large' as const };
+    expect(digest(buildOsmMesh({ ...far, cover }))).toEqual(digest(buildOsmMesh(far)));
   });
 
   it('draws the water faces on the terrain’s own vertices into the water mesh', () => {
@@ -580,13 +626,16 @@ describe('roads and water as the terrain’s own faces', () => {
   });
 
   it('without the cover the mesh is what it was, byte for byte', () => {
-    const { opts } = osmMeshOf(bridgedTown(), rolling);
-    // digests of the output of the code before Task 6 on this input
+    // the surface under the roads alone: the input owes nothing to the covers
+    const { opts: withCover } = osmMeshOf(bridgedTown(), rolling);
+    const tin = buildSurfaceTin(COVER_TILE, COVER_GRID, lattice(rolling), { borders: bordersOf(rolling), roads: withCover.roads });
+    const opts = { ...withCover, tin, sampleHeight: tinSampler(tin, COVER_TILE) };
+    // digests of the output of the code before Task 6 (0d4c7b7) on this input
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  6066, 2016892399, 3067500026, 10365, 1359097566, 545597248, 3551177572, 1173, 2274697990, 583978983, 546, 1714264376, 1187553749,
-  2893043461, 861862347, 1967087128, 3498056759,
+  5472, 3144877107, 1878073586, 17646, 2702523443, 2729080567, 1796636789, 2685, 3942426410, 243433191, 546, 3310701280, 1187553749,
+  1063991330, 3743679959, 1604464319, 280040517,
 ];
