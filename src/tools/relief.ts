@@ -111,10 +111,10 @@ const chunks = new ChunkManager(renderer.gl, state.centre);
 const osm = new OsmManager(renderer.gl, state.centre);
 /** the far ring round the simulator camera, as in flight: building dots by day, window lights by night */
 const farOsm = new FarOsmManager(renderer.gl, state.centre);
-osm.onTileReady = (tile, runways, coast) => {
-  // as in the simulator: terrain under a runway or by the coast is rebuilt once its OSM is known
+osm.onTileReady = (tile, runways, coast, roads) => {
+  // as in the simulator: terrain under a runway, by the coast or under roads is rebuilt once its OSM is known
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
-  else if (coast) chunks.invalidate(tile); // only this tile's shore changes
+  else if (coast || roads) chunks.invalidate(tile); // only this tile changes
 };
 
 const view = mat4.create();

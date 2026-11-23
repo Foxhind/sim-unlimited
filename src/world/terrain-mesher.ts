@@ -1,7 +1,8 @@
 import { RAMP, snowy, withGlow } from '../engine/palette';
 import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
-import { buildTerrainTin, isSeaFace, type TerrainTin, type TinOptions } from './terrain-tin';
+import { isSeaFace, type TerrainTin, type TinOptions } from './terrain-tin';
+import { buildSurfaceTin, type RoadSurface } from './surface-tin';
 import type { Tri } from './contours';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
@@ -35,6 +36,8 @@ export interface TerrainMeshOptions {
   coast?: TinOptions['coast'];
   /** aerodrome pads (see TinOptions.pads) */
   pads?: TinOptions['pads'];
+  /** the tile's roads with their heights: the surface is built under them (surface-tin.ts) */
+  roads?: RoadSurface;
 }
 
 function faceRamp(avgH: number, ny: number): number {
@@ -155,7 +158,7 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris, coarse, sea } = buildTerrainTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads });
+  const { vx, vy, vh, tris, coarse, sea } = buildSurfaceTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads, roads: opts.roads });
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);
   const vyH = vh.map((h) => Math.max(h, 0));

@@ -8,6 +8,7 @@ import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
 import { applyPads, loadPads, type Pad } from '../world/aerodrome';
+import { fetchRoadSurface, type RoadSurface } from '../world/surface-tin';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { climateFaceColor } from '../world/climate-colour';
 
@@ -64,6 +65,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const { heights, borders } = dem;
     let coast: LonLat[][] | undefined;
     let pads: Pad[] = [];
+    let roads: RoadSurface | undefined;
     if (osmRaw) {
       let data: ReturnType<typeof parseOverpass> | undefined;
       try {
@@ -76,6 +78,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         pads = await loadPads(data);
         applyPads(dem, tile, grid, pads);
         coast = coastlineWays(data.lines);
+        // the roads with their heights (z14): the surface is built under them
+        roads = await fetchRoadSurface(tile, data, pads);
       }
     }
     // experimental: faces coloured by height × temperature at that height (climate-colour.ts), no imagery
@@ -84,6 +88,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       faceColor: climateFaceColor(tile, grid, heights),
       coast,
       pads,
+      roads,
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;

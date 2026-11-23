@@ -12,7 +12,8 @@ import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from 
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import type { TerrainTin } from './terrain-tin';
-import { buildRoadLevels, LIFT_EPS_M } from './road-levels';
+import { buildRoadLevels, LIFT_EPS_M, type RoadLevels } from './road-levels';
+import type { RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 
 export interface OsmMeshOptions {
@@ -36,6 +37,12 @@ export interface OsmMeshOptions {
   faceColor?: FaceColor;
   /** filters of the areas over the imagery (area style editor); DEFAULT_AREA_STYLES by default */
   areaStyles?: AreaStyles;
+  /**
+   * The tile's roads with their heights (surface-tin.ts), the TIN built under them. A bridge then
+   * runs at its own height (H and its lift), whatever the ground under it; every other way lies
+   * on the TIN, which is its road surface.
+   */
+  roads?: RoadSurface;
 }
 
 type P2 = [number, number];
@@ -300,6 +307,10 @@ const ROAD_KINDS: Record<string, { width: number; shoulder: number; minor?: bool
   pedestrian: { width: 5, shoulder: 0, minor: true },
 };
 const LINK_ROAD = { width: 7, shoulder: 1.5 };
+/** the carriageway width of a road's class (both directions, whatever its own tags say), metres; undefined for other ways */
+export function roadClassWidth(highway: string): number | undefined {
+  return ROAD_KINDS[highway]?.width ?? (/^(motorway|trunk|primary|secondary|tertiary)_link$/.test(highway) ? LINK_ROAD.width : undefined);
+}
 /**
  * Footways, paths and the like: narrow strips without `width`, paved light (paving slabs) or, a
  * path or bridleway without `surface`, beaten earth
@@ -822,7 +833,90 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
 
   /** bridges over what they cross and the approaches to them: near, on the TIN (road-levels.ts) */
-  const levels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
+  const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
+  const levels = plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels;
+  /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */
+  const ownHeight = (line: OsmLine): boolean => !!opts.roads && !!levels && 'own' in levels && (levels as RoadLevels & { own(l: OsmLine): boolean }).own(line);
+  /** the ground under a mesh point (world metres), as the TIN's faces draw it */
+  const groundUnder = (p: { x: number; z: number }): number => {
+    const ll = enuToLatLon(center, p.x, -p.z, 0);
+    return Math.max(sampleHeight(ll.lon, ll.lat), 0);
+  };
+  /**
+   * With the roads' own heights: of the carriageways with a height (the network's ways), only the
+   * bridges are lifted, to their height, over the ground left as it was under them (the approaches
+   * lie on ground pulled up to them). A lift is the bridge's height less the ground under its centre
+   * line. Every other way (railways, paths, a road without a height) lifts as without them.
+   */
+  function bridgeLevels(roads: RoadSurface, plain: RoadLevels): RoadLevels & { own(line: OsmLine): boolean } {
+    const { net, z } = roads;
+    const wayOf = new Map<OsmLine, number>();
+    const byTags = new Map<Record<string, string>, number[]>();
+    net.ways.forEach((w, k) => {
+      for (let i = w.first; i < w.first + w.count; i++) if (!Number.isFinite(z[i])) return;
+      wayOf.set(w.line, k);
+      const l = byTags.get(w.line.tags);
+      if (l) l.push(k);
+      else byTags.set(w.line.tags, [k]);
+    });
+    /** the centre line of way k at d metres: lon, lat and height */
+    const axis = (k: number, d: number): [number, number, number] => {
+      const w = net.ways[k];
+      let i = w.first;
+      const last = w.first + w.count - 1;
+      while (i < last && net.samples[i + 1].d < d) i++;
+      const a = net.samples[i], b = net.samples[Math.min(last, i + 1)];
+      const t = b.d > a.d ? Math.max(0, Math.min(1, (d - a.d) / (b.d - a.d))) : 0;
+      const za = z[i], zb = z[Math.min(last, i + 1)];
+      return [a.lon + (b.lon - a.lon) * t, a.lat + (b.lat - a.lat) * t, za + (zb - za) * t];
+    };
+    const liftOf = (k: number, d: number): number => {
+      if (!net.ways[k].bridge) return 0;
+      const [lon, lat, h] = axis(k, d);
+      return Number.isFinite(h) ? h - Math.max(sampleHeight(lon, lat), 0) : 0;
+    };
+    const maxOf = new Map<number, number>();
+    const maxLift = (k: number): number => {
+      let m = maxOf.get(k);
+      if (m === undefined) {
+        m = 0;
+        const w = net.ways[k];
+        for (let i = w.first; i < w.first + w.count; i++) m = Math.max(m, liftOf(k, net.samples[i].d));
+        maxOf.set(k, m);
+      }
+      return m;
+    };
+    return {
+      own: (line) => wayOf.has(line),
+      liftAt: (line, d) => {
+        const k = wayOf.get(line);
+        return k === undefined ? plain.liftAt(line, d) : liftOf(k, d);
+      },
+      maxLift: (line) => {
+        const k = wayOf.get(line);
+        return k === undefined ? plain.maxLift(line) : maxLift(k);
+      },
+      liftNear: (tags, x, zz) => {
+        if (!byTags.has(tags)) return plain.liftNear(tags, x, zz);
+        let best = Infinity, lift = 0;
+        for (const k of byTags.get(tags) ?? []) {
+          const w = net.ways[k];
+          for (let i = w.first; i + 1 < w.first + w.count; i++) {
+            const [ax, az] = enu(net.samples[i].lon, net.samples[i].lat), [bx, bz] = enu(net.samples[i + 1].lon, net.samples[i + 1].lat);
+            const dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (zz - az) * dz) / l2)) : 0;
+            const dist = (x - ax - dx * t) ** 2 + (zz - az - dz * t) ** 2;
+            if (dist < best) {
+              best = dist;
+              lift = liftOf(k, net.samples[i].d + (net.samples[i + 1].d - net.samples[i].d) * t);
+            }
+          }
+        }
+        return lift;
+      },
+      liftedTags: (tags) => (byTags.has(tags) ? byTags.get(tags)!.some((k) => maxLift(k) >= LIFT_EPS_M) : plain.liftedTags(tags)),
+    };
+  }
 
   const LINE_BIAS = 1.4;
   /** under a road's carriageway its shoulders, over a railway's right-of-way strip its track */
@@ -1132,6 +1226,20 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
    */
   const raise = (line: OsmLine, src: { c: P2; e: [number, number] }[], half: number, bias: number): { pts: { c: P2; e: [number, number] }[]; lift: Lift } | undefined => {
     if (!levels || levels.maxLift(line) < LIFT_EPS_M) return undefined;
+    /** the ground under the centre line d metres along the way (where its lift is measured from) */
+    const groundAt = (l: OsmLine, d: number): number => {
+      let left = d;
+      for (let i = 1; i < l.points.length; i++) {
+        const [ax, az] = enu(l.points[i - 1][0], l.points[i - 1][1]), [bx, bz] = enu(l.points[i][0], l.points[i][1]);
+        const len = Math.hypot(bx - ax, bz - az);
+        if (left <= len || i + 1 === l.points.length) {
+          const t = len > 0 ? Math.max(0, Math.min(1, left / len)) : 0;
+          return groundUnder({ x: ax + (bx - ax) * t, z: az + (bz - az) * t });
+        }
+        left -= len;
+      }
+      return groundUnder({ x: enu(l.points[0][0], l.points[0][1])[0], z: enu(l.points[0][0], l.points[0][1])[1] });
+    };
     // metres along the way itself at each vertex (a fork's shift stretches the drawn line a little)
     let wayLen = 0;
     for (let i = 1; i < line.points.length; i++) {
@@ -1167,7 +1275,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
           d = pts[i].d + (pts[i + 1].d - pts[i].d) * t;
         }
       }
-      return levels.liftAt(line, d);
+      // with the roads' heights: the bridge's height over the ground under this very vertex, so
+      // the deck is level across however the ground under it slopes
+      return ownHeight(line) ? levels.liftAt(line, d) + groundAt(line, d) - groundUnder(p) : levels.liftAt(line, d);
     };
     raisedWays.push({ line, half, bias, pts });
     return { pts, lift };

@@ -11,8 +11,9 @@ import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
 import { loadTileDem } from '../world/terrain-source';
-import { buildTerrainTin, COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
-import { greenColour, isMaterial, RAMP } from '../engine/palette';
+import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
+import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
+import { greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
 import { gridForZoom } from '../world/chunks';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -22,7 +23,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 60;
+export const OSM_MESH_SCHEMA = 62;
 
 export interface OsmRequest {
   type: 'osm';
@@ -79,6 +80,11 @@ export interface OsmMeshResponse {
    * terrain worker built the tile, so the terrain already has the coastline.
    */
   coast: boolean;
+  /**
+   * The tile's OSM, just downloaded, has roads the terrain is built under (surface-tin.ts): its
+   * terrain was built without them and is rebuilt. From the cache false, like `coast`.
+   */
+  roads: boolean;
 }
 
 export interface OsmErrorResponse {
@@ -147,7 +153,11 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const empty = () => new ArrayBuffer(0);
   try {
     const cached = useCache ? await getCachedMesh(key) : undefined;
-    if (cached) {
+    // the cached drape lies on a surface built under the roads of the tile's raw OSM; once that has
+    // expired the terrain and the collision ground are built without them: build again (the OSM is
+    // fetched anew, and the terrain rebuilt on the 'roads' flag)
+    const rawKept = !cached || detail !== 'full' || await getOsmRaw(osmRawKey(tile)).then((r) => !!r, () => false);
+    if (cached && rawKept) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
@@ -161,6 +171,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
         lamps: cached.lamps ?? empty(),
         ...(detail === 'full' ? await cachedTerrainFlags(tile) : { runways: 0, coast: false }),
+        roads: false,
       });
       return;
     }
@@ -173,8 +184,9 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     applyPads(dem, tile, grid, pads);
     // the same face colours as the terrain mesh (height × temperature, climate-colour.ts)
     const ls = { faceColor: climateFaceColor(tile, grid, lattice) };
-    // the same TIN as the terrain worker builds from the same OSM: coastline included
-    const tin = buildTerrainTin(tile, grid, lattice, { borders, coast: coastlineWays(data.lines), pads });
+    // the same TIN as the terrain worker builds from the same OSM: coastline and roads included
+    const roads = detail === 'full' ? await fetchRoadSurface(tile, data, pads) : undefined;
+    const tin = buildSurfaceTin(tile, grid, lattice, { borders, coast: coastlineWays(data.lines), pads, roads });
     const drape = tinSampler(tin, tile);
     // foliage: the colour of the land face under the tree, pulled to the nearest green land colour
     const locate = tinLocator(tin, tile);
@@ -185,11 +197,19 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
     };
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles });
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles, roads });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
     // entrances from the whole fetch, not only the tile's own share: one by the border may belong to an own building
-    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points });
+    // a house's plinth on a slope takes the colour of the terrain face under it, as the terrain mesh draws it
+    const groundColour = (lon: number, lat: number): number | undefined => {
+      const r = locate(lon, lat);
+      if (!r) return undefined;
+      const t = tin.tris[r.tri];
+      const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
+      return ramp === RAMP.WATER ? ramp : snowy(ramp);
+    };
+    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points, groundColour });
     // antenna trusses are drawn with the buildings (near), as lines far away
     const masts = buildMasts(clipped.points, tile, drape);
     // bridge bodies and embankments (bridge-mesher.ts) are solid like the buildings and drawn with
@@ -232,7 +252,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
-    send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }) });
+    send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }), roads: roads !== undefined });
   } catch (err) {
     const res: OsmErrorResponse = {
       type: 'error',

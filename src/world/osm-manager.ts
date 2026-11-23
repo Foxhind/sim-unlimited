@@ -114,6 +114,7 @@ interface MeshPayload {
   lamps: ArrayBuffer;
   runways: number;
   coast: boolean;
+  roads: boolean;
 }
 
 interface WorkerSlot {
@@ -143,7 +144,7 @@ export class OsmManager {
   private shownList: OsmChunk[] = [];
   /** fired once per tile when its mesh first becomes ready (Q40 rebuild trigger) */
   /** a tile's OSM arrived: `runways` and `coast` reshape its terrain, which then needs a rebuild */
-  onTileReady?: (tile: Tile, runways: number, coast: boolean) => void;
+  onTileReady?: (tile: Tile, runways: number, coast: boolean, roads: boolean) => void;
   /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
   grade: ColourGrade = NEUTRAL_GRADE;
   /** filters of the areas for tiles built from now on (area style editor; invalidate() to rebuild); undefined: the game's */
@@ -181,7 +182,7 @@ export class OsmManager {
             glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
-            lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false,
+            lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
           });
         } else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
@@ -421,7 +422,7 @@ export class OsmManager {
     chunk.status = 'ready';
     if (!this.readyFired.has(chunk.key)) {
       this.readyFired.add(chunk.key);
-      this.onTileReady?.(chunk.tile, data.runways, data.coast);
+      this.onTileReady?.(chunk.tile, data.runways, data.coast, data.roads);
     }
   }
 

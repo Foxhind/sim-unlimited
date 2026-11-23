@@ -14,17 +14,22 @@ import { padDistance, padHeightEnu, type Pad } from './aerodrome';
 import type { LonLat } from './osm-types';
 import type { HeightSampler, TileBorders } from './terrain-source';
 
-/** Vertical thickness of one belt, the same at every zoom (tuned in the terrain inspector). */
-export const BELT_STEP = 250;
+/** Vertical thickness of one belt, the same at every zoom (tuned in the terrain inspector: 150 m, a smoother relief than 250 m). */
+export const BELT_STEP = 150;
 
 export function beltStepForZoom(_z: number): number {
   return BELT_STEP;
 }
 
-/** budget for contour vertices per tile; the (fixed-tolerance) border comes on top */
-export const MAX_VERTS = 100;
+/**
+ * budget for contour vertices per tile; the (fixed-tolerance) border comes on top. 300 keeps
+ * 150 m belts and the start tolerance on every z12–14 tile measured (Matterhorn, Grand Canyon,
+ * Elbrus: under 450 vertices, 13 ms); z11 and z10 tiles of high mountains thicken their belts to
+ * 225–340 m (the old budget took them to 375–840 m).
+ */
+export const MAX_VERTS = 300;
 /** isoline simplification tolerance in lattice cells: starting value and the loosest allowed */
-export const EPS_START = 2;
+export const EPS_START = 1;
 export const EPS_MAX = 3;
 
 /**
@@ -85,6 +90,8 @@ export interface TerrainTin {
  */
 export interface TinOptions {
   step?: number;
+  /** contour vertex budget (default MAX_VERTS): over it the isolines are simplified harder, then the belts thickened */
+  maxVerts?: number;
   eps?: number;
   /** shared edge profiles (see TileBorders); without them the lattice edge nodes are used */
   borders?: TileBorders;
@@ -119,6 +126,22 @@ export interface TinOptions {
    * no face inside an aerodrome bends. Every builder of a tile's TIN must pass the same.
    */
   pads?: ReadonlyArray<Pad>;
+  /**
+   * Lines forced in as fixed edges on the relief built so far (lattice coordinates): they subdivide
+   * its faces, their vertices take its height there; a vertex where they cross another fixed edge
+   * too. An end on the tile border becomes a border vertex. (The road beds, surface-tin.ts.)
+   */
+  fixedLines?: ReadonlyArray<ReadonlyArray<Pt>>;
+  /** points added on the relief built so far the same way (on the border: border vertices) */
+  extraPoints?: ReadonlyArray<Pt>;
+  /**
+   * The final height of every vertex from its height on the relief (lattice coordinates), but for
+   * the sea (at or below 0 m), the coastline and the aerodrome pads. A vertex on the tile border
+   * that is not one both neighbours have (a profile point, an extra point or a fixed line's end
+   * there) then takes the height on the border line between the shared ones next to it, so the
+   * two tiles draw the same border.
+   */
+  reshape?: (x: number, y: number, h: number) => number;
 }
 
 /** land beside an OSM coastline is lifted to at least this height (the DEM has it at or below 0) */
@@ -666,6 +689,141 @@ function insertColourLines(
   }
 }
 
+/**
+ * Fixed lines and extra points (TinOptions.fixedLines / extraPoints) into the fixed edges, like
+ * insertColourLines but over thousands of segments: the fixed edges are found by cell. A segment
+ * crossing a fixed edge splits both there (the height interpolated along the fixed edge); a point
+ * on a fixed edge splits it; an extra point on a fixed edge is left out. Deterministic.
+ */
+function insertFixedLines(
+  lines: ReadonlyArray<ReadonlyArray<Pt>>,
+  points: ReadonlyArray<Pt>,
+  constraints: Array<[number, number]>,
+  vx: number[], vy: number[], vh: number[],
+  vid: (p: Pt, h: number) => number,
+  heightAt: (p: Pt) => number,
+  isEnd: (p: Pt) => boolean,
+  onSplit: (ci: number, added: number) => void,
+): void {
+  const SNAP = 1e-3; // lattice cells
+  const CELL = 1;
+  const cells = new Map<number, number[]>();
+  const key = (cx: number, cy: number) => (cx + 1024) * 4096 + (cy + 1024);
+  const index = (ci: number) => {
+    const [u, v] = constraints[ci];
+    const x0 = Math.floor((Math.min(vx[u], vx[v]) - SNAP) / CELL), x1 = Math.floor((Math.max(vx[u], vx[v]) + SNAP) / CELL);
+    const y0 = Math.floor((Math.min(vy[u], vy[v]) - SNAP) / CELL), y1 = Math.floor((Math.max(vy[u], vy[v]) + SNAP) / CELL);
+    for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
+      const k = key(cx, cy);
+      const l = cells.get(k);
+      if (l) l.push(ci);
+      else cells.set(k, [ci]);
+    }
+  };
+  for (let ci = 0; ci < constraints.length; ci++) index(ci);
+  const add = (u: number, v: number) => {
+    constraints.push([u, v]);
+    index(constraints.length - 1);
+  };
+  /** the fixed edges whose cells the box touches, each once (in a deterministic order) */
+  const seen: number[] = [];
+  let stamp = 0;
+  const nearBox = (x0: number, y0: number, x1: number, y1: number): number[] => {
+    const out: number[] = [];
+    stamp++;
+    for (let cx = Math.floor((x0 - SNAP) / CELL); cx <= Math.floor((x1 + SNAP) / CELL); cx++) {
+      for (let cy = Math.floor((y0 - SNAP) / CELL); cy <= Math.floor((y1 + SNAP) / CELL); cy++) {
+        const list = cells.get(key(cx, cy));
+        if (!list) continue;
+        for (const ci of list) {
+          if (seen[ci] === stamp) continue;
+          seen[ci] = stamp;
+          out.push(ci);
+        }
+      }
+    }
+    return out;
+  };
+  /** split fixed edge ci at fraction s: the new vertex */
+  const split = (ci: number, s: number): number => {
+    const [u, v] = constraints[ci];
+    // on an axis-parallel edge (the tile border) exactly on its line
+    const q = {
+      x: vx[u] === vx[v] ? vx[u] : vx[u] + (vx[v] - vx[u]) * s,
+      y: vy[u] === vy[v] ? vy[u] : vy[u] + (vy[v] - vy[u]) * s,
+    };
+    const w = vid(q, vh[u] + (vh[v] - vh[u]) * s);
+    if (w === u || w === v) return w;
+    constraints[ci] = [u, w]; // still in its old cells: they cover the shorter edge
+    add(w, v);
+    onSplit(ci, constraints.length - 1);
+    return w;
+  };
+  /**
+   * The vertex p is to be when it lies on a fixed edge (within SNAP): that edge split there, or
+   * its end when that is within SNAP; undefined off every fixed edge
+   */
+  const onEdge = (p: Pt): number | undefined => {
+    for (const ci of nearBox(p.x, p.y, p.x, p.y)) {
+      const [u, v] = constraints[ci];
+      const ax = vx[u], ay = vy[u], dx = vx[v] - ax, dy = vy[v] - ay, len = Math.hypot(dx, dy);
+      if (len === 0) continue;
+      const s = ((p.x - ax) * dx + (p.y - ay) * dy) / (len * len);
+      if (s * len < -SNAP || (1 - s) * len < -SNAP) continue;
+      if (Math.abs((p.x - ax) * dy - (p.y - ay) * dx) / len >= SNAP) continue;
+      return s * len <= SNAP ? u : (1 - s) * len <= SNAP ? v : split(ci, s);
+    }
+    return undefined;
+  };
+
+  /** whether p lies within SNAP of a fixed edge */
+  const nearEdge = (p: Pt): boolean => nearBox(p.x, p.y, p.x, p.y).some((ci) => {
+    const [u, v] = constraints[ci];
+    return distToSeg(p, { x: vx[u], y: vy[u] }, { x: vx[v], y: vy[v] }) < SNAP;
+  });
+
+  for (const line of lines) {
+    let prev = -1;
+    for (let k = 0; k < line.length; k++) {
+      const p = line[k];
+      let id: number;
+      const on = (k === 0 || k === line.length - 1) && isEnd(p) ? undefined : onEdge(p);
+      id = on ?? vid(p, heightAt(p));
+      if (prev >= 0 && prev !== id) {
+        const a = { x: vx[prev], y: vy[prev] }, b = { x: vx[id], y: vy[id] };
+        const segLen = Math.hypot(b.x - a.x, b.y - a.y);
+        const hits: Array<{ t: number; ci: number; s: number }> = [];
+        for (const ci of nearBox(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y))) {
+          const [u, v] = constraints[ci];
+          if (u === prev || v === prev || u === id || v === id) continue;
+          const c = { x: vx[u], y: vy[u] }, d = { x: vx[v], y: vy[v] };
+          const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+          if (den === 0) continue;
+          const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+          const s2 = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+          if (t * segLen <= SNAP || (1 - t) * segLen <= SNAP || s2 < 0 || s2 > 1) continue;
+          hits.push({ t, ci, s: s2 });
+        }
+        hits.sort((h1, h2) => h1.t - h2.t || h1.ci - h2.ci);
+        let from = prev;
+        for (const h of hits) {
+          const [u, v] = constraints[h.ci];
+          const len = Math.hypot(vx[v] - vx[u], vy[v] - vy[u]);
+          const w = h.s * len < SNAP ? u : (1 - h.s) * len < SNAP ? v : split(h.ci, h.s);
+          if (w !== from) add(from, w);
+          from = w;
+        }
+        if (from !== id) add(from, id);
+      }
+      prev = id;
+    }
+  }
+  for (const p of points) {
+    if (isEnd(p) || nearEdge(p)) continue;
+    vid(p, heightAt(p));
+  }
+}
+
 /** rings smaller than the tolerance are noise at this detail level */
 function tinyRing(line: Polyline, eps: number): boolean {
   if (!line.closed) return false;
@@ -871,7 +1029,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       chains.push(makeChain(line, eps));
     }
     const kept = chains.reduce((s, c) => s + c.keep.reduce((t, v) => t + v, 0), 0);
-    if (kept <= MAX_VERTS || attempt >= 24) break;
+    if (kept <= (opts.maxVerts ?? MAX_VERTS) || attempt >= 24) break;
     if (eps * 1.5 <= EPS_MAX) eps *= 1.5;
     else {
       step *= 1.5;
@@ -881,7 +1039,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
 
   /** chains → vertices, fixed edges and the constrained triangulation (chains get untangled) */
   /** `colourHeight`: insert the colour boundaries too, their vertices at this height */
-  const triangulate = (chains: Chain[], colourHeight?: (p: Pt) => number) => {
+  /** `surfaceHeight`: insert the fixed lines and extra points too, their vertices at this height */
+  const triangulate = (chains: Chain[], colourHeight?: (p: Pt) => number, surfaceHeight?: (p: Pt) => number) => {
     // vertices: border (profile points and isoline ends), then the kept isoline points
     const vx: number[] = [];
     const vy: number[] = [];
@@ -900,9 +1059,20 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       return id;
     };
     const onBorder: Pt[][] = [[], [], [], []];
+    /** border vertices both neighbours have: the profile points, the corners, the extra points and fixed lines' ends there */
+    const shared = new Set<number>();
     for (const { p, h } of borderPts) {
-      vid(p, h);
+      shared.add(vid(p, h));
       onBorder[edgeOf(p)].push(p);
+    }
+    if (surfaceHeight) {
+      const ends = [...fixedLines.flatMap((l) => [l[0], l[l.length - 1]]), ...extraPoints];
+      for (const p of ends) {
+        const e = edgeOf(p);
+        if (e < 0) continue;
+        shared.add(vid(p, borderHeight(p)));
+        onBorder[e].push(p);
+      }
     }
     for (const c of chains) {
       for (const p of [c.pts[0], c.pts[c.pts.length - 1]]) {
@@ -946,6 +1116,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const borderVerts = vx.length;
     // corners belong to two edges
     for (const p of [place(0, 0), place(0, 1), place(1, 0), place(1, 1)]) {
+      const c = ids.get(`${Math.round(p.x * 4096)},${Math.round(p.y * 4096)}`);
+      if (c !== undefined) shared.add(c);
       for (let e = 0; e < 4; e++) if (edgeOf(p) !== e && (e < 2 ? p.y === (e ? grid : 0) : p.x === (e === 3 ? grid : 0))) onBorder[e].push(p);
     }
     const borderSegs: Seg[] = [];
@@ -1002,6 +1174,11 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       const h = colourHeight(p);
       return h < COAST_LEVEL ? 0 : h;
     }, stats, (p) => edgeOf(p) >= 0, (ci, added) => { if (coast[ci]) coast[added] = true; });
+    // the fixed lines and the extra points (the road beds) on the relief built so far
+    if (surfaceHeight) {
+      insertFixedLines(fixedLines, extraPoints, constraints, vx, vy, vh, vid, surfaceHeight, (p) => edgeOf(p) >= 0,
+        (ci, added) => { if (coast[ci]) coast[added] = true; });
+    }
     const coastEdges = new Set<number>();
     constraints.forEach(([u, v], ci) => { if (coast[ci]) coastEdges.add(edgeKey(u, v)); });
     // everything on or inside an aerodrome outline lies on its plane: the faces there are all
@@ -1017,6 +1194,14 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     // boundary instead of spanning the belt. Flip free edges while that strictly reduces flat ones.
     const flat = (a: number, b: number, c: number) => vh[a] === vh[b] && vh[b] === vh[c];
     const flats = (a: number, b: number, c: number, d: number) => (flat(a, b, c) ? 1 : 0) + (flat(a, b, d) ? 1 : 0);
+    // a triangle reaching over a whole belt: a simplified belt line can cut a corner past two
+    // refinement lines of the belts either side of it, leaving them face to face (on rough relief
+    // whose belts the budget thickened); flipped away first
+    const over = (a: number, b: number, c: number) => {
+      const lo = Math.min(vh[a], vh[b], vh[c]) / step, hi = Math.max(vh[a], vh[b], vh[c]) / step;
+      return hi - Math.floor(lo + 1e-9) > 1 + 1e-9 ? 1 : 0;
+    };
+    const overs = (a: number, b: number, c: number, d: number) => over(a, b, c) + over(a, b, d);
     // with colour labels: fewer flat triangles first, then fewer off-colour pixels (lexicographic)
     const cc = opts.colour ? colourCost(opts.colour, vx, vy, vh, heights, grid, opts.colour.maxDh ?? step * REFINE_TOL) : null;
     let colourFlips = 0;
@@ -1024,6 +1209,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       vx.map((x, k) => ({ x, y: vy[k] })),
       constraints,
       (u, v, p, q) => {
+        const o = overs(u, v, p, q), on = overs(p, q, u, v);
+        if (o !== on) return on < o;
         const now = flats(u, v, p, q), next = flats(p, q, u, v);
         if (next !== now || !cc) return next < now;
         if (!cc.better(u, v, p, q)) return false;
@@ -1032,11 +1219,48 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       },
     );
     lastColourFlips = colourFlips;
-    return { vx, vy, vh, tris, constraints, missing, borderVerts, coastEdges };
+    return { vx, vy, vh, tris, constraints, missing, borderVerts, coastEdges, shared };
   };
 
   let lastColourFlips = 0;
   const stats = { verts: 0, crossings: 0 };
+  const fixedLines = (opts.fixedLines ?? []).filter((l) => l.length >= 2);
+  const extraPoints = opts.extraPoints ?? [];
+  /** the final heights (TinOptions.reshape), and the border kept to what both neighbours draw */
+  const reshapeHeights = (r: { vx: number[]; vy: number[]; vh: number[]; coastEdges: Set<number>; shared: Set<number> }, reshape: (x: number, y: number, h: number) => number) => {
+    const { vx, vy, vh } = r;
+    const fixed = new Uint8Array(vx.length);
+    for (const key of r.coastEdges) {
+      fixed[Math.floor(key / 1048576)] = 1;
+      fixed[key % 1048576] = 1;
+    }
+    for (let k = 0; k < vx.length; k++) {
+      if (fixed[k] || vh[k] <= 0 || padAt({ x: vx[k], y: vy[k] }) !== undefined) {
+        fixed[k] = 1;
+        continue;
+      }
+      vh[k] = reshape(vx[k], vy[k], vh[k]);
+    }
+    // the border: between the shared vertices, straight
+    const byEdge: number[][] = [[], [], [], []];
+    for (let k = 0; k < vx.length; k++) {
+      const on = [vy[k] === 0, vy[k] === grid, vx[k] === 0, vx[k] === grid];
+      for (let e = 0; e < 4; e++) if (on[e]) byEdge[e].push(k);
+    }
+    byEdge.forEach((list, e) => {
+      const along = (k: number) => (e < 2 ? vx[k] : vy[k]);
+      list.sort((a, b) => along(a) - along(b));
+      const sh = list.filter((k) => r.shared.has(k));
+      if (sh.length < 2) return;
+      let j = 0;
+      for (const k of list) {
+        if (r.shared.has(k) || fixed[k]) continue;
+        while (j + 2 < sh.length && along(sh[j + 1]) <= along(k)) j++;
+        const a = sh[j], b = sh[j + 1], f = along(b) > along(a) ? (along(k) - along(a)) / (along(b) - along(a)) : 0;
+        vh[k] = vh[a] + (vh[b] - vh[a]) * Math.max(0, Math.min(1, f));
+      }
+    });
+  };
   // colour boundaries up to the vertex cap, longest first
   const colourPicked: Pt[][] = [];
   {
@@ -1099,17 +1323,21 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // made every one of them a sample of relief finer than the belts carry — bumps inside a tile,
   // and next to the border a strip tilted against the coarser border line (a ridge or a groove
   // along every seam). A tile of one belt stays two flat triangles however it is coloured.
-  if (colourPicked.length) {
+  // The fixed lines and extra points (road beds) the same way: on the relief built so far.
+  const surfacePass = fixedLines.length > 0 || extraPoints.length > 0;
+  if (colourPicked.length || surfacePass) {
     const locate = latticeLocator(res, grid);
     const relief = res.vh;
     const tris = res.tris;
-    res = triangulate(chains, (p) => {
+    const onRelief = (p: Pt) => {
       const r = locate(p.x, p.y);
       if (!r) return latticeHeight(heights, grid, p);
       const t = tris[r.tri];
       return relief[t.a] * r.w[0] + relief[t.b] * r.w[1] + relief[t.c] * r.w[2];
-    });
+    };
+    res = triangulate(chains, colourPicked.length ? onRelief : undefined, surfacePass ? onRelief : undefined);
   }
+  if (opts.reshape) reshapeHeights(res, opts.reshape);
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
   const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid, seaAt);
@@ -1208,6 +1436,17 @@ export function tinSampler(tin: TerrainTin, tile: Tile): HeightSampler {
     if (!r) return 0;
     const t = tin.tris[r.tri];
     return h[t.a] * r.w[0] + h[t.b] * r.w[1] + h[t.c] * r.w[2];
+  };
+}
+
+/** raw height (not clamped to sea level) of the TIN at a lattice point, clamped into the tile */
+export function tinLatticeSampler(tin: TerrainTin): (x: number, y: number) => number {
+  const locate = latticeLocator(tin, tin.grid);
+  return (x, y) => {
+    const r = locate(x, y);
+    if (!r) return 0;
+    const t = tin.tris[r.tri];
+    return tin.vh[t.a] * r.w[0] + tin.vh[t.b] * r.w[1] + tin.vh[t.c] * r.w[2];
   };
 }
 

@@ -9,8 +9,9 @@
  * railways and the paths are three networks: steps from a bridge down to the street under it do
  * not pull that street up, nor does a level crossing by a bridge raise the track.
  *
- * The lift is metres above the drawn ground, from geometry and tags alone: never from the relief,
- * and of nothing further than LIFT_REACH_M along the roads. So every tile that sees the roads
+ * The lift is metres above the drawn ground, from geometry and tags alone (or, given the roads'
+ * own heights, from those: the clearance between the two surfaces at a crossing), never from the
+ * relief, and of nothing further than LIFT_REACH_M along the roads. So every tile that sees the roads
  * LIFT_REACH_M round it (overpass.ts ROAD_REACH_M) gets the same lift at the same point, and the
  * ribbons meet at the tile borders.
  */
@@ -25,8 +26,12 @@ export const WATER_CLEAR_M = 4;
 export const STREAM_CLEAR_M = 1.5;
 /** the approaches' slope */
 export const LIFT_GRADE = 0.08;
-/** no lift reaches further than this along the roads: a higher one falls steeper */
-export const LIFT_REACH_M = 150;
+/**
+ * no lift reaches further than this along the roads: a higher one falls steeper. 90 m: with the
+ * road heights' window (road-heights.ts) the ground a tile builds at its border still depends on
+ * roads within 150 m of it (overpass.ts ROAD_REACH_M)
+ */
+export const LIFT_REACH_M = 90;
 /** less than this is no lift */
 export const LIFT_EPS_M = 0.02;
 
@@ -79,6 +84,8 @@ interface Under {
   ka: string;
   kb: string;
   half: number;
+  /** its segment of the way */
+  seg: number;
   /** a road or railway (its Way), or water and the clearance over it */
   way?: Way;
   clear?: number;
@@ -141,8 +148,22 @@ class Heap {
 
 const NONE: RoadLevels = { liftAt: () => 0, maxLift: () => 0, liftNear: () => 0, liftedTags: () => false };
 
+export interface RoadLevelOptions {
+  /**
+   * The way's own surface height `d` metres from its start (road-heights.ts). Given it, a bridge
+   * over a road or railway asks for what is left to the clearance over that way's surface; where
+   * either height is not a number, for the whole clearance as without it.
+   */
+  height?: (line: OsmLine, d: number) => number;
+}
+
 /** `toXZ`: lon, lat → metres on one plane (the mesher's `enu`) */
-export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: LonLat) => [number, number]): RoadLevels {
+export function buildRoadLevels(
+  lines: OsmLine[],
+  areas: OsmArea[],
+  toXZ: (p: LonLat) => [number, number],
+  opts: RoadLevelOptions = {},
+): RoadLevels {
   // --- the roads and railways drawn, and what a bridge may cross ---
   const ways: Way[] = [];
   const unders: Under[] = [];
@@ -170,7 +191,7 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
       if (way.path) continue; // a path under a bridge asks for nothing
     }
     for (let i = 0; i + 1 < p.length; i++) {
-      unders.push({ a: p[i], b: p[i + 1], ka: key(line.points[i]), kb: key(line.points[i + 1]), half: style.width / 2, way, clear: way ? undefined : clear });
+      unders.push({ a: p[i], b: p[i + 1], ka: key(line.points[i]), kb: key(line.points[i + 1]), half: style.width / 2, seg: i, way, clear: way ? undefined : clear });
     }
   }
   const bridges = ways.filter((w) => w.bridge);
@@ -229,6 +250,11 @@ export function buildRoadLevels(lines: OsmLine[], areas: OsmArea[], toXZ: (p: Lo
           const hit = cross(p, q, u.a, u.b);
           if (!hit) continue;
           const d = w.cum[i] + hit[0] * len;
+          if (u.way && opts.height) {
+            const du = u.way.cum[u.seg] + hit[1] * (u.way.cum[u.seg + 1] - u.way.cum[u.seg]);
+            const gap = opts.height(w.line, d) - opts.height(u.way.line, du);
+            if (Number.isFinite(gap)) req = Math.max(0, req - gap);
+          }
           // held over the whole width of what is crossed
           ask(d, req);
           ask(d - u.half, req);

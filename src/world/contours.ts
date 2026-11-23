@@ -2,9 +2,12 @@
  * Deterministic contour pipeline for terrain "belts":
  *   1. marching squares → isoline polylines for each level (grid units),
  *   2. Douglas–Peucker simplification (open lines and closed rings),
- *   3. Bowyer–Watson Delaunay triangulation of the surviving vertices.
+ *   3. Delaunay triangulation of the surviving vertices (Delaunator, Constrainautor).
  * No randomness, no hash-order dependence: identical input → identical output.
  */
+
+import Constrainautor from '@kninnug/constrainautor';
+import Delaunator from 'delaunator';
 
 export interface Pt {
   x: number;
@@ -197,92 +200,58 @@ export interface Tri {
   c: number;
 }
 
-/**
- * Bowyer–Watson Delaunay over the points, inserted in (x, y, index) order.
- * Covers the convex hull; zero-area triangles are dropped.
- */
-export function delaunay(points: Pt[]): Tri[] {
-  const n = points.length;
-  if (n < 3) return [];
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of points) {
-    minX = Math.min(minX, p.x);
-    minY = Math.min(minY, p.y);
-    maxX = Math.max(maxX, p.x);
-    maxY = Math.max(maxY, p.y);
-  }
-  const span = Math.max(maxX - minX, maxY - minY, 1e-9);
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const px: number[] = points.map((p) => p.x);
-  const py: number[] = points.map((p) => p.y);
-  // super-triangle vertices n, n+1, n+2
-  px.push(cx - 40 * span, cx, cx + 40 * span);
-  py.push(cy - 20 * span, cy + 40 * span, cy - 20 * span);
+/** flat coordinates for Delaunator */
+function coordsOf(points: ReadonlyArray<Pt>): Float64Array {
+  const c = new Float64Array(points.length * 2);
+  points.forEach((p, k) => {
+    c[2 * k] = p.x;
+    c[2 * k + 1] = p.y;
+  });
+  return c;
+}
 
-  interface T {
-    a: number; b: number; c: number;
-    ox: number; oy: number; r2: number;
-    dead: boolean;
-  }
-  const make = (a: number, b: number, c: number): T => {
-    const ax = px[a], ay = py[a], bx = px[b], by = py[b], cxx = px[c], cyy = py[c];
-    const d = 2 * (ax * (by - cyy) + bx * (cyy - ay) + cxx * (ay - by));
-    if (Math.abs(d) < 1e-18) return { a, b, c, ox: 0, oy: 0, r2: -1, dead: false };
-    const a2 = ax * ax + ay * ay, b2 = bx * bx + by * by, c2 = cxx * cxx + cyy * cyy;
-    const ox = (a2 * (by - cyy) + b2 * (cyy - ay) + c2 * (ay - by)) / d;
-    const oy = (a2 * (cxx - bx) + b2 * (ax - cxx) + c2 * (bx - ax)) / d;
-    return { a, b, c, ox, oy, r2: (ax - ox) ** 2 + (ay - oy) ** 2, dead: false };
-  };
+/** the largest coordinate distance from the first point: the scale of the tolerances */
+function spanOf(points: ReadonlyArray<Pt>): number {
+  let span = 1e-9;
+  for (const p of points) span = Math.max(span, Math.abs(p.x - points[0].x), Math.abs(p.y - points[0].y));
+  return span;
+}
 
-  let tris: T[] = [make(n, n + 1, n + 2)];
-  const order = points.map((_, i) => i).sort((i, j) => px[i] - px[j] || py[i] - py[j] || i - j);
-  const tol = 1e-9 * span * span;
-
-  for (const p of order) {
-    const x = px[p], y = py[p];
-    const bad: T[] = [];
-    for (const t of tris) {
-      if (t.r2 >= 0 && (x - t.ox) ** 2 + (y - t.oy) ** 2 < t.r2 - tol) {
-        t.dead = true;
-        bad.push(t);
-      }
-    }
-    if (!bad.length) continue; // duplicate / exactly cocircular on all circles
-    const edgeCount = new Map<number, [number, number, number]>();
-    const key = (u: number, v: number) => (u < v ? u * (n + 3) + v : v * (n + 3) + u);
-    for (const t of bad) {
-      for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]] as const) {
-        const k = key(u, v);
-        const e = edgeCount.get(k);
-        if (e) e[2]++;
-        else edgeCount.set(k, [u, v, 1]);
-      }
-    }
-    tris = tris.filter((t) => !t.dead);
-    for (const [u, v, c] of edgeCount.values()) {
-      if (c === 1) tris.push(make(u, v, p));
-    }
-  }
-
-  const out: Tri[] = [];
-  for (const t of tris) {
-    if (t.a >= n || t.b >= n || t.c >= n) continue;
-    const area2 = (px[t.b] - px[t.a]) * (py[t.c] - py[t.a]) - (px[t.c] - px[t.a]) * (py[t.b] - py[t.a]);
-    if (Math.abs(area2) < 1e-12 * span * span) continue;
-    out.push({ a: t.a, b: t.b, c: t.c });
-  }
-  // canonical order → deterministic regardless of Map iteration details
+/** the triangles in canonical form (lowest index first, orientation kept), sorted */
+function canonical(tris: Tri[]): Tri[] {
+  const out = tris.map(({ a, b, c }) => (a < b && a < c ? { a, b, c } : b < c ? { a: b, b: c, c: a } : { a: c, b: a, c: b }));
   out.sort((s, t) => s.a - t.a || s.b - t.b || s.c - t.c);
   return out;
 }
 
 /**
- * Constrained Delaunay triangulation: Delaunay of `points`, then every segment of `constraints`
- * is forced in as an edge (Sloan's edge flipping) and the Delaunay property is restored around
- * the fixed edges (Lawson flips). `prefer(u, v, p, q)`, when given, is a final flip pass on free
- * edges: edge u–v (opposite vertices p, q) is replaced by p–q when it returns true; it must
- * describe a strictly decreasing potential. Constraints must not cross each other or pass
- * through points. Deterministic: edges are visited in index order.
+ * Delaunay triangulation of the points (Delaunator). Covers the convex hull; exact duplicates
+ * are left out and zero-area triangles dropped. Deterministic.
+ */
+export function delaunay(points: Pt[]): Tri[] {
+  if (points.length < 3) return [];
+  const { triangles } = new Delaunator(coordsOf(points));
+  const span = spanOf(points);
+  const out: Tri[] = [];
+  for (let t = 0; t < triangles.length; t += 3) {
+    const a = triangles[t], b = triangles[t + 1], c = triangles[t + 2];
+    const pa = points[a], pb = points[b], pc = points[c];
+    const area2 = (pb.x - pa.x) * (pc.y - pa.y) - (pc.x - pa.x) * (pb.y - pa.y);
+    if (Math.abs(area2) < 1e-12 * span * span) continue;
+    out.push({ a, b, c });
+  }
+  return canonical(out);
+}
+
+/**
+ * Constrained Delaunay triangulation: Delaunay of `points` (Delaunator), then every segment of
+ * `constraints` is forced in as an edge and the Delaunay property restored around it
+ * (Constrainautor, exact predicates). `prefer(u, v, p, q)`, when given, is a final flip pass on
+ * free edges: edge u–v (u < v; p the apex on the side of u→v, q the other) is replaced by p–q
+ * when it returns true; it must describe a strictly decreasing potential. A flip never makes a
+ * triangle of (nearly) zero area, so no vertex ends up on another face's edge. A constraint that
+ * cannot be inserted (it crosses another or passes through a point) is counted in `missing`.
+ * Triangles are counter-clockwise. Deterministic.
  */
 export function constrainedDelaunay(
   points: Pt[],
@@ -290,108 +259,69 @@ export function constrainedDelaunay(
   prefer?: (u: number, v: number, p: number, q: number) => boolean,
 ): { tris: Tri[]; missing: number } {
   const n = points.length;
-  const px = points.map((p) => p.x), py = points.map((p) => p.y);
-  const orient = (a: number, b: number, c: number) => (px[b] - px[a]) * (py[c] - py[a]) - (py[b] - py[a]) * (px[c] - px[a]);
-  const tri: Array<[number, number, number]> = [];
-  const he = new Map<number, number>(); // directed edge u→v → triangle having it (CCW)
-  const K = (u: number, v: number) => u * n + v;
-  const U = (u: number, v: number) => (u < v ? u * n + v : v * n + u);
-  const set = (t: number, a: number, b: number, c: number) => {
-    tri[t] = [a, b, c];
-    he.set(K(a, b), t);
-    he.set(K(b, c), t);
-    he.set(K(c, a), t);
-  };
-  delaunay(points).forEach((t, i) => (orient(t.a, t.b, t.c) > 0 ? set(i, t.a, t.b, t.c) : set(i, t.a, t.c, t.b)));
-  const third = (t: number, u: number, v: number) => tri[t].find((w) => w !== u && w !== v)!;
-  /** the quad around interior edge u–v, or undefined on the hull */
-  const quad = (u: number, v: number): [number, number, number, number] | undefined => {
-    const t1 = he.get(K(u, v)), t2 = he.get(K(v, u));
-    if (t1 === undefined || t2 === undefined) return undefined;
-    return [t1, t2, third(t1, u, v), third(t2, u, v)];
-  };
-  const convex = (u: number, v: number, p: number, q: number) => orient(p, q, u) * orient(p, q, v) < 0;
-  /** flip u–v (u→v in t1 with apex p, v→u in t2 with apex q) into p–q */
-  const flip = (t1: number, t2: number, u: number, v: number, p: number, q: number) => {
-    for (const t of [t1, t2]) {
-      const [a, b, c] = tri[t];
-      he.delete(K(a, b));
-      he.delete(K(b, c));
-      he.delete(K(c, a));
-    }
-    set(t1, q, v, p);
-    set(t2, p, u, q);
-  };
-  const crosses = (u: number, v: number, a: number, b: number) =>
-    orient(a, b, u) * orient(a, b, v) < 0 && orient(u, v, a) * orient(u, v, b) < 0;
-  const freeEdges = () =>
-    [...he.keys()]
-      .filter((k) => {
-        const u = Math.floor(k / n), v = k % n;
-        return u < v && he.has(K(v, u));
-      })
-      .sort((x, y) => x - y);
-
+  if (n < 3) return { tris: [], missing: constraints.filter(([a, b]) => a !== b).length };
+  const del = new Delaunator(coordsOf(points));
+  const con = new Constrainautor(del);
+  const lone = new Set(con.untriangulatedPoints());
   const fixed = new Set<number>();
+  const U = (u: number, v: number) => (u < v ? u * n + v : v * n + u);
   let missing = 0;
   for (const [a, b] of constraints) {
     if (a === b) continue;
-    if (!he.has(K(a, b)) && !he.has(K(b, a))) {
-      const queue: Array<[number, number]> = freeEdges()
-        .map((k) => [Math.floor(k / n), k % n] as [number, number])
-        .filter(([u, v]) => crosses(u, v, a, b));
-      let guard = queue.length * 64 + 64;
-      while (queue.length && guard-- > 0) {
-        const [u, v] = queue.shift()!;
-        const qd = quad(u, v);
-        if (!qd || fixed.has(U(u, v))) break; // a crossing constraint: give up on this one
-        const [t1, t2, p, q] = qd;
-        if (!convex(u, v, p, q)) {
-          queue.push([u, v]);
-          continue;
-        }
-        flip(t1, t2, u, v, p, q);
-        if (crosses(p, q, a, b)) queue.push([p, q]);
-      }
+    if (lone.has(a) || lone.has(b)) {
+      missing++;
+      continue;
     }
-    if (he.has(K(a, b)) || he.has(K(b, a))) fixed.add(U(a, b));
-    else missing++;
+    try {
+      con.constrainOne(a, b);
+      fixed.add(U(a, b));
+    } catch {
+      // crosses another constraint or runs through a point: left out (unless it got in before that)
+      if (con.findEdge(a, b) !== Infinity) fixed.add(U(a, b));
+      else missing++;
+    }
   }
 
-  const sweep = (want: (u: number, v: number, p: number, q: number) => boolean) => {
+  const tri = del.triangles, he = del.halfedges;
+  const px = points.map((p) => p.x), py = points.map((p) => p.y);
+  const orient = (a: number, b: number, c: number) => (px[b] - px[a]) * (py[c] - py[a]) - (py[b] - py[a]) * (px[c] - px[a]);
+  const span = spanOf(points);
+  const tol = 1e-10 * span * span;
+  const prev = (e: number) => (e % 3 === 0 ? e + 2 : e - 1);
+  const link = (e: number, o: number) => {
+    he[e] = o;
+    if (o !== -1) he[o] = e;
+  };
+
+  if (prefer) {
     for (let pass = 0; pass < 200; pass++) {
       let flips = 0;
-      for (const k of freeEdges()) {
-        if (fixed.has(k)) continue;
-        const u = Math.floor(k / n), v = k % n;
-        const qd = quad(u, v);
-        if (!qd) continue;
-        const [t1, t2, p, q] = qd;
-        if (!convex(u, v, p, q) || !want(u, v, p, q)) continue;
-        flip(t1, t2, u, v, p, q);
+      for (let e = 0; e < tri.length; e++) {
+        const o = he[e];
+        if (o < e) continue; // the hull, or visited from its twin
+        const a = tri[e], b = tri[o];
+        if (fixed.has(U(a, b))) continue;
+        const e2 = prev(e), o2 = prev(o);
+        const p = tri[e2], q = tri[o2];
+        // Delaunator's triangles turn clockwise (y up): the quad a, p, b, q; the new triangles
+        // (p, a, q) and (q, b, p) must turn the same way, with area
+        if (orient(p, a, q) >= -tol || orient(q, b, p) >= -tol) continue;
+        // counter-clockwise, b→a has apex p and a→b apex q
+        const want = b < a ? prefer(b, a, p, q) : prefer(a, b, q, p);
+        if (!want) continue;
+        const heE2 = he[e2], heO2 = he[o2];
+        tri[e] = q; // q→b
+        tri[o] = p; // p→a
+        link(e, heO2);
+        link(o, heE2);
+        link(e2, o2); // p→q and q→p
         flips++;
       }
-      if (!flips) return;
+      if (!flips) break;
     }
-  };
-  let span = 1e-9;
-  for (let k = 0; k < n; k++) span = Math.max(span, Math.abs(px[k] - px[0]), Math.abs(py[k] - py[0]));
-  const tol = 1e-10 * span ** 4;
-  // d strictly inside the circumcircle of CCW triangle (a, b, c)
-  const inCircle = (a: number, b: number, c: number, d: number) => {
-    const ax = px[a] - px[d], ay = py[a] - py[d];
-    const bx = px[b] - px[d], by = py[b] - py[d];
-    const cx = px[c] - px[d], cy = py[c] - py[d];
-    return (
-      (ax * ax + ay * ay) * (bx * cy - cx * by) - (bx * bx + by * by) * (ax * cy - cx * ay) + (cx * cx + cy * cy) * (ax * by - bx * ay) > tol
-    );
-  };
-  sweep((u, v, p, q) => inCircle(u, v, p, q));
-  if (prefer) sweep(prefer);
+  }
 
-  const out: Tri[] = tri.map(([a, b, c]) =>
-    a < b && a < c ? { a, b, c } : b < c ? { a: b, b: c, c: a } : { a: c, b: a, c: b },
-  );
-  out.sort((s, t) => s.a - t.a || s.b - t.b || s.c - t.c);
-  return { tris: out, missing };
+  const out: Tri[] = [];
+  for (let t = 0; t < tri.length; t += 3) out.push({ a: tri[t], b: tri[t + 2], c: tri[t + 1] }); // counter-clockwise
+  return { tris: canonical(out), missing };
 }

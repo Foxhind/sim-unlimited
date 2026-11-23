@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LonLat, OsmArea, OsmLine } from '../src/world/osm-types';
-import { buildRoadLevels, LEVEL_M, LIFT_GRADE, LIFT_REACH_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
+import { buildRoadLevels, LEVEL_M, LIFT_EPS_M, LIFT_GRADE, LIFT_REACH_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
 
 /** points are given in metres (x east, y north) and stored as "degrees" of 1e-5 */
 const P = (x: number, y: number): LonLat => [x / 1e5, y / 1e5];
@@ -78,7 +78,7 @@ describe('road levels', () => {
     const lower = lowerRoad(400, { highway: 'secondary', bridge: 'yes', layer: '2' });
     const l = levels([top, lower]);
     expect(l.liftAt(top, 400)).toBeCloseTo(3 * LEVEL_M, 2);
-    expect(l.liftAt(top, 400 + LOWER_HALF + 100)).toBeCloseTo(LEVEL_M, 1);
+    expect(l.liftAt(top, 400 + LOWER_HALF + (2 * LEVEL_M * LIFT_REACH_M) / (3 * LEVEL_M))).toBeCloseTo(LEVEL_M, 1);
     expect(l.liftAt(top, 400 + LOWER_HALF + LIFT_REACH_M)).toBeCloseTo(0, 6);
     expect(l.liftAt(top, 400 + LOWER_HALF + LIFT_REACH_M + 20)).toBe(0);
   });
@@ -170,34 +170,35 @@ describe('road levels', () => {
 
   it('a bridge holds its height between two crossings near each other', () => {
     const bridge = way(BRIDGE, [0, 0], [600, 0]);
-    const l = levels([bridge, lowerRoad(200), lowerRoad(320)]);
-    for (let d = 200; d <= 320; d += 10) expect(l.liftAt(bridge, d), `at ${d}`).toBeGreaterThan(LEVEL_M - 0.01);
+    const l = levels([bridge, lowerRoad(200), lowerRoad(270)]);
+    for (let d = 200; d <= 270; d += 10) expect(l.liftAt(bridge, d), `at ${d}`).toBeGreaterThan(LEVEL_M - 0.01);
     // past the last crossing it comes down at the grade as ever
-    expect(Math.abs(l.liftAt(bridge, 370) - (LEVEL_M - LIFT_GRADE * (50 - LOWER_HALF)))).toBeLessThan(0.05);
+    expect(Math.abs(l.liftAt(bridge, 320) - (LEVEL_M - LIFT_GRADE * (50 - LOWER_HALF)))).toBeLessThan(0.05);
   });
 
   it('held across the ways a bridge is split into, and sloping evenly between unlike crossings', () => {
     const a = way(BRIDGE, [0, 0], [250, 0]), b = way(BRIDGE, [250, 0], [600, 0]);
     const river = way({ waterway: 'river', width: '2' }, [300, -100], [300, 100]);
-    const l = levels([a, b, lowerRoad(200), river]);
+    const l = levels([a, b, lowerRoad(240), river]);
     // 6 m over the road and level on to the bridge's next vertex (250), 4 m at the river's near
     // bank (299): even in between
     const at = (d: number) => (d <= 250 ? l.liftAt(a, d) : l.liftAt(b, d - 250));
     const even = (d: number) => (d <= 250 ? LEVEL_M : LEVEL_M + ((WATER_CLEAR_M - LEVEL_M) * (d - 250)) / (299 - 250));
-    for (const d of [220, 250, 265, 280, 299]) expect(Math.abs(at(d) - even(d)), `at ${d}`).toBeLessThan(0.05);
+    // (the far bank's ask, 2 m on, bends the last metres by up to 0.07 m)
+    for (const d of [245, 250, 265, 280, 299]) expect(Math.abs(at(d) - even(d)), `at ${d}`).toBeLessThan(0.1);
     expect(l.liftAt(a, 250)).toBeCloseTo(l.liftAt(b, 0), 6);
   });
 
   it('a short bridge is level from end to end: the approaches do the climbing', () => {
-    const west = way({ highway: 'primary' }, [-100, 0], [140, 0]);
-    const bridge = way(BRIDGE, [140, 0], [270, 0]);
-    const east = way({ highway: 'primary' }, [270, 0], [500, 0]);
+    const west = way({ highway: 'primary' }, [-100, 0], [180, 0]);
+    const bridge = way(BRIDGE, [180, 0], [220, 0]);
+    const east = way({ highway: 'primary' }, [220, 0], [500, 0]);
     const l = levels([west, bridge, east, lowerRoad(200)]);
-    for (let d = 0; d <= 130; d += 10) expect(l.liftAt(bridge, d), `at ${d}`).toBeCloseTo(LEVEL_M, 2);
-    expect(l.liftAt(west, 240 - 25)).toBeCloseTo(LEVEL_M - LIFT_GRADE * 25, 2);
+    for (let d = 0; d <= 40; d += 10) expect(l.liftAt(bridge, d), `at ${d}`).toBeCloseTo(LEVEL_M, 2);
+    expect(l.liftAt(west, 280 - 25)).toBeCloseTo(LEVEL_M - LIFT_GRADE * 25, 2);
     // the level stretch and the fall after it stay within the reach
     expect(l.liftAt(east, LEVEL_M / LIFT_GRADE)).toBe(0);
-    expect(270 - 205.5 + LEVEL_M / LIFT_GRADE).toBeLessThanOrEqual(LIFT_REACH_M);
+    expect(220 - 205.5 + LEVEL_M / LIFT_GRADE).toBeLessThanOrEqual(LIFT_REACH_M);
   });
 
   it('a long bridge is level only as far as the reach allows', () => {
@@ -235,5 +236,28 @@ describe('road levels', () => {
     expect(l.liftNear(bridge.tags, 200, 3)).toBeCloseTo(LEVEL_M, 2);
     expect(l.liftNear(bridge.tags, 250, -4)).toBeCloseTo(l.liftAt(bridge, 250), 6);
     expect(l.liftNear({ highway: 'primary' }, 200, 0)).toBe(0);
+  });
+});
+
+describe('clearance between the roads’ own heights', () => {
+  const bridge = way(BRIDGE, [0, 0], [400, 0]), under = lowerRoad(200);
+  it('reaches 90 m along the roads', () => { expect(LIFT_REACH_M).toBe(90); });
+  it('lifts a bridge by what is left to the clearance over the road under it', () => {
+    // the bridge's own height 3 m over the lower road's at the crossing: 3 m more makes LEVEL_M
+    const l = buildRoadLevels([bridge, under], [], xz, { height: (line) => (line === bridge ? 503 : 500) });
+    expect(l.maxLift(bridge)).toBeCloseTo(LEVEL_M - 3, 2);
+  });
+  it('lifts nothing where the bridge already clears the road under it', () => {
+    const l = buildRoadLevels([bridge, under], [], xz, { height: (line) => (line === bridge ? 510 : 500) });
+    expect(l.maxLift(bridge)).toBeLessThan(LIFT_EPS_M);
+  });
+  it('reads the heights where the two cross', () => {
+    // the lower road climbs north at 10 %: at the crossing (100 m from its start) it is at 510
+    const l = buildRoadLevels([bridge, under], [], xz, { height: (line, d) => (line === bridge ? 500 : 500 + 0.1 * d) });
+    expect(l.liftAt(bridge, 200)).toBeCloseTo(10 + LEVEL_M, 1);
+  });
+  it('lifts as before without heights, or where a height is missing', () => {
+    expect(buildRoadLevels([bridge, under], [], xz).maxLift(bridge)).toBeCloseTo(LEVEL_M, 2);
+    expect(buildRoadLevels([bridge, under], [], xz, { height: () => NaN }).maxLift(bridge)).toBeCloseTo(LEVEL_M, 2);
   });
 });

@@ -15,6 +15,7 @@ import {
   computeHeights,
   parseColor,
   parseLength,
+  PLINTH_MAX_M,
   pastelColour,
   roofRamp,
   wallRamp,
@@ -447,14 +448,14 @@ describe('buildBuildingMesh', () => {
     for (let i = 0; i < m.vertices.length; i++) expect(Number.isFinite(m.vertices[i])).toBe(true);
   });
 
-  it('sits the foundation on the minimum terrain under the footprint', () => {
+  it('stands PLINTH_MAX_M over the lowest ground where the ground under it rises more, its plinth down into the ground', () => {
     const b = tileBounds(TILE);
     const westLon = (b.west + b.east) / 2 - 0.0004;
-    const sample = (lon: number) => 100 + (lon - westLon) * 10000;
+    const sample = (lon: number) => 100 + (lon - westLon) * 10000; // 8 m across
     const m = build([{ rings: [rect()], tags: { building: 'house', height: '10' } }], sample);
     const minY = Math.min(...ys(m));
-    expect(minY).toBeCloseTo(100, 2);
-    expect(edgeTop(m)).toBeCloseTo(110, 2);
+    expect(minY).toBeCloseTo(100 - 0.5, 2);
+    expect(edgeTop(m)).toBeCloseTo(100 + PLINTH_MAX_M + 10, 2);
   });
 
   it('raises elevated parts and adds a ceiling (arch)', () => {
@@ -507,5 +508,39 @@ describe('buildBuildingMesh', () => {
     const m = build([{ rings: [outer, hole], tags: { building: 'yes', height: '8' } }]);
     expect(m.vertexCount).toBeGreaterThan(0);
     for (let i = 0; i < m.vertices.length; i++) expect(Number.isFinite(m.vertices[i])).toBe(true);
+  });
+});
+describe('a house on a slope stands on a plinth', () => {
+  const b = tileBounds(TILE);
+  const cx = (b.west + b.east) / 2;
+  const mPerLon = 111320 * Math.cos((((b.south + b.north) / 2) * Math.PI) / 180);
+  /** ground rising east at `grade`, 100 m at the footprint's centre */
+  const slope = (grade: number) => (lon: number) => 100 + grade * (lon - cx) * mPerLon;
+  const house: OsmBuilding = { rings: [rect(0.0001, 0.0001)], tags: { building: 'yes', 'building:levels': '2', 'roof:shape': 'flat' } };
+  const h = buildingHeights(house);
+  const halfW = 0.0001 * mPerLon;
+  const EARTH = colour(90, 80, 60);
+  const meshOn = (grade: number) => buildBuildingMesh({ tile: TILE, buildings: [house], sampleHeight: slope(grade), groundColour: () => EARTH });
+  const top = (m: { vertices: Float32Array; vertexCount: number }) => { let y = -Infinity; for (let i = 0; i < m.vertexCount; i++) y = Math.max(y, m.vertices[i * 6 + 1]); return y; };
+
+  it('stands at the highest ground under it: nothing of it is buried', () => {
+    const grade = 0.2; // 3 m across a 15 m house
+    expect(top(meshOn(grade))).toBeCloseTo(100 + grade * halfW + h.min + h.wall + h.roof, 1);
+  });
+  it('is never lifted more than PLINTH_MAX_M over the lowest ground', () => {
+    const grade = 1; // 15 m across
+    expect(top(meshOn(grade))).toBeCloseTo(100 - halfW + PLINTH_MAX_M + h.min + h.wall + h.roof, 1);
+  });
+  it('closes the gap under it with a plinth of the ground’s colour, down into the ground', () => {
+    const m = meshOn(0.2);
+    let lo = Infinity, hi = -Infinity, n = 0;
+    for (let i = 0; i < m.vertexCount; i++) if (m.ramps[i] === EARTH) { n++; lo = Math.min(lo, m.vertices[i * 6 + 1]); hi = Math.max(hi, m.vertices[i * 6 + 1]); }
+    expect(n).toBeGreaterThan(0);
+    expect(lo).toBeLessThan(100 - 0.2 * halfW);
+    expect(hi).toBeCloseTo(100 + 0.2 * halfW, 1);
+  });
+  it('has no plinth on flat ground', () => {
+    const m = meshOn(0);
+    for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).not.toBe(EARTH);
   });
 });

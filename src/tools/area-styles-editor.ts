@@ -101,9 +101,9 @@ const canvas = $<HTMLCanvasElement>('screen');
 const renderer = new Renderer(canvas);
 const chunks = new ChunkManager(renderer.gl, state.centre);
 const osm = new OsmManager(renderer.gl, state.centre);
-osm.onTileReady = (tile, runways, coast) => {
+osm.onTileReady = (tile, runways, coast, roads) => {
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
-  else if (coast) chunks.invalidate(tile);
+  else if (coast || roads) chunks.invalidate(tile);
 };
 
 const view = mat4.create();

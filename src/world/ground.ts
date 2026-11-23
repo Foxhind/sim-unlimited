@@ -1,25 +1,10 @@
 import { vec3 } from 'gl-matrix';
-import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, type LatLon } from './geodesy';
-import { loadTileDem, type HeightSampler } from './terrain-source';
-import { buildTerrainTin, tinSampler } from './terrain-tin';
-import { applyPads, loadPads, type Pad } from './aerodrome';
-import { gridForZoom } from './chunks';
-import { getOsmRaw } from './tile-cache';
-import { osmRawKey } from './osm-source';
-import { parseOverpass } from './overpass';
-import { coastlineWays } from './coast';
-import { buildingHeights } from './building-mesher';
+import { enuToLatLon, tileCenter, tileForLatLon, type LatLon } from './geodesy';
+import type { HeightSampler } from './terrain-source';
+import { buildGroundTile, groundSampler, type GroundTile, type Prism } from './ground-tile';
+import { RetryableError } from '../engine/queue';
 import type { GroundContact } from '../flight/model';
-
-interface Prism {
-  lat: number;
-  lon: number;
-  /** footprint rings in local meters [x=east, z=-north] relative to (lat, lon) */
-  rings: [number, number][][];
-  base: number;
-  top: number;
-  boundR: number;
-}
+import type { GroundResponse } from '../workers/ground.worker';
 
 function pointInRing(x: number, z: number, ring: [number, number][]): boolean {
   let inside = false;
@@ -32,8 +17,9 @@ function pointInRing(x: number, z: number, ring: [number, number][]): boolean {
 }
 
 /**
- * Collision ground truth on the main thread: bilinear DEM samples (Q13 water
- * mask) plus S3DB prisms from cached raw OSM. Tiles stream in around the jet.
+ * Collision ground truth: the rendered terrain surface (Q13 water mask) plus S3DB prisms from
+ * cached raw OSM, built in a worker (ground-tile.ts) and sampled on the main thread. Tiles stream
+ * in around the jet.
  */
 export class GroundProbe {
   private samplers = new Map<string, HeightSampler>();
@@ -52,6 +38,38 @@ export class GroundProbe {
   private active = 0;
 
   constructor(private origin: () => LatLon) {}
+
+  private worker?: Worker;
+  private nextId = 0;
+  private waiting = new Map<number, { resolve: (g: GroundTile) => void; reject: (e: Error) => void }>();
+
+  /** a tile's ground, built in the worker (in place where there are no workers: tests) */
+  private build(tile: { z: number; x: number; y: number }): Promise<GroundTile> {
+    if (typeof Worker === 'undefined') return buildGroundTile(tile);
+    if (!this.worker) {
+      const worker = new Worker(new URL('../workers/ground.worker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = (e: MessageEvent<GroundResponse>) => {
+        const w = this.waiting.get(e.data.id);
+        if (!w) return;
+        this.waiting.delete(e.data.id);
+        if ('ground' in e.data) w.resolve(e.data.ground);
+        else w.reject(e.data.retryable ? new RetryableError(0, e.data.error) : new Error(e.data.error));
+      };
+      // a failed worker is dropped: the next tile starts a new one (the waiting ones retry later)
+      worker.onerror = () => {
+        for (const w of this.waiting.values()) w.reject(new Error('ground worker failed'));
+        this.waiting.clear();
+        worker.terminate();
+        if (this.worker === worker) this.worker = undefined;
+      };
+      this.worker = worker;
+    }
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      this.waiting.set(id, { resolve, reject });
+      this.worker!.postMessage({ id, tile });
+    });
+  }
 
   private tileLatLon = { lat: 0, lon: 0 };
 
@@ -99,61 +117,11 @@ export class GroundProbe {
   private async load(tile: { z: number; x: number; y: number }, key: string, now: number): Promise<void> {
     const gen = this.outdated.get(key);
     try {
-      // the OSM raw cache is keyed with a '/full' suffix (see osm.worker); without it buildings never collided
-      const raw = await getOsmRaw(osmRawKey(tile)).catch(() => undefined);
-      let data: ReturnType<typeof parseOverpass> | undefined;
-      if (raw) {
-        try {
-          data = parseOverpass(JSON.parse(raw.json));
-        } catch {
-          data = undefined;
-        }
-      }
-      // the surface is the rendered one: same lattice (runway-flattened when OSM is cached) → same isoline TIN as the mesh
-      const grid = gridForZoom(tile.z);
-      const dem = await loadTileDem(tile, grid);
-      const { heights: lattice, borders } = dem;
-      const pads: Pad[] = data ? await loadPads(data) : [];
-      applyPads(dem, tile, grid, pads);
-      // the same TIN as the mesh (no colour boundaries: faces are coloured by height × temperature)
-      const surface = tinSampler(buildTerrainTin(tile, grid, lattice, {
-        borders,
-        coast: data ? coastlineWays(data.lines) : undefined,
-        pads,
-      }), tile);
-      this.samplers.set(key, surface);
+      const ground = await this.build(tile);
+      this.samplers.set(key, groundSampler(ground, tile));
       if (this.outdated.get(key) === gen) this.outdated.delete(key);
       this.stale.delete(key);
-      if (data) {
-        try {
-          const list: Prism[] = [];
-          for (const b of data.buildings) {
-            const outer = b.rings[0];
-            if (!outer || outer.length < 3) continue;
-            let lat = 0;
-            let lon = 0;
-            for (const [lo, la] of outer) {
-              lon += lo;
-              lat += la;
-            }
-            lon /= outer.length;
-            lat /= outer.length;
-            const h = buildingHeights(b);
-            const rings = b.rings.map((ring) =>
-              ring.map(([lo, la]) => {
-                const [e, n] = latLonToEnu({ lat, lon }, la, lo, 0);
-                return [e, -n] as [number, number];
-              }),
-            );
-            const base = Math.max(0, surface(lon, lat));
-            const boundR = rings[0].reduce((m, [x, z]) => Math.max(m, Math.hypot(x, z)), 0);
-            list.push({ lat, lon, rings, base, top: base + h.min + h.wall + h.roof, boundR });
-          }
-          this.prisms.set(key, list);
-        } catch {
-          this.prisms.set(key, []);
-        }
-      }
+      if (ground.prisms) this.prisms.set(key, ground.prisms);
     } catch {
       this.retryAt.set(key, now + 5000);
     }

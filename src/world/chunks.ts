@@ -31,7 +31,7 @@ export const DETAIL_RADIUS_M = 7000;
 export const DETAIL_Z = 14;
 
 /** Work-lattice resolution on which terrain contours are traced (not the mesh density). */
-export const TERRAIN_GRID = 48;
+export const TERRAIN_GRID = 64;
 
 /** the same lattice at every zoom (tuned in the terrain inspector) */
 export function gridForZoom(_z: number): number {

@@ -15,7 +15,7 @@ import type { HeightSampler } from './terrain-source';
 export const FAR_OSM_RADIUS_M = 21000;
 export const FAR_OSM_Z = 14;
 /** bump when what a far tile is built from or into changes (cached far tiles are rebuilt) */
-export const FAR_OSM_SCHEMA = 2;
+export const FAR_OSM_SCHEMA = 3;
 /** far window dots here cover larger facade cells than on the detailed tiles (palette.ts FAR_WINDOWS) */
 export const FAR_RING_CELL_M = FAR_WINDOWS.CELL_M * FAR_WINDOWS.FAR_RING_SCALE;
 

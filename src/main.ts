@@ -358,7 +358,7 @@ function runwayOwner(pts: [number, number][]): string | undefined {
 }
 
 // Q40: a fresh aerodrome/runway tile invalidates nearby terrain so its pad is applied
-osm.onTileReady = (tile, runways, coast) => {
+osm.onTileReady = (tile, runways, coast, roads) => {
   // every long paved runway gets an ILS on each end
   if (runways > 0) {
     void cachedRunwayLines([tile]).then((lines) => {
@@ -367,9 +367,10 @@ osm.onTileReady = (tile, runways, coast) => {
   }
   // the collision surface is built from the tile's own OSM like the mesh: rebuild it too
   ground.refresh(tile);
-  // aerodrome pads flatten the terrain and the OSM coastline reshapes the shore: rebuild with the OSM
+  // aerodrome pads flatten the terrain, the OSM coastline reshapes the shore and the ground is
+  // built under the roads: rebuild with the OSM
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
-  else if (coast) chunks.invalidate(tile); // only this tile's shore changes
+  else if (coast || roads) chunks.invalidate(tile); // only this tile changes
 };
 
 type SimState = 'menu' | 'loading' | 'flying' | 'paused' | 'crashed';

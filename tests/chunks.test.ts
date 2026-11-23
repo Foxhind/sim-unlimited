@@ -4,6 +4,7 @@ import {
   coarseEdges,
   frustumPlanes,
   gridForZoom,
+  TERRAIN_GRID,
   MAX_Z,
   MIN_Z,
   selectLeaves,
@@ -98,9 +99,10 @@ describe('frustum culling with a camera away from the origin', () => {
 
 describe('gridForZoom', () => {
   it('uses one contour work lattice at every zoom', () => {
-    expect(gridForZoom(14)).toBe(48);
-    expect(gridForZoom(12)).toBe(48);
-    expect(gridForZoom(8)).toBe(48);
+    expect(gridForZoom(14)).toBe(TERRAIN_GRID);
+    expect(gridForZoom(12)).toBe(TERRAIN_GRID);
+    expect(gridForZoom(8)).toBe(TERRAIN_GRID);
+    expect(TERRAIN_GRID).toBe(64);
   });
 });
 describe('two tile variants', () => {

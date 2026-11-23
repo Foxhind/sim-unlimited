@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contourLevels, delaunay, extractIsolines, simplifyOpen, simplifyRing } from '../src/world/contours';
+import { constrainedDelaunay, contourLevels, delaunay, extractIsolines, simplifyOpen, simplifyRing } from '../src/world/contours';
 
 function lattice(n: number, fn: (i: number, j: number) => number): Float32Array {
   const h = new Float32Array((n + 1) * (n + 1));
@@ -95,5 +95,38 @@ describe('delaunay', () => {
   it('is deterministic', () => {
     const pts = Array.from({ length: 60 }, (_, k) => ({ x: (k * 37) % 17, y: (k * 91) % 23 + k * 0.01 }));
     expect(delaunay(pts)).toEqual(delaunay(pts));
+  });
+});
+
+describe('constrainedDelaunay at scale', () => {
+  const rnd = (seed: number) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  it('triangulates 8000 points with 2000 fixed edges within 150 ms', () => {
+    const r = rnd(7), pts = Array.from({ length: 8000 }, () => ({ x: r() * 64, y: r() * 64 }));
+    // fixed edges: short non-crossing segments between consecutive points of 2000 disjoint pairs
+    const sorted = pts.map((p, i) => ({ p, i })).sort((a, b) => a.p.x - b.p.x || a.p.y - b.p.y);
+    const cons: [number, number][] = [];
+    for (let k = 0; k + 1 < sorted.length && cons.length < 2000; k += 4) cons.push([sorted[k].i, sorted[k + 1].i]);
+    constrainedDelaunay(pts, cons); // warm-up
+    const t = performance.now();
+    const { tris, missing } = constrainedDelaunay(pts, cons);
+    expect(performance.now() - t).toBeLessThan(150);
+    expect(missing).toBe(0);
+    const has = new Set(tris.flatMap((f) => [[f.a, f.b], [f.b, f.c], [f.c, f.a]].map(([u, v]) => (u < v ? `${u},${v}` : `${v},${u}`))));
+    for (const [u, v] of cons) expect(has.has(u < v ? `${u},${v}` : `${v},${u}`)).toBe(true);
+  });
+
+  it('leaves no vertex on another face’s edge among points on one line', () => {
+    const on = (x: number) => ({ x, y: 3 + ((x - 3) * 41) / 42 });
+    const pts = [on(24.54), on(26.54), on(27.041), on(27.613), on(28.04), on(29.27), { x: 27.995, y: 29.434 }, { x: 33, y: 24.35 }, { x: 20, y: 30 }, { x: 30, y: 18 }];
+    const { tris } = constrainedDelaunay(pts, [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]], () => true);
+    for (const f of tris) for (const [p, q] of [[f.a, f.b], [f.b, f.c], [f.c, f.a]]) {
+      const a = pts[p], b = pts[q], len = Math.hypot(b.x - a.x, b.y - a.y);
+      pts.forEach((m, k) => {
+        if (k === p || k === q) return;
+        const s = ((m.x - a.x) * (b.x - a.x) + (m.y - a.y) * (b.y - a.y)) / (len * len);
+        const d = Math.abs((m.x - a.x) * (b.y - a.y) - (m.y - a.y) * (b.x - a.x)) / len;
+        expect(s > 1e-6 && s < 1 - 1e-6 && d < 1e-7).toBe(false);
+      });
+    }
   });
 });

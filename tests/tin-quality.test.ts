@@ -50,13 +50,16 @@ it('triangles stay inside one belt and the TIN is deterministic', () => {
       const tin = buildTerrainTin(tile, GRID, h, { debug });
       const step = debug.step!;
       const inner = (k: number) => tin.vx[k] > 0 && tin.vx[k] < GRID && tin.vy[k] > 0 && tin.vy[k] < GRID;
+      let across = 0, inside = 0;
       for (const t of tin.tris) {
         const ks = [t.a, t.b, t.c];
         if (!ks.every(inner)) continue;
+        inside++;
         // all corners within [n·step, (n+1)·step] for one n
         const hs = ks.map((k) => tin.vh[k] / step);
-        expect(Math.max(...hs) - Math.floor(Math.min(...hs) + 1e-9), JSON.stringify(ks.map((k) => tin.vh[k]))).toBeLessThanOrEqual(1 + 1e-9);
+        if (Math.max(...hs) - Math.floor(Math.min(...hs) + 1e-9) > 1 + 1e-9) across++;
       }
+      expect(across, `${across} of ${inside}`).toBe(0);
       expect(buildTerrainTin(tile, GRID, h)).toEqual(tin);
     }
   }

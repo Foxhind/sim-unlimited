@@ -10,7 +10,7 @@
  * (applyPads); the TIN takes the pad outline as fixed edges and every vertex on or inside it at
  * the plane's height (TinOptions.pads), so no face inside the territory bends.
  */
-import { enuToLatLon, latLonToEnu, mercatorYToLat, tileRowMeters, type LatLon, type Tile } from './geodesy';
+import { EARTH_R, enuToLatLon, latLonToEnu, mercatorYToLat, tileRowMeters, type LatLon, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmLine } from './osm-types';
 import { demHeights, type TileBorders } from './terrain-source';
 import { parseLength } from './building-mesher';
@@ -310,6 +310,17 @@ function padNode(h: number, lon: number, lat: number, pads: ReadonlyArray<Pad>, 
     }
   }
   return bestW >= 1 ? bestH : bestW > 0 ? h * (1 - bestW) + bestH * bestW : h;
+}
+
+/**
+ * A raw height at lon/lat as applyPads leaves the lattice there: on the pad's plane (with the
+ * flat margin of a z14 lattice of `grid` cells at that latitude), blended over PAD_BLEND_M. A
+ * function of the point alone: the same in every tile.
+ */
+export function padAdjust(pads: ReadonlyArray<Pad>, lon: number, lat: number, h: number, grid = 64): number {
+  if (!pads.length) return h;
+  const row = ((2 * Math.PI * EARTH_R) / 2 ** 14) * Math.cos((lat * Math.PI) / 180);
+  return padNode(h, lon, lat, pads, (1.5 * row) / grid);
 }
 
 /**

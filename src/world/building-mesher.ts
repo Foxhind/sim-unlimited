@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -60,6 +60,8 @@ export interface BuildingMeshOptions {
   tile: Tile;
   buildings: OsmBuilding[];
   sampleHeight: HeightSampler;
+  /** the terrain's colour at a point (its face colour): a house's plinth takes it; earth without */
+  groundColour?: (lon: number, lat: number) => number | undefined;
   /** OSM points: those tagged `entrance` on a building's outline become doors in its wall */
   points?: OsmPoint[];
 }
@@ -603,6 +605,39 @@ function normalizeRing(ring: XZ[], ccw: boolean): XZ[] {
   return ring;
 }
 
+/**
+ * A house on a slope stands at the highest ground under its outline, on a plinth down to the lowest
+ * (nothing of it buried in the hill), but never more than this over the lowest ground: on steeper
+ * ground it is cut into the hill by the rest
+ */
+export const PLINTH_MAX_M = 6;
+/** a plinth reaches this far into the ground under its lowest point: no gap where the ground dips between outline points */
+const PLINTH_SINK_M = 0.5;
+/** a plinth's colour without the terrain's: earth */
+const PLINTH_EARTH = snowy(colour(112, 94, 70));
+
+/**
+ * Where a building stands: `base` the foot of its walls (the highest ground under its outline and
+ * the midpoints of its edges, at most PLINTH_MAX_M over the lowest), `low` the lowest ground there
+ * (both at least sea level)
+ */
+export function buildingFooting(ring: ReadonlyArray<LonLat>, sampleHeight: HeightSampler): { base: number; low: number } {
+  let lo = Infinity, hi = -Infinity;
+  const at = (lon: number, lat: number) => {
+    const h = sampleHeight(lon, lat);
+    lo = Math.min(lo, h);
+    hi = Math.max(hi, h);
+  };
+  for (let i = 0; i < ring.length; i++) {
+    const [lon, lat] = ring[i], [lon2, lat2] = ring[(i + 1) % ring.length];
+    at(lon, lat);
+    at((lon + lon2) / 2, (lat + lat2) / 2);
+  }
+  if (!Number.isFinite(lo)) return { base: 0, low: 0 };
+  const low = Math.max(lo, 0);
+  return { base: Math.max(Math.min(hi, lo + PLINTH_MAX_M), 0), low };
+}
+
 export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const { tile, buildings, sampleHeight } = opts;
   const center = tileCenter(tile);
@@ -649,13 +684,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (outer.length < 3) continue;
     const holes = b.rings.slice(1).map((r) => normalizeRing(dedupe(r.map(toXZ)), false)).filter((r) => r.length >= 3);
 
-    // foundation sits on the lowest terrain under the footprint
-    let minTerrain = Infinity;
-    for (const [x, z] of outer) {
-      const ll = enuToLatLon(center, x, -z, 0);
-      minTerrain = Math.min(minTerrain, sampleHeight(ll.lon, ll.lat));
-    }
-    const base = Math.max(minTerrain, 0);
+    // the walls stand at the highest ground under the footprint (a plinth below, see PLINTH_MAX_M)
+    const { base, low } = buildingFooting(outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
     const shape = roofShape(tags);
     const frame = roofFrame(outer, tags);
     const h = computeHeights(tags, roofRun(shape, frame));
@@ -677,6 +707,20 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const balconies = windowed && hasBalconies(tags, winH);
     // hospitals and supermarkets keep their lights on all night
     const flags = isAllNight(tags) ? FACADE_ALL_NIGHT : 0;
+
+    // a plinth of the ground's colour from under the lowest ground up to the walls: a house on a slope
+    if (!isCanopy && h.min < 0.5 && base - low > 0.05) {
+      for (const ring of [outer, ...holes]) {
+        for (let i = 0; i < ring.length; i++) {
+          const a = ring[i], c = ring[(i + 1) % ring.length];
+          const mid = enuToLatLon(center, (a[0] + c[0]) / 2, -(a[1] + c[1]) / 2, 0);
+          const ramp = opts.groundColour?.(mid.lon, mid.lat) ?? PLINTH_EARTH;
+          const y0 = low - PLINTH_SINK_M;
+          emitWallQuad([a[0], y0, a[1]], [a[0], base, a[1]], [c[0], base, c[1]], [c[0], y0, c[1]], ramp, centroid);
+          for (let k = 0; k < 6; k++) win.push(0, 0, 0, 0, 0);
+        }
+      }
+    }
 
     // walls up to the roof profile (gable ends close themselves); none under a canopy
     if (!isCanopy) {
@@ -1089,7 +1133,7 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     lat /= ring.length;
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
-    const y = Math.max(0, sampleHeight(lon, lat)) + h.min + (h.wall + h.roof) * 0.5;
+    const y = buildingFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
     out.push(e, y, -n, pointValue(wallRamp(b.tags, buildingSeed(ring))));
     out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring))));
   }
@@ -1166,12 +1210,7 @@ export function buildingNightLights(
     if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
     if (ring.length < 3) continue;
     const h = buildingHeights(b);
-    let minTerrain = Infinity;
-    for (const [x, z] of ring) {
-      const ll = enuToLatLon(center, x, -z, 0);
-      minTerrain = Math.min(minTerrain, sampleHeight(ll.lon, ll.lat));
-    }
-    const base = Math.max(minTerrain, 0);
+    const { base } = buildingFooting(ringLL, sampleHeight);
     const wallBase = base + h.min;
     const roofTop = wallBase + h.wall + h.roof;
     const cx = ring.reduce((s, p) => s + p[0], 0) / ring.length;
