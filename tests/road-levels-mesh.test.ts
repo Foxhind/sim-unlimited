@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, withGlow } from '../src/engine/palette';
-import { gridLatLon, latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
-import { buildOsmMesh } from '../src/world/osm-mesher';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, type Tile } from '../src/world/geodesy';
+import { buildOsmMesh, classifyLine } from '../src/world/osm-mesher';
 import type { LonLat, OsmLine, OsmTileData } from '../src/world/osm-types';
 import { LEVEL_M, LIFT_GRADE } from '../src/world/road-levels';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import { buildGroundCover } from '../src/world/ground-cover';
 import { buildSurfaceTin } from '../src/world/surface-tin';
-import { GRID as COVER_GRID, osmMeshOf, road, TILE as COVER_TILE } from './roads-helpers';
+import { GRID as COVER_GRID, osmMeshOf, road, seeded, TILE as COVER_TILE } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GRID = 16;
@@ -96,6 +96,47 @@ function surfacesAtJoints(m: { vertices: Float32Array; vertexCount: number }, jo
     }
   }
   return counts;
+}
+
+/**
+ * Probes over the carriageways meeting at `joint` (tile-centre metres): along each leg (its unit
+ * direction away from the joint, metres x east and z south, and its half width) up to 6 m out,
+ * across it to 0.1 m short of its edges
+ */
+function unionProbes(joint: [number, number], legs: { dir: [number, number]; half: number }[], rnd: () => number): [number, number][] {
+  const out: [number, number][] = [];
+  for (const { dir: [dx, dz], half } of legs) {
+    for (let k = 0; k < 40; k++) {
+      const s = rnd() * 6, t = (rnd() * 2 - 1) * (half - 0.1);
+      out.push([joint[0] + dx * s - dz * t, joint[1] + dz * s + dx * t]);
+    }
+  }
+  return out;
+}
+
+/**
+ * The mesh of `lines` on TILE's flat ground with plain levels and the cover, and whether a point
+ * (tile-centre metres) lies on a path's face of the surface (the terrain draws those)
+ */
+function plainCoverMesh(lines: OsmLine[]) {
+  const data: OsmTileData = { areas: [], points: [], buildings: [], lines };
+  const cover = buildGroundCover(TILE, GRID, data);
+  const tin = buildSurfaceTin(TILE, GRID, new Float32Array((GRID + 1) * (GRID + 1)).fill(GROUND), { cover });
+  const m = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: tinSampler(tin, TILE), tin, cover });
+  const toLattice = tileLattice(TILE, GRID);
+  const pathAt = (x: number, z: number): boolean => {
+    const ll = enuToLatLon(C, x, -z, 0);
+    const [px, py] = toLattice([ll.lon, ll.lat]);
+    return tin.tris.some((t, f) => {
+      const s = tin.cover![f];
+      if (s < 0 || cover.shapes[s].kind !== 'path') return false;
+      const [ax, ay, bx, by, cx, cy] = [tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]];
+      const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+      const w1 = ((px - ax) * (cy - ay) - (cx - ax) * (py - ay)) / d, w2 = ((bx - ax) * (py - ay) - (px - ax) * (by - ay)) / d;
+      return w1 > 0 && w2 > 0 && w1 + w2 < 1;
+    });
+  };
+  return { m, pathAt };
 }
 
 /** the deck-step test's bridge: a tertiary over a river on a slope */
@@ -299,6 +340,83 @@ describe('lifted roads in the mesh', () => {
     const m = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: tinSampler(tin, TILE), tin, cover: plainCover });
     const plain = surfacesAtJoints(m.roads, [[-20, 0], [20, 0]]);
     expect(plain.every((n) => n === 1), `${plain}`).toBe(true);
+  });
+
+  for (const deg of [5, 30]) {
+    it(`one surface and no gap over the two carriageways at a bridge's joints turning ${deg}°`, () => {
+      const th = (deg * Math.PI) / 180, rnd = seeded(deg);
+      // the roads with their heights: a tertiary turning θ at each end of its bridge over a river
+      const j1: [number, number] = [15.9, 30.1], len = 3.8, j2: [number, number] = [j1[0] + len * Math.cos(th), j1[1] + len * Math.sin(th)];
+      const xm = (j1[0] + j2[0]) / 2;
+      const lines = [
+        road({ highway: 'tertiary' }, [[4.2, 30.1], j1]),
+        road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [j1, j2]),
+        road({ highway: 'tertiary' }, [j2, [j2[0] + 10 * Math.cos(2 * th), j2[1] + 10 * Math.sin(2 * th)]]),
+        road({ waterway: 'river' }, [[xm - 0.3, 4.3], [xm + 0.3, 60.2]]),
+      ];
+      const { opts, cover } = osmMeshOf({ lines, areas: [], points: [] }, deckRelief);
+      const m = buildOsmMesh({ ...opts, cover }).roads;
+      const half = classifyLine({ highway: 'tertiary' })!.width / 2;
+      // lattice directions → metres (x east, z south: the lattice's y runs south too)
+      const dir = (a: number): [number, number] => [Math.cos(a), Math.sin(a)];
+      const withHeights = [
+        ...unionProbes(coverEnu(...j1), [{ dir: dir(Math.PI), half }, { dir: dir(th), half }], rnd),
+        ...unionProbes(coverEnu(...j2), [{ dir: dir(th + Math.PI), half }, { dir: dir(2 * th), half }], rnd),
+      ].map(([x, z]) => surfacesOver(m, x, z, true).length);
+      expect(withHeights.every((n) => n === 1), `${withHeights}`).toBe(true);
+      // plain levels: the bridge's ribbon against its approaches' lifted ribbons
+      const k1: [number, number] = [-20, 0], k2: [number, number] = [-20 + 40 * Math.cos(th), 40 * Math.sin(th)];
+      const pm = (k1[0] + k2[0]) / 2;
+      const plain = plainCoverMesh([
+        { tags: { highway: 'primary' }, points: [at(-300, 0), at(...k1)] },
+        { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(...k1), at(...k2)] },
+        { tags: { highway: 'primary' }, points: [at(...k2), at(k2[0] + 280 * Math.cos(2 * th), k2[1] + 280 * Math.sin(2 * th))] },
+        { tags: { highway: 'secondary' }, points: [at(pm, -150), at(pm, 150)] },
+      ]);
+      const ph = classifyLine({ highway: 'primary' })!.width / 2;
+      // north is −z
+      const dirN = (a: number): [number, number] => [Math.cos(a), -Math.sin(a)];
+      const counts = [
+        ...unionProbes([k1[0], -k1[1]], [{ dir: dirN(Math.PI), half: ph }, { dir: dirN(th), half: ph }], rnd),
+        ...unionProbes([k2[0], -k2[1]], [{ dir: dirN(th + Math.PI), half: ph }, { dir: dirN(2 * th), half: ph }], rnd),
+      ].map(([x, z]) => surfacesOver(plain.m.roads, x, z, true).length);
+      expect(counts.every((n) => n === 1), `${counts}`).toBe(true);
+    });
+  }
+
+  it('one surface and no gap where a bridge ends on the middle of the bank road', () => {
+    // the roads with their heights: the bank road on the ground through the bridge's western end
+    const n: [number, number] = [15.9, 30.1];
+    const lines = [
+      road({ highway: 'residential', name: 'bank' }, [[15.9, 10.2], n, [15.9, 50.3]]),
+      road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [n, [19.7, 30.1]]),
+      road({ highway: 'tertiary' }, [[19.7, 30.1], [30.3, 30.1]]),
+      road({ waterway: 'river' }, [[17.6, 4.3], [17.9, 60.2]]),
+    ];
+    const { opts, cover } = osmMeshOf({ lines, areas: [], points: [] }, deckRelief);
+    const m = buildOsmMesh({ ...opts, cover }).roads;
+    const bank = classifyLine({ highway: 'residential' })!.width / 2, half = classifyLine({ highway: 'tertiary' })!.width / 2;
+    const counts = unionProbes(coverEnu(...n), [{ dir: [0, -1], half: bank }, { dir: [0, 1], half: bank }, { dir: [1, 0], half }], seeded(3))
+      .map(([x, z]) => surfacesOver(m, x, z, true).length);
+    expect(counts.every((c) => c === 1), `${counts}`).toBe(true);
+  });
+
+  it('one surface and no gap where a path ends on the foot of a lifted approach', () => {
+    // plain levels: the approach lifted towards the bridge at LIFT_GRADE, ~0.4 m where the footway meets it
+    const foot = -20 - (LEVEL_M - 0.4) / LIFT_GRADE;
+    const lines: OsmLine[] = [
+      { tags: { highway: 'primary' }, points: [at(-300, 0), at(foot, 0), at(-20, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(-20, 0), at(20, 0)] },
+      { tags: { highway: 'primary' }, points: [at(20, 0), at(300, 0)] },
+      under,
+      { tags: { highway: 'footway' }, points: [at(foot, -60), at(foot, 0)] },
+    ];
+    const { m, pathAt } = plainCoverMesh(lines);
+    const ph = classifyLine({ highway: 'primary' })!.width / 2, fh = classifyLine({ highway: 'footway' })!.width / 2;
+    // the footway's paving is the terrain's face; the approach's ribbon is the road mesh's
+    const counts = unionProbes([foot, 0], [{ dir: [1, 0], half: ph }, { dir: [-1, 0], half: ph }, { dir: [0, 1], half: fh }], seeded(4))
+      .map(([x, z]) => surfacesOver(m.roads, x, z, true).length + (pathAt(x, z) ? 1 : 0));
+    expect(counts.every((c) => c === 1), `${counts}`).toBe(true);
   });
 
   it('the lift keeps the ribbon the colour of the road', () => {

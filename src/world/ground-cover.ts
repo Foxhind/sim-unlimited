@@ -7,7 +7,7 @@
  * areas, not the tile's share of them, so the tiles round a border agree. Tunnels and the lifted
  * stretches of the ways (coverLifted: the bridges and the approaches to them) cover nothing: they
  * run over it; a bridge the levels leave on the ground is a cover like any way. A way ends square
- * where it meets a lifted one (squareAt).
+ * where it meets a lifted one at a joint (liftedJoints).
  */
 import earcut from 'earcut';
 import { colourOf, RAMP, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
@@ -18,7 +18,7 @@ import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted } from './road-levels';
 import type { RoadSurface } from './road-pull';
-import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'area';
 
@@ -231,35 +231,72 @@ export function runPart(cl: P2[], cum: number[], half: number | number[], ends: 
 
 /** a node of the ways by its lon/lat */
 const nodeKey = (p: LonLat): string => `${p[0]},${p[1]}`;
+/** ways that can continue one another: the roads, the railways, the waterways, the aerodrome's */
+const family = (tags: Record<string, string>): string => (tags.highway ? 'highway' : tags.railway ? 'railway' : tags.waterway ? 'waterway' : 'aeroway');
 
 /**
- * The nodes of the drawn ways (tunnels aside) where one of them is lifted (`lifted`, metres along
- * its points in ENU), by nodeKey
+ * How the ways end where a lifted run ends (`lifted`, metres along a way's points in ENU): a lifted
+ * way ending at a node where exactly one other way of its kind is (roads below its rank and a link's
+ * not counting, as roadEnds), and that one ends there too, is its single continuation whatever their
+ * layers: both are mitred onto each other there (the bisector cut ribbonGeom makes of `start`/`end`),
+ * the same for the cover and the ribbon, so neither a gap nor an overlap opens between the deck and
+ * its approach. Where it has no single continuation the lifted way ends square; every other way, and
+ * every end at a node no lifted run ends at, keeps its own ends (`ends`). Returns the ends of a way.
  */
-export function liftedNodes(lines: ReadonlyArray<OsmLine>, enu: (lon: number, lat: number) => P2, lifted: (line: OsmLine, d: number) => boolean): Set<string> {
-  const nodes = new Set<string>();
-  for (const line of lines) {
-    if (line.points.length < 2 || isTunnel(line.tags) || !classifyLine(line.tags)) continue;
-    let d = 0, prev = enu(line.points[0][0], line.points[0][1]);
+export function liftedJoints(
+  lines: ReadonlyArray<OsmLine>, enu: (lon: number, lat: number) => P2, toLattice: (p: LonLat) => P2, lifted: (line: OsmLine, d: number) => boolean,
+): (line: OsmLine, ends: RibbonEnds) => RibbonEnds {
+  const drawn = lines.filter((l) => l.points.length >= 2 && !isTunnel(l.tags) && classifyLine(l.tags));
+  const atNode = new Map<string, { line: OsmLine; end: boolean }[]>();
+  for (const line of drawn) {
     line.points.forEach((p, i) => {
-      const e = enu(p[0], p[1]);
-      if (i) d += Math.hypot(e[0] - prev[0], e[1] - prev[1]);
-      prev = e;
-      if (lifted(line, d)) nodes.add(nodeKey(p));
+      const k = nodeKey(p);
+      let list = atNode.get(k);
+      if (!list) atNode.set(k, list = []);
+      list.push({ line, end: i === 0 || i === line.points.length - 1 });
     });
   }
-  return nodes;
-}
-
-/**
- * A way's ends where it meets a lifted way (or is lifted itself) at a node of `nodes` (liftedNodes):
- * square, no round end and no mitre, its cover and its ribbon alike, so that neither lies over or
- * under the other surface there; its own ends elsewhere
- */
-export function squareAt(line: OsmLine, ends: RibbonEnds, nodes: ReadonlySet<string>): RibbonEnds {
-  const a = nodes.has(nodeKey(line.points[0])), b = nodes.has(nodeKey(line.points[line.points.length - 1]));
-  if (!a && !b) return ends;
-  return { start: a ? undefined : ends.start, capStart: !a && ends.capStart, end: b ? undefined : ends.end, capEnd: !b && ends.capEnd };
+  /** per way and end (0 its first point, 1 its last): the lattice direction it is mitred along, or null for square */
+  const mitre = new Map<OsmLine, [P2 | null | undefined, P2 | null | undefined]>();
+  const set = (line: OsmLine, at: 0 | 1, dir: P2 | null, strong: boolean): void => {
+    const m = mitre.get(line) ?? [undefined, undefined];
+    if (strong || m[at] === undefined) m[at] = dir;
+    mitre.set(line, m);
+  };
+  /** the unit lattice vector from `line`'s end `at` towards its next point */
+  const inward = (line: OsmLine, at: 0 | 1): P2 | null => {
+    const n = line.points.length, a = toLattice(line.points[at ? n - 1 : 0]), b = toLattice(line.points[at ? n - 2 : 1]);
+    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    return l > 1e-9 ? [(b[0] - a[0]) / l, (b[1] - a[1]) / l] : null;
+  };
+  for (const line of drawn) {
+    let len = 0;
+    for (let i = 1; i < line.points.length; i++) {
+      const [ax, az] = enu(line.points[i - 1][0], line.points[i - 1][1]), [bx, bz] = enu(line.points[i][0], line.points[i][1]);
+      len += Math.hypot(bx - ax, bz - az);
+    }
+    for (const at of [0, 1] as const) {
+      if (!lifted(line, at ? len : 0)) continue;
+      const p = line.points[at ? line.points.length - 1 : 0];
+      const kind = family(line.tags), floor = line.tags.highway ? Math.min(roadRank(line.tags), LINK_RANK) : -Infinity;
+      const others = (atNode.get(nodeKey(p)) ?? []).filter((o) =>
+        o.line !== line && family(o.line.tags) === kind && (!o.line.tags.highway || roadRank(o.line.tags) >= floor));
+      if (others.length === 1 && others[0].end) {
+        const o = others[0].line, oAt: 0 | 1 = nodeKey(o.points[0]) === nodeKey(p) ? 0 : 1;
+        set(line, at, inward(o, oAt), true);
+        set(o, oAt, inward(line, at), true);
+      } else set(line, at, null, false);
+    }
+  }
+  return (line, ends) => {
+    const m = mitre.get(line);
+    if (!m) return ends;
+    const [s, e] = m;
+    return {
+      start: s === undefined ? ends.start : s ?? undefined, capStart: s === undefined && ends.capStart,
+      end: e === undefined ? ends.end : e ?? undefined, capEnd: e === undefined && ends.capEnd,
+    };
+  };
 }
 
 /** the kind of cover of an area classifyArea draws, in classifyArea's order */
@@ -295,7 +332,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   const latticePerMetre = grid / tileSizeMeters(tile);
   const net = lineNetwork(data.lines, enu, toLattice, latticePerMetre);
   const lifted = coverLifted(roads, buildRoadLevels(data.lines, data.areas, ([lon, lat]) => enu(lon, lat)));
-  const nodes = liftedNodes(data.lines, enu, lifted);
+  const joints = liftedJoints(data.lines, enu, toLattice, lifted);
 
   interface Draft { shape: CoverShape; rank: number; tie: number; triSeg?: Int32Array; index: number }
   const drafts: Draft[] = [];
@@ -350,7 +387,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
      * length as of the way's), its own ends at the way's ends, square where the lift begins
      */
     const along = (kind: CoverKind, cl: P2[], w: number | number[], ways: RibbonEnds, prio = 0, segs?: VertexAttr[]): void => {
-      const cum = cumulative(cl), ends = squareAt(line, ways, nodes);
+      const cum = cumulative(cl), ends = joints(line, ways);
       for (const [d0, d1] of runs) {
         const part = runPart(cl, cum, w, ends, d0, d1, len);
         ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first);

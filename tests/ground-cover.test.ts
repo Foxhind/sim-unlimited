@@ -240,7 +240,7 @@ describe('ground cover', () => {
     }
   });
 
-  it('ends a way’s cover square where it meets a lifted bridge: nothing of it past the joint', () => {
+  it('ends a way’s cover where its bridge begins, mitred onto it: nothing of it past the joint', () => {
     const west = road({ highway: 'tertiary', name: 'west' }, [[10, 32], [30, 32]]);
     const lines = [west, road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[30, 32], [34, 32]]), road({ highway: 'tertiary' }, [[34, 32], [54, 32]]), road({ highway: 'residential' }, [[32, 20], [32, 44]])];
     const c = buildGroundCover(TILE, GRID, data(lines), roadsOf(lines));
@@ -249,6 +249,18 @@ describe('ground cover', () => {
     for (let k = 0; k < s.tris.length; k += 2) east = Math.max(east, s.tris[k]);
     expect(east).toBeLessThan(30 + 1e-6);
     expect(east).toBeGreaterThan(30 - 1e-6);
+  });
+
+  it('keeps the ends of the ground ways at a junction a bridge ends at: only the lifted way changes', () => {
+    // two streets meeting at an angle where a bridge (over a road) begins
+    const a = road({ highway: 'tertiary', name: 'a' }, [[10.2, 30.3], [30.1, 32.2]]), b = road({ highway: 'tertiary', name: 'b' }, [[30.1, 32.2], [40.4, 50.1]]);
+    const bridged = [a, b, road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[30.1, 32.2], [36.3, 20.1]]), road({ highway: 'residential' }, [[30.2, 25.3], [37.3, 27.4]])];
+    const outlineOf = (lines: OsmLine[], way: OsmLine) => {
+      const c = buildGroundCover(TILE, GRID, data(lines), roadsOf(lines));
+      return c.shapes.find((sh) => sh.kind === 'carriageway' && sh.source === way)!.outline;
+    };
+    expect(outlineOf(bridged, a)).toEqual(outlineOf([a, b], a));
+    expect(outlineOf(bridged, b)).toEqual(outlineOf([a, b], b));
   });
 
   it('skips what lies wholly outside the tile', () => {

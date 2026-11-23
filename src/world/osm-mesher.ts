@@ -13,7 +13,7 @@ import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from 
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import type { SurfaceTin } from './surface-tin';
-import { coverRamp, cumulative, liftedNodes, liftedRuns, runPart, squareAt, type CoverKind, type GroundCover } from './ground-cover';
+import { coverRamp, cumulative, liftedJoints, liftedRuns, runPart, type CoverKind, type GroundCover } from './ground-cover';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './road-levels';
 import type { RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
@@ -78,6 +78,11 @@ const DECK_MIN_LIFT_M = 0.3;
 
 /** the covers drawn as faces of the road mesh (the water's go to the water mesh; the rest are the terrain's) */
 const FACE_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'ballast', 'runway']);
+
+/** the covers a lifted ribbon barely over them gives way to (liftedRibbons onJunction) */
+const JUNCTION_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'ballast', 'runway', 'path']);
+/** a lifted ribbon's piece lifted less than this over a junction's face is left out, metres */
+const JUNCTION_LIFT_M = 0.5;
 
 /** colour of a far road line: mid-lit asphalt (GL lines are not lit) */
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
@@ -287,13 +292,15 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /** the areas with a shape among the covers (by the tags object of the whole, which the clipped share keeps): the terrain draws them */
   const coveredAreas = cover ? new Set(cover.shapes.filter((s) => 'rings' in s.source).map((s) => s.source.tags)) : undefined;
   const faces = tin
-    ? tin.tris.map((t) => {
+    ? tin.tris.map((t, fi) => {
         const c: [P2, P2, P2] = [[tin.vx[t.a], tin.vy[t.a]], [tin.vx[t.b], tin.vy[t.b]], [tin.vx[t.c], tin.vy[t.c]]];
         // the mesh draws water and anything below it at 0 m
         const h = [Math.max(0, tin.vh[t.a]), Math.max(0, tin.vh[t.b]), Math.max(0, tin.vh[t.c])];
         const det = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
         return {
           c, h, det,
+          // its cover (an index into opts.cover's shapes), or −1
+          cover: tin.cover ? tin.cover[fi] : -1,
           x0: Math.min(c[0][0], c[1][0], c[2][0]), x1: Math.max(c[0][0], c[1][0], c[2][0]),
           y0: Math.min(c[0][1], c[1][1], c[2][1]), y1: Math.max(c[0][1], c[1][1], c[2][1]),
         };
@@ -346,14 +353,20 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     return rgb;
   };
   /** one triangle of an area, cut by every terrain face under it: each piece lies on its face */
-  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: AreaFilter, attr?: VertexAttr, lift?: Lift): void => {
+  /**
+   * `over`: whether a piece on a face of that cover, lifted so (its vertices' lifts; undefined: none),
+   * is left out
+   */
+  const onFaces = (tri: [P2, P2, P2], ramp: number, bias: number, out: Out = main, filter?: AreaFilter, attr?: VertexAttr, lift?: Lift, over?: (cover: number, lifts?: number[]) => boolean): void => {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
       const piece = clipToTriangle(tri, f.c);
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
-      if (lift) for (const p of pts) p.y += lift(p);
+      const lifts = lift ? pts.map((p) => lift(p)) : undefined;
+      if (over?.(f.cover, lifts)) continue;
+      if (lifts) pts.forEach((p, k) => { p.y += lifts[k]; });
       const under = filter && imageryOf(f);
       const col = under ? withGlow(snowy(colourOf(filterColour(under, filter))), rampGlowLevel(ramp)) : ramp;
       for (let k = 1; k + 1 < pts.length; k++) emitTri(pts[0], pts[k], pts[k + 1], col, out, attr);
@@ -524,8 +537,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const levels = plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels;
   /** with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts) */
   const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels) : undefined;
-  /** with the cover: the nodes where a way is lifted, where every way ends square (ground-cover squareAt) */
-  const coverNodes = coverLift ? liftedNodes(opts.data.lines, enu, coverLift) : undefined;
+  /** with the cover: the ends of the ways where a lifted run ends, as the cover has them (ground-cover liftedJoints) */
+  const coverJoints = coverLift ? liftedJoints(opts.data.lines, enu, toLattice, coverLift) : undefined;
   /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */
   const ownHeight = (line: OsmLine): boolean => !!opts.roads && !!levels && 'own' in levels && (levels as RoadLevels & { own(l: OsmLine): boolean }).own(line);
   /** the ground under a mesh point (world metres), as the TIN's faces draw it */
@@ -755,9 +768,22 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   /**
+   * With the cover: whether a piece of a lifted ribbon on a face of cover `si`, lifted `lifts` at its
+   * vertices, is left out: one on a carriageway, ballast, runway or path face lifted less than
+   * JUNCTION_LIFT_M on average (a bridge ending on the middle of the bank road, a path ending on the
+   * foot of an approach), whose face is the junction's surface
+   */
+  const onJunction = (si: number, lifts?: number[]): boolean => {
+    if (si < 0 || !JUNCTION_KINDS.has(cover!.shapes[si].kind)) return false;
+    const mean = lifts ? lifts.reduce((a, b) => a + b, 0) / lifts.length : 0;
+    return mean < JUNCTION_LIFT_M;
+  };
+
+  /**
    * With the cover: a way's lifted stretches (what its cover leaves of it, ground-cover liftedRuns)
-   * as ribbons with their lift and no bias, square where a stretch ends inside the way or meets a
-   * lifted way at a node (squareAt); no shoulders or right-of-way strip on them
+   * as ribbons with their lift and no bias, square where a stretch ends inside the way, mitred onto
+   * a single continuation (liftedJoints); no shoulders or right-of-way strip on them. A piece barely
+   * lifted over a road's, a railway's, a runway's or a path's face is left out (onJunction).
    */
   const liftedRibbons = (line: OsmLine, look: NonNullable<ReturnType<typeof lineLook>>, pts: { c: P2; e: [number, number] }[], lift?: Lift): void => {
     const { runs, len } = liftedRuns(line, line.points.map(([lon, lat]) => enu(lon, lat)), coverLift!);
@@ -771,10 +797,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       half = p.half;
       segs = p.segs;
     }
-    const ends = squareAt(line, look.road ? net.roadEnds(line) : ROUND_ENDS, coverNodes!), cum = cumulative(cl);
+    const ends = coverJoints!(line, look.road ? net.roadEnds(line) : ROUND_ENDS), cum = cumulative(cl);
     for (const [d0, d1] of runs) {
       const part = runPart(cl, cum, half, ends, d0, d1, len);
-      if (part.c.length >= 2) ribbon(part.c, part.half, look.ramp, 0, look.rail ? roads : look.out, segs?.slice(part.first), part.ends, lift);
+      if (part.c.length >= 2) ribbon(part.c, part.half, look.ramp, 0, look.rail ? roads : look.out, segs?.slice(part.first), part.ends, lift, onJunction);
     }
   };
 
@@ -785,9 +811,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
    * at the same border, so the two halves meet exactly. Per segment vertex attributes optional (the
    * caps take the first and last segment's, a joint disc its vertex's).
    */
-  const ribbon = (c: P2[], half: number | number[], ramp: number, bias: number, out: Out, segs?: VertexAttr[], ends: RibbonEnds = ROUND_ENDS, lift?: Lift): void => {
+  const ribbon = (c: P2[], half: number | number[], ramp: number, bias: number, out: Out, segs?: VertexAttr[], ends: RibbonEnds = ROUND_ENDS, lift?: Lift, over?: (cover: number, lifts?: number[]) => boolean): void => {
     const { tris, triSeg } = ribbonGeom(c, half, ends, latticePerMetre);
-    for (let k = 0; k < triSeg.length; k++) onFaces([tris[3 * k], tris[3 * k + 1], tris[3 * k + 2]], ramp, bias, out, undefined, segs?.[triSeg[k]], lift);
+    for (let k = 0; k < triSeg.length; k++) onFaces([tris[3 * k], tris[3 * k + 1], tris[3 * k + 2]], ramp, bias, out, undefined, segs?.[triSeg[k]], lift, over);
   };
 
   /** this tile's share of a line: its lamps and far lines (the TIN ribbon is buildRibbon's) */
