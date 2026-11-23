@@ -9,9 +9,9 @@
  */
 import earcut from 'earcut';
 import { DEFAULT_AREA_STYLES } from './area-styles';
-import { enuToLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
-import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
-import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, type Seg } from './pitch-markings';
+import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
+import type { OsmArea, OsmLine, OsmPoint } from './osm-types';
+import { pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted } from './road-levels';
 import type { RoadSurface } from './road-pull';
@@ -148,12 +148,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     return [e, -n];
   };
-  const toLattice = ([lon, lat]: LonLat): P2 => {
-    const n = 2 ** tile.z;
-    const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
-    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
-    return [(((lon + 180) / 360) * n - tile.x) * grid, (merc * n - tile.y) * grid];
-  };
+  /** the tile's lattice point of a lon/lat: the OSM mesh's own */
+  const toLattice = tileLattice(tile, grid);
   const enuToLattice = ([x, z]: P2): P2 => {
     const ll = enuToLatLon(center, x, -z, 0);
     return toLattice([ll.lon, ll.lat]);
@@ -310,30 +306,9 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   const buildPitchPaint = (area: OsmArea): void => {
     const ring = (area.rings[0] ?? []).map(([lon, lat]) => enu(lon, lat));
     if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
-    const r = orientedRect(ring);
-    if (!r) return;
-    const vx = -r.uz, vz = r.ux;
-    let frame = (s: number, t: number): P2 => [r.cx + r.ux * s + vx * t, r.cz + r.uz * s + vz * t];
-    const sport = pitchSport(area.tags);
-    let segs: Seg[] | undefined;
-    if (sport === 'baseball') {
-      // home plate: the corner of the fan nearest a right angle; second base towards the middle
-      let home = ring[0], bestDev = Infinity;
-      const mx = ring.reduce((s, p) => s + p[0], 0) / ring.length, mz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-      for (let i = 0; i < ring.length; i++) {
-        const p = ring[i], a = ring[(i + ring.length - 1) % ring.length], b = ring[(i + 1) % ring.length];
-        const ax = a[0] - p[0], az = a[1] - p[1], bx = b[0] - p[0], bz = b[1] - p[1];
-        const dev = Math.abs((ax * bx + az * bz) / ((Math.hypot(ax, az) * Math.hypot(bx, bz)) || 1));
-        if (dev < bestDev) { bestDev = dev; home = p; }
-      }
-      const dl = Math.hypot(mx - home[0], mz - home[1]) || 1;
-      const dx = (mx - home[0]) / dl, dz = (mz - home[1]) / dl;
-      const reach = Math.max(...ring.map((p) => Math.hypot(p[0] - home[0], p[1] - home[1])));
-      segs = baseballMarkings(reach * 0.95);
-      frame = (s, t) => [home[0] + dx * s - dz * t, home[1] + dz * s + dx * t];
-    } else if (sport) {
-      segs = pitchMarkings(sport, r.length, r.width);
-    }
+    const pf = pitchFrame(ring, area.tags);
+    if (!pf) return;
+    const { segs, frame } = pf;
     const tris: P2[] = [], outline: P2[][] = [];
     for (const [s0, t0, s1, t1] of segs ?? []) {
       const a = enuToLattice(frame(s0, t0)), b = enuToLattice(frame(s1, t1));

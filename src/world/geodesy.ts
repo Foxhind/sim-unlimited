@@ -72,6 +72,20 @@ export function gridLatLon(t: Tile, i: number, j: number, grid: number): LatLon 
   return { lon: fx * 360 - 180, lat: mercatorYToLat(fy) };
 }
 
+/**
+ * The inverse of gridLatLon: lon/lat to the lattice of tile `t` with `grid` cells a side (x east,
+ * y south, 0..grid over the tile, beyond it past the tile), latitude clamped to Mercator's range.
+ * The OSM mesh and the ground covers lay their shapes on the same lattice through it.
+ */
+export function tileLattice(t: Tile, grid: number): (p: readonly [number, number]) => [number, number] {
+  return ([lon, lat]) => {
+    const n = 2 ** t.z;
+    const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
+    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    return [(((lon + 180) / 360) * n - t.x) * grid, (merc * n - t.y) * grid];
+  };
+}
+
 export type Vec3 = [number, number, number];
 
 export function latLonToEcef(lat: number, lon: number, h: number): Vec3 {

@@ -108,6 +108,53 @@ export function orientedRect(ring: [number, number][]): PitchRect | undefined {
   return best;
 }
 
+/** a pitch's markings and the frames they are drawn in (pitchFrame) */
+export interface PitchFrame {
+  /** the oriented rectangle round the outline */
+  rect: PitchRect;
+  /** the rectangle's frame (s along its long side, t across, metres) to ENU x, z */
+  toXZ(s: number, t: number): [number, number];
+  /** the markings for its sport, in `frame`; undefined for no sport marked or a plot too small */
+  segs?: Seg[];
+  /** the markings' frame to ENU x, z: the rectangle's, or for baseball one from home plate towards second base */
+  frame(s: number, t: number): [number, number];
+}
+
+/**
+ * A pitch's markings and their frame from its outer ring (ENU x, z, without the closing point) and
+ * tags; undefined when the ring has no rectangle. The OSM mesh draws the lines and the ground covers
+ * lay their paint from this one derivation, so the two lie on each other.
+ */
+export function pitchFrame(ring: [number, number][], tags: Record<string, string>): PitchFrame | undefined {
+  const r = orientedRect(ring);
+  if (!r) return undefined;
+  const vx = -r.uz, vz = r.ux;
+  const toXZ = (s: number, t: number): [number, number] => [r.cx + r.ux * s + vx * t, r.cz + r.uz * s + vz * t];
+  const sport = pitchSport(tags);
+  let segs: Seg[] | undefined;
+  let frame = toXZ;
+  if (sport === 'baseball') {
+    // home plate: the corner of the fan nearest a right angle; second base towards the middle
+    let home = ring[0], bestDev = Infinity;
+    const mx = ring.reduce((s, p) => s + p[0], 0) / ring.length, mz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+    for (let i = 0; i < ring.length; i++) {
+      const p = ring[i], a = ring[(i + ring.length - 1) % ring.length], b = ring[(i + 1) % ring.length];
+      const ax = a[0] - p[0], az = a[1] - p[1], bx = b[0] - p[0], bz = b[1] - p[1];
+      const cos = (ax * bx + az * bz) / ((Math.hypot(ax, az) * Math.hypot(bx, bz)) || 1);
+      const dev = Math.abs(cos);
+      if (dev < bestDev) { bestDev = dev; home = p; }
+    }
+    const dl = Math.hypot(mx - home[0], mz - home[1]) || 1;
+    const dx = (mx - home[0]) / dl, dz = (mz - home[1]) / dl;
+    const reach = Math.max(...ring.map((p) => Math.hypot(p[0] - home[0], p[1] - home[1])));
+    segs = baseballMarkings(reach * 0.95);
+    frame = (s, t) => [home[0] + dx * s - dz * t, home[1] + dz * s + dx * t];
+  } else if (sport) {
+    segs = pitchMarkings(sport, r.length, r.width);
+  }
+  return { rect: r, toXZ, segs, frame };
+}
+
 const ARC_STEP_RAD = Math.PI / 16;
 
 /** an arc round (cs, ct) from angle a0 to a1 (radians; 0 is +s, π/2 is +t) */

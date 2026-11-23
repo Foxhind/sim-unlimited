@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildGroundCover, COVER_RANK, type CoverShape } from '../src/world/ground-cover';
-import { gridLatLon, latLonToEnu, tileCenter } from '../src/world/geodesy';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileLattice } from '../src/world/geodesy';
+import { buildOsmMesh } from '../src/world/osm-mesher';
+import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M } from '../src/world/road-levels';
 import { buildRoadNet } from '../src/world/road-net';
@@ -154,6 +156,63 @@ describe('ground cover', () => {
     expect(c.locate(30 + w / 4, 30 + 0.03 * M)).toBe(1);
     expect(c.locate(30 + w / 4, 30 + h / 4)).toBe(2);
     expect(paint.outline.length).toBeGreaterThan(0);
+  });
+  it('lays the pitch paint under every line the mesh draws of it, soccer and baseball', () => {
+    const lls = (pts: [number, number][]) => pts.map(([x, y]): [number, number] => { const p = gridLatLon(TILE, x, y, GRID); return [p.lon, p.lat]; });
+    const c0 = Math.cos(0.3), s0 = Math.sin(0.3);
+    const soccer: OsmArea = { tags: { leisure: 'pitch', sport: 'soccer' }, rings: [lls([[-52.5, -34], [52.5, -34], [52.5, 34], [-52.5, 34]].map(([x, y]): [number, number] => [20 + (x * c0 - y * s0) * M, 20 + (x * s0 + y * c0) * M]))] };
+    const baseball: OsmArea = { tags: { leisure: 'pitch', sport: 'baseball' }, rings: [lls([[40, 40], [44, 40.3], [43.5, 43], [41, 44.2], [40.2, 44]])] };
+    const areas = [soccer, baseball];
+    const tin = buildTerrainTin(TILE, GRID, new Float32Array((GRID + 1) * (GRID + 1)).fill(100));
+    const mesh = buildOsmMesh({ tile: TILE, detail: 'full', tin, sampleHeight: tinSampler(tin, TILE), data: { lines: [], areas, points: [], buildings: [] } });
+    const c = buildGroundCover(TILE, GRID, data([], areas));
+    const toLattice = tileLattice(TILE, GRID), centre = tileCenter(TILE);
+    const lattice = (k: number) => { const ll = enuToLatLon(centre, mesh.pitchLines[k], -mesh.pitchLines[k + 2], 0); return toLattice([ll.lon, ll.lat]); };
+    /** metres from (x, y) to the nearest triangle of shape s */
+    const off = (s: CoverShape, [x, y]: [number, number]): number => {
+      let best = Infinity;
+      for (let t = 0; t < s.tris.length; t += 6) {
+        const [ax, ay, bx, by, cx, cy] = s.tris.subarray(t, t + 6);
+        const sides = [(bx - ax) * (y - ay) - (by - ay) * (x - ax), (cx - bx) * (y - by) - (cy - by) * (x - bx), (ax - cx) * (y - cy) - (ay - cy) * (x - cx)];
+        if (sides.every((v) => v >= 0) || sides.every((v) => v <= 0)) return 0;
+        for (const [px, py, qx, qy] of [[ax, ay, bx, by], [bx, by, cx, cy], [cx, cy, ax, ay]]) {
+          const dx = qx - px, dy = qy - py, f = Math.max(0, Math.min(1, ((x - px) * dx + (y - py) * dy) / (dx * dx + dy * dy)));
+          best = Math.min(best, Math.hypot(x - px - dx * f, y - py - dy * f) / M);
+        }
+      }
+      return best;
+    };
+    const seen = new Set<number>();
+    expect(mesh.pitchLines.length).toBeGreaterThan(100);
+    // the mesh's lines come in pairs of vertices: the middle of each piece is on the paint (its ends
+    // are on its edge where a strip ends square, and the mesh keeps them in float32)
+    for (let k = 0; k < mesh.pitchLines.length; k += 8) {
+      const p = lattice(k), q = lattice(k + 4);
+      const at = c.locate((p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+      expect(at).toBeGreaterThanOrEqual(0);
+      expect(c.shapes[at].kind).toBe('pitchPaint');
+      expect(off(c.shapes[at], p)).toBeLessThan(1e-4);
+      expect(off(c.shapes[at], q)).toBeLessThan(1e-4);
+      seen.add(at);
+    }
+    // the lines of both pitches, each on its own paint
+    expect(seen.size).toBe(2);
+  });
+  it('closes the outline of a stretch cut where the lift begins or ends (square there)', () => {
+    const lines = railOverRoad();
+    const c = buildGroundCover(TILE, GRID, data(lines));
+    // the western approach: round where it starts, square where it rises; the eastern: square where it lands, round at its end
+    const cut = c.shapes.filter((s) => (s.kind === 'ballast' || s.kind === 'railZone') && (s.source === lines[0] || s.source === lines[2]));
+    expect(cut.length).toBe(4);
+    for (const s of cut) {
+      const ls = loops(s.outline);
+      expect(ls.length).toBe(1);
+      const [a, b] = [ls[0][0], ls[0][ls[0].length - 1]];
+      expect(Math.hypot(a[0] - b[0], a[1] - b[1])).toBeLessThan(1e-9);
+      // the body and half a 12-gon: the triangles less the half of the cap under the body
+      const r = (s.kind === 'ballast' ? 3 : 11) * M;
+      expect(shoelace(ls[0])).toBeCloseTo(triArea(s) - 1.5 * r * r, 9);
+    }
   });
   it('skips what lies wholly outside the tile', () => {
     const c = buildGroundCover(TILE, GRID, data([road({ highway: 'primary' }, [[-40, -10], [-20, -10]]), rail([[70, 70], [90, 70]])], [park(square(-20, 30, 5))]));

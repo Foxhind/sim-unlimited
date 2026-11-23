@@ -2,11 +2,11 @@ import earcut from 'earcut';
 import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
-import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
-import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, type Seg } from './pitch-markings';
+import { pitchFrame } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -314,12 +314,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const ll = gridLatLon(tile, x, y, tin!.grid);
     return makePt(ll.lon, ll.lat, f.h[0] * (1 - w1 - w2) + f.h[1] * w1 + f.h[2] * w2 + bias * biasScale);
   };
-  const toLattice = ([lon, lat]: LonLat): P2 => {
-    const n = 2 ** tile.z, g = tin!.grid;
-    const sinLat = Math.sin((Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI) / 180);
-    const merc = 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
-    return [(((lon + 180) / 360) * n - tile.x) * g, (merc * n - tile.y) * g];
-  };
+  /** the TIN's lattice point of a lon/lat (only with the TIN) */
+  const latticeOf = tin ? tileLattice(tile, tin.grid) : undefined;
+  const toLattice = (p: LonLat): P2 => latticeOf!(p);
   /** imagery colour of a face, once per face (undefined: none, a material ramp) */
   const faceRgb = new Map<(typeof faces)[number], RGB | undefined>();
   const imageryOf = (f: (typeof faces)[number]): RGB | undefined => {
@@ -447,32 +444,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
    */
   const buildPitch = (area: OsmArea): void => {
     const ring = pitchRing(area);
-    const r = orientedRect(ring);
-    if (!r) return;
-    const vx = -r.uz, vz = r.ux;
-    const toXZ = (s: number, t: number): [number, number] => [r.cx + r.ux * s + vx * t, r.cz + r.uz * s + vz * t];
-    const sport = pitchSport(area.tags);
-    let segs: Seg[] | undefined;
-    let frame = toXZ;
-    if (sport === 'baseball') {
-      // home plate: the corner of the fan nearest a right angle; second base towards the middle
-      let home = ring[0], bestDev = Infinity;
-      const mx = ring.reduce((s, p) => s + p[0], 0) / ring.length, mz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-      for (let i = 0; i < ring.length; i++) {
-        const p = ring[i], a = ring[(i + ring.length - 1) % ring.length], b = ring[(i + 1) % ring.length];
-        const ax = a[0] - p[0], az = a[1] - p[1], bx = b[0] - p[0], bz = b[1] - p[1];
-        const cos = (ax * bx + az * bz) / ((Math.hypot(ax, az) * Math.hypot(bx, bz)) || 1);
-        const dev = Math.abs(cos);
-        if (dev < bestDev) { bestDev = dev; home = p; }
-      }
-      const dl = Math.hypot(mx - home[0], mz - home[1]) || 1;
-      const dx = (mx - home[0]) / dl, dz = (mz - home[1]) / dl;
-      const reach = Math.max(...ring.map((p) => Math.hypot(p[0] - home[0], p[1] - home[1])));
-      segs = baseballMarkings(reach * 0.95);
-      frame = (s, t) => [home[0] + dx * s - dz * t, home[1] + dz * s + dx * t];
-    } else if (sport) {
-      segs = pitchMarkings(sport, r.length, r.width);
-    }
+    const pf = pitchFrame(ring, area.tags);
+    if (!pf) return;
+    const { rect: r, toXZ, segs, frame } = pf;
     const lattice = ([x, z]: [number, number]): P2 => {
       const ll = enuToLatLon(center, x, -z, 0);
       return toLattice([ll.lon, ll.lat]);

@@ -3,7 +3,7 @@ import { rampGlowLevel, RAMP, withGlow } from '../src/engine/palette';
 import { enuToLatLon, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, LIT_PITCH_LINE_INDEX, PITCH_GLOW, PITCH_LINE_INDEX } from '../src/world/osm-mesher';
 import type { LonLat, OsmTileData } from '../src/world/osm-types';
-import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, pitchSurface, type PitchSport } from '../src/world/pitch-markings';
+import { baseballMarkings, orientedRect, pitchFrame, pitchMarkings, pitchSport, pitchSurface, type PitchSport } from '../src/world/pitch-markings';
 import { INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 
@@ -61,6 +61,38 @@ describe('markings', () => {
     expect(Math.hypot(segs[0][2], segs[0][3])).toBeCloseTo(27.43, 2);
     const foul = segs[4];
     expect(Math.hypot(foul[2], foul[3])).toBeCloseTo(100, 6);
+  });
+});
+
+describe('pitch frame', () => {
+  it('a soccer pitch: its markings at the rectangle’s size, in the rectangle’s frame', () => {
+    const c = Math.cos(0.4), s = Math.sin(0.4);
+    const ring = [[-52.5, -34], [52.5, -34], [52.5, 34], [-52.5, 34]].map(([x, z]): [number, number] => [100 + x * c - z * s, 50 + x * s + z * c]);
+    const f = pitchFrame(ring, { leisure: 'pitch', sport: 'soccer' })!;
+    expect(f.rect.length).toBeCloseTo(105, 6);
+    expect(f.rect.width).toBeCloseTo(68, 6);
+    expect(f.segs).toEqual(pitchMarkings('soccer', f.rect.length, f.rect.width));
+    expect(f.frame).toBe(f.toXZ);
+    // the corners of the touch lines are the ring's corners
+    for (const [es, et] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const [x, z] = f.frame((es * f.rect.length) / 2, (et * f.rect.width) / 2);
+      expect(Math.min(...ring.map(([px, pz]) => Math.hypot(px - x, pz - z)))).toBeLessThan(1e-6);
+    }
+  });
+  it('baseball: from home plate, the fan’s right-angled corner, towards the middle', () => {
+    const ring: [number, number][] = [[0, 0], [100, 0], [95, 60], [60, 95], [0, 100]];
+    const f = pitchFrame(ring, { leisure: 'pitch', sport: 'baseball' })!;
+    expect(f.frame(0, 0)[0]).toBeCloseTo(0, 9);
+    expect(f.frame(0, 0)[1]).toBeCloseTo(0, 9);
+    const reach = Math.max(...ring.map(([x, z]) => Math.hypot(x, z)));
+    expect(f.segs).toEqual(baseballMarkings(reach * 0.95));
+    const [x, z] = f.frame(10, 0);
+    expect(Math.atan2(z, x)).toBeGreaterThan(0.6);
+    expect(Math.atan2(z, x)).toBeLessThan(1);
+  });
+  it('no sport, no markings; no ring, no frame', () => {
+    expect(pitchFrame([[0, 0], [30, 0], [30, 20], [0, 20]], { leisure: 'pitch' })!.segs).toBeUndefined();
+    expect(pitchFrame([[0, 0], [30, 0]], { leisure: 'pitch', sport: 'soccer' })).toBeUndefined();
   });
 });
 

@@ -8,6 +8,7 @@ import {
   tileBounds,
   tileCenter,
   tileForLatLon,
+  tileLattice,
   tileSizeMeters,
 } from '../src/world/geodesy';
 
@@ -126,6 +127,19 @@ describe('frameYaw', () => {
         const pa = place(origin, a, ll.lat, ll.lon), pb = place(origin, b, ll.lat, ll.lon);
         expect(Math.hypot(pa[0] - pb[0], pa[1] - pb[1])).toBeLessThan(0.5);
       }
+    }
+  });
+});
+
+describe('tileLattice', () => {
+  it('is the inverse of gridLatLon, inside the tile and past it', () => {
+    const t = { z: 14, x: 9000, y: 6000 };
+    const toLattice = tileLattice(t, 64);
+    for (const [i, j] of [[0, 0], [64, 64], [17.25, 40.5], [-3, 70], [80, -10]]) {
+      const ll = gridLatLon(t, i, j, 64);
+      const [x, y] = toLattice([ll.lon, ll.lat]);
+      expect(x).toBeCloseTo(i, 8);
+      expect(y).toBeCloseTo(j, 8);
     }
   });
 });
