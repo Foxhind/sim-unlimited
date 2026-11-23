@@ -1,12 +1,12 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE, FORK_TAPER_M, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
-import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaKind, type AreaStyles } from './area-styles';
+import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
-import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, pitchSurface, type Seg } from './pitch-markings';
+import { baseballMarkings, orientedRect, pitchMarkings, pitchSport, type Seg } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -15,6 +15,17 @@ import type { TerrainTin } from './terrain-tin';
 import { buildRoadLevels, LIFT_EPS_M, type RoadLevels } from './road-levels';
 import type { RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
+import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
+import {
+  AEROWAY_LINE_BIAS, classifyArea, classifyLine, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
+  RAIL_ZONE_RAMP, ROAD_LAYER_STEP_M, ROAD_RANK_STEP_M, ROAD_TIE_M, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW,
+} from './way-styles';
+export {
+  AEROWAY_AREA_BIAS, AEROWAY_LINE_BIAS, BALLAST_RAMP, BALLAST_WIDTH_M, CAR_PARK_BIAS, classifyLine, DIRT_ROAD_RAMP, GRAVEL_ROAD_RAMP, isLitRoad,
+  isOnewayRoad, isOpenCarPark, isTunnel, LIT_ROAD_GLOW, osmWidthM, PAVING_RAMP, PITCH_BIAS, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M, RAIL_ZONE_RAMP,
+  roadClassWidth, ROAD_LAYER_STEP_M, roadLayer, roadMarks, roadPriority, roadRank, ROAD_RANK_STEP_M, ROAD_TIE_M, SHOULDER_RAMP, TRAIL_RAMP,
+  UNLIT_ROAD_GLOW, waterwayWidth,
+} from './way-styles';
 
 export interface OsmMeshOptions {
   tile: Tile;
@@ -45,17 +56,6 @@ export interface OsmMeshOptions {
   roads?: RoadSurface;
 }
 
-type P2 = [number, number];
-/**
- * How a ribbon ends: start/end a lattice vector from its end point towards the way that continues it
- * (the joint mitred), and whether it gets a round cap there
- */
-interface RibbonEnds { start?: P2; end?: P2; capStart: boolean; capEnd: boolean }
-const ROUND_ENDS: RibbonEnds = { capStart: true, capEnd: true };
-/** cosine of half the turn: sharper than a right angle a ribbon's bend is rounded, not mitred */
-const SHARP_TURN_COS = Math.SQRT1_2;
-/** a vertex's WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) from its position */
-type VertexAttr = (p: { x: number; z: number }) => [number, number, number, number, number];
 /** metres a vertex of a ribbon is lifted over the ground under it (road-levels.ts), from its position */
 type Lift = (p: { x: number; z: number }) => number;
 /** a lifted ribbon has a vertex at least this often along it: the lift bends between the vertices */
@@ -67,25 +67,7 @@ const DECK_MIN_LIFT_M = 0.3;
 const ROAD_LINE_INDEX = rampIndex(RAMP.ASPHALT, 8);
 /** colour of a far railway line */
 const RAIL_LINE_INDEX = rampIndex(RAMP.HULL_DARK, 7);
-/** runway, taxiway, apron and helipad areas above the aerodrome pad, m */
-export const AEROWAY_AREA_BIAS = 0.1;
-/** runway and taxiway ribbons above the pad, m: over the asphalt areas they cross */
-export const AEROWAY_LINE_BIAS = 0.2;
 
-/**
- * A street-lit road: every residential street and motorway / trunk / primary / secondary road,
- * and any road tagged lit=yes.
- */
-export function isLitRoad(tags: Record<string, string>): boolean {
-  const hw = tags.highway;
-  if (!hw) return false;
-  return tags.lit === 'yes' || hw === 'residential' || hw === 'living_street' || hw === 'motorway' || hw === 'trunk' || hw === 'primary' || hw === 'secondary';
-}
-
-/** glow level of a street-lit road surface at night (the brightest built-up ground is GLOW_LEVELS) */
-export const LIT_ROAD_GLOW = 7;
-/** glow level of an unlit road at night: just above the night sky's ground */
-export const UNLIT_ROAD_GLOW = 2;
 /** street lamps along lit roads: one every LAMP_SPACING_M, sides alternating; a one-way road keeps
  *  them on one side (see lampSide) */
 export const LAMP_SPACING_M = 35;
@@ -179,300 +161,14 @@ interface Pt {
   y: number;
 }
 
-interface AreaStyle {
-  ramp: number;
-  bias: number;
-  water: boolean;
-  /**
-   * A colour filter instead of a solid fill: each piece takes the imagery colour of the terrain face
-   * under it blended with this filter (area-styles filterColour), so the ground keeps its own
-   * pattern. Where the face has no imagery colour (or no faceColor is given), `ramp` is drawn.
-   */
-  filter?: AreaFilter;
-}
-
-/** pitches over the parks round them; their markings a little above */
-export const PITCH_BIAS = 0.65;
-export const PITCH_LINE_BIAS = 0.7;
 /** a pitch at least this big (m²) has floodlights on its corners and is lit at night */
 export const PITCH_LIT_MIN_M2 = 300;
-/** floodlit pitch surface at night: the brightest artificial light */
-export const PITCH_GLOW = 7;
 /** the floodlight poles stand this far out from the pitch's corners, metres */
 const PITCH_LAMP_SETBACK_M = 1.5;
 /** pitch markings: white paint (the snow ramp, well lit) in the palette of the day */
 export const PITCH_LINE_INDEX = rampIndex(RAMP.SNOW, 10);
 /** on a floodlit pitch: the same from the brightest street-lit copy (the plain one by day, buildLUT) */
 export const LIT_PITCH_LINE_INDEX = PITCH_GLOW * LUT_SIZE + PITCH_LINE_INDEX;
-
-/** car parks over the parks and pitches they border, under the road ribbons (LINE_BIAS) */
-export const CAR_PARK_BIAS = 0.75;
-/**
- * A car park drawn as asphalt: an open one (parking=surface, or untagged); not one under the ground,
- * in a building (multi-storey: the building is drawn) or on a roof
- */
-export function isOpenCarPark(tags: Record<string, string>): boolean {
-  if (tags.location === 'underground' || tags.parking === 'underground' || tags.parking === 'multi-storey' || tags.parking === 'rooftop') return false;
-  const layer = Number(tags.layer);
-  return !(Number.isFinite(layer) && layer < 0);
-}
-
-function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaStyle | undefined {
-  /** open ground (fields, parks, beaches...): snow covers it in winter */
-  const ground = (ramp: number, bias: number, kind: AreaKind): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter: styles[kind] });
-  const natural = tags.natural;
-  const landuse = tags.landuse;
-  const leisure = tags.leisure;
-  const aeroway = tags.aeroway;
-  const waterway = tags.waterway;
-  if (natural === 'water' || waterway === 'riverbank' || waterway === 'river' || waterway === 'canal') {
-    return { ramp: RAMP.WATER, bias: 0.3, water: true };
-  }
-  if (aeroway === 'runway' || aeroway === 'taxiway' || aeroway === 'apron' || aeroway === 'helipad') {
-    // on the aerodrome's flat pad (aerodrome.ts): a hair above it, where the aircraft's wheels are
-    return { ramp: RAMP.ASPHALT, bias: AEROWAY_AREA_BIAS, water: false };
-  }
-  // open car parks: the roads' asphalt, a little lit at night like an unlit road
-  if (tags.amenity === 'parking' && isOpenCarPark(tags)) return { ramp: withGlow(RAMP.ASPHALT, UNLIT_ROAD_GLOW), bias: CAR_PARK_BIAS, water: false };
-  // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
-  if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
-  if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
-  if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, 'rock');
-  if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, 'farmland');
-  if (leisure === 'pitch') {
-    // over the park it lies in; a tagged surface solid, natural grass the imagery in a grass filter
-    const surface = pitchSurface(tags);
-    return surface !== undefined ? { ramp: surface, bias: PITCH_BIAS, water: false } : ground(RAMP.GRASS, PITCH_BIAS, 'pitch');
-  }
-  if (leisure === 'park') return ground(RAMP.GRASS, 0.6, 'park');
-  if (leisure === 'garden') return ground(RAMP.GRASS, 0.6, 'garden');
-  if (leisure === 'golf_course') return ground(RAMP.GRASS, 0.6, 'golf');
-  if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
-  if (natural === 'wetland') return ground(RAMP.GRASS, 0.5, 'wetland');
-  return undefined;
-}
-
-interface LineStyle {
-  ramp: number;
-  width: number;
-  /** a road's shoulder beyond the carriageway on each side, metres (ROAD_SHOULDER_M) */
-  shoulder?: number;
-  /** a railway: its ballast carries the track (WORLD_FS trackAt) and a right-of-way strip beside it */
-  rail?: boolean;
-  /** a minor road (service, track, footway-like streets): no far line */
-  minor?: boolean;
-  /** a road's paint (roadMarks code, WORLD_FS roadMarkAt); 0: none */
-  marks?: number;
-  /** a footway, path, cycleway or steps: no street lamps along it */
-  path?: boolean;
-}
-
-/**
- * OSM `width` in metres: "5", "5.5 m", "3,5", "12'", "12 ft", "4'6\"". Undefined when absent,
- * unreadable or outside 0.5–200 m (a typo, not a road).
- */
-export function osmWidthM(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const v = value.trim().replace(',', '.');
-  const feet = /^(\d+(?:\.\d+)?)\s*(?:'|ft|feet)\s*(?:(\d+(?:\.\d+)?)\s*(?:"|in))?$/.exec(v);
-  const m = feet ? (Number(feet[1]) + Number(feet[2] ?? 0) / 12) * 0.3048 : /^(\d+(?:\.\d+)?)\s*(?:m|meters?|metres?)?$/.exec(v)?.[1];
-  const w = Number(m);
-  return Number.isFinite(w) && w >= 0.5 && w <= 200 ? w : undefined;
-}
-
-/** carriageway width per lane when a road has `lanes` but no `width` */
-const LANE_WIDTH_M = 3.5;
-/** width of a waterway line without a `width` tag, metres */
-const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
-/** a waterway's drawn width, metres (its `width`, else by kind); undefined for anything else */
-export function waterwayWidth(tags: Record<string, string>): number | undefined {
-  const ww = tags.waterway;
-  return ww && WATERWAY_WIDTH_M[ww] !== undefined ? osmWidthM(tags.width) ?? WATERWAY_WIDTH_M[ww] : undefined;
-}
-
-/**
- * Roads drawn near, by highway=*: carriageway width without `width` or `lanes`, and the shoulder
- * beside it on each side (none on town streets that have kerbs instead). Footways, paths, cycleways,
- * bridleways and steps are PATH_KINDS. *_link roads take LINK_ROAD.
- */
-const ROAD_KINDS: Record<string, { width: number; shoulder: number; minor?: boolean }> = {
-  motorway: { width: 20, shoulder: 3 },
-  trunk: { width: 20, shoulder: 3 },
-  primary: { width: 14, shoulder: 2.5 },
-  secondary: { width: 11, shoulder: 2 },
-  tertiary: { width: 9, shoulder: 1.5 },
-  unclassified: { width: 7, shoulder: 1 },
-  road: { width: 6, shoulder: 1 },
-  busway: { width: 7, shoulder: 1 },
-  raceway: { width: 10, shoulder: 1.5, minor: true },
-  residential: { width: 7, shoulder: 0.5 },
-  living_street: { width: 6, shoulder: 0 },
-  service: { width: 4, shoulder: 0.5, minor: true },
-  track: { width: 3, shoulder: 0, minor: true },
-  pedestrian: { width: 5, shoulder: 0, minor: true },
-};
-const LINK_ROAD = { width: 7, shoulder: 1.5 };
-/** the carriageway width of a road's class (both directions, whatever its own tags say), metres; undefined for other ways */
-export function roadClassWidth(highway: string): number | undefined {
-  return ROAD_KINDS[highway]?.width ?? (/^(motorway|trunk|primary|secondary|tertiary)_link$/.test(highway) ? LINK_ROAD.width : undefined);
-}
-/**
- * Footways, paths and the like: narrow strips without `width`, paved light (paving slabs) or, a
- * path or bridleway without `surface`, beaten earth
- */
-const PATH_KINDS: Record<string, { width: number; paved: boolean }> = {
-  footway: { width: 2, paved: true },
-  cycleway: { width: 2, paved: true },
-  steps: { width: 2, paved: true },
-  path: { width: 1.5, paved: false },
-  bridleway: { width: 2, paved: false },
-};
-/** footways and paved paths: light paving slabs */
-export const PAVING_RAMP = colour(184, 176, 160);
-/** unpaved paths: light beaten earth and fine gravel */
-export const TRAIL_RAMP = colour(166, 148, 116);
-/** service=parking_aisle / driveway: narrower, no shoulder */
-const NARROW_SERVICE = new Set(['parking_aisle', 'driveway', 'drive-through', 'alley']);
-/** shoulders: compacted gravel and earth */
-export const SHOULDER_RAMP = snowy(colour(150, 140, 118));
-/** unpaved roads and tracks: gravel, or earth and grass ruts */
-export const GRAVEL_ROAD_RAMP = snowy(colour(146, 134, 110));
-export const DIRT_ROAD_RAMP = snowy(colour(118, 102, 80));
-const GRAVEL_SURFACES = new Set(['unpaved', 'gravel', 'fine_gravel', 'compacted', 'pebblestone', 'shells']);
-const DIRT_SURFACES = new Set(['dirt', 'earth', 'ground', 'grass', 'mud', 'sand', 'grass_paver', 'woodchips']);
-const PAVED_SURFACES = new Set(['paved', 'asphalt', 'concrete', 'concrete:plates', 'concrete:lanes', 'paving_stones', 'sett', 'cobblestone']);
-/** railway ballast (the track on it is WORLD_FS trackAt): grey-brown crushed stone, cleared of snow */
-export const BALLAST_RAMP = colour(104, 98, 90);
-/** railway=* drawn: main lines, sidings and yards (service=*), narrow gauge and light rail */
-const RAIL_KINDS = new Set(['rail', 'narrow_gauge', 'light_rail']);
-/** width of the ballast bed, metres (sleepers 2.7 m in the middle) */
-export const BALLAST_WIDTH_M = 6;
-/** the right-of-way strip beside the ballast on each side (cleared, mown), metres */
-export const RAIL_ZONE_M = 8;
-export const RAIL_ZONE_RAMP = snowy(colour(124, 118, 86));
-
-/** lanes of a two-way road of the class without a `lanes` tag (a one-way road half of them, at least 1) */
-const DEFAULT_LANES: Record<string, number> = {
-  motorway: 4, trunk: 4, primary: 4, secondary: 2, tertiary: 2, unclassified: 2, road: 2, busway: 2,
-};
-const EDGE_LINE_CLASSES = new Set(['motorway', 'trunk', 'primary', 'secondary', 'tertiary']);
-
-/**
- * Priority of a road where it meets others: the higher one lies over the lower (its ribbon a little
- * higher, ROAD_RANK_STEP_M a rank) and keeps its paint through the junction; links yield to whatever
- * they join. A bridge or a higher layer lies over everything under it (ROAD_LAYER_STEP_M a layer).
- */
-const ROAD_RANK: Record<string, number> = {
-  motorway: 9, trunk: 8, primary: 7, secondary: 6, tertiary: 5, unclassified: 4, road: 3.5, busway: 3.5,
-  residential: 3, living_street: 2, service: 1.5, pedestrian: 1, track: 1, raceway: 1,
-  footway: 0.5, cycleway: 0.5, steps: 0.5, path: 0.5, bridleway: 0.5,
-};
-const LINK_RANK = 4.5;
-export const ROAD_RANK_STEP_M = 0.02;
-export const ROAD_LAYER_STEP_M = 0.25;
-/** at most this far apart, roads of equal priority (by a hash of their first point: always the same) */
-export const ROAD_TIE_M = 0.012;
-/** 0..1 from a point, the same in every tile */
-function tieBreak([lon, lat]: LonLat): number {
-  let h = Math.imul(Math.round(lon * 1e7) | 0, 73856093) ^ Math.imul(Math.round(lat * 1e7) | 0, 19349663);
-  h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
-  return ((h ^ (h >>> 12)) >>> 0) / 4294967296;
-}
-/**
- * Where roads of one class meet (an interchange of secondary ramps and carriageways), the wider one
- * lies over the narrower: the rank plus up to 0.9 by the width (40 m and wider: all of it)
- */
-export function roadPriority(tags: Record<string, string>, width: number): number {
-  return roadRank(tags) + (Math.min(width, 40) / 40) * 0.9;
-}
-export function roadRank(tags: Record<string, string>): number {
-  const hw = tags.highway ?? '';
-  return /_link$/.test(hw) ? LINK_RANK : ROAD_RANK[hw] ?? 0;
-}
-/** the layer a way is drawn in: `layer`, else 1 on a bridge; never below the ground (tunnels are not drawn) */
-export function roadLayer(tags: Record<string, string>): number {
-  const l = Number(tags.layer);
-  if (Number.isFinite(l)) return Math.max(0, Math.min(5, Math.round(l)));
-  return tags.bridge && tags.bridge !== 'no' ? 1 : 0;
-}
-
-/** a fork branch's direction is taken over its first this many metres */
-const FORK_PROBE_M = 15;
-/** one carriageway without `width` or `lanes`: at least this wide */
-const ONEWAY_MIN_WIDTH_M = 4;
-/** a one-way road: oneway=yes/1/-1, a roundabout, or a motorway or link not tagged oneway=no */
-export function isOnewayRoad(tags: Record<string, string>): boolean {
-  const o = tags.oneway;
-  if (o === 'no') return false;
-  if (o === 'yes' || o === '1' || o === '-1' || o === 'true') return true;
-  const hw = tags.highway ?? '';
-  return hw === 'motorway' || /_link$/.test(hw) || tags.junction === 'roundabout' || tags.junction === 'circular';
-}
-
-export function roadMarks(hw: string, tags: Record<string, string>): number {
-  const link = /_link$/.test(hw);
-  const cls = hw.replace(/_link$/, '');
-  if (DEFAULT_LANES[cls] === undefined) return 0;
-  const oneway = isOnewayRoad(tags.highway ? tags : { ...tags, highway: hw });
-  const tagged = Number(tags.lanes);
-  const lanes = Number.isInteger(tagged) && tagged >= 1 && tagged <= ROAD_MARK.LANES ? tagged
-    : link ? 1 : oneway ? Math.max(1, DEFAULT_LANES[cls] / 2) : DEFAULT_LANES[cls];
-  let code = lanes;
-  if (oneway) code |= ROAD_MARK.ONEWAY;
-  if (EDGE_LINE_CLASSES.has(cls)) code |= ROAD_MARK.EDGES;
-  if (!oneway && lanes >= 4) code |= ROAD_MARK.DOUBLE;
-  // a single-lane two-way road with no edge lines: nothing to paint
-  return !oneway && lanes < 2 && !(code & ROAD_MARK.EDGES) ? 0 : code;
-}
-
-export function classifyLine(tags: Record<string, string>): LineStyle | undefined {
-  const hw = tags.highway;
-  if (hw) {
-    if (tags.area === 'yes') return undefined;
-    const path = PATH_KINDS[hw];
-    if (path) {
-      const surface = tags.surface;
-      const paved = surface === undefined ? path.paved : PAVED_SURFACES.has(surface) || !(GRAVEL_SURFACES.has(surface) || DIRT_SURFACES.has(surface));
-      const ramp = surface === 'asphalt' ? RAMP.ASPHALT : paved ? PAVING_RAMP : TRAIL_RAMP;
-      return { ramp, width: Math.min(osmWidthM(tags.width) ?? path.width, 8), shoulder: 0, minor: true, marks: 0, path: true };
-    }
-    let kind = ROAD_KINDS[hw] ?? (/^(motorway|trunk|primary|secondary|tertiary)_link$/.test(hw) ? LINK_ROAD : undefined);
-    if (!kind) return undefined;
-    if (hw === 'service' && NARROW_SERVICE.has(tags.service)) kind = { width: 3, shoulder: 0, minor: true };
-    const lanes = Number(tags.lanes);
-    const width =
-      osmWidthM(tags.width) ??
-      (Number.isInteger(lanes) && lanes > 0 && lanes <= 16 ? lanes * LANE_WIDTH_M : undefined) ??
-      // one carriageway of a dual road: half the road's width
-      (isOnewayRoad(tags) ? Math.max(ONEWAY_MIN_WIDTH_M, kind.width / 2) : kind.width);
-    const surface = tags.surface ?? (hw === 'track' ? 'unpaved' : undefined);
-    const unpaved = surface !== undefined && !PAVED_SURFACES.has(surface) && (GRAVEL_SURFACES.has(surface) || DIRT_SURFACES.has(surface));
-    const ramp = !unpaved ? (hw === 'pedestrian' ? RAMP.CONCRETE : RAMP.ASPHALT)
-      : DIRT_SURFACES.has(surface!) || (hw === 'track' && (tags.tracktype === 'grade4' || tags.tracktype === 'grade5')) ? DIRT_ROAD_RAMP : GRAVEL_ROAD_RAMP;
-    // a bridge has railings, not shoulders (and no strip painted over the water under it)
-    const shoulder = unpaved || (tags.bridge && tags.bridge !== 'no') ? 0 : kind.shoulder;
-    return { ramp, width, shoulder, minor: kind.minor, marks: unpaved ? 0 : roadMarks(hw, tags) };
-  }
-  if (tags.railway && RAIL_KINDS.has(tags.railway)) return { ramp: BALLAST_RAMP, width: BALLAST_WIDTH_M, rail: true };
-  const ww = tags.waterway;
-  if (ww && WATERWAY_WIDTH_M[ww] !== undefined) {
-    // piped under roads, fields and buildings: nothing to see
-    if (tags.tunnel && tags.tunnel !== 'no') return undefined;
-    if (tags.location === 'underground') return undefined;
-    return { ramp: RAMP.WATER, width: osmWidthM(tags.width) ?? WATERWAY_WIDTH_M[ww] };
-  }
-  if (tags.aeroway === 'runway' || tags.aeroway === 'taxiway') return { ramp: RAMP.ASPHALT, width: 30 };
-  return undefined;
-}
-
-/**
- * A road or railway under the ground: no ribbon over the hill above it, only its portals.
- * `building_passage` runs under a building and is open to the sky on both sides of it.
- */
-export function isTunnel(tags: Record<string, string>): boolean {
-  const t = tags.tunnel;
-  return !!t && t !== 'no' && t !== 'building_passage' && (tags.highway !== undefined || tags.railway !== undefined);
-}
 
 /** shape of a tunnel portal: an arch tube from the mouth into the hill, metres */
 const PORTAL = {
@@ -959,268 +655,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       ramp: lit ? withGlow(style.ramp, LIT_ROAD_GLOW) : road ? withGlow(style.ramp, UNLIT_ROAD_GLOW) : style.ramp,
     };
   };
-  /** points of a round cap around an end of a ribbon (lattice units); 12 sides */
-  const CAP_SIDES = 12;
-
-  /**
-   * A line's ribbon on the TIN, from the whole way (not this tile's share of it): each triangle is
-   * cut by the terrain faces under it, so the relief cannot cut through it, and whatever lies past
-   * the tile border finds no face here and is dropped. The neighbour cuts the same ribbon at the
-   * same border, so the two halves meet exactly. Each end of the way gets a round cap: OSM splits
-   * roads and rivers into ways that meet at an angle, and square ends left a wedge open outside
-   * every such bend. Inside a way the sides are mitred, so a bend keeps the full width.
-   */
-  /** the drawn roads at each OSM node (the whole ways, not this tile's share): at an end or passing through */
-  const roadsAtNode = new Map<string, { line: OsmLine; end: boolean; rank: number; prio: number; layer: number; half: number }[]>();
-  const nodeKey = (p: LonLat) => `${p[0]},${p[1]}`;
-  for (const line of opts.data.lines) {
-    if (!line.tags.highway || isTunnel(line.tags)) continue;
-    const style = classifyLine(line.tags);
-    if (!style) continue;
-    const entry = { rank: roadRank(line.tags), prio: roadPriority(line.tags, style.width), layer: roadLayer(line.tags), half: style.width / 2 };
-    line.points.forEach((p, i) => {
-      const k = nodeKey(p);
-      let list = roadsAtNode.get(k);
-      if (!list) roadsAtNode.set(k, list = []);
-      list.push({ line, end: i === 0 || i === line.points.length - 1, ...entry });
-    });
-  }
-  /**
-   * How far from its end `at` a road's paint stops: at a junction, where roads of its priority or
-   * higher (in its layer) meet it more than its own continuation does, past the widest of them; a
-   * road split in two, or meeting only lower ones there, paints on through.
-   */
-  /**
-   * A fork at `at`: three or more roads of standing end there (in `layer`; a driveway or a parking
-   * aisle may join too) — a two-way road and one-way branches (a dual carriageway begins, a ramp
-   * leaving with it), or one-way roads of which one flows the other way to all the rest (a road
-   * splits in two or three, or they merge into one); the trunk and the branches, or undefined
-   */
-  const forkAt = (at: LonLat, layer: number): { width: number; trunk: OsmLine; branches: { line: OsmLine; half: number }[] } | undefined => {
-    const here = (roadsAtNode.get(nodeKey(at)) ?? []).filter((o) => o.layer === layer);
-    if (!here.length) return undefined;
-    // roads below this neither count nor spoil the fork
-    const floor = Math.min(Math.max(...here.map((o) => o.rank)), LINK_RANK);
-    const big = here.filter((o) => o.rank >= floor);
-    if (big.length < 3 || big.some((o) => !o.end)) return undefined;
-    const twoWay = big.filter((o) => !isOnewayRoad(o.line.tags));
-    let trunk: (typeof big)[number] | undefined;
-    if (twoWay.length === 1) trunk = twoWay[0];
-    else if (twoWay.length === 0) {
-      // flowing into the node: it is the way's last point (its first, drawn against the flow)
-      const into = (o: (typeof big)[number]) => (nodeKey(o.line.points[o.line.points.length - 1]) === nodeKey(at)) !== (o.line.tags.oneway === '-1');
-      const ins = big.filter(into);
-      trunk = ins.length === 1 ? ins[0] : ins.length === big.length - 1 ? big.find((o) => !into(o)) : undefined;
-    }
-    if (!trunk) return undefined;
-    return { width: trunk.half * 2, trunk: trunk.line, branches: big.filter((o) => o !== trunk).map((o) => ({ line: o.line, half: o.half })) };
-  };
-  /** the unit direction (x, z) a way leaves the node `at` in, over its first FORK_PROBE_M or so */
-  const leaving = (line: OsmLine, at: LonLat): [number, number] => {
-    const pts = nodeKey(line.points[0]) === nodeKey(at) ? line.points : [...line.points].reverse();
-    const [ax, az] = enu(pts[0][0], pts[0][1]);
-    let bx = ax, bz = az;
-    for (let i = 1; i < pts.length; i++) {
-      [bx, bz] = enu(pts[i][0], pts[i][1]);
-      if (Math.hypot(bx - ax, bz - az) >= FORK_PROBE_M) break;
-    }
-    const l = Math.hypot(bx - ax, bz - az) || 1;
-    return [(bx - ax) / l, (bz - az) / l];
-  };
-
-  /**
-   * A branch of a fork starts with its outer edge on the trunk's (shifted away from the other branch
-   * by half the difference of their widths) and eases onto its own line over FORK_TAPER_M (at most
-   * half its length): the centre line shifted, with a vertex where the shift ends. Two branches as
-   * wide as the trunk together lie side by side; wider ones overlap in the middle (lanes merging),
-   * narrower ones leave a gap (a median beginning).
-   */
-  const forkShift = (line: OsmLine, pts: { c: P2; e: [number, number] }[]): { c: P2; e: [number, number] }[] => {
-    if (!isOnewayRoad(line.tags)) return pts;
-    const layer = roadLayer(line.tags);
-    const lens = pts.slice(1).map((p, i) => Math.hypot(p.e[0] - pts[i].e[0], p.e[1] - pts[i].e[1]));
-    const length = lens.reduce((a, b) => a + b, 0);
-    const taper = Math.min(FORK_TAPER_M, length / 2 - 1);
-    const first = line.points[0], last = line.points[line.points.length - 1];
-    const f0 = forkAt(first, layer), f1 = forkAt(last, layer);
-    if ((!f0 && !f1) || taper <= 1) return pts;
-    /**
-     * The shift there (+ right of the drawing direction): the branches lie across the trunk in the
-     * order they leave the node, side by side, the outer ones' outer edges on the trunk's; whatever
-     * their widths miss or exceed the trunk's by is shared out evenly between them (a median, or
-     * lanes merging), none past the trunk's edges. Two branches: each with its outer edge on the trunk's.
-     */
-    const shiftAt = (f: NonNullable<ReturnType<typeof forkAt>>, at: LonLat, atStart: boolean): number => {
-      const i = f.branches.findIndex((b) => b.line === line);
-      if (i < 0) return 0; // this is the trunk
-      // the axis: away from the trunk, its right normal (x east, z south)
-      const [tx, tz] = leaving(f.trunk, at), nx = tz, nz = -tx;
-      const across = f.branches
-        .map((b) => { const [bx, bz] = leaving(b.line, at); return { b, s: Math.atan2(nx * bx + nz * bz, -tx * bx - tz * bz) }; })
-        .sort((p, q) => p.s - q.s).map((p) => p.b);
-      const k = across.indexOf(f.branches[i]);
-      const total = across.reduce((a, b) => a + b.half * 2, 0);
-      const gap = (f.width - total) / (across.length - 1);
-      let offset = -f.width / 2 + k * gap + across[k].half;
-      for (let j = 0; j < k; j++) offset += across[j].half * 2;
-      // never past the trunk's edges: a branch wider than the trunk keeps to its axis
-      const room = Math.max(0, f.width / 2 - across[k].half);
-      offset = Math.max(-room, Math.min(room, offset));
-      // right of the axis is right of the drawing direction where it leaves (the start), left where it arrives
-      return atStart ? offset : -offset;
-    };
-    const o0 = f0 ? shiftAt(f0, first, true) : 0;
-    const o1 = f1 ? shiftAt(f1, last, false) : 0;
-    if (!o0 && !o1) return pts;
-    // the vertices, with ones where the shifts end
-    const out: { c: P2; e: [number, number]; d: number }[] = [];
-    let at = 0;
-    for (let i = 0; i < pts.length; i++) {
-      out.push({ ...pts[i], d: at });
-      if (i + 1 === pts.length) break;
-      const next = at + lens[i];
-      for (const d of [taper, length - taper]) {
-        if (d <= at + 1e-3 || d >= next - 1e-3) continue;
-        const f = (d - at) / (lens[i] || 1), a = pts[i], b = pts[i + 1];
-        out.push({ c: [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f], e: [a.e[0] + (b.e[0] - a.e[0]) * f, a.e[1] + (b.e[1] - a.e[1]) * f], d });
-      }
-      at = next;
-    }
-    out.sort((a, b) => a.d - b.d);
-    return out.map((p, i) => {
-      const shift = o0 * Math.max(0, 1 - p.d / taper) + o1 * Math.max(0, 1 - (length - p.d) / taper);
-      if (shift === 0) return { c: p.c, e: p.e };
-      const a = out[Math.max(0, i - 1)].e, b = out[Math.min(out.length - 1, i + 1)].e;
-      const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-      // right of the drawing direction (x east, z south; the lattice's y runs south too)
-      const nx = -(b[1] - a[1]) / l, nz = (b[0] - a[0]) / l;
-      return {
-        e: [p.e[0] + nx * shift, p.e[1] + nz * shift],
-        c: [p.c[0] + nx * shift * latticePerMetre, p.c[1] + nz * shift * latticePerMetre],
-      };
-    });
-  };
-
-  const junctionGap = (line: OsmLine, at: LonLat): number => {
-    if (forkAt(at, roadLayer(line.tags))) return 0;
-    const style = classifyLine(line.tags);
-    const own = roadPriority(line.tags, style?.width ?? 0), layer = roadLayer(line.tags);
-    let count = 0, widest = 0;
-    for (const o of roadsAtNode.get(nodeKey(at)) ?? []) {
-      if (o.line === line || o.layer !== layer || o.prio < own) continue;
-      count += o.end ? 1 : 2;
-      widest = Math.max(widest, o.half);
-    }
-    return count >= 2 ? widest + ROAD_MARK_END_M : 0;
-  };
-
-  /**
-   * The width of the way that continues `line` at `at` (the one other road of its rank, layer and
-   * one-way-ness ending there), or undefined where there is none or more than one
-   */
-  const continuationWidth = (line: OsmLine, at: LonLat): number | undefined => {
-    if (forkAt(at, roadLayer(line.tags))) return undefined;
-    const own = roadRank(line.tags), layer = roadLayer(line.tags), oneway = isOnewayRoad(line.tags);
-    let found: number | undefined, n = 0;
-    for (const o of roadsAtNode.get(nodeKey(at)) ?? []) {
-      if (o.line === line || o.rank !== own || o.layer !== layer) continue;
-      if (!o.end || isOnewayRoad(o.line.tags) !== oneway) return undefined;
-      found = o.half * 2;
-      n++;
-    }
-    return n === 1 ? found : undefined;
-  };
-
-  /**
-   * A painted road (WORLD_FS roadMarkAt). Where the way that continues it is narrower (a lane fewer:
-   * the speed-change lanes at ramps), this one narrows to its width at the shared node, linearly
-   * over ROAD_TAPER_M (at most half its length): the dropped lane closes on the right, the lines
-   * measured from the left edge stay put. Vertex attributes:
-   *   u   ROAD_U_BASE + metres from the start in the first half, -(ROAD_U_BASE + metres from the end)
-   *       in the second (a vertex at the middle, so no triangle spans both)
-   *   v   metres from the left edge (in the driving direction of a one-way road)
-   *   edge.x  ROAD_EDGE - (start taper length / 2 m) · 64 - (end taper length / 2 m)
-   *   edge.y  full width / 0.25 m + (start narrowing / 0.5 m) · 1024 + (end narrowing / 0.5 m) · 32768
-   *   edge.z  the ROAD_MARK code + (start gap / 0.5 m) << 7 + (end gap / 0.5 m) << 13
-   */
-  const paintedRibbon = (line: OsmLine, src: { c: P2; e: [number, number] }[], look: NonNullable<ReturnType<typeof lineLook>>, ends: RibbonEnds, lift?: Lift): void => {
-    const q = (v: number, step: number, max: number) => Math.max(0, Math.min(max, Math.round(v / step)));
-    const wq = q(look.half * 2, 0.25, 1023), width = wq * 0.25;
-    const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
-    const length = lens.reduce((a, b) => a + b, 0);
-    if (length < 1e-3) return;
-    const first = line.points[0], last = line.points[line.points.length - 1];
-    const narrow = (at: LonLat) => {
-      const w = continuationWidth(line, at);
-      return w !== undefined && w < width ? q(width - w, 0.5, 31) : 0;
-    };
-    const n0 = narrow(first), n1 = narrow(last);
-    const taperLen = (n: number) => (n ? q(Math.min(ROAD_TAPER_M, length / 2 - 1), 2, 63) : 0);
-    const t0q = taperLen(n0), t1q = taperLen(n1);
-    const t0 = t0q * 2, t1 = t1q * 2;
-    const g0q = q(junctionGap(line, first), 0.5, 63), g1q = q(junctionGap(line, last), 0.5, 63);
-    const widthAt = (d0: number): number => {
-      let w = width;
-      if (t0 > 0) w -= n0 * 0.5 * (1 - Math.min(1, Math.max(0, d0) / t0));
-      if (t1 > 0) w -= n1 * 0.5 * (1 - Math.min(1, Math.max(0, length - d0) / t1));
-      return w;
-    };
-    // vertices where the width bends and at the middle: each piece of the ribbon is linear in both
-    const cuts = [t0, length / 2, length - t1].filter((d) => d > 1e-3 && d < length - 1e-3);
-    const pts: { c: P2; e: [number, number]; d: number }[] = [];
-    let at = 0;
-    for (let i = 0; i < src.length; i++) {
-      pts.push({ ...src[i], d: at });
-      if (i + 1 === src.length) break;
-      const next = at + lens[i];
-      for (const d of cuts) {
-        if (d <= at + 1e-3 || d >= next - 1e-3) continue;
-        const f = (d - at) / (lens[i] || 1), a = src[i], b = src[i + 1];
-        pts.push({ c: [a.c[0] + (b.c[0] - a.c[0]) * f, a.c[1] + (b.c[1] - a.c[1]) * f], e: [a.e[0] + (b.e[0] - a.e[0]) * f, a.e[1] + (b.e[1] - a.e[1]) * f], d });
-      }
-      at = next;
-    }
-    pts.sort((a, b) => a.d - b.d);
-    const flip = line.tags.oneway === '-1' ? -1 : 1;
-    const ex = ROAD_EDGE - t0q * 64 - t1q, ey = wq + n0 * 1024 + n1 * 32768, ez = look.marks + (g0q << 7) + (g1q << 13);
-    const segs: VertexAttr[] = [];
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const [ax, az] = pts[i].e, len = (pts[i + 1].d - pts[i].d) || 1;
-      const dx = (pts[i + 1].e[0] - ax) / len, dz = (pts[i + 1].e[1] - az) / len, start = pts[i].d;
-      const secondHalf = (pts[i].d + pts[i + 1].d) / 2 > length / 2;
-      segs.push((p) => {
-        const d0 = start + (p.x - ax) * dx + (p.z - az) * dz;
-        const across = flip * ((p.z - az) * dx - (p.x - ax) * dz);
-        const u = secondHalf ? -(ROAD_U_BASE + (length - d0)) : ROAD_U_BASE + d0;
-        return [u, across + widthAt(d0) / 2, ex, ey, ez];
-      });
-    }
-    ribbon(pts.map((p) => p.c), pts.map((p) => widthAt(p.d) / 2), look.ramp, look.bias, look.out, segs, ends, lift);
-  };
-
-  /**
-   * How a road's ribbon ends at each node: a dead end gets a round cap; a way continued by exactly
-   * one other is mitred onto it (no cap: on a wide road a cap bulged past the edges at every angled
-   * joint); at a junction or a fork it ends square, the roads there covering it. Minor roads joining
-   * (driveways, parking aisles) do not count.
-   */
-  const roadEnds = (line: OsmLine): RibbonEnds => {
-    const own = roadRank(line.tags), layer = roadLayer(line.tags);
-    const at = (p: LonLat): { dir?: P2; cap: boolean } => {
-      const others = (roadsAtNode.get(nodeKey(p)) ?? []).filter((o) => o.line !== line && o.layer === layer);
-      if (!others.length) return { cap: true };
-      const floor = Math.min(own, LINK_RANK);
-      const big = others.filter((o) => o.rank >= floor);
-      if (forkAt(p, layer) || big.length !== 1 || !big[0].end) return { cap: !big.length };
-      const o = big[0].line;
-      const k = nodeKey(o.points[0]) === nodeKey(p) ? 1 : o.points.length - 2;
-      const a = toLattice(p), b = toLattice(o.points[Math.max(0, Math.min(o.points.length - 1, k))]);
-      const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      return l > 1e-9 ? { dir: [(b[0] - a[0]) / l, (b[1] - a[1]) / l], cap: false } : { cap: true };
-    };
-    const s = at(line.points[0]), e = at(line.points[line.points.length - 1]);
-    return { start: s.dir, end: e.dir, capStart: s.cap, capEnd: e.cap };
-  };
+  /** where roads meet (the whole ways, not this tile's share): ribbon ends, forks, paint gaps */
+  const net = lineNetwork(opts.data.lines, enu, toLattice, latticePerMetre);
 
   /** a lifted way as the bridge and embankment builder takes it: its centre line and what it looks like */
   const raisedWays: { line: OsmLine; half: number; bias: number; pts: { c: P2; e: [number, number]; d: number }[] }[] = [];
@@ -1294,12 +730,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     let pts = line.points.map((ll) => ({ c: toLattice(ll), e: enu(ll[0], ll[1]) }))
       .filter((p, i, a) => i === 0 || p.c[0] !== a[i - 1].c[0] || p.c[1] !== a[i - 1].c[1]);
     if (pts.length < 2) return;
-    if (look.road) pts = forkShift(line, pts);
+    if (look.road) pts = net.forkShift(line, pts);
     const raised = look.road || look.rail ? raise(line, pts, look.half + look.shoulder, look.rail ? RAIL_BIAS : look.bias) : undefined;
     if (raised) pts = raised.pts;
     const lift = raised?.lift;
     const c = pts.map((p) => p.c);
-    const ends = look.road ? roadEnds(line) : ROUND_ENDS;
+    const ends = look.road ? net.roadEnds(line) : ROUND_ENDS;
     // nothing of it reaches this tile: skip the work
     const g = tin.grid, r = (look.half + look.shoulder + look.zone) * latticePerMetre;
     if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > g + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > g + r)) return;
@@ -1313,79 +749,25 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         ribbon(c, look.half, look.ramp, look.bias, look.out, undefined, ends, lift);
         return;
       }
-      paintedRibbon(line, pts, look, ends, lift);
+      // a painted road: narrowing into a narrower continuation, its paint in its vertex attributes
+      const p = painted(line, pts, look.half, look.marks, net);
+      if (p.c.length) ribbon(p.c, p.half, look.ramp, look.bias, look.out, p.segs, ends, lift);
       return;
     }
-    // the track: each segment's vertices carry u along the line (metres from its start) and v across it
-    const segs: VertexAttr[] = [];
-    let u0 = 0;
-    for (let i = 0; i + 1 < pts.length; i++) {
-      const [ax, az] = pts[i].e, [bx, bz] = pts[i + 1].e;
-      const len = Math.hypot(bx - ax, bz - az) || 1;
-      const dx = (bx - ax) / len, dz = (bz - az) / len, start = u0;
-      segs.push((p) => [start + (p.x - ax) * dx + (p.z - az) * dz, (p.z - az) * dx - (p.x - ax) * dz, TRACK_EDGE, 0, 0]);
-      u0 += len;
-    }
-    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, segs, ROUND_ENDS, lift);
+    // the track: each segment's vertices carry u along the line and v across it
+    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, trackSegs(pts), ROUND_ENDS, lift);
   };
 
   /**
-   * A ribbon `half` metres wide each side of the lattice polyline `c`, cut by the terrain faces; per
-   * segment vertex attributes optional (the caps take the first and last segment's)
+   * A line's ribbon on the TIN (ribbonGeom), from the whole way (not this tile's share of it): each
+   * triangle is cut by the terrain faces under it, so the relief cannot cut through it, and whatever
+   * lies past the tile border finds no face here and is dropped. The neighbour cuts the same ribbon
+   * at the same border, so the two halves meet exactly. Per segment vertex attributes optional (the
+   * caps take the first and last segment's, a joint disc its vertex's).
    */
   const ribbon = (c: P2[], half: number | number[], ramp: number, bias: number, out: Out, segs?: VertexAttr[], ends: RibbonEnds = ROUND_ENDS, lift?: Lift): void => {
-    const halfAt = (i: number) => (typeof half === 'number' ? half : half[i]);
-    // each vertex's edge points as the end of the segment before it (in) and the start of the one
-    // after it (out): the same mitred point at a bend, the two segments' own at a sharp turn
-    const inL: P2[] = [], inR: P2[] = [], outL: P2[] = [], outR: P2[] = [];
-    const joints: number[] = [];
-    // a way continued by another: a point of it past each joint, so the joint is mitred like a bend
-    const before: P2 | undefined = ends.start ? [c[0][0] + ends.start[0], c[0][1] + ends.start[1]] : undefined;
-    const after: P2 | undefined = ends.end ? [c[c.length - 1][0] + ends.end[0], c[c.length - 1][1] + ends.end[1]] : undefined;
-    for (let i = 0; i < c.length; i++) {
-      const r = halfAt(i) * latticePerMetre;
-      const prev = i === 0 && before ? before : c[Math.max(0, i - 1)];
-      const next = i === c.length - 1 && after ? after : c[Math.min(c.length - 1, i + 1)];
-      // the direction at the vertex: the bisector of the two segments' directions (the chord from
-      // prev to next leans towards the longer one, and the mitre with it: a leg tapered to the corner)
-      const unit = (ax: number, ay: number): P2 => { const l = Math.hypot(ax, ay); return l > 1e-12 ? [ax / l, ay / l] : [0, 0]; };
-      const uIn = unit(c[i][0] - prev[0], c[i][1] - prev[1]), uOut = unit(next[0] - c[i][0], next[1] - c[i][1]);
-      let [dx, dy] = unit(uIn[0] + uOut[0], uIn[1] + uOut[1]);
-      if (dx === 0 && dy === 0) [dx, dy] = uIn[0] || uIn[1] ? uIn : uOut;
-      // mitre: the offset along the mean normal that keeps both segments `r` wide; a turn sharper
-      // than SHARP_TURN_COS is not mitred (a spike): each segment keeps its full width up to the
-      // vertex, and a disc round it fills the outer wedge
-      const at = (sx: number, sy: number, m: number): [P2, P2] => [[c[i][0] - sy * m, c[i][1] + sx * m], [c[i][0] + sy * m, c[i][1] - sx * m]];
-      let pIn = at(dx, dy, r), pOut = pIn;
-      if ((i > 0 || before) && (i < c.length - 1 || after)) {
-        const ix = c[i][0] - prev[0], iy = c[i][1] - prev[1], il = Math.hypot(ix, iy) || 1;
-        const cos = (ix / il) * dx + (iy / il) * dy;
-        if (cos >= SHARP_TURN_COS) pIn = pOut = at(dx, dy, r / cos);
-        else {
-          const ox = next[0] - c[i][0], oy = next[1] - c[i][1], ol = Math.hypot(ox, oy) || 1;
-          pIn = at(ix / il, iy / il, r);
-          pOut = at(ox / ol, oy / ol, r);
-          joints.push(i);
-        }
-      }
-      inL.push(pIn[0]); inR.push(pIn[1]); outL.push(pOut[0]); outR.push(pOut[1]);
-    }
-    for (let i = 0; i < c.length - 1; i++) {
-      onFaces([outL[i], outR[i], inL[i + 1]], ramp, bias, out, undefined, segs?.[i], lift);
-      onFaces([outR[i], inR[i + 1], inL[i + 1]], ramp, bias, out, undefined, segs?.[i], lift);
-    }
-    const caps: [boolean, P2, VertexAttr | undefined, number][] = [
-      [ends.capStart, c[0], segs?.[0], halfAt(0)], [ends.capEnd, c[c.length - 1], segs?.[segs.length - 1], halfAt(c.length - 1)],
-      ...joints.map((i): [boolean, P2, VertexAttr | undefined, number] => [true, c[i], segs?.[Math.min(i, (segs?.length ?? 1) - 1)], halfAt(i)]),
-    ];
-    for (const [cap, e, attr, h] of caps) {
-      if (!cap) continue;
-      const r = h * latticePerMetre;
-      for (let k = 0; k < CAP_SIDES; k++) {
-        const a0 = (k / CAP_SIDES) * 2 * Math.PI, a1 = ((k + 1) / CAP_SIDES) * 2 * Math.PI;
-        onFaces([e, [e[0] + Math.cos(a0) * r, e[1] + Math.sin(a0) * r], [e[0] + Math.cos(a1) * r, e[1] + Math.sin(a1) * r]], ramp, bias, out, undefined, attr, lift);
-      }
-    }
+    const { tris, triSeg } = ribbonGeom(c, half, ends, latticePerMetre);
+    for (let k = 0; k < triSeg.length; k++) onFaces([tris[3 * k], tris[3 * k + 1], tris[3 * k + 2]], ramp, bias, out, undefined, segs?.[triSeg[k]], lift);
   };
 
   /** this tile's share of a line: its lamps and far lines (the TIN ribbon is buildRibbon's) */
