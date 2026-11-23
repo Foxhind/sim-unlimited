@@ -4,9 +4,9 @@ import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import type { P2 } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceTin } from '../src/world/surface-tin';
+import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceStats, type SurfaceTin } from '../src/world/surface-tin';
 import { buildTerrainTin, tinLatticeSampler, type TerrainTin, type TinDebug } from '../src/world/terrain-tin';
-import { area, areaOf, at, bordersOf, coverTin, cracks, demOf, denseTown, GRID, lattice, M, padAround, polygon, randomTown, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
+import { area, areaOf, at, bordersOf, coverTin, cracks, data, demOf, denseTown, GRID, lattice, M, padAround, polygon, randomTown, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
 
 const slope = lattice((x, y) => 500 + 0.2 * x + 0.05 * y);
 const surfaceOf = (roads: OsmLine[], h: Float32Array = slope, opts: SurfaceOptions = {}) => {
@@ -257,13 +257,46 @@ function ownArea(cover: GroundCover, s: number): number {
   }
   return own[s];
 }
-/** the kinds of the shapes whose edges are not all in the surface */
+/** the kinds of the shapes whose edges (outside their seniors) are not all in the surface */
 const droppedKinds = (tin: TerrainTin, cover: GroundCover): string[] =>
-  [...new Set(cover.shapes.filter((s) => !s.outline.every((l) => edgeInTin(tin, l))).map((s) => s.kind))].sort();
+  [...new Set(cover.shapes.filter((s, si) => !s.outline.every((l) => cover.outside(l, si).every((piece) => edgeInTin(tin, piece)))).map((s) => s.kind))].sort();
 
-it('puts every edge of every cover into the surface', () => {
+it('puts every edge of every cover into the surface, but where it lies inside a senior one', () => {
   const { tin, cover } = coverSurface(townFixture());
-  for (const s of cover.shapes) for (const line of s.outline) expect(edgeInTin(tin, line)).toBe(true);
+  cover.shapes.forEach((s, si) => {
+    for (const line of s.outline) for (const piece of cover.outside(line, si)) expect(edgeInTin(tin, piece)).toBe(true);
+  });
+});
+it('leaves out the edges of a junior cover inside a senior one: they part no faces of different covers', () => {
+  const primary = road({ highway: 'primary' }, [[10.2, 30.1], [54.3, 31.4]]);
+  const street = road({ highway: 'residential' }, [[30.4, 12.2], [31.1, 50.3]]);
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  const net = buildRoadNet([primary, street]), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+  const cover = buildGroundCover(TILE, GRID, data([primary, street]), roads);
+  const debug = {} as TinDebug;
+  const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), roads, cover, debug });
+  const asphalt = (way: OsmLine) => cover.shapes.findIndex((s) => s.kind === 'carriageway' && s.source === way);
+  const p = asphalt(primary), s = asphalt(street);
+  expect(p).toBeLessThan(s);
+  /** distance from (x, y) to the street's asphalt edge */
+  const offEdge = (x: number, y: number) => Math.min(...cover.shapes[s].outline.flatMap((line) => line.slice(1).map(([bx, by], k) => {
+    const [ax, ay] = line[k], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy, f = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2));
+    return Math.hypot(x - ax - dx * f, y - ay - dy * f);
+  })));
+  // the fixed edges along the street's sides, more than 5 cm into the primary's asphalt: none
+  const margin = 0.05 * M;
+  const deep = (x: number, y: number) => [[-1, -1], [-1, 1], [1, -1], [1, 1]].every(([i, j]) => cover.locate(x + i * margin, y + j * margin) === p);
+  let along = 0, inside = 0;
+  for (const [u, v] of debug.constraints!) {
+    const x = (tin.vx[u] + tin.vx[v]) / 2, y = (tin.vy[u] + tin.vy[v]) / 2;
+    if (offEdge(x, y) > 1e-3) continue;
+    along++;
+    if (deep(x, y)) inside++;
+  }
+  expect(along).toBeGreaterThan(4);
+  expect(inside).toBe(0);
+  // and where it enters the primary's asphalt it is in, to its edge
+  for (const line of cover.shapes[s].outline) for (const piece of cover.outside(line, s)) expect(edgeInTin(tin, piece)).toBe(true);
 });
 it('gives each face one cover, the senior shape under its centre, and no face straddles a cover edge', () => {
   const { tin, cover } = coverSurface(townFixture());
@@ -281,6 +314,42 @@ it('drops the parks before the roads when over the budget, and cracks nowhere', 
   expect(tin.loose?.size ?? 0).toBe(0);
   expect(droppedKinds(tin, cover)).toEqual(['area']);
   expect(cracks(tin)).toBe(0);
+});
+
+it('paints a face with a dropped area only when the face lies in it, centre and corners: a small pool goes', () => {
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  // a budget below the relief's own vertices: every edge left out
+  const surface = (areas: OsmArea[]) => {
+    const cover = buildGroundCover(TILE, GRID, data([], areas), undefined);
+    return { cover, tin: buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), cover, maxSurfaceVerts: 0 }) };
+  };
+  const bare = surface([areaOf({ natural: 'water' }, polygon(-20, -20, 1, 5))]).tin;
+  // a pool round the centre of a big face, much smaller than it; a lake round the whole tile
+  const [cx, cy] = centre(bare, 0);
+  const pool = areaOf({ natural: 'water' }, polygon(cx, cy, 0.3, 7, 0.4)), lake = areaOf({ natural: 'water' }, polygon(32, 32, 80, 9, 0.1));
+  const { tin, cover } = surface([pool]);
+  expect(cover.locate(cx, cy)).toBe(0);
+  expect(tin.vx.length).toBe(bare.vx.length);
+  expect([...tin.cover!].every((c) => c === -1)).toBe(true);
+  // over the lake, every face lies in it
+  const wet = surface([lake]);
+  expect([...wet.tin.cover!].every((c) => c === 0)).toBe(true);
+  // the pool in the lake: the lake's
+  const both = surface([pool, lake]);
+  const ofPool = both.cover.shapes.findIndex((sh) => sh.source === pool), ofLake = both.cover.shapes.findIndex((sh) => sh.source === lake);
+  expect(both.cover.locate(cx, cy)).toBe(Math.min(ofPool, ofLake));
+  expect([...both.tin.cover!].every((c) => c === ofLake)).toBe(true);
+});
+it('fills the vertex budget: in one build where the outlines cross little, in two where they cross much', () => {
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  for (const [d, max, builds] of [[denseTown(2500), MAX_SURFACE_VERTS, 1], [denseTown(2500), 12000, 1], [randomTown(10), 6000, 2]] as const) {
+    const net = buildRoadNet(d.lines), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+    const cover = buildGroundCover(TILE, GRID, d, roads), stats = {} as SurfaceStats;
+    const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), roads, cover, maxSurfaceVerts: max, stats });
+    expect(tin.vx.length).toBeLessThanOrEqual(max);
+    expect(tin.vx.length).toBeGreaterThan(0.88 * max);
+    expect(stats.builds).toBeLessThanOrEqual(builds);
+  }
 });
 
 /** the surface of a random town, roads only or with its cover, and how many fixed edges the triangulation lost */
@@ -316,15 +385,18 @@ it('lays a dropped road over the cover under it: the park it crosses, the bare g
   const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { roads, cover, maxSurfaceVerts: 0 });
   expect([...tin.loose!].sort((a, b) => a.tags.highway.localeCompare(b.tags.highway))).toEqual([street, lane]);
   const under = new Set<number>();
+  /** the dropped park paints a face only where the face lies in it, its corners too */
+  const lies = (f: number) => [tin.tris[f].a, tin.tris[f].b, tin.tris[f].c].every((v) => cover.locate(tin.vx[v], tin.vy[v], (s) => s !== park) === park);
   tin.tris.forEach((_, f) => {
     const [x, y] = centre(tin, f);
     expect(ofStreet(tin.cover![f])).toBe(false);
     if (!ofStreet(cover.locate(x, y))) {
-      expect(tin.cover![f]).toBe(cover.locate(x, y));
+      const want = cover.locate(x, y);
+      expect(tin.cover![f]).toBe(want === park && !lies(f) ? -1 : want);
       return;
     }
     // on the street: what lies under it
-    const inPark = cover.shapes[park].tris.length > 0 && cover.locate(x, y, (s) => s !== park) === park;
+    const inPark = cover.shapes[park].tris.length > 0 && cover.locate(x, y, (s) => s !== park) === park && lies(f);
     expect(tin.cover![f]).toBe(inPark ? park : -1);
     under.add(tin.cover![f]);
   });

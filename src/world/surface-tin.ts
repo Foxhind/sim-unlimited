@@ -25,6 +25,14 @@ export type { RoadSurface } from './road-pull';
  * before a road, and a road's or a river's bed outline with it
  */
 export const MAX_SURFACE_VERTS = 30000;
+/**
+ * the vertices the covers' and beds' lines make where they cross the isolines, the beds and each
+ * other, per point of theirs: about 5 % on a city centre (Innsbruck 14/8710/5744), 8–17 % on
+ * hillier tiles (Fethiye 14/9517/6397 and round it)
+ */
+const CROSSINGS = 0.12;
+/** over the budget, the next build takes this share of the room the last one's crossings leave (the rest cross more) */
+const RETRY_ROOM = 0.97;
 /** the base relief's fixed edges get a vertex this often where they run through a pull band, metres */
 const BAND_EDGE_STEP_M = 12;
 /** at most this many band points a tile (about the lattice nodes it had: 65²) */
@@ -40,6 +48,21 @@ export interface SurfaceOptions extends TinOptions {
   cover?: GroundCover;
   /** the vertex budget, MAX_SURFACE_VERTS unless given (tests: a tile over it without thousands of ways) */
   maxSurfaceVerts?: number;
+  /** filled with how the surface was built (tests, measurements) */
+  stats?: SurfaceStats;
+}
+
+/** how a surface was built */
+export interface SurfaceStats {
+  /** the triangulations of the surface: the first, and one more each time it came out over the budget */
+  builds: number;
+  /** the relief's vertices, the extra points, and the points of the picked units' lines */
+  relief: number;
+  points: number;
+  lines: number;
+  /** the units (a way's or an area's covers with its bed, a bed alone) and how many of them went in */
+  units: number;
+  picked: number;
 }
 
 export interface SurfaceTin extends TerrainTin {
@@ -57,9 +80,11 @@ export interface SurfaceTin extends TerrainTin {
  * outline of its way of the network (a pitch with its paint), or a bed alone
  */
 interface Unit {
-  /** its fixed lines (lattice, inside the tile) and their vertices */
+  /** its fixed lines (lattice, inside the tile) and their vertices (distinct points), once `settle` has run */
   lines: Pt[][];
   count: number;
+  /** fills `lines` and `count` where its shapes' edges are yet to be cut by their seniors (coverUnits): the units picked only */
+  settle?: () => void;
   /** its shapes (indices into cover.shapes) */
   shapes: number[];
   /** the way it is drawn along when it is left out: a ribbon kind's source or a bed's way */
@@ -79,7 +104,7 @@ interface Unit {
 export const Z14_RELIEF_TOL_M = 5;
 
 export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
-  const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, ...given } = opts;
+  const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, stats, ...given } = opts;
   const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
   const pull = roads && roads.net.ways.length ? buildRoadPull(tile, grid, roads) : undefined;
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
@@ -115,13 +140,22 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
         }
       }
       points.push(...coverBorder);
-      // the outlines while the vertices last; a third of their vertices again for where they cross
-      // the isolines, each other and the band points: one build, mostly
-      let room = (maxSurfaceVerts - relief.vx.length - points.length) / 1.3;
-      let attempt = 0;
+      // the outlines while the vertices last: their distinct points and CROSSINGS more for where
+      // they cross the isolines, the beds and each other (one build, mostly); over the budget, again
+      // with as many more as that build made
+      const base = relief.vx.length + points.length;
+      let room = (maxSurfaceVerts - base) / (1 + CROSSINGS);
+      let attempt = 0, used = 0;
       const pick = () => {
         picked = 0;
-        for (let used = 0; picked < units.length && used + units[picked].count <= room; picked++) used += units[picked].count;
+        used = 0;
+        for (; picked < units.length; picked++) {
+          const u = units[picked];
+          u.settle?.();
+          if (used + u.count > room) break;
+          used += u.count;
+        }
+        if (stats) Object.assign(stats, { builds: attempt + 1, relief: relief.vx.length, points: points.length, lines: used, units: units.length, picked });
         return units.slice(0, picked).flatMap((u) => u.lines);
       };
       return {
@@ -130,7 +164,8 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
         next: (vertices) => {
           if (vertices === undefined) return pick();
           if (vertices <= maxSurfaceVerts || picked === 0 || ++attempt >= 6) return undefined;
-          room -= (vertices - maxSurfaceVerts) * 1.2 + 16;
+          const made = used > 0 ? Math.max(1, (vertices - base) / used) : 1;
+          room = Math.min(room - 16, ((maxSurfaceVerts - base) / made) * RETRY_ROOM);
           return pick();
         },
       };
@@ -144,13 +179,24 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   if (!cover) return out;
   // each face the senior cover under its centre: all its edges are the faces' (but a dropped unit's),
   // so the centre tells. A dropped ribbon's shapes are passed over: its faces take the junior cover
-  // under them (a park the road crosses), −1 only on the bare ground, and its ribbon lies over them
+  // under them (a park the road crosses), −1 only on the bare ground, and its ribbon lies over them.
+  // A dropped area's or water's edge is no edge of the faces: one takes it only when its corners lie
+  // in it too (a small pool under a big face goes, rather than painting the face), else the next under it
   const dropped = new Uint8Array(cover.shapes.length);
-  for (const u of units.slice(picked)) for (const si of u.shapes) if (RIBBON_KINDS.has(cover.shapes[si].kind)) dropped[si] = 1;
-  const skip = (si: number) => dropped[si] === 1;
+  for (const u of units.slice(picked)) for (const si of u.shapes) dropped[si] = RIBBON_KINDS.has(cover.shapes[si].kind) ? 1 : 2;
+  let passed: number[] = [];
+  const skip = (si: number) => dropped[si] === 1 || passed.includes(si);
+  const holds = (si: number, x: number, y: number) => cover.locate(x, y, (sj) => sj !== si) === si;
   const faces = new Int32Array(tin.tris.length);
   tin.tris.forEach((t, f) => {
-    faces[f] = cover.locate((tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3, skip);
+    const x = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, y = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
+    passed = [];
+    let si = cover.locate(x, y, skip);
+    while (si >= 0 && dropped[si] === 2 && ![t.a, t.b, t.c].every((v) => holds(si, tin.vx[v], tin.vy[v]))) {
+      passed.push(si);
+      si = cover.locate(x, y, skip);
+    }
+    faces[f] = si;
   });
   return { ...out, cover: faces };
 }
@@ -165,7 +211,9 @@ function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: Road
 /**
  * The covers by source (a way's or an area's shapes together, a pitch with its paint), each with the
  * bed outline of its way of the network, the senior first; a bed without a shape on its own, ranked
- * as its way's carriageway or water. Their edges cut to the tile; where they cross its border into `border`.
+ * as its way's carriageway or water. Their edges cut to the tile; where they cross its border into
+ * `border`. A shape's edge inside a senior shape is left out (it parts faces of that one cover): a
+ * senior whose unit comes no later, so it is in the surface whenever this one is.
  */
 function coverUnits(cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net?: RoadNet): Unit[] {
   const units: Unit[] = [];
@@ -180,10 +228,28 @@ function coverUnits(cover: GroundCover, grid: number, border: Pt[], beds: Readon
     }
     u.shapes.push(si);
     if (RIBBON_KINDS.has(s.kind)) u.way = s.source as OsmLine;
-    for (const line of s.outline) for (const piece of clipToTile(line, grid, border)) {
-      u.lines.push(piece);
-      u.count += piece.length;
-    }
+  });
+  units.sort(byPlace);
+  /** each shape's unit's place */
+  const place = new Int32Array(cover.shapes.length);
+  units.forEach((u, i) => { for (const si of u.shapes) place[si] = i; });
+  /** each unit's edges inside the tile (every one's border points now), cut by the seniors when it is picked */
+  const pending = units.map(() => [] as { si: number; piece: P2[] }[]);
+  cover.shapes.forEach((s, si) => {
+    for (const line of s.outline) for (const piece of clipToTile(line, grid, border)) pending[place[si]].push({ si, piece: piece.map((p): P2 => [p.x, p.y]) });
+  });
+  units.forEach((u, i) => {
+    u.settle = () => {
+      u.settle = undefined;
+      // its shapes' edges before its bed's
+      const beds = u.lines;
+      u.lines = [];
+      for (const { si, piece } of pending[i]) {
+        for (const part of cover.outside(piece, si, (sj) => place[sj] <= place[si])) u.lines.push(part.map(([x, y]) => ({ x, y })));
+      }
+      u.lines.push(...beds);
+      u.count = distinctPoints(u.lines);
+    };
   });
   beds.forEach((b, i) => {
     const line = net!.ways[b.way].line;
@@ -198,10 +264,21 @@ function coverUnits(cover: GroundCover, grid: number, border: Pt[], beds: Readon
       units.push(u);
     }
     u.lines.push(...b.edges);
-    for (const e of b.edges) u.count += e.length;
   });
-  return units.sort((a, b) => a.rank - b.rank || b.prio - a.prio || a.tie - b.tie || a.first - b.first);
+  // the vertices a unit brings: its lines' points, each once (a cut's ends are its sides' points)
+  for (const u of units) if (!u.settle) u.count = distinctPoints(u.lines);
+  return units.sort(byPlace);
 }
+
+/** the distinct points of `lines` (to a rare collision of two in one key: an estimate) */
+function distinctPoints(lines: ReadonlyArray<ReadonlyArray<Pt>>): number {
+  const seen = new Set<number>();
+  for (const l of lines) for (const p of l) seen.add(p.x * 4099 + p.y);
+  return seen.size;
+}
+
+/** the senior unit first: by rank, priority, tie and first shape (a bed alone after every shape) */
+const byPlace = (a: Unit, b: Unit): number => a.rank - b.rank || b.prio - a.prio || a.tie - b.tie || a.first - b.first;
 
 /**
  * The pieces of lattice polyline `line` inside the tile, each ending where it reaches the border,

@@ -1018,12 +1018,24 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // aerodrome pads: their outlines inside the tile, and the plane height of a point on or inside one
   const pads = opts.pads ?? [];
   const padPieces: Pt[][] = [];
+  /** each pad's outline's lon/lat box, a metre wider each way than PAD_ON_M: a point off it is off the pad */
+  const padBoxes = pads.map((pad) => {
+    const dLat = (PAD_ON_M + 1) / 111000, dLon = dLat / Math.max(0.01, Math.cos((pad.origin.lat * Math.PI) / 180));
+    let west = Infinity, east = -Infinity, south = Infinity, north = -Infinity;
+    for (const [lon, lat] of pad.ring) {
+      west = Math.min(west, lon); east = Math.max(east, lon);
+      south = Math.min(south, lat); north = Math.max(north, lat);
+    }
+    return { west: west - dLon, east: east + dLon, south: south - dLat, north: north + dLat };
+  });
   const padAt = (p: Pt): number | undefined => {
     if (!pads.length) return undefined;
     const n = 2 ** tile.z;
     const lon = ((tile.x + p.x / grid) / n) * 360 - 180;
     const lat = mercatorYToLat((tile.y + p.y / grid) / n);
-    for (const pad of pads) {
+    for (let k = 0; k < pads.length; k++) {
+      const pad = pads[k], box = padBoxes[k];
+      if (lon < box.west || lon > box.east || lat < box.south || lat > box.north) continue;
       const [e, nn] = latLonToEnu(pad.origin, lat, lon, 0);
       // on the outline counts as inside: crossings computed on it land a hair either side
       if (padDistance(pad, e, nn) <= PAD_ON_M) return padHeightEnu(pad, e, nn);
