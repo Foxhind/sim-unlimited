@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { colour, rampGlowLevel, RAMP, snowy, withGlow } from '../src/engine/palette';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
-import { buildOsmMesh, isTunnel, osmWidthM } from '../src/world/osm-mesher';
+import { buildOsmMesh, classifyLine, isTunnel, osmWidthM, RAIL_ZONE_RAMP, SHOULDER_RAMP } from '../src/world/osm-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
@@ -536,6 +536,37 @@ function maxLiftOverTin(m: { vertices: Float32Array; vertexCount: number }, tin:
   return worst;
 }
 
+/** the largest distance of a mesh's vertices from the ground under them (`sampleHeight`: the TIN's faces) */
+function maxOffTin(m: { vertices: Float32Array; vertexCount: number }, sampleHeight: (lon: number, lat: number) => number): number {
+  const c = tileCenter(COVER_TILE);
+  let worst = 0;
+  for (let i = 0; i < m.vertexCount; i++) {
+    const ll = enuToLatLon(c, m.vertices[i * 6], -m.vertices[i * 6 + 2], 0);
+    worst = Math.max(worst, Math.abs(m.vertices[i * 6 + 1] - sampleHeight(ll.lon, ll.lat)));
+  }
+  return worst;
+}
+
+/** a mesh's vertices of one face colour */
+function onlyRamp(m: { vertices: Float32Array; ramps: Uint32Array }, ramp: number): { vertices: Float32Array; vertexCount: number } {
+  const vertices: number[] = [];
+  m.ramps.forEach((r, i) => { if (r === ramp) vertices.push(...m.vertices.subarray(i * 6, i * 6 + 6)); });
+  return { vertices: Float32Array.from(vertices), vertexCount: vertices.length / 6 };
+}
+
+/** a street with its shoulders, a footway across it and a railway across both, and a park */
+function looseTown() {
+  return {
+    lines: [
+      coverRoad({ highway: 'residential', name: 'street' }, [[4.3, 20.2], [60.1, 22.7]]),
+      coverRoad({ highway: 'footway', name: 'footway' }, [[30.2, 12.1], [31.4, 30.3]]),
+      coverRoad({ railway: 'rail', name: 'railway' }, [[45.3, 10.2], [46.1, 33.8]]),
+    ],
+    areas: [areaOf({ leisure: 'park' }, polygon(30.2, 21.4, 8.1, 9, 0.2))],
+    points: [],
+  };
+}
+
 /** how many TIN faces have a cover of one of `kinds` */
 const facesOf = (tin: SurfaceTin, cover: GroundCover, kinds: string[]) =>
   Array.from(tin.cover!).filter((s) => s >= 0 && kinds.includes(cover.shapes[s].kind)).length;
@@ -611,18 +642,52 @@ describe('roads and water as the terrain’s own faces', () => {
     expect(m.lampPosts.length).toBe(buildOsmMesh(opts).lampPosts.length);
   });
 
-  it('still draws a road the budget dropped as a ribbon over the ground', () => {
-    const street = coverRoad({ highway: 'residential' }, [[4.3, 20.2], [60.1, 22.7]]);
-    const parkArea = areaOf({ leisure: 'park' }, polygon(30.2, 21.4, 8.1, 9, 0.2));
-    // a budget below the relief's own vertices: every edge left out
-    const { opts, tin, cover } = osmMeshOf({ lines: [street], areas: [parkArea], points: [] }, rolling, 0);
-    expect(tin.loose?.has(street)).toBe(true);
+  it('still draws a road the budget dropped as a ribbon, lying on the ground’s faces, lifted by nothing', () => {
+    const { opts, tin, cover } = osmMeshOf(looseTown(), rolling, 0);
+    for (const l of looseTown().lines) expect([...tin.loose!].some((d) => d.tags.name === l.tags.name)).toBe(true);
     const m = buildOsmMesh({ ...opts, cover }), ribbon = buildOsmMesh(opts);
-    expect(m.roads.vertexCount).toBeGreaterThan(0);
-    // the ribbon of today, LINE_BIAS over the ground
-    expect(Array.from(m.roads.vertices)).toEqual(Array.from(ribbon.roads.vertices));
+    // the ribbons of today, piece for piece, but on the faces: not LINE_BIAS and more over them (the
+    // drape: the railway's right-of-way strip, the park the terrain's)
+    for (const [a, b] of [[m.roads, ribbon.roads], [m, onlyRamp(ribbon, RAIL_ZONE_RAMP)]] as const) {
+      expect(a.vertexCount).toBeGreaterThan(0);
+      expect(a.vertexCount).toBe(b.vertexCount);
+      for (let i = 0; i < a.vertexCount; i++) {
+        expect(a.vertices[i * 6]).toBe(b.vertices[i * 6]);
+        expect(a.vertices[i * 6 + 2]).toBe(b.vertices[i * 6 + 2]);
+      }
+      expect(maxOffTin(b, opts.sampleHeight)).toBeGreaterThan(0.9);
+      expect(maxOffTin(a, opts.sampleHeight)).toBeLessThan(1e-4);
+    }
     expect(Array.from(m.roadAttrs)).toEqual(Array.from(ribbon.roadAttrs));
-    expect(maxLiftOverTin(m.roads, tin)).toBeGreaterThan(1);
+  });
+
+  it('orders the dropped ways’ ribbons by depth levels, as their heights did: shoulder under carriageway, junior under senior', () => {
+    const { opts, cover } = osmMeshOf(looseTown(), rolling, 0);
+    const m = buildOsmMesh({ ...opts, cover });
+    expect(m.roadDepthLevels.length).toBe(m.roads.vertexCount);
+    expect(m.depthLevels.length).toBe(m.vertexCount);
+    const levelsOf = (ramps: Uint32Array, levels: Float32Array, ramp: number): number[] => {
+      const found = new Set<number>();
+      ramps.forEach((r, i) => { if (r === ramp) found.add(levels[i]); });
+      expect(found.size).toBe(1);
+      return [...found];
+    };
+    const [zone] = levelsOf(m.ramps, m.depthLevels, RAIL_ZONE_RAMP);
+    const [shoulder] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(SHOULDER_RAMP, LIT_ROAD_GLOW));
+    const [street] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(classifyLine({ highway: 'residential' })!.ramp, LIT_ROAD_GLOW));
+    const [footway] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(classifyLine({ highway: 'footway' })!.ramp, UNLIT_ROAD_GLOW));
+    const [track] = levelsOf(m.roads.ramps, m.roadDepthLevels, classifyLine({ railway: 'rail' })!.ramp);
+    // every piece is over the ground (level 0)
+    expect(Math.min(...m.roadDepthLevels, ...m.depthLevels)).toBeGreaterThanOrEqual(1);
+    // the right-of-way strip under the shoulder it crosses, the shoulder under its carriageway and
+    // under the footway, the footway under the street, the street under the railway's track
+    expect(zone).toBeLessThan(shoulder);
+    expect(shoulder).toBeLessThan(footway);
+    expect(footway).toBeLessThan(street);
+    expect(street).toBeLessThan(track);
+    // without the cover nothing has a level: the ribbons are lifted as ever
+    const plain = buildOsmMesh(opts);
+    expect(plain.roadDepthLevels.length + plain.depthLevels.length + plain.waterDepthLevels.length).toBe(0);
   });
 
   it('without the cover the mesh is what it was, byte for byte', () => {

@@ -23,7 +23,7 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 71;
+export const OSM_MESH_SCHEMA = 72;
 
 export interface OsmRequest {
   type: 'osm';
@@ -42,6 +42,13 @@ export interface OsmMeshResponse {
   /** drape: areas, roads, points */
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /**
+   * per vertex of the drape, the roads and the water: its depth level (osm-mesher depthLevels, WORLD_VS
+   * aDepthLevel), or empty when none has one
+   */
+  levels: ArrayBuffer;
+  rLevels: ArrayBuffer;
+  wLevels: ArrayBuffer;
   /** buildings (near), their facade window attributes (building-mesher BuildingMeshData.windows) and their dots (far: x, y, z, palette index) */
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
@@ -143,7 +150,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
-      res.vertices, res.ramps, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
+      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps,
     ]);
@@ -158,6 +165,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (cached && rawKept) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
+        levels: cached.levels ?? empty(), rLevels: cached.rLevels ?? empty(), wLevels: cached.wLevels ?? empty(),
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
         bCore: cached.bCore ?? (cached.bRamps?.byteLength ?? 0) / 4,
         dots: cached.dots ?? empty(),
@@ -234,6 +242,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     applyGlowToTrees(instances, tile, locate, levels);
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
+      levels: mesh.depthLevels.slice().buffer, rLevels: mesh.roadDepthLevels.slice().buffer, wLevels: mesh.waterDepthLevels.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
       // the masts come after the houses: small parts too
       bCore: core + decks,

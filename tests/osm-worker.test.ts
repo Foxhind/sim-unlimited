@@ -88,7 +88,21 @@ describe('the OSM worker with the covers', () => {
     expect('glowVertices' in cached).toBe(false);
   });
 
-  it('is cache schema 71', () => {
-    expect(OSM_MESH_SCHEMA).toBe(71);
+  it('sends and caches the depth levels of the drape, the roads and the water, per vertex or none', async () => {
+    const { res } = await osmReply();
+    const cached = [...store.values()][0] as Record<string, ArrayBuffer>;
+    for (const m of [res, cached]) {
+      for (const [levels, ramps] of [['levels', 'ramps'], ['rLevels', 'rRamps'], ['wLevels', 'wRamps']]) {
+        expect(m[levels]).toBeInstanceOf(ArrayBuffer);
+        expect([0, m[ramps].byteLength]).toContain(m[levels].byteLength);
+      }
+    }
+    // from the cache the same
+    const again = await osmReply();
+    for (const k of ['levels', 'rLevels', 'wLevels']) expect(again.res[k].byteLength).toBe(res[k].byteLength);
+  });
+
+  it('is cache schema 72', () => {
+    expect(OSM_MESH_SCHEMA).toBe(72);
   });
 });

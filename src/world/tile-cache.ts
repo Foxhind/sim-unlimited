@@ -13,6 +13,10 @@ export interface CachedMesh {
   ts: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** OSM tiles: per vertex of the drape, the roads and the water its depth level (osm-mesher depthLevels), or empty */
+  levels?: ArrayBuffer;
+  rLevels?: ArrayBuffer;
+  wLevels?: ArrayBuffer;
   /** terrain tiles: stitching to a coarser neighbour (TerrainMeshData.morph) */
   morph?: ArrayBuffer;
   /** terrain tiles with a cover: vertices drawn near and far (TerrainMeshData.nearCount, farCount); absent: all */
@@ -47,9 +51,10 @@ export interface CachedMesh {
   lamps?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps';
+type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
-  return m.vertices.byteLength + m.ramps.byteLength + (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
+  return m.vertices.byteLength + m.ramps.byteLength + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
+    (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
     (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
     (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.rAttrs?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0) + (m.pitchLines?.byteLength ?? 0) +

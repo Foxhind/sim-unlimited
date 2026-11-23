@@ -18,6 +18,7 @@ import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './roa
 import { bridgeDecks, type RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
+import { depthLevels, type LevelItem } from './depth-levels';
 import {
   AEROWAY_LINE_BIAS, classifyArea, classifyLine, isBridge, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
   RAIL_ZONE_RAMP, ROAD_LAYER_STEP_M, ROAD_RANK_STEP_M, ROAD_TIE_M, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW,
@@ -62,9 +63,10 @@ export interface OsmMeshOptions {
    * `roads` and its water faces to `water`, on its own vertices, lifted by nothing; the areas, the
    * pitch markings and the helipads are the terrain's (terrain-mesher), not drawn here; of a way only
    * its lifted stretches are ribbons (with their lift, no bias, square where they meet the ground's
-   * ways), but a way the TIN's budget dropped (`tin.loose`), drawn over the ground as without the
-   * cover. Areas are known for the cover's by their tags object (the same object in `data`, as
-   * clip.ts keeps it): the cover must be built from this very `data`, in the same worker.
+   * ways), but a way the TIN's budget dropped (`tin.loose`), drawn as without the cover yet on the
+   * faces too (no bias), over the ground and over each other by its depth level (depth-levels.ts,
+   * OsmMeshData.depthLevels). Areas are known for the cover's by their tags object (the same object
+   * in `data`, as clip.ts keeps it): the cover must be built from this very `data`, in the same worker.
    */
   cover?: GroundCover;
 }
@@ -75,6 +77,12 @@ type Lift = (p: { x: number; z: number }) => number;
 const LIFT_STEP_M = 10;
 /** a road lifted less than this has nothing built under it */
 const DECK_MIN_LIFT_M = 0.3;
+/**
+ * how far a ribbon reaches from its centre line, × its half width and in metres more: a mitred
+ * joint (a turn no sharper than a right angle, ribbon-shapes) reaches √2 half widths out
+ */
+const LOOSE_REACH = Math.SQRT2;
+const LOOSE_MARGIN_M = 0.5;
 
 /** the covers drawn as faces of the road mesh (the water's go to the water mesh; the rest are the terrain's) */
 const FACE_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'ballast', 'runway']);
@@ -131,6 +139,14 @@ export interface OsmMeshData extends TerrainMeshData {
   /** night: lamp heads at the ends of the lamp arms (x, y, z, palette index); far, the same points
    *  stand in for the street-lit roads as a dotted line */
   lamps: Float32Array;
+  /**
+   * per vertex of the drape, the roads and the water: its depth level (WORLD_VS aDepthLevel, 0 for
+   * all but the ribbons of the ways the TIN dropped, with the cover: depth-levels.ts); empty when
+   * the mesh has none (without the cover always)
+   */
+  depthLevels: Float32Array;
+  roadDepthLevels: Float32Array;
+  waterDepthLevels: Float32Array;
 }
 
 /** part [t0, t1] of segment p→q inside triangle `c` (lattice coordinates), or undefined */
@@ -221,8 +237,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const maxEdge = opts.maxEdgeMeters ?? Math.max(120, Math.min(500, tileSizeMeters(tile) / 12));
   // far 'large' layer sits slightly lower so the near 'full' layer wins depth where they overlap
   const biasScale = opts.detail === 'large' ? 0.4 : 1;
-  // attrs: per vertex WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) where the mesh carries them
-  interface Out { verts: number[]; ramps: number[]; attrs?: number[] }
+  // attrs: per vertex WINDOW_ATTR_FLOATS (WORLD_VS aWinUV, aWinEdge) where the mesh carries them;
+  // depth: the depth levels (WORLD_VS aDepthLevel) of the vertices from `from` on (before it: 0)
+  interface Out { verts: number[]; ramps: number[]; attrs?: number[]; depth?: { from: number; levels: number[] } }
   const main: Out = { verts: [], ramps: [] };
   const roads: Out = { verts: [], ramps: [], attrs: [] };
   const water: Out = { verts: [], ramps: [] };
@@ -736,7 +753,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     if (look.road) pts = net.forkShift(line, pts);
     // with the cover a way is the terrain's faces but where it is lifted (or the TIN dropped its edges)
     const asCover = !!cover && !tin.loose?.has(line);
-    const raised = look.road || look.rail ? raise(line, pts, look.half + look.shoulder, asCover ? 0 : look.rail ? RAIL_BIAS : look.bias) : undefined;
+    // with the cover every ribbon lies on the faces, the bridge under it too (a dropped way's included)
+    const raised = look.road || look.rail ? raise(line, pts, look.half + look.shoulder, cover ? 0 : look.rail ? RAIL_BIAS : look.bias) : undefined;
     if (raised) pts = raised.pts;
     const lift = raised?.lift;
     const c = pts.map((p) => p.c);
@@ -749,22 +767,50 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       return;
     }
     const lit = look.lit ? (ramp: number) => withGlow(ramp, LIT_ROAD_GLOW) : (ramp: number) => ramp;
+    // with the cover a way the TIN dropped lies on the faces too, its bias the key of its depth level
+    const draw = cover ? looseRibbon : ribbon;
     // under the carriageway: the right-of-way strip of a railway, the shoulders of a road
-    if (look.zone) ribbon(c, look.half + look.zone, RAIL_ZONE_RAMP, ZONE_BIAS, main);
+    if (look.zone) draw(c, look.half + look.zone, RAIL_ZONE_RAMP, ZONE_BIAS, main);
     // the shoulders of an approach rise with it: the top of its embankment
-    if (look.shoulder) ribbon(c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
+    if (look.shoulder) draw(c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
     if (!look.rail) {
       if (!look.marks) {
-        ribbon(c, look.half, look.ramp, look.bias, look.out, undefined, ends, lift);
+        draw(c, look.half, look.ramp, look.bias, look.out, undefined, ends, lift);
         return;
       }
       // a painted road: narrowing into a narrower continuation, its paint in its vertex attributes
       const p = painted(line, pts, look.half, look.marks, net);
-      if (p.c.length) ribbon(p.c, p.half, look.ramp, look.bias, look.out, p.segs, ends, lift);
+      if (p.c.length) draw(p.c, p.half, look.ramp, look.bias, look.out, p.segs, ends, lift);
       return;
     }
     // the track: each segment's vertices carry u along the line and v across it
-    ribbon(c, look.half, look.ramp, RAIL_BIAS, roads, trackSegs(pts), ROUND_ENDS, lift);
+    draw(c, look.half, look.ramp, RAIL_BIAS, roads, trackSegs(pts), ROUND_ENDS, lift);
+  };
+
+  /** the ribbons of the ways the TIN dropped (with the cover), each with its key and the mesh it goes to */
+  const loose: { item: LevelItem; out: Out; part: Out }[] = [];
+  /**
+   * With the cover: a ribbon of a way the TIN's budget dropped (tin.loose), on the faces like the
+   * cover's own (no bias), kept aside until every ribbon is in (flushLoose). `bias`, the height that
+   * ordered it over the others when it was lifted, is the key of its depth level.
+   */
+  const looseRibbon: typeof ribbon = (c, half, ramp, bias, out, segs, ends = ROUND_ENDS, lift) => {
+    const part: Out = { verts: [], ramps: [], attrs: out.attrs ? [] : undefined };
+    ribbon(c, half, ramp, 0, part, segs, ends, lift);
+    if (!part.ramps.length) return;
+    const widest = typeof half === 'number' ? half : half.reduce((a, b) => Math.max(a, b), 0);
+    loose.push({ item: { key: bias, c, reach: (widest * LOOSE_REACH + LOOSE_MARGIN_M) * latticePerMetre }, out, part });
+  };
+  /** the dropped ways' ribbons into their meshes, each vertex with its ribbon's depth level (depth-levels.ts) */
+  const flushLoose = (): void => {
+    const levels = depthLevels(loose.map((l) => l.item));
+    loose.forEach(({ out, part }, k) => {
+      const depth = (out.depth ??= { from: out.ramps.length, levels: [] });
+      while (depth.from + depth.levels.length < out.ramps.length) depth.levels.push(0);
+      for (const v of part.verts) out.verts.push(v);
+      for (const r of part.ramps) { out.ramps.push(r); depth.levels.push(levels[k]); }
+      if (out.attrs) for (const a of part.attrs!) out.attrs.push(a);
+    });
   };
 
   /**
@@ -1189,6 +1235,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   if (tin) for (const area of opts.data.areas) if (area.tags.leisure === 'pitch') buildPitch(area);
   for (const line of data.lines) buildLine(line);
   if (tin) for (const line of opts.data.lines) buildRibbon(line);
+  flushLoose();
   for (const p of data.points) buildPoint(p);
   buildPortals();
   const bridges = buildBridges();
@@ -1198,6 +1245,14 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     for (let i = 0; i < bm.vertices.length; i++) verts.push(bm.vertices[i]);
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);
   }
+
+  /** per vertex of a mesh its depth level (0 but the dropped ways' ribbons), or none at all when it has none */
+  const depthOf = (out: Out): Float32Array => {
+    if (!out.depth) return new Float32Array(0);
+    const a = new Float32Array(out.ramps.length);
+    a.set(out.depth.levels, out.depth.from);
+    return a;
+  };
 
   return {
     vertices: new Float32Array(verts),
@@ -1211,5 +1266,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     pitchLines: new Float32Array(pitchLines),
     lamps: new Float32Array(lamps),
     lampPosts: new Float32Array(lampPosts),
+    depthLevels: depthOf(main),
+    roadDepthLevels: depthOf(roads),
+    waterDepthLevels: depthOf(water),
   };
 }

@@ -89,6 +89,10 @@ interface OsmChunk {
 interface MeshPayload {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** per vertex of the drape, the roads and the water: its depth level (WORLD_VS aDepthLevel), or empty */
+  levels: ArrayBuffer;
+  rLevels: ArrayBuffer;
+  wLevels: ArrayBuffer;
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
   bWindows: ArrayBuffer;
@@ -171,6 +175,7 @@ export class OsmManager {
         if (msg.type === 'mesh') {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
+            levels: buf(msg.levels), rLevels: buf(msg.rLevels), wLevels: buf(msg.wLevels),
             bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, dots: buf(msg.dots),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
@@ -296,9 +301,10 @@ export class OsmManager {
 
   /**
    * interleaved pos+normal (stride 24) with Uint32 face colours, as the world shader expects; for
-   * buildings also the facade window attributes (WORLD_VS aWinUV, aWinEdge)
+   * buildings also the facade window attributes (WORLD_VS aWinUV, aWinEdge), for the ribbons on the
+   * ground's own faces their depth levels (WORLD_VS aDepthLevel; without them the shader reads 0)
    */
-  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer, windows?: ArrayBuffer): Mesh | undefined {
+  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer, windows?: ArrayBuffer, levels?: ArrayBuffer): Mesh | undefined {
     if (ramps.byteLength === 0) return undefined;
     const gl = this.gl;
     const vao = must(gl.createVertexArray(), 'osm VAO');
@@ -326,6 +332,14 @@ export class OsmManager {
       gl.enableVertexAttribArray(4);
       gl.vertexAttribPointer(4, 3, gl.FLOAT, false, stride, 8);
       chunk.buffers.push(wb);
+    }
+    if (levels && levels.byteLength === ramps.byteLength) {
+      const lb = must(gl.createBuffer(), 'osm depth levels');
+      gl.bindBuffer(gl.ARRAY_BUFFER, lb);
+      gl.bufferData(gl.ARRAY_BUFFER, levels, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(6);
+      gl.vertexAttribPointer(6, 1, gl.FLOAT, false, 4, 0);
+      chunk.buffers.push(lb);
     }
     gl.bindVertexArray(null);
     chunk.vaos.push(vao);
@@ -355,7 +369,7 @@ export class OsmManager {
     if (this.chunks.get(chunk.key) !== chunk) return; // unloaded (or replaced) while in flight
     this.dispose(chunk);
     const gl = this.gl;
-    chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps);
+    chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps, undefined, data.levels);
     chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
     chunk.bcore = chunk.bmesh && { vao: chunk.bmesh.vao, vertexCount: Math.min(data.bCore, chunk.bmesh.vertexCount) };
     chunk.dots = this.points(chunk, data.dots);
@@ -364,8 +378,8 @@ export class OsmManager {
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
-    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs);
-    chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps);
+    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels);
+    chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels);
     chunk.roadLines = this.points(chunk, data.roadLines);
     chunk.pitchLines = this.points(chunk, data.pitchLines);
     chunk.lamps = this.points(chunk, data.lamps);
