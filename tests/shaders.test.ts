@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CLIMATE, FLAME_STEP, MAT, SELF_LIT_FLAG, selfLit, SNOW_FLAG } from '../src/engine/palette';
 import { seaLevelTemperature } from '../src/world/climate-colour';
-import { POINTS_FS, POINTS_VS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
+import { DEPTH_FAR, DEPTH_PULL, depthPull, POINTS_FS, POINTS_VS, REVERSED_NEAR, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 
 describe('logarithmic depth', () => {
   it('every world pass writes the same log depth, so drapes do not z-fight the terrain', () => {
@@ -10,6 +10,37 @@ describe('logarithmic depth', () => {
       expect(fs).toContain('log2(vLogW) / log2(200000.0 + 1.0);');
       expect(fs).toMatch(/void main\(\) \{[\s\S]*writeLogDepth\(\);/);
     }
+  });
+
+  it('pulls a loose ribbon toward the eye by its depth level, along its own ray (WORLD_VS aDepthLevel)', () => {
+    expect(WORLD_VS).toContain('layout(location=6) in float aDepthLevel;');
+    // the pulled point drawn, the true one lit, fogged and shadowed
+    expect(WORLD_VS).toContain('gl_Position = uProj * uView * vec4(depthPulled(wp, n), 1.0);');
+    expect(WORLD_VS).toContain(`aDepthLevel * (${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * eyeDist(wp - uCamPos)) / max(abs(dot(n, dir)), ${DEPTH_PULL.SIN_MIN.toFixed(3)})`);
+    expect(depthPull(0, 3500, 1)).toBe(0);
+    expect(depthPull(2, 3500, 0.5)).toBeCloseTo(2 * (DEPTH_PULL.M + DEPTH_PULL.PER_M * 3500) / 0.5, 9);
+    expect(depthPull(1, 100, 0.001)).toBeCloseTo(depthPull(1, 100, DEPTH_PULL.SIN_MIN), 9);
+  });
+
+  it('a level apart, overlapping ribbons do not z-fight out to the roads’ radius (3.5 km) in either depth', () => {
+    const f32ulp = (x: number) => { const e = Math.floor(Math.log2(Math.abs(x))); return 2 ** (e - 23); };
+    for (const t of [1, 10, 100, 1000, 3500]) {
+      for (const sin of [1, 0.3, 0.05, 0.01]) {
+        const step = depthPull(1, t, sin);
+        // reversed Z (float depth REVERSED_NEAR / w): at least 8 float steps apart, after the error of
+        // the rasteriser's depth (1e-6 of it) and of the vertex positions (1 mm in w within the rebase
+        // distance, 0.5 mm of height along a ray this steep)
+        const err = 1e-6 * t + 1e-3 + 5e-4 / sin;
+        const near = REVERSED_NEAR / (t - (step - err)), far = REVERSED_NEAR / t;
+        expect((near - far) / f32ulp(far)).toBeGreaterThan(8);
+        // without the extension: the 24-bit log depth (LOG_DEPTH_FS), at least 4 units apart
+        const log = (w: number) => Math.log2(w + 1) / Math.log2(DEPTH_FAR + 1) * 2 ** 24;
+        expect(log(t) - log(t - (step - err))).toBeGreaterThan(4);
+      }
+    }
+    // and the highest level of a dense tile (11, Innsbruck) seen across at 3.5 km is no more in the
+    // way of what stands on the ground than half a metre of height
+    expect(11 * depthPull(1, 3500, 1)).toBeLessThan(0.5);
   });
 
   it('resolves a 0.3 m drape bias out to the far plane (24-bit depth)', () => {

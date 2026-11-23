@@ -19,6 +19,23 @@ export const DEPTH_FAR = 200000;
 export const HDR_PEAK = 12;
 /** the projections' near plane, m (main.ts, camera.ts): reversed-Z depth is REVERSED_NEAR / w (LOG_DEPTH_FS) */
 export const REVERSED_NEAR = 0.5;
+/**
+ * Depth levels (WORLD_VS aDepthLevel, osm-mesher depthLevels): a ribbon lying on the ground's own
+ * faces (a way the TIN's budget dropped) is moved toward the eye along its own ray, so it stays where
+ * it is on screen and only its depth comes nearer: by depthPull a level, over the ground (level 0)
+ * and over the ribbons of the levels under it. The pull must beat what makes two coplanar faces'
+ * depths differ: the depth buffer's own step (reversed Z: a float of REVERSED_NEAR / w, 1.2e-7 of it;
+ * the 24-bit log depth: 7.3e-7 of w a unit), the rasteriser's rounding (1e-6 of w) and the vertex
+ * positions' float32 rounding (heights to 4 km: 0.25 mm; w within the rebase distance plus the roads'
+ * radius: 1 mm), the last one stretched along a slanting ray by 1 / sin of its angle to the face. So
+ * a level is M + PER_M × distance, divided by that sine (no less than SIN_MIN): a fixed height of
+ * pull as much as a fixed depth, 10× the errors down to a 3° slant (tests/shaders.test.ts).
+ */
+export const DEPTH_PULL = { M: 0.01, PER_M: 1e-5, SIN_MIN: 0.05 } as const;
+/** the pull of depth level `level`, metres toward the eye, `dist` metres from it, its ray at `sin` to the face (WORLD_VS depthPulled) */
+export function depthPull(level: number, dist: number, sin: number): number {
+  return (level * (DEPTH_PULL.M + DEPTH_PULL.PER_M * dist)) / Math.max(Math.abs(sin), DEPTH_PULL.SIN_MIN);
+}
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
 const GLOW_RINGS = 4;
@@ -977,6 +994,8 @@ layout(location=4) in vec3 aWinEdge;
 // terrain tiles only (zero elsewhere): x metres up to the border line of a coarser neighbour,
 // y the tile edges (bits) it applies to; uCoarse: the edges whose neighbour is coarser now
 layout(location=5) in vec2 aMorph;
+// OSM ribbons on the ground's own faces only (zero elsewhere): their depth level (DEPTH_PULL)
+layout(location=6) in float aDepthLevel;
 uniform int uCoarse;
 uniform mat4 uView;
 uniform mat4 uProj;
@@ -999,6 +1018,15 @@ flat out vec3 vWinEdge;
 flat out vec3 vRef;
 uniform highp int uWindows;
 ${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
+// a point of depth level aDepthLevel moved toward the eye along its ray (DEPTH_PULL, depthPull): the
+// same place on screen, a nearer depth; never more than half way to the eye
+vec3 depthPulled(vec3 wp, vec3 n) {
+  if (aDepthLevel <= 0.0) return wp;
+  vec3 e = toEye(wp);
+  vec3 dir = e / max(length(e), 1e-6);
+  float pull = aDepthLevel * (${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * eyeDist(wp - uCamPos)) / max(abs(dot(n, dir)), ${DEPTH_PULL.SIN_MIN.toFixed(3)});
+  return wp + dir * (uOrthoFar > 0.0 ? pull : min(pull, 0.5 * length(e)));
+}
 void main() {
   vWinUV = aWinUV;
   vWinEdge = aWinEdge;
@@ -1026,7 +1054,7 @@ void main() {
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   vWater = water && !frozenWater(aRamp, tempC) ? 1.0 : 0.0;
   vRay = wp - uCamPos;
-  gl_Position = uProj * uView * vec4(wp, 1.0);
+  gl_Position = uProj * uView * vec4(depthPulled(wp, n), 1.0);
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);
 }
