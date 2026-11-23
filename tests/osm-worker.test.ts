@@ -7,7 +7,7 @@ const store = new Map<string, unknown>();
 let osmJson: string | undefined;
 
 vi.mock('../src/world/tile-cache', () => ({
-  SCHEMA_VERSION: 58,
+  SCHEMA_VERSION: 61,
   getCachedMesh: async (key: string) => store.get(key),
   putCachedMesh: async (r: { key: string }) => void store.set(r.key, r),
   getOsmRaw: async () => (osmJson ? { key: 'raw', ts: 0, json: osmJson } : undefined),
@@ -88,7 +88,7 @@ describe('the OSM worker with the covers', () => {
     expect('glowVertices' in cached).toBe(false);
   });
 
-  it('is cache schema 69', () => {
-    expect(OSM_MESH_SCHEMA).toBe(69);
+  it('is cache schema 71', () => {
+    expect(OSM_MESH_SCHEMA).toBe(71);
   });
 });
