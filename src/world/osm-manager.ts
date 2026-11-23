@@ -29,7 +29,9 @@ export const BUILDING_DETAIL_M = 1500;
  * Prop LOD: wall air conditioners (0.8 m) and lamp posts (0.24 m thick) on a tile whose nearest
  * point is farther than this (slant, m) are not drawn: under a pixel from there on.
  */
-const PROP_DETAIL_M: Partial<Record<number, number>> = { [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500 };
+/** power line conductors are drawn within this slant distance of a tile's nearest part, m */
+const WIRE_RADIUS_M = 4000;
+const PROP_DETAIL_M: Partial<Record<number, number>> ={ [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500 };
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
 
@@ -78,6 +80,8 @@ interface OsmChunk {
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
   mastLines?: PropSet;
+  /** power line conductors: 1 px GL lines within WIRE_RADIUS_M */
+  wires?: PropSet;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
@@ -108,6 +112,7 @@ interface MeshPayload {
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
+  wires: ArrayBuffer;
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   rAttrs: ArrayBuffer;
@@ -184,7 +189,7 @@ export class OsmManager {
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
-            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
@@ -210,7 +215,7 @@ export class OsmManager {
     }
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
-        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0);
+        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.wires ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -384,6 +389,7 @@ export class OsmManager {
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
+    chunk.wires = this.points(chunk, data.wires);
     chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels);
     chunk.roadLines = this.points(chunk, data.roadLines);
@@ -448,7 +454,7 @@ export class OsmManager {
     chunk.vaos = [];
     chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
-    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
+    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
   }
@@ -523,6 +529,10 @@ export class OsmManager {
       }
       if (c.beacons && lightsOn) {
         renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
+      }
+      // power line conductors: thin, near and middle distance only (far they are less than a pixel)
+      if (c.wires && slant - c.radius * 0.71 < WIRE_RADIUS_M) {
+        renderer.drawLights(c.wires.vao, c.wires.count, c.offset, view, proj, camPos, 1, true, 'lines');
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
         for (const t of c.trees) {

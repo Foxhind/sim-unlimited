@@ -43,6 +43,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // orchards for their rows of trees and a tint, vineyards for a tint; other landuse is not fetched.
 // Cliff lines give bands of bare rock (cliffs.ts), summits their height to the relief (peaks.ts).
 // Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
+// Power lines stand their pylons or poles at their vertices and hang their conductors (power-mesher.ts).
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -62,6 +63,7 @@ const FULL_FILTER = `
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
   node["man_made"="tower"]["tower:type"="minaret"]; way["man_made"="tower"]["tower:type"="minaret"];
+  way["power"~"^(line|minor_line)$"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
@@ -142,7 +144,7 @@ function isPierTags(tags: Record<string, string>): boolean {
 
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
-    tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags);
+    tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags) || tags.power === 'line' || tags.power === 'minor_line';
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {

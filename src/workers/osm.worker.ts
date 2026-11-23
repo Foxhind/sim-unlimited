@@ -9,6 +9,7 @@ import { buildProps } from '../world/props-mesher';
 import { insertAt } from '../world/bridge-mesher';
 import { buildPiers } from '../world/pier-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
+import { buildPower } from '../world/power-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
@@ -26,8 +27,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets
-export const OSM_MESH_SCHEMA = 86;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires)
+export const OSM_MESH_SCHEMA = 87;
 
 export interface OsmRequest {
   type: 'osm';
@@ -84,6 +85,8 @@ export interface OsmMeshResponse {
   pitchLines: ArrayBuffer;
   /** night: lamp heads (x, y, z, palette index); far, the street-lit roads' dotted line */
   lamps: ArrayBuffer;
+  /** power line conductors: 1 px GL lines (x, y, z, palette index), near and far (power-mesher.ts) */
+  wires: ArrayBuffer;
   runways: number;
   /**
    * The tile's OSM, just downloaded, decides its shore (a coastline, or DEM sea without one): its
@@ -164,7 +167,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
-      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps,
+      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -187,7 +190,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(), pitchLines: cached.pitchLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
-        lamps: cached.lamps ?? empty(),
+        lamps: cached.lamps ?? empty(), wires: cached.wires ?? empty(),
         ...(detail === 'full' ? await cachedTerrainFlags(tile) : { runways: 0, coast: false }),
         roads: false,
       });
@@ -245,9 +248,11 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       ...data.buildings.filter((b) => isMappedMinaret(b.tags) && b.rings[0]?.length).map((b) => b.rings[0][0]),
     ];
     const minarets = buildMinarets(minaretSites(clipped.points, own, known), tile, drape);
+    // and the power lines' pylons and poles (power-mesher.ts), from the whole lines; their conductors are GL lines
+    const power = buildPower(tile, data.lines, drape);
     const solid = {
-      vertices: concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices),
-      ramps: concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps),
+      vertices: concatF32(concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices), power.vertices),
+      ramps: concatU32(concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps), power.ramps),
     };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {
@@ -286,6 +291,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       roadLines: mesh.roadLines.slice().buffer,
       pitchLines: mesh.pitchLines.slice().buffer,
       lamps: mesh.lamps.slice().buffer,
+      wires: power.wires.slice().buffer,
     };
     // under the raw it was built from (just fetched, or kept)
     if (useCache) await putCachedMesh({ key: keyOf(await rawNow()), ts: Date.now(), ...out });

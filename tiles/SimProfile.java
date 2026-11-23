@@ -69,7 +69,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -113,6 +113,7 @@ public class SimProfile implements Profile {
       find(WATERWAY, s(f, "waterway")) ||
       find(LEISURE, s(f, "leisure")) || "marina".equals(s(f, "leisure")) ||
       find(PIER, s(f, "man_made")) ||
+      "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
       isCarPark(f) ||
       isMast(f);
   }

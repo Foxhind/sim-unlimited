@@ -41,6 +41,46 @@ const LINE_INDEX = rampIndex(RAMP.HULL_LIGHT, 8);
 const MAX_PANELS = 120;
 
 /**
+ * A square prism of side t from p to q, side faces only (the ends are hidden in the joints), into a
+ * mesh of pos + normal (stride 6) with a face colour per vertex: a member of a lattice truss.
+ */
+export function pushPrism(verts: number[], ramps: number[], ramp: number, p: V3, q: V3, t: number): void {
+  const d: V3 = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+  const len = Math.hypot(d[0], d[1], d[2]);
+  if (len < 1e-6) return;
+  d[0] /= len; d[1] /= len; d[2] /= len;
+  // any axis not parallel to d
+  const ref: V3 = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  let u: V3 = [d[1] * ref[2] - d[2] * ref[1], d[2] * ref[0] - d[0] * ref[2], d[0] * ref[1] - d[1] * ref[0]];
+  const ul = Math.hypot(u[0], u[1], u[2]);
+  u = [u[0] / ul, u[1] / ul, u[2] / ul];
+  const v: V3 = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
+  const h = t / 2;
+  const corner = (base: V3, su: number, sv: number): V3 => [
+    base[0] + (u[0] * su + v[0] * sv) * h,
+    base[1] + (u[1] * su + v[1] * sv) * h,
+    base[2] + (u[2] * su + v[2] * sv) * h,
+  ];
+  const signs: [number, number][] = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+  for (let i = 0; i < 4; i++) {
+    const [a0, a1] = signs[i];
+    const [b0, b1] = signs[(i + 1) % 4];
+    const n: V3 = [
+      u[0] * (a0 + b0) + v[0] * (a1 + b1),
+      u[1] * (a0 + b0) + v[1] * (a1 + b1),
+      u[2] * (a0 + b0) + v[2] * (a1 + b1),
+    ];
+    const nl = Math.hypot(n[0], n[1], n[2]) || 1;
+    const nn: V3 = [n[0] / nl, n[1] / nl, n[2] / nl];
+    const a = corner(p, a0, a1), b = corner(p, b0, b1), c = corner(q, b0, b1), e = corner(q, a0, a1);
+    for (const pt of [a, b, c, a, c, e]) {
+      verts.push(pt[0], pt[1], pt[2], nn[0], nn[1], nn[2]);
+      ramps.push(ramp);
+    }
+  }
+}
+
+/**
  * Antenna masts from OSM point objects: a four-legged lattice truss (legs, a horizontal frame and
  * one diagonal brace per face in every panel, each member a thin square prism), a vertical line for
  * far views, and red beacons every 25 m. Coordinates are tile-centre ENU like the other meshes.
@@ -52,43 +92,7 @@ export function buildMasts(points: OsmPoint[], tile: Tile, sampleHeight: HeightS
   const lines: number[] = [];
   const beacons: number[] = [];
 
-  const quad = (a: V3, b: V3, c: V3, d: V3, n: V3): void => {
-    for (const p of [a, b, c, a, c, d]) {
-      verts.push(p[0], p[1], p[2], n[0], n[1], n[2]);
-      ramps.push(MAST_RAMP);
-    }
-  };
-  /** square prism of side t from p to q (side faces only: the ends are hidden in the joints) */
-  const member = (p: V3, q: V3, t: number): void => {
-    const d: V3 = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
-    const len = Math.hypot(d[0], d[1], d[2]);
-    if (len < 1e-6) return;
-    d[0] /= len; d[1] /= len; d[2] /= len;
-    // any axis not parallel to d
-    const ref: V3 = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
-    let u: V3 = [d[1] * ref[2] - d[2] * ref[1], d[2] * ref[0] - d[0] * ref[2], d[0] * ref[1] - d[1] * ref[0]];
-    const ul = Math.hypot(u[0], u[1], u[2]);
-    u = [u[0] / ul, u[1] / ul, u[2] / ul];
-    const v: V3 = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
-    const h = t / 2;
-    const corner = (base: V3, su: number, sv: number): V3 => [
-      base[0] + (u[0] * su + v[0] * sv) * h,
-      base[1] + (u[1] * su + v[1] * sv) * h,
-      base[2] + (u[2] * su + v[2] * sv) * h,
-    ];
-    const signs: [number, number][] = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
-    for (let i = 0; i < 4; i++) {
-      const [a0, a1] = signs[i];
-      const [b0, b1] = signs[(i + 1) % 4];
-      const n: V3 = [
-        u[0] * (a0 + b0) + v[0] * (a1 + b1),
-        u[1] * (a0 + b0) + v[1] * (a1 + b1),
-        u[2] * (a0 + b0) + v[2] * (a1 + b1),
-      ];
-      const nl = Math.hypot(n[0], n[1], n[2]) || 1;
-      quad(corner(p, a0, a1), corner(p, b0, b1), corner(q, b0, b1), corner(q, a0, a1), [n[0] / nl, n[1] / nl, n[2] / nl]);
-    }
-  };
+  const member = (p: V3, q: V3, t: number): void => pushPrism(verts, ramps, MAST_RAMP, p, q, t);
 
   for (const pt of points) {
     if (!isAntenna(pt.tags)) continue;
