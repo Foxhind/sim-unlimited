@@ -4,6 +4,7 @@
  * the main thread (ground.worker.ts) and handed over as plain arrays.
  */
 import { applyPads, loadPads, type Pad } from './aerodrome';
+import { applyPeaks, peaksOf } from './peaks';
 import { buildingFooting, buildingHeights } from './building-mesher';
 import { DETAIL_Z, gridForZoom } from './chunks';
 import { coastlineWays } from './coast';
@@ -68,6 +69,8 @@ export async function buildGroundTile(tile: Tile): Promise<GroundTile> {
   const { heights: lattice, borders } = dem;
   const pads: Pad[] = data ? await loadPads(data) : [];
   applyPads(dem, tile, grid, pads);
+  // mapped summits up to their height, as the terrain mesh has them
+  if (data) applyPeaks(dem, tile, grid, peaksOf(data.points));
   // the same TIN as the mesh (no colour boundaries: faces are coloured by height × temperature),
   // built under the roads
   const roads = data ? await fetchRoadSurface(tile, data, pads) : undefined;

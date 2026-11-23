@@ -8,6 +8,7 @@ import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
 import { applyPads, loadPads, type Pad } from '../world/aerodrome';
+import { applyPeaks, peaksOf } from '../world/peaks';
 import { fetchRoadSurface, type RoadSurface, type SurfaceTin } from '../world/surface-tin';
 import { DETAIL_Z } from '../world/chunks';
 import { buildGroundCover, type GroundCover } from '../world/ground-cover';
@@ -94,6 +95,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         // aerodromes on their pads (a DEM outage fails the tile as retryable, like its own DEM)
         pads = await loadPads(data);
         applyPads(dem, tile, grid, pads);
+        // mapped summits up to their height (peaks.ts)
+        applyPeaks(dem, tile, grid, peaksOf(data.points));
         coast = coastlineWays(data.lines);
         // the roads with their heights (z14): the surface is built under them
         roads = await fetchRoadSurface(tile, data, pads);

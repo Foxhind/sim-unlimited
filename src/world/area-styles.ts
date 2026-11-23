@@ -6,7 +6,7 @@ import { blend, type BlendMode, type RGB } from '../engine/palette';
  * blended with the kind's colour in the kind's mode, `strength` 0..1 of the way from the imagery.
  * Area style editor (areas.html) tunes them; the game uses DEFAULT_AREA_STYLES.
  */
-export type AreaKind = 'scrub' | 'beach' | 'rock' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland';
+export type AreaKind = 'scrub' | 'beach' | 'rock' | 'cliff' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland';
 
 export interface AreaFilter {
   colour: RGB;
@@ -29,6 +29,7 @@ export const AREA_KINDS: ReadonlyArray<{ kind: AreaKind; name: string; tags: str
   { kind: 'wetland', name: 'Болото', tags: 'natural=wetland' },
   { kind: 'beach', name: 'Пляж', tags: 'natural=beach' },
   { kind: 'rock', name: 'Скалы и осыпи', tags: 'natural=bare_rock, scree' },
+  { kind: 'cliff', name: 'Обрыв (полоса под линией)', tags: 'natural=cliff' },
 ];
 
 /** the game's filters (tuned in areas.html) */
@@ -45,6 +46,8 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   wetland: { colour: [88, 144, 112], mode: 'soft-light', strength: 1 },
   beach: { colour: [179, 164, 122], mode: 'normal', strength: 0.74 },
   rock: { colour: [150, 138, 122], mode: 'soft-light', strength: 1 },
+  // a cliff's face must stand out of the wooded slope round it: pale limestone over the imagery (first guess)
+  cliff: { colour: [176, 170, 158], mode: 'normal', strength: 0.75 },
 };
 
 const sameFilter = (a: AreaFilter, b: AreaFilter): boolean =>

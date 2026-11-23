@@ -5,6 +5,7 @@
  */
 import { colour, RAMP, ROAD_MARK, snowy, withGlow } from '../engine/palette';
 import type { AreaFilter, AreaKind, AreaStyles } from './area-styles';
+import { CLIFF_TAG } from './cliffs';
 import type { LonLat } from './osm-types';
 import { pitchSurface } from './pitch-markings';
 export { PITCH_LIT_MIN_M2 } from './pitch-markings';
@@ -79,6 +80,8 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
   if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
+  // a cliff's band (cliffs.ts) before the bare rock it is tagged as
+  if (tags[CLIFF_TAG] === 'yes') return ground(RAMP.ROCK, 0.6, 'cliff');
   if (natural === 'bare_rock' || natural === 'scree') return ground(RAMP.ROCK, 0.6, 'rock');
   if (landuse === 'farmland') return ground(RAMP.FIELD, 0.6, 'farmland');
   // the orchard's trees are props (props-mesher plantOrchard); the ground between the rows is tinted

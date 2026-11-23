@@ -15,6 +15,7 @@ import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
 import { greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
+import { applyPeaks, peaksOf } from '../world/peaks';
 import { DETAIL_Z, gridForZoom } from '../world/chunks';
 import { buildGroundCover, type GroundCover } from '../world/ground-cover';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -23,8 +24,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame
-export const OSM_MESH_SCHEMA = 83;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands
+export const OSM_MESH_SCHEMA = 84;
 
 export interface OsmRequest {
   type: 'osm';
@@ -197,6 +198,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const { heights: lattice, borders } = dem;
     const pads = detail === 'full' ? await loadPads(data) : [];
     applyPads(dem, tile, grid, pads);
+    // mapped summits up to their height, as the terrain worker raises them (peaks.ts)
+    applyPeaks(dem, tile, grid, peaksOf(data.points));
     // the same face colours as the terrain mesh (height × temperature, climate-colour.ts)
     const ls = { faceColor: climateFaceColor(tile, grid, lattice) };
     // the same TIN as the terrain worker builds from the same OSM: coastline and roads included

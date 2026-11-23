@@ -1,4 +1,5 @@
 import { tileBounds, type Tile, type TileBounds } from './geodesy';
+import { cliffBands } from './cliffs';
 import { isAntenna } from './mast-mesher';
 import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 
@@ -23,6 +24,8 @@ export const REACH_SELECTORS = [
   'way["waterway"~"^(river|riverbank|canal|stream|brook|ditch|drain)$"]',
   'way["natural"="water"]',
   'relation["natural"="water"]',
+  // a cliff's rock band reaches up to MITER_LIMIT × MAX_M off its line (cliffs.ts): into the next tile
+  'way["natural"="cliff"]',
 ];
 
 /** a tile's bounds grown by ROAD_REACH_M */
@@ -35,6 +38,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
 // bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
 // orchards for their rows of trees and a tint, vineyards for a tint; other landuse is not fetched.
+// Cliff lines give bands of bare rock (cliffs.ts), summits their height to the relief (peaks.ts).
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -54,9 +58,12 @@ const FULL_FILTER = `
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
   node["entrance"];
+  way["natural"="cliff"]; node["natural"="peak"];
 `;
 
+// summits far too: they raise the relief's lattice (peaks.ts)
 const LARGE_FILTER = `
+  node["natural"="peak"];
   way["natural"="water"]; relation["natural"="water"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["waterway"="river"];
@@ -116,14 +123,15 @@ const AREA_KEYS = ['natural', 'landuse', 'leisure', 'aeroway', 'waterway', 'buil
 
 function isAreaTags(tags: Record<string, string>): boolean {
   if (tags.area === 'no') return false;
-  // an island's coastline closes on itself, but it is a line: land on its left (see coast.ts)
-  if (tags.natural === 'coastline') return false;
+  // an island's coastline closes on itself, but it is a line: land on its left (see coast.ts);
+  // so is a cliff round a plateau: the low side on its right (cliffs.ts)
+  if (tags.natural === 'coastline' || tags.natural === 'cliff') return false;
   return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking';
 }
 
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
-    tags.natural === 'coastline';
+    tags.natural === 'coastline' || tags.natural === 'cliff';
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {
@@ -169,7 +177,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined)) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak')) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);
@@ -261,6 +269,8 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     }
     if (isLineTags(tags)) lines.push({ points: geom, tags });
   }
+  // each cliff's face: a band of bare rock on its low side (cliffs.ts)
+  areas.push(...cliffBands(lines));
   return { areas, lines, points, buildings: hideOutlinesWithParts(buildings) };
 }
 
