@@ -350,3 +350,17 @@ export function kindsInRange(m: TerrainMeshData, tin: SurfaceTin, cover: GroundC
   });
   return kinds;
 }
+
+/** a primary road through a park, the raw Overpass reply for TILE (the workers' cached OSM) */
+export function townOverpassJson(): string {
+  const ll = (x: number, y: number) => { const p = gridLatLon(TILE, x, y, GRID); return { lon: p.lon, lat: p.lat }; };
+  const ring = [[20, 20], [44, 20], [44, 44], [20, 44]];
+  return JSON.stringify({
+    elements: [
+      { type: 'node', id: 1, ...ll(32, 4) }, { type: 'node', id: 2, ...ll(32, 60) },
+      ...ring.map(([x, y], k) => ({ type: 'node', id: 10 + k, ...ll(x, y) })),
+      { type: 'way', id: 100, nodes: [1, 2], tags: { highway: 'primary' } },
+      { type: 'way', id: 101, nodes: [10, 11, 12, 13, 10], tags: { leisure: 'park' } },
+    ],
+  });
+}

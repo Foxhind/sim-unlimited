@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { mat4, vec3 } from 'gl-matrix';
+import { mat4, vec3, vec4 } from 'gl-matrix';
 import {
+  ChunkManager,
+  drawnCount,
+  type Chunk,
   coarseEdges,
   frustumPlanes,
   gridForZoom,
@@ -144,5 +147,39 @@ describe('coarseEdges', () => {
   it('ignores neighbours of the same zoom and edges inside the parent', () => {
     expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['14/8/7', '14/7/8', '14/9/8', '14/8/9']))).toBe(0);
     expect(coarseEdges({ z: 14, x: 8, y: 8 }, drawn(['13/4/4']))).toBe(0);
+  });
+});
+
+
+describe('ChunkManager.draw (the terrain near the camera without its road faces)', () => {
+  const tile = (n: number, nearCount?: number, farCount?: number, x = 0): Chunk => ({
+    tile: { z: 14, x: n, y: 0 }, key: `14/${n}/0`, grid: 64, status: 'ready', buffers: [],
+    mesh: { vao: {} as WebGLVertexArrayObject, vertexCount: 1000 },
+    nearCount, farCount, offset: vec4.create(), centerEnu: vec3.fromValues(x, 0, 0), coarse: 0, radius: 800, lastUsed: 0, lastAttempt: 0,
+  });
+  const drawn = (list: Chunk[], radius: number | undefined) => {
+    const counts: number[] = [];
+    const renderer = { speckle: false, drawWorld: (m: { vertexCount: number }) => void counts.push(m.vertexCount) };
+    const mgr = Object.create(ChunkManager.prototype) as ChunkManager;
+    mgr.renderList = list;
+    mgr.stitch = true;
+    mgr.draw(renderer as never, mat4.create(), mat4.create(), vec3.fromValues(0, 100, 0), vec3.create(), 1e9, 2e9, radius);
+    return counts;
+  };
+
+  it('draws a near detailed tile without its road faces and a far one with them', () => {
+    // the camera 100 m up over x = 0: the first tile is 100 m away, the second 6 km
+    expect(drawn([tile(1, 600, 800, 0), tile(2, 600, 800, 6000)], 3500)).toEqual([600, 800]);
+  });
+
+  it('draws the whole mesh of a tile without counts, and every tile whole without a radius', () => {
+    expect(drawn([tile(1, undefined, undefined, 0), tile(2, undefined, undefined, 6000)], 3500)).toEqual([1000, 1000]);
+    expect(drawn([tile(1, 600, 800, 0), tile(2, 600, 800, 6000)], undefined)).toEqual([1000, 1000]);
+  });
+
+  it('measures the slant as the OSM does, with the altitude', () => {
+    const c = tile(1, 600, 800, 3400);
+    expect(drawnCount(c, vec3.fromValues(0, 100, 0), 3500)).toBe(600); // hypot(3400, 100) < 3500
+    expect(drawnCount(c, vec3.fromValues(0, 900, 0), 3500)).toBe(800); // hypot(3400, 900) > 3500
   });
 });

@@ -12,7 +12,7 @@ import { parseMapLink } from '../ui/map-links';
 import { AREA_KINDS, DEFAULT_AREA_STYLES, filterColour, isDefaultAreaStyles, type AreaFilter, type AreaKind, type AreaStyles } from '../world/area-styles';
 import { ChunkManager, type CameraWorld } from '../world/chunks';
 import { enuToLatLon, latLonToEnu, tileCenter, type LatLon } from '../world/geodesy';
-import { OsmManager } from '../world/osm-manager';
+import { HOUSE_RADIUS_M, OsmManager } from '../world/osm-manager';
 import { PRESETS, SOURCE } from './presets';
 
 const NO_MOON = new Float32Array([0, -1, 0]);
@@ -170,7 +170,7 @@ function frame(now: number): void {
   renderer.nightGlow = false;
   renderer.beginFrame(lut, lightUniforms(paletteAt(state.sunEl)));
   renderer.setSunMoon(sunDir, NO_MOON);
-  chunks.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9);
+  chunks.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9, osmOn ? HOUSE_RADIUS_M : undefined);
   if (osmOn) osm.draw(renderer, view, proj, cam.pos, sunDir, 1e9, 2e9, false, POINT_SIZE * dpr);
   renderer.beginOverlay();
   renderer.resolve();
@@ -219,7 +219,10 @@ function scheduleRebuild(delay = REBUILD_DELAY_MS): void {
     if (key === builtWith) return;
     builtWith = key;
     osm.areaStyles = isDefaultAreaStyles(s) ? undefined : s;
+    chunks.areaStyles = osm.areaStyles;
     osm.invalidate();
+    // the terrain draws the area covers now: its detailed tiles are rebuilt with the styles too
+    chunks.invalidateDetail();
     styleMsg(isDefaultAreaStyles(s) ? 'стили игры; OSM пересобирается' : 'OSM пересобирается с новыми стилями');
   }, delay);
 }
@@ -415,6 +418,7 @@ function init(): void {
   renderKinds();
   if (!isDefaultAreaStyles(state.styles)) {
     osm.areaStyles = copyStyles(state.styles);
+    chunks.areaStyles = osm.areaStyles;
     builtWith = JSON.stringify(state.styles);
     styleMsg('восстановлены сохранённые стили');
   } else {

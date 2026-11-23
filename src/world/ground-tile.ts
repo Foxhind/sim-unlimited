@@ -10,6 +10,7 @@ import { coastlineWays } from './coast';
 import { latLonToEnu, type Tile } from './geodesy';
 import { osmRawKey } from './osm-source';
 import { parseOverpass } from './overpass';
+import { buildGroundCover } from './ground-cover';
 import { buildSurfaceTin, fetchRoadSurface } from './surface-tin';
 import { loadTileDem, type HeightSampler } from './terrain-source';
 import { tinSampler, type TerrainTin } from './terrain-tin';
@@ -70,11 +71,14 @@ export async function buildGroundTile(tile: Tile): Promise<GroundTile> {
   // the same TIN as the mesh (no colour boundaries: faces are coloured by height × temperature),
   // built under the roads
   const roads = data ? await fetchRoadSurface(tile, data, pads) : undefined;
+  // and with the same covers (only where the terrain worker builds them: z14 with roads)
+  const cover = data && roads ? buildGroundCover(tile, grid, data, roads) : undefined;
   const tin = buildSurfaceTin(tile, grid, lattice, {
     borders,
     coast: data ? coastlineWays(data.lines) : undefined,
     pads,
     roads,
+    cover,
   });
   if (!data) return packGround(tin, undefined);
   const surface = tinSampler(tin, tile);

@@ -1,11 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { gridLatLon } from '../src/world/geodesy';
-import { groundSampler, packGround } from '../src/world/ground-tile';
+import { buildGroundTile, groundSampler, packGround } from '../src/world/ground-tile';
+import { buildGroundCover } from '../src/world/ground-cover';
+import { parseOverpass } from '../src/world/overpass';
+import { fetchRoadSurface } from '../src/world/surface-tin';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin } from '../src/world/surface-tin';
 import { tinSampler } from '../src/world/terrain-tin';
-import { demOf, GRID, lattice, road, TILE } from './roads-helpers';
+import { bordersOf, demOf, GRID, lattice, road, TILE, townOverpassJson } from './roads-helpers';
+
+const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+vi.mock('../src/world/tile-cache', () => ({
+  getOsmRaw: async () => ({ key: 'raw', ts: 0, json: townOverpassJson() }),
+}));
+vi.mock('../src/world/terrain-source', async (orig) => ({
+  ...(await orig<typeof import('../src/world/terrain-source')>()),
+  loadTileDem: async () => ({ heights: lattice(relief), borders: bordersOf(relief) }),
+  demHeights: async (points: ReadonlyArray<unknown>) => new Float64Array(points.length).fill(500),
+}));
 
 describe('a ground tile packed for the main thread', () => {
   it('samples the same surface as the TIN it was packed from', () => {
@@ -23,5 +36,22 @@ describe('a ground tile packed for the main thread', () => {
         expect(b(ll.lon, ll.lat)).toBe(a(ll.lon, ll.lat));
       }
     }
+  });
+});
+
+describe('the collision ground of a tile with its covers', () => {
+  it('is the surface the terrain worker renders: the same TIN built with the covers', async () => {
+    const data = parseOverpass(JSON.parse(townOverpassJson()));
+    const roads = await fetchRoadSurface(TILE, data, []);
+    const cover = buildGroundCover(TILE, GRID, data, roads);
+    const rendered = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), coast: undefined, pads: [], roads, cover });
+    const bare = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), coast: undefined, pads: [], roads });
+    expect(rendered.tris.length).not.toBe(bare.tris.length); // the covers' edges are in the surface
+    const g = await buildGroundTile(TILE);
+    const want = packGround(rendered, undefined);
+    expect(g.tris).toEqual(want.tris);
+    expect(g.vx).toEqual(want.vx);
+    expect(g.vy).toEqual(want.vy);
+    expect(g.vh).toEqual(want.vh);
   });
 });

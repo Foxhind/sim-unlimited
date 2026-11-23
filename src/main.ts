@@ -10,7 +10,7 @@ import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
-import { OsmManager } from './world/osm-manager';
+import { HOUSE_RADIUS_M, OsmManager } from './world/osm-manager';
 import { FarOsmManager } from './world/far-osm-manager';
 import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, type LatLon, type Tile } from './world/geodesy';
@@ -1021,7 +1021,7 @@ function frame(now: number): void {
   }
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
-  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
+  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, HOUSE_RADIUS_M);
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');

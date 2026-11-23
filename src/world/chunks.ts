@@ -3,6 +3,7 @@ import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
+import type { AreaStyles } from './area-styles';
 import {
   enuToLatLon,
   frameYaw,
@@ -171,6 +172,9 @@ export interface Chunk {
   grid: number;
   status: ChunkStatus;
   mesh?: Mesh;
+  /** vertices drawn near (ground and skirts) and far (also road, rail and runway faces); undefined: all of the mesh */
+  nearCount?: number;
+  farCount?: number;
   buffers: WebGLBuffer[];
   vao?: WebGLVertexArrayObject;
   /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
@@ -181,6 +185,13 @@ export interface Chunk {
   radius: number;
   lastUsed: number;
   lastAttempt: number;
+}
+
+/** how many vertices of a tile to draw: `nearCount` within `osmRadius` of the camera, `farCount` beyond; the whole mesh without them */
+export function drawnCount(c: Pick<Chunk, 'centerEnu' | 'mesh' | 'nearCount' | 'farCount'>, camPos: vec3, osmRadius: number): number {
+  const all = c.mesh?.vertexCount ?? 0;
+  const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
+  return (slant < osmRadius ? c.nearCount : c.farCount) ?? all;
 }
 
 export interface CameraWorld {
@@ -195,6 +206,8 @@ interface TileBuffers {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
   morph?: ArrayBuffer;
+  nearCount?: number;
+  farCount?: number;
 }
 
 interface WorkerSlot {
@@ -213,6 +226,8 @@ export class ChunkManager {
   stitch = true;
   /** Landsat colour correction for tiles built from now on (relief inspector; invalidate() to rebuild) */
   grade: ColourGrade = NEUTRAL_GRADE;
+  /** area filters for tiles built from now on (area styles editor; invalidateDetail() to rebuild); undefined: the game's */
+  areaStyles: AreaStyles | undefined;
   /** z14 leaves wanted this frame: the detailed tiles whose OSM must load */
   detailTiles: Tile[] = [];
   /** z14 tiles drawn this frame (terrain and OSM both ready): only these show their OSM */
@@ -229,11 +244,11 @@ export class ChunkManager {
       const worker = new Worker(new URL('../workers/terrain.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; morph?: ArrayBuffer; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number; retryable?: boolean; message?: string };
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
-        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, morph: msg.morph });
+        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, morph: msg.morph, nearCount: msg.nearCount, farCount: msg.farCount });
         else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
       };
@@ -382,7 +397,7 @@ export class ChunkManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'tile', id, tile: chunk.tile, grid: chunk.grid, grade: this.grade });
+      slot.worker.postMessage({ type: 'tile', id, tile: chunk.tile, grid: chunk.grid, grade: this.grade, areaStyles: this.areaStyles });
     });
   }
 
@@ -415,6 +430,8 @@ export class ChunkManager {
     gl.bindVertexArray(null);
     chunk.vao = vao;
     chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 4 };
+    chunk.nearCount = data.nearCount;
+    chunk.farCount = data.farCount;
     chunk.status = 'ready';
   }
 
@@ -427,10 +444,17 @@ export class ChunkManager {
     chunk.vao = undefined;
   }
 
-  draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, fogStart: number, fogEnd: number): void {
+  /**
+   * `osmRadius`: within it (slant, as osm-manager.draw measures) a tile draws only its ground,
+   * beyond it also its road, rail and runway faces; the water faces are never drawn here (the OSM
+   * water mesh is). Undefined: every tile draws its whole mesh (no OSM drawn over it).
+   */
+  draw(renderer: Renderer, view: mat4, proj: mat4, camPos: vec3, sunDir: vec3, fogStart: number, fogEnd: number, osmRadius?: number): void {
     renderer.speckle = true;
     for (const c of this.renderList) {
-      if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, this.stitch ? c.coarse : 0);
+      if (!c.mesh) continue;
+      const mesh = osmRadius === undefined ? c.mesh : { vao: c.mesh.vao, vertexCount: drawnCount(c, camPos, osmRadius) };
+      renderer.drawWorld(mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, this.stitch ? c.coarse : 0);
     }
     renderer.speckle = false;
   }
@@ -471,6 +495,16 @@ export class ChunkManager {
   invalidate(tile?: Tile): void {
     for (const [key, c] of this.chunks) {
       if (tile && key !== `${tile.z}/${tile.x}/${tile.y}`) continue;
+      this.queue.cancel(key);
+      this.dispose(c);
+      this.chunks.delete(key);
+    }
+  }
+
+  /** Drop the detailed tiles (z14, the covers' tiles) only: they are requested again, the coarser ones stay. */
+  invalidateDetail(): void {
+    for (const [key, c] of this.chunks) {
+      if (c.tile.z !== DETAIL_Z) continue;
       this.queue.cancel(key);
       this.dispose(c);
       this.chunks.delete(key);

@@ -13,7 +13,7 @@ import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../
 import { farOsmTiles } from '../world/far-osm';
 import { FarOsmManager } from '../world/far-osm-manager';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
-import { OsmManager } from '../world/osm-manager';
+import { HOUSE_RADIUS_M, OsmManager } from '../world/osm-manager';
 import { FOG_CLEAR } from '../world/precipitation';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { moonPosition, sunPosition } from '../world/sun';
@@ -323,7 +323,7 @@ function frame(now: number): void {
       y: 0, ramp: snowy(BASE_LAND), fogStart, fogEnd,
     });
   }
-  chunks.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd);
+  chunks.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, osmOn ? HOUSE_RADIUS_M : undefined);
   if (osmOn) {
     osm.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, night, POINT_SIZE * dpr);
     farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr, fogStart, fogEnd);

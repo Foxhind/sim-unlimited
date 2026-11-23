@@ -8,7 +8,12 @@ import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
 import { applyPads, loadPads, type Pad } from '../world/aerodrome';
-import { fetchRoadSurface, type RoadSurface } from '../world/surface-tin';
+import { fetchRoadSurface, type RoadSurface, type SurfaceTin } from '../world/surface-tin';
+import { buildGroundCover, type GroundCover } from '../world/ground-cover';
+import { clipTileData } from '../world/clip';
+import { tinLocator } from '../world/terrain-tin';
+import { buildingCoverage, glowLevels } from '../world/night-glow';
+import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { climateFaceColor } from '../world/climate-colour';
 
@@ -19,6 +24,8 @@ export interface TileRequest {
   grid: number;
   /** Landsat colour correction (relief inspector); a graded mesh is neither read from nor written to the cache */
   grade?: ColourGrade;
+  /** the area filters (area styles editor); not the defaults: the mesh is neither read from nor written to the cache */
+  areaStyles?: AreaStyles;
 }
 
 export interface MeshResponse {
@@ -27,6 +34,9 @@ export interface MeshResponse {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
   morph?: ArrayBuffer;
+  /** vertices drawn near (ground and skirts) and far (also the road, rail and runway faces); undefined: all */
+  nearCount?: number;
+  farCount?: number;
 }
 
 export interface ErrorResponse {
@@ -46,7 +56,8 @@ const ctx = self as unknown as WorkerScope;
 ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
   const { id, tile, grid } = e.data;
   const grade = e.data.grade ?? NEUTRAL_GRADE;
-  const useCache = isNeutralGrade(grade);
+  const areaStyles = e.data.areaStyles;
+  const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles));
   try {
     // Q40: when OSM is cached for this tile, build with the aerodromes on their pads;
     // the '/o' suffix keeps pre-OSM and flattened meshes in separate cache slots
@@ -57,7 +68,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? (osmSourceMode() === 'pmtiles' ? '/op' : '/o') : '');
     const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
-      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph };
+      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph, nearCount: cached.nearCount, farCount: cached.farCount };
       ctx.postMessage(res, [res.vertices, res.ramps, ...(res.morph ? [res.morph] : [])]);
       return;
     }
@@ -66,6 +77,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     let coast: LonLat[][] | undefined;
     let pads: Pad[] = [];
     let roads: RoadSurface | undefined;
+    let cover: GroundCover | undefined;
+    let glow: ((tin: SurfaceTin) => Uint8Array) | undefined;
     if (osmRaw) {
       let data: ReturnType<typeof parseOverpass> | undefined;
       try {
@@ -80,6 +93,12 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         coast = coastlineWays(data.lines);
         // the roads with their heights (z14): the surface is built under them
         roads = await fetchRoadSurface(tile, data, pads);
+        if (roads) {
+          // z14 with its OSM: every ground cover in the surface, the faces coloured by their cover
+          const raw = data;
+          cover = buildGroundCover(tile, grid, raw, roads);
+          glow = (tin) => glowLevels(buildingCoverage(tin, tile, clipTileData(raw, tile).buildings, tinLocator(tin, tile)));
+        }
       }
     }
     // experimental: faces coloured by height × temperature at that height (climate-colour.ts), no imagery
@@ -89,12 +108,18 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       coast,
       pads,
       roads,
+      cover,
+      areaStyles,
+      glow,
     });
     const vertices = mesh.vertices.slice().buffer;
     const ramps = mesh.ramps.slice().buffer;
     const morph = mesh.morph?.slice().buffer;
-    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph });
-    const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph };
+    // without a cover the whole mesh is drawn at any distance, as ever
+    const nearCount = cover ? mesh.nearCount : undefined;
+    const farCount = cover ? mesh.farCount : undefined;
+    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph, nearCount, farCount });
+    const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph, nearCount, farCount };
     ctx.postMessage(res, [vertices, ramps, ...(morph ? [morph] : [])]);
   } catch (err) {
     const res: ErrorResponse = {

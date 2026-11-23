@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 57;
+export const SCHEMA_VERSION = 58;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';
@@ -15,6 +15,9 @@ export interface CachedMesh {
   ramps: ArrayBuffer;
   /** terrain tiles: stitching to a coarser neighbour (TerrainMeshData.morph) */
   morph?: ArrayBuffer;
+  /** terrain tiles with a cover: vertices drawn near and far (TerrainMeshData.nearCount, farCount); absent: all */
+  nearCount?: number;
+  farCount?: number;
   trees?: ArrayBuffer;
   lights?: ArrayBuffer;
   /** OSM tiles: building mesh (vertices, ramps, facade window attributes) and far building dots */

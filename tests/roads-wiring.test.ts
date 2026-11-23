@@ -8,7 +8,8 @@ import type { RoadSurface } from '../src/world/road-pull';
 import { buildSurfaceTin } from '../src/world/surface-tin';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 import { tinSampler } from '../src/world/terrain-tin';
-import { demOf, GRID, lattice, metresOf, road, SIZE, TILE } from './roads-helpers';
+import { packGround } from '../src/world/ground-tile';
+import { coverTin, demOf, GRID, lattice, metresOf, road, SIZE, TILE, townFixture, townMesh } from './roads-helpers';
 
 const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
 const slope = lattice(relief);
@@ -61,4 +62,18 @@ it('builds a bridge at the road’s own height, over ground left as it was', () 
   }
   expect(mid.length).toBeGreaterThan(0);
   for (const y of mid) expect(Math.abs(y - 503)).toBeLessThan(2); // the deck at 503 m (+ its ribbon bias), the valley floor at 420 m
+});
+
+it('builds the terrain, the drape and the collision ground on one surface with the covers', () => {
+  const town = townMesh(townFixture(), () => 100);
+  const mesh = buildTerrainMesh(town.opts);
+  // the drape (osm.worker) and the collision ground (ground-tile.ts) build the TIN with the same options
+  const drape = coverTin(townFixture(), () => 100);
+  const ground = packGround(drape.tin, undefined);
+  expect(ground.tris).toEqual(packGround(town.tin, undefined).tris);
+  expect(ground.vh).toEqual(packGround(town.tin, undefined).vh);
+  // every face of that surface is in the mesh once (skirts come on top, six vertices a quad)
+  const rest = mesh.vertexCount - ground.tris.length;
+  expect(rest).toBeGreaterThanOrEqual(0);
+  expect(rest % 6).toBe(0);
 });
