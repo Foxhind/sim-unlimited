@@ -18,7 +18,6 @@ import type { LonLat, OsmLine } from './osm-types';
 import { EARTH_R, mercatorYToLat, type Tile } from './geodesy';
 import { ROAD_WINDOW_M, roadWindow } from './road-heights';
 import { NET_STEP_M, type NetWay, type RoadNet } from './road-net';
-import { classifyLine } from './way-styles';
 
 /** the roads of a tile with the height of each network sample: H and the lift */
 export interface RoadSurface {
@@ -810,14 +809,14 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
 
   /**
    * Each network bridge with its heights (and the raw DEM `dem`): its lifted stretches into `decks`,
-   * where its deck lies DECK_CLEAR_M or more over the pulled ground (on the raw DEM along it) under
-   * its centre line and both its edges, its approaches left out; probed every DECK_PROBE_M, each
-   * end found to DECK_EDGE_M, a low stretch under DECK_LOW_MIN_M with the deck. Off the tile and its
-   * margin, where the pull sees no roads, it is lifted. Its low stretches (a cover like any way:
-   * ground-cover) then pull as roads at the deck's height, square at their ends, after the network's
-   * ways: the asphalt there is the deck's height, the road outranks the water under it and the bank
-   * falls at its cover's edge (followed down the bank, the asphalt fell 2.6 m inside the deck's
-   * footprint at 14/9517/6397, and stepped where it met the lifted deck)
+   * where its deck lies DECK_CLEAR_M or more over the raw DEM under it (a function of the way alone,
+   * so every tile that has it agrees: the pulled ground under it is the tile's, and a low stretch cut
+   * where one tile's view ended broke the seam); probed every DECK_PROBE_M, each end found to
+   * DECK_EDGE_M, a low stretch under DECK_LOW_MIN_M with the deck. Its low stretches (a cover like
+   * any way: ground-cover) then pull as roads at the deck's height, square at their ends, after the
+   * network's ways: the asphalt there is the deck's height, the road outranks the water under it and
+   * the bank falls at its cover's edge (followed down the bank, the asphalt fell 2.6 m inside the
+   * deck's footprint at 14/9517/6397, and stepped where it met the lifted deck)
    */
   function liftDecks(dem: ArrayLike<number>): void {
     const lows: Array<{ way: number; a: number; b: number }> = [];
@@ -829,25 +828,13 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
       let finite = true;
       for (let i = first; i <= last; i++) if (!Number.isFinite(z[i]) || !Number.isFinite(dem[i])) finite = false;
       if (!finite) continue;
-      // its approaches (the ways of its class at its ends): the ground under it as if they were not
-      // there (their beds stop square at its ends, under the deck's edge where it turns off them)
-      const approaches = new Set<number>();
-      for (const e of [first, last]) {
-        for (const [o, m] of net.next[e]) {
-          const a = net.samples[o].way;
-          if (m === 0 && !ways[a].bridge && ways[a].line.tags.highway === w.line.tags.highway) approaches.add(a);
-        }
-      }
       const len = net.samples[last].d - net.samples[first].d;
-      /** the carriageway's half width, metres (a lifted ribbon has no shoulders) */
-      const halfM = (classifyLine(w.line.tags)?.width ?? 2 * w.half) / 2;
+      // its own data alone (its samples' heights and the raw DEM under them, the same in every tile
+      // that has it): the pulled ground under it, and the tile's view of it, differ from tile to tile
+      // and so would its low stretches, which pull
       const lifted = (d: number): boolean => {
         const { i, t } = along(first, last, d);
-        const x = sx[i] + (sx[i + 1] - sx[i]) * t, y = sy[i] + (sy[i + 1] - sy[i]) * t;
-        if (x < -1 || x > grid + 1 || y < -1 || y > grid + 1) return true;
-        const dx = sx[i + 1] - sx[i], dy = sy[i + 1] - sy[i], l = Math.hypot(dx, dy) || 1, h = halfM / mpc(y);
-        const deck = z[i] + (z[i + 1] - z[i]) * t, base = dem[i] + (dem[i + 1] - dem[i]) * t;
-        return [0, 1, -1].every((k) => deck - height(x - (dy / l) * h * k, y + (dx / l) * h * k, base, approaches) >= DECK_CLEAR_M);
+        return z[i] + (z[i + 1] - z[i]) * t - (dem[i] + (dem[i + 1] - dem[i]) * t) >= DECK_CLEAR_M;
       };
       const runs: Array<[number, number]> = [];
       const steps = Math.max(1, Math.ceil(len / DECK_PROBE_M));

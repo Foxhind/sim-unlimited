@@ -486,3 +486,21 @@ it('shares the border’s points of a road’s bank with the neighbour: where it
   expect(cracks(west)).toBe(0);
   expect(cracks(east)).toBe(0);
 });
+
+it('lifts a bridge’s deck by its own heights and DEM alone: the low stretches that pull agree across the border', () => {
+  // a primary with a 350 m bridge crossing the border to the east tile at 45° over rolling relief
+  const relief = (xm: number, ym: number) => 500 + 4 * Math.sin(xm / 60) * Math.cos(ym / 70);
+  const lines = [
+    road({ highway: 'primary' }, [[40, 10], [60, 30]]), road({ highway: 'primary', bridge: 'yes', layer: '1' }, [[60, 30], [68, 38]]),
+    road({ highway: 'primary' }, [[68, 38], [88, 58]]),
+  ];
+  const tileOf = (t: typeof TILE) => {
+    const d = data(lines), net = buildRoadNet(d.lines), roads = roadSurfaceOf(t, d, net, demOf(net, relief)), cover = buildGroundCover(t, GRID, d, roads);
+    return buildSurfaceTin(t, GRID, lattice(relief, t), { borders: bordersOf(relief, t), roads, cover });
+  };
+  const west = tileOf(TILE), east = tileOf({ ...TILE, x: TILE.x + 1 });
+  const on = (tin: SurfaceTin, x: number) => new Map(tin.vx.flatMap((vx, k) => (vx === x ? [[tin.vy[k].toFixed(6), tin.vh[k]] as const] : [])));
+  const a = on(west, GRID), b = on(east, 0);
+  expect([...a.keys()].sort()).toEqual([...b.keys()].sort());
+  for (const [y, h] of a) expect(Math.abs(b.get(y)! - h)).toBeLessThan(0.05);
+});

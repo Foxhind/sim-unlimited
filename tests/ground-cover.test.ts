@@ -8,7 +8,6 @@ import { buildRoadLevels, coverLifted, LIFT_EPS_M } from '../src/world/road-leve
 import { capSides } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { bridgeDecks } from '../src/world/road-pull';
-import { roadSurfaceOf } from '../src/world/surface-tin';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { classifyLine } from '../src/world/way-styles';
 import { ROAD_TAPER_M } from '../src/engine/palette';
@@ -342,24 +341,23 @@ describe('coverLifted', () => {
     const len = metresOf(...lines[0].points[1])[0] - metresOf(...lines[0].points[0])[0];
     expect(lifted(lines[0], len - 1)).toBe(true);
   });
-  it('a network bridge’s deck less than DECK_CLEAR_M over the pulled ground under it is a cover like any way: lifted over the channel only', () => {
-    // flat at 500 m: a 20 m tertiary bridge level with its approaches over a canal (8 m wide, its
-    // water 2.5 m down), the streets along both banks through its ends, their beds under them
+  it('a network bridge’s deck less than DECK_CLEAR_M over the raw DEM under it is a cover like any way: lifted where it rises over it', () => {
+    // flat DEM at 500 m: a 20 m tertiary bridge rising to 502 m at its middle over a canal (8 m
+    // wide, its water 2.5 m down): lifted where it stands 0.3 m or more over the DEM, 8.5 m either
+    // side of its middle, whatever the pulled ground under it (the same in every tile that has it)
     const s = 10 * M;
     const bridge = road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[32, 32 - s], [32, 32 + s]]);
-    const all = [
-      road({ highway: 'tertiary' }, [[32, 4], [32, 32 - s]]), bridge, road({ highway: 'tertiary' }, [[32, 32 + s], [32, 60]]), road({ waterway: 'canal' }, [[4, 32], [60, 32]]),
-      road({ highway: 'residential' }, [[4, 32 - s], [32, 32 - s], [60, 32 - s]]), road({ highway: 'residential' }, [[4, 32 + s], [32, 32 + s], [60, 32 + s]]),
-    ];
-    const net = buildRoadNet(all);
-    const roads = roadSurfaceOf(TILE, { lines: all, areas: [] }, net, new Float64Array(net.samples.length).fill(500));
+    const all = [road({ highway: 'tertiary' }, [[32, 4], [32, 32 - s]]), bridge, road({ highway: 'tertiary' }, [[32, 32 + s], [32, 60]]), road({ waterway: 'canal' }, [[4, 32], [60, 32]])];
+    const net = buildRoadNet(all), b = net.ways.findIndex((w) => w.line === bridge);
+    const dem = new Float64Array(net.samples.length).fill(500);
+    const z = Float64Array.from(net.samples, (p) => (p.way === b ? 500 + 2 * (1 - Math.abs(p.d - 10) / 10) : net.ways[p.way].water ? 497.5 : 500));
+    const roads = { net, z, dem };
     const lifted = coverLifted(roads, buildRoadLevels(all, [], ([lon, lat]) => enu(lon, lat)), bridgeDecks(TILE, GRID, roads, ([lon, lat]) => enu(lon, lat)));
-    expect([1, 10, 19].map((d) => lifted(bridge, d))).toEqual([false, true, false]);
-    // its cover: the asphalt either side of the channel, none over it
+    expect([1, 2, 10, 18, 19].map((d) => lifted(bridge, d))).toEqual([false, true, true, true, false]);
+    // its cover: the asphalt at both its ends, none over the middle (the deck's)
     const c = buildGroundCover(TILE, GRID, data(all), roads);
     expect(c.shapes.filter((sh) => sh.kind === 'carriageway' && sh.source === bridge).length).toBe(2);
     expect(c.shapes[c.locate(32, 32)].kind).toBe('water');
-    for (const y of [-7, -5, 5, 7]) expect(c.shapes[c.locate(32, 32 + y * M)].kind).toBe('carriageway');
   });
   it('a way of the network with heights: lifted only on a bridge', () => {
     const roadBridge = road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[30, 6], [30, 8]]);

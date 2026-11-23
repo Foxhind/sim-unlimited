@@ -111,7 +111,9 @@ describe('real dense tiles in the surface budget', () => {
       let prev: number | undefined;
       for (let d = 0.05; d < len - 0.05; d += 0.1) {
         const hs = surfacesOver(m, a[0] + ux * d - uz * o, a[1] + uz * d + ux * o);
-        if (hs.length !== 1 || hs[0] < Math.min(...deck) - 0.3 || hs[0] > Math.max(...deck) + 0.05) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))}`);
+        // the deck's own height there (its samples' along it)
+        const f = (d / len) * (deck.length - 1), i = Math.min(deck.length - 2, Math.floor(f)), here = deck[i] + (deck[i + 1] - deck[i]) * (f - i);
+        if (hs.length !== 1 || hs[0] < here - 0.3 || hs[0] > here + 0.05) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))} deck ${here.toFixed(2)}`);
         if (hs.length === 1 && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
         prev = hs.length === 1 ? hs[0] : undefined;
       }
