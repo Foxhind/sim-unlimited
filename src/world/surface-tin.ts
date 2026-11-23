@@ -43,6 +43,8 @@ const MAX_BAND_POINTS = 4500;
 const ROADS_Z = 14;
 /** the covers drawn along a way: dropped from the surface, the way's ribbon lies over it (SurfaceTin.loose) */
 const RIBBON_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['runway', 'ballast', 'carriageway', 'shoulder', 'path', 'railZone']);
+/** a water face with a corner under a road's cover, raised this much or more off the river's level, is the road's bank (the ground's), metres */
+const BANK_STEP_M = 0.5;
 /** a vertex this close to a road's cover is under it (its edge thinned by 2 cm, its vertices snapped by 3), metres */
 const COVER_SNAP_M = 0.06;
 /** the covers of a road: under them a river gives way (RoadPull.surface) */
@@ -205,6 +207,17 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   const skip = (si: number) => dropped[si] === 1 || passed.includes(si);
   const holds = (si: number, x: number, y: number) => cover.locate(x, y, (sj) => sj !== si) === si;
   const faces = new Int32Array(tin.tris.length);
+  /** per vertex: 0 not asked, 1 under a road's cover over a river's water, its ground the land's (RoadPull.surface) BANK_STEP_M or more off the water's, 2 not */
+  const roadV = new Uint8Array(tin.vx.length);
+  const underRoad = (v: number): boolean => {
+    if (!roadV[v]) {
+      const x = tin.vx[v], y = tin.vy[v];
+      // on a river's water (its level, whatever the relief under it) and raised off it
+      const water = pull?.surface(x, y, 0) ?? NaN;
+      roadV[v] = water === pull?.surface(x, y, 1000) && Math.abs(tin.vh[v] - water) > BANK_STEP_M && roadAt!(x, y) ? 1 : 2;
+    }
+    return roadV[v] === 1;
+  };
   tin.tris.forEach((t, f) => {
     const x = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, y = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
     passed = [];
@@ -213,8 +226,9 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
       passed.push(si);
       si = cover.locate(x, y, skip);
     }
-    // a road's bank (between its cover's edge and the water row BANK_M beyond it) is the ground's
-    faces[f] = si >= 0 && cover.shapes[si].kind === 'water' && pull?.bank(x, y) ? -1 : si;
+    // a road's bank (between its cover's edge and the water row BANK_M beyond it, or from a corner
+    // under a road's cover over a river, at the land's height, down to the water) is the ground's
+    faces[f] = si >= 0 && cover.shapes[si].kind === 'water' && (pull?.bank(x, y) || [t.a, t.b, t.c].some(underRoad)) ? -1 : si;
   });
   return { ...out, cover: faces };
 }
