@@ -2,17 +2,18 @@ import { expect, it } from 'vitest';
 import type { OsmLine } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { buildSurfaceTin, MAX_SURFACE_VERTS, type SurfaceOptions } from '../src/world/surface-tin';
-import { buildTerrainTin } from '../src/world/terrain-tin';
-import { area, at, cracks, demOf, GRID, lattice, padAround, road, seeded, SIZE, TILE } from './roads-helpers';
+import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions } from '../src/world/surface-tin';
+import { buildTerrainTin, tinLatticeSampler } from '../src/world/terrain-tin';
+import { area, at, cracks, demOf, GRID, lattice, M, padAround, road, seeded, SIZE, TILE } from './roads-helpers';
 
 const slope = lattice((x, y) => 500 + 0.2 * x + 0.05 * y);
 const surfaceOf = (roads: OsmLine[], h: Float32Array = slope, opts: SurfaceOptions = {}) => {
   const net = buildRoadNet(roads), z = solveRoadHeights(net, demOf(net, (x, y) => 500 + 0.2 * x + 0.05 * y));
   return { tin: buildSurfaceTin(TILE, GRID, h, { ...opts, roads: { net, z } }), net, z };
 };
-it('is the base TIN without roads', () => {
-  expect(buildSurfaceTin(TILE, GRID, slope)).toEqual(buildTerrainTin(TILE, GRID, slope));
+it('is the base TIN without roads (to the z14 tolerances)', () => {
+  const hills = lattice((x, y) => 520 + 15 * Math.sin(x / 140) * Math.cos(y / 170));
+  expect(buildSurfaceTin(TILE, GRID, hills)).toEqual(buildTerrainTin(TILE, GRID, hills, { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M }));
 });
 it('lays the ground level across a road on a hillside, at the road’s height', () => {
   const r = road({ highway: 'primary' }, [[32, 6], [32, 58]]); // runs south across a 20 % cross slope
@@ -65,4 +66,35 @@ it('leaves a road without a height on the ground as ever', () => {
   const r = road({ highway: 'primary' }, [[32, 6], [32, 58]]), net = buildRoadNet([r]);
   const tin = buildSurfaceTin(TILE, GRID, slope, { roads: { net, z: new Float64Array(net.samples.length).fill(NaN) } });
   expect(tin.vh).toEqual(buildTerrainTin(TILE, GRID, slope).vh);
+});
+it('lays a river level across in a valley with a cross slope, its banks pulled to it', () => {
+  const r = road({ waterway: 'river' }, [[32, 4], [32, 60]]); // 18 m wide, the valley side rising east at 20 %
+  const { tin } = surfaceOf([r]);
+  for (const y of [400, 800, 1200]) {
+    const h = at(tin, SIZE / 2, y);
+    for (const off of [-8, -4, 4, 8]) expect(at(tin, SIZE / 2 + off, y)).toBeCloseTo(h, 1);
+  }
+});
+it('carries the fall from a diagonal road along it, not stepped by the lattice', () => {
+  // a road at 30° to the lattice on a 20 % cross slope: the ground 25 m off it, followed along it,
+  // runs as smoothly as the relief and the road do (no zigzag from lattice nodes)
+  const r = road({ highway: 'primary' }, [[6, 10], [58, 40]]);
+  const { tin } = surfaceOf([r]);
+  const ux = 52 / Math.hypot(52, 30), uy = 30 / Math.hypot(52, 30);
+  const prof: number[] = [];
+  for (let s = 400; s <= 1400; s += 5) {
+    const xm = 6 / M + ux * s - uy * 25, ym = 10 / M + uy * s + ux * 25;
+    prof.push(at(tin, xm, ym));
+  }
+  let worst = 0;
+  for (let i = 1; i + 1 < prof.length; i++) worst = Math.max(worst, Math.abs(prof[i + 1] - 2 * prof[i] + prof[i - 1]));
+  expect(worst).toBeLessThan(0.25);
+});
+it('follows the relief within Z14_RELIEF_TOL_M on a z14 tile, hills lower than a belt included', () => {
+  const hills = (x: number, y: number) => 520 + 15 * Math.sin(x / 140) * Math.cos(y / 170);
+  const h = lattice(hills), tin = buildSurfaceTin(TILE, GRID, h);
+  const s = tinLatticeSampler(tin);
+  let worst = 0;
+  for (let j = 0; j <= GRID; j++) for (let i = 0; i <= GRID; i++) worst = Math.max(worst, Math.abs(s(i, j) - h[j * (GRID + 1) + i]));
+  expect(worst).toBeLessThanOrEqual(Z14_RELIEF_TOL_M + 0.01);
 });

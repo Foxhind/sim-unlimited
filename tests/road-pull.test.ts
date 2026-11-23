@@ -69,3 +69,10 @@ it('has a height on the bed past a dead end', () => {
   const pull = buildRoadPull(TILE, GRID, flatAt(520)(net));
   expect(pull.height(32 + 8 * M, 32, 500)).toBeCloseTo(520, 6);
 });
+it('outlines a straight road on an even grade with few vertices (no more than one in 60 m)', () => {
+  const net = buildRoadNet([road({ highway: 'primary' }, [[6, 10], [58, 40]])]);
+  const z = Float64Array.from(net.samples, (s) => 500 + 0.05 * s.d);
+  const pull = buildRoadPull(TILE, GRID, { net, z });
+  const len = net.samples[net.samples.length - 1].d;
+  for (const e of pull.beds[0].edges) expect(e.length).toBeLessThanOrEqual(Math.ceil(len / 60) * 2 + 2);
+});

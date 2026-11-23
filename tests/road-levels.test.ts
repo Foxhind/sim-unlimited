@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LonLat, OsmArea, OsmLine } from '../src/world/osm-types';
-import { buildRoadLevels, LEVEL_M, LIFT_EPS_M, LIFT_GRADE, LIFT_REACH_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
+import { buildRoadLevels, LEVEL_M, LIFT_EPS_M, LIFT_GRADE, LIFT_REACH_M, MIN_BRIDGE_LIFT_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
 
 /** points are given in metres (x east, y north) and stored as "degrees" of 1e-5 */
 const P = (x: number, y: number): LonLat => [x / 1e5, y / 1e5];
@@ -8,7 +8,7 @@ const xz = ([lon, lat]: LonLat): [number, number] => [lon * 1e5, -lat * 1e5];
 const way = (tags: Record<string, string>, ...pts: [number, number][]): OsmLine => ({ tags, points: pts.map(([x, y]) => P(x, y)) });
 const levels = (lines: OsmLine[], areas: OsmArea[] = []) => buildRoadLevels(lines, areas, xz);
 
-const BRIDGE = { highway: 'primary', bridge: 'yes' };
+const BRIDGE = { highway: 'primary', bridge: 'yes', layer: '1' };
 /** half the width of the secondary road under the bridges below */
 const LOWER_HALF = 5.5;
 const lowerRoad = (x: number, tags: Record<string, string> = { highway: 'secondary' }) => way(tags, [x, -100], [x, 100]);
@@ -67,7 +67,7 @@ describe('road levels', () => {
 
   it('stacked: a level-2 bridge over a level-1 bridge is 12 m up', () => {
     const top = way({ ...BRIDGE, layer: '2' }, [0, 0], [400, 0]);
-    const lower = lowerRoad(200, { highway: 'secondary', bridge: 'yes' });
+    const lower = lowerRoad(200, { highway: 'secondary', bridge: 'yes', layer: '1' });
     const l = levels([top, lower]);
     expect(l.liftAt(top, 200)).toBeCloseTo(2 * LEVEL_M, 2);
     expect(l.maxLift(lower)).toBeLessThanOrEqual(LEVEL_M);
@@ -112,7 +112,7 @@ describe('road levels', () => {
 
   it('roads of the same or a higher level under a bridge ask for nothing', () => {
     const bridge = way(BRIDGE, [0, 0], [400, 0]);
-    expect(levels([bridge, lowerRoad(200, { highway: 'secondary', bridge: 'yes' })]).maxLift(bridge)).toBe(0);
+    expect(levels([bridge, lowerRoad(200, { highway: 'secondary', bridge: 'yes', layer: '1' })]).maxLift(bridge)).toBe(0);
     expect(levels([bridge, lowerRoad(200, { highway: 'secondary', layer: '2' })]).maxLift(bridge)).toBe(0);
   });
 
@@ -130,12 +130,12 @@ describe('road levels', () => {
   });
 
   it('paths bridge too', () => {
-    const foot = way({ highway: 'footway', bridge: 'yes' }, [0, 0], [400, 0]);
+    const foot = way({ highway: 'footway', bridge: 'yes', layer: '1' }, [0, 0], [400, 0]);
     expect(levels([foot, lowerRoad(200, { highway: 'primary' })]).maxLift(foot)).toBeCloseTo(LEVEL_M, 2);
   });
 
   it('rails: over a road and under one', () => {
-    const rail = way({ railway: 'rail', bridge: 'yes' }, [0, 0], [400, 0]);
+    const rail = way({ railway: 'rail', bridge: 'yes', layer: '1' }, [0, 0], [400, 0]);
     expect(levels([rail, lowerRoad(200)]).maxLift(rail)).toBeCloseTo(LEVEL_M, 2);
     const bridge = way(BRIDGE, [0, 0], [400, 0]);
     expect(levels([bridge, way({ railway: 'rail' }, [200, -100], [200, 100])]).maxLift(bridge)).toBeCloseTo(LEVEL_M, 2);
@@ -152,7 +152,7 @@ describe('road levels', () => {
   });
 
   it('a footbridge lifts the paths that join it, not the roads', () => {
-    const foot = way({ highway: 'footway', bridge: 'yes' }, [180, 0], [220, 0]);
+    const foot = way({ highway: 'footway', bridge: 'yes', layer: '1' }, [180, 0], [220, 0]);
     const path = way({ highway: 'footway' }, [100, 0], [180, 0]);
     const street = way({ highway: 'residential' }, [220, 0], [300, 0]);
     const l = levels([foot, path, street, lowerRoad(200, { highway: 'primary' })]);
@@ -212,7 +212,7 @@ describe('road levels', () => {
   it('a higher bridge has less room to stay level (the fall takes more of the reach)', () => {
     const west = way({ highway: 'primary' }, [-100, 0], [140, 0]);
     const top = way({ ...BRIDGE, layer: '2' }, [140, 0], [270, 0]);
-    const l = levels([west, top, lowerRoad(200, { highway: 'secondary', bridge: 'yes' })]);
+    const l = levels([west, top, lowerRoad(200, { highway: 'secondary', bridge: 'yes', layer: '1' })]);
     expect(l.liftAt(top, 60)).toBeCloseTo(2 * LEVEL_M, 2);
     expect(l.liftAt(top, 0)).toBeLessThan(2 * LEVEL_M - 3);
     expect(l.liftAt(west, 240 - 100)).toBe(0);
@@ -259,5 +259,33 @@ describe('clearance between the roads’ own heights', () => {
   it('lifts as before without heights, or where a height is missing', () => {
     expect(buildRoadLevels([bridge, under], [], xz).maxLift(bridge)).toBeCloseTo(LEVEL_M, 2);
     expect(buildRoadLevels([bridge, under], [], xz, { height: () => NaN }).maxLift(bridge)).toBeCloseTo(LEVEL_M, 2);
+  });
+});
+
+describe('a bridge over a river with the roads’ and the river’s own heights', () => {
+  const bridge = way(BRIDGE, [0, 0], [400, 0]), river = way({ waterway: 'river' }, [200, -100], [200, 100]);
+  it('clears the river’s own level, not the ground', () => {
+    // the river at 495 (its bed pulled down to the water), the bridge's own height 500: 4 m over the water is 1 m under it
+    const l = buildRoadLevels([bridge, river], [], xz, { height: (line) => (line === bridge ? 500 : 495) });
+    expect(l.maxLift(bridge)).toBeLessThan(LIFT_EPS_M);
+    const high = buildRoadLevels([bridge, river], [], xz, { height: (line) => (line === bridge ? 497 : 495) });
+    expect(high.maxLift(bridge)).toBeCloseTo(WATER_CLEAR_M - 2, 2);
+  });
+});
+
+describe('a bridge over nothing that the levels know of', () => {
+  it('stands at least MIN_BRIDGE_LIFT_M over the ground without a layer or on layer 0', () => {
+    const cases: Array<Record<string, string>> = [{ highway: 'residential', bridge: 'yes' }, { highway: 'residential', bridge: 'yes', layer: '0' }, { highway: 'footway', bridge: 'yes' }, { railway: 'rail', bridge: 'yes' }];
+    for (const tags of cases) {
+      const b = way(tags, [0, 0], [30, 0]), approach = way({ highway: 'residential' }, [-100, 0], [0, 0]);
+      const l = levels([approach, b]);
+      for (const d of [0, 15, 30]) expect(l.liftAt(b, d), JSON.stringify(tags)).toBeGreaterThanOrEqual(MIN_BRIDGE_LIFT_M - 1e-9);
+      // the approach comes down at the grade
+      if (tags.highway === 'residential') expect(l.liftAt(approach, 100 - 5)).toBeCloseTo(MIN_BRIDGE_LIFT_M - 5 * LIFT_GRADE, 6);
+    }
+  });
+  it('is lifted only where it crosses something on layer 1 and up', () => {
+    const b = way({ highway: 'residential', bridge: 'yes', layer: '1' }, [0, 0], [30, 0]);
+    expect(levels([b]).maxLift(b)).toBe(0);
   });
 });

@@ -25,7 +25,7 @@ const from = (lon: number, lat: number, east: number, north: number): LonLat => 
 const at = (east: number, north: number): LonLat => from(C.lon, C.lat, east, north);
 
 /** a bridge west to east through the tile's centre and a road under its middle */
-const bridge = (tags: Record<string, string> = {}): OsmLine => ({ tags: { highway: 'primary', bridge: 'yes', ...tags }, points: [at(-400, 0), at(400, 0)] });
+const bridge = (tags: Record<string, string> = {}): OsmLine => ({ tags: { highway: 'primary', bridge: 'yes', layer: '1', ...tags }, points: [at(-400, 0), at(400, 0)] });
 const under: OsmLine = { tags: { highway: 'secondary' }, points: [at(0, -150), at(0, 150)] };
 const LOWER_HALF = 5.5;
 
@@ -87,7 +87,7 @@ describe('lifted roads in the mesh', () => {
   });
 
   it('rails rise too', () => {
-    const rail: OsmLine = { tags: { railway: 'rail', bridge: 'yes' }, points: [at(-400, 0), at(400, 0)] };
+    const rail: OsmLine = { tags: { railway: 'rail', bridge: 'yes', layer: '1' }, points: [at(-400, 0), at(400, 0)] };
     expect(Math.max(...heights(meshOf([rail, under]).roads, -3, 3, -4, 4))).toBeGreaterThanOrEqual(LEVEL_M + 1.4);
   });
 
@@ -103,7 +103,7 @@ describe('lifted roads in the mesh', () => {
     const border = tileBounds(TILE).east;
     // the bridge crosses the border; what it crosses lies 30 m into the eastern tile
     const lines: OsmLine[] = [
-      { tags: { highway: 'primary', bridge: 'yes' }, points: [from(border, C.lat, -300, 0), from(border, C.lat, 300, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [from(border, C.lat, -300, 0), from(border, C.lat, 300, 0)] },
       { tags: { highway: 'secondary' }, points: [from(border, C.lat, 30, -150), from(border, C.lat, 30, 150)] },
     ];
     const edge = (tile: Tile): number[] => {
@@ -137,7 +137,7 @@ describe('lifted roads in the mesh', () => {
   it('the approaches of a short bridge are embankments', () => {
     const lines: OsmLine[] = [
       { tags: { highway: 'primary' }, points: [at(-300, 0), at(-20, 0)] },
-      { tags: { highway: 'primary', bridge: 'yes' }, points: [at(-20, 0), at(20, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(-20, 0), at(20, 0)] },
       { tags: { highway: 'primary' }, points: [at(20, 0), at(300, 0)] },
       under,
     ];
@@ -162,7 +162,7 @@ describe('lifted roads in the mesh', () => {
   it('the body starts where the lift does: no stretch of the approach hangs in the air', () => {
     const lines: OsmLine[] = [
       { tags: { highway: 'primary' }, points: [at(-300, 0), at(-20, 0)] },
-      { tags: { highway: 'primary', bridge: 'yes' }, points: [at(-20, 0), at(20, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(-20, 0), at(20, 0)] },
       under,
     ];
     const m = meshOf(lines);

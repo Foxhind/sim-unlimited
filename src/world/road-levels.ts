@@ -32,6 +32,12 @@ export const LIFT_GRADE = 0.08;
  * roads within 150 m of it (overpass.ts ROAD_REACH_M)
  */
 export const LIFT_REACH_M = 90;
+/**
+ * A bridge without a `layer` or on layer 0 (most small bridges: over a ditch, a stream mapped as
+ * an area or not at all) stands at least this far over the ground along its whole length, its
+ * approaches coming down at LIFT_GRADE: a bridge never lies flat on the ground
+ */
+export const MIN_BRIDGE_LIFT_M = 1;
 /** less than this is no lift */
 export const LIFT_EPS_M = 0.02;
 
@@ -89,6 +95,8 @@ interface Under {
   /** a road or railway (its Way), or water and the clearance over it */
   way?: Way;
   clear?: number;
+  /** water: its line and the metres along it at each point (for its own height, RoadLevelOptions.height) */
+  water?: { line: OsmLine; cum: number[] };
 }
 
 const key = (p: LonLat): string => `${p[0]},${p[1]}`;
@@ -190,8 +198,14 @@ export function buildRoadLevels(
       ways.push(way);
       if (way.path) continue; // a path under a bridge asks for nothing
     }
+    let water: Under['water'];
+    if (!way) {
+      const cum = [0];
+      for (let i = 1; i < p.length; i++) cum.push(cum[i - 1] + Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]));
+      water = { line, cum };
+    }
     for (let i = 0; i + 1 < p.length; i++) {
-      unders.push({ a: p[i], b: p[i + 1], ka: key(line.points[i]), kb: key(line.points[i + 1]), half: style.width / 2, seg: i, way, clear: way ? undefined : clear });
+      unders.push({ a: p[i], b: p[i + 1], ka: key(line.points[i]), kb: key(line.points[i + 1]), half: style.width / 2, seg: i, way, clear: way ? undefined : clear, water });
     }
   }
   const bridges = ways.filter((w) => w.bridge);
@@ -230,6 +244,12 @@ export function buildRoadLevels(
     const ask = (d: number, req: number): void => {
       if (req > 0 && Number.isFinite(d)) w.asks.push({ d: Math.max(0, Math.min(total, d)), req });
     };
+    // on no layer (or layer 0): at least MIN_BRIDGE_LIFT_M all along it
+    const layer = w.line.tags.layer;
+    if (layer === undefined || Number(layer) === 0) {
+      const n = Math.max(1, Math.ceil(total / HOLD_STEP_M));
+      for (let k = 0; k <= n; k++) ask((total * k) / n, MIN_BRIDGE_LIFT_M);
+    }
     for (let i = 0; i + 1 < w.p.length; i++) {
       const p = w.p[i], q = w.p[i + 1], len = w.cum[i + 1] - w.cum[i];
       if (len < 1e-6) continue;
@@ -250,9 +270,11 @@ export function buildRoadLevels(
           const hit = cross(p, q, u.a, u.b);
           if (!hit) continue;
           const d = w.cum[i] + hit[0] * len;
-          if (u.way && opts.height) {
-            const du = u.way.cum[u.seg] + hit[1] * (u.way.cum[u.seg + 1] - u.way.cum[u.seg]);
-            const gap = opts.height(w.line, d) - opts.height(u.way.line, du);
+          // with the ways' own heights: what is left to the clearance over what is under it
+          const under = u.way ?? u.water;
+          if (under && opts.height) {
+            const du = under.cum[u.seg] + hit[1] * (under.cum[u.seg + 1] - under.cum[u.seg]);
+            const gap = opts.height(w.line, d) - opts.height(under.line, du);
             if (Number.isFinite(gap)) req = Math.max(0, req - gap);
           }
           // held over the whole width of what is crossed

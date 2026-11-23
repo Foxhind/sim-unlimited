@@ -3,9 +3,11 @@
  * links included; not footways, paths or steps), sampled along its line and joined where ways share
  * a node. It carries what the roads-first surface needs of each way: its bed (carriageway and
  * shoulder), the band over which the ground is pulled to it, and the weight of its DEM samples.
+ * Rivers, canals and streams are in it too, as water ways: their bed is the water, level across,
+ * at the water's height along them, and their banks are pulled to it.
  */
 import { EARTH_R } from './geodesy';
-import { classifyLine, isTunnel, roadClassWidth, roadPriority } from './osm-mesher';
+import { classifyLine, isTunnel, roadClassWidth, roadPriority, waterwayWidth } from './osm-mesher';
 import type { OsmLine } from './osm-types';
 
 /** network samples along a way at most this far apart, metres */
@@ -25,7 +27,10 @@ export interface NetWay {
    */
   weight: number;
   bridge: boolean;
+  /** a tunnel, or a waterway in a culvert: pulls nothing */
   tunnel: boolean;
+  /** a river, canal or stream: its bed is the water */
+  water: boolean;
   /** its samples: first .. first + count − 1, in the way's order */
   first: number;
   count: number;
@@ -52,6 +57,18 @@ export function isCarriageway(tags: Record<string, string>): boolean {
   const style = classifyLine(tags);
   return !!style && !style.path && !style.rail;
 }
+
+/** waterways in the network: the surface of their water is level across */
+const WATER_KINDS = new Set(['river', 'canal', 'stream']);
+/** a river, canal or stream the OSM layer draws (not an area) */
+export function isWaterWay(tags: Record<string, string>): boolean {
+  return WATER_KINDS.has(tags.waterway ?? '') && tags.area !== 'yes' && waterwayWidth(tags) !== undefined;
+}
+/** banks pulled to the water this far beyond its edge, metres: rivers and canals, streams */
+const WATER_BAND_M = 30;
+const STREAM_BAND_M = 12;
+/** below every road: a ford is the road's surface */
+const WATER_PRIO = -1;
 
 /** pull band beyond the bed by class, metres */
 function bandOf(highway: string): number {
@@ -82,8 +99,8 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
     next[j].push([i, m]);
   };
   for (const line of lines) {
-    if (!isCarriageway(line.tags) || !line.points.length) continue;
-    const style = classifyLine(line.tags)!;
+    const water = isWaterWay(line.tags);
+    if ((!water && !isCarriageway(line.tags)) || !line.points.length) continue;
     const way = ways.length;
     const first = samples.length;
     let d = 0;
@@ -104,6 +121,17 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
       plon = lon;
       plat = lat;
     }
+    if (water) {
+      const width = waterwayWidth(line.tags)!;
+      ways.push({
+        line, prio: WATER_PRIO + Math.min(width, 100) / 1000, half: width / 2,
+        band: line.tags.waterway === 'stream' ? STREAM_BAND_M : WATER_BAND_M, weight: 1,
+        bridge: false, tunnel: !!line.tags.tunnel && line.tags.tunnel !== 'no', water: true,
+        first, count: samples.length - first,
+      });
+      continue;
+    }
+    const style = classifyLine(line.tags)!;
     ways.push({
       line,
       prio: roadPriority(line.tags, style.width),
@@ -112,6 +140,7 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
       weight: (roadClassWidth(line.tags.highway) ?? style.width) ** 3,
       bridge: !!line.tags.bridge && line.tags.bridge !== 'no',
       tunnel: isTunnel(line.tags),
+      water: false,
       first,
       count: samples.length - first,
     });

@@ -6,18 +6,22 @@
  */
 import type { Pad } from './aerodrome';
 import type { Pt } from './contours';
-import { EARTH_R, tileCenter, type Tile } from './geodesy';
+import { EARTH_R, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmArea, OsmLine } from './osm-types';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
 import { buildRoadNet } from './road-net';
 import { buildRoadPull, type RoadSurface } from './road-pull';
-import { buildTerrainTin, type TerrainTin, type TinOptions } from './terrain-tin';
+import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 
 export type { RoadSurface } from './road-pull';
 
 /** the most vertices a tile's surface may have: over it the youngest roads' bed outlines go first */
 export const MAX_SURFACE_VERTS = 12000;
+/** the base relief's fixed edges get a vertex this often where they run through a pull band, metres */
+const BAND_EDGE_STEP_M = 12;
+/** at most this many band points a tile (about the lattice nodes it had: 65²) */
+const MAX_BAND_POINTS = 4500;
 /** the zoom with the roads (chunks.ts DETAIL_Z) */
 const ROADS_Z = 14;
 
@@ -30,52 +34,70 @@ export interface SurfaceTin extends TerrainTin {
   loose?: Set<OsmLine>;
 }
 
-export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
-  const { roads, ...tinOpts } = opts;
-  const base = buildTerrainTin(tile, grid, heights, tinOpts);
-  if (!roads || !roads.net.ways.length) return base;
-  const pull = buildRoadPull(tile, grid, roads);
-  // the lattice nodes the roads pull: they carry the fall from a road to the relief
-  // and the ring just outside the bands, at the relief's own height: it keeps the fall inside
-  const side = grid + 1;
-  const pulled = new Uint8Array(side * side);
-  for (let j = 0; j <= grid; j++) for (let i = 0; i <= grid; i++) pulled[j * side + i] = pull.weight(i, j) > 0 ? 1 : 0;
-  const points: Pt[] = [];
-  for (let j = 0; j <= grid; j++) for (let i = 0; i <= grid; i++) {
-    // a border node by its neighbours along the border only: the neighbour tile decides the same
-    const onX = i === 0 || i === grid, onY = j === 0 || j === grid;
-    let near = false;
-    for (let dj = -1; dj <= 1 && !near; dj++) for (let di = -1; di <= 1 && !near; di++) {
-      const ii = i + di, jj = j + dj;
-      if ((onX && ii !== i && !onY) || (onY && jj !== j && !onX) || ((onX && onY) && di !== 0 && dj !== 0)) continue;
-      near = ii >= 0 && ii <= grid && jj >= 0 && jj <= grid && pulled[jj * side + ii] === 1;
-    }
-    if (near) points.push({ x: i, y: j });
-  }
-  if (!points.length && !pull.beds.length) return base;
+/**
+ * A detailed (z14) tile's relief follows its lattice within this many metres, and its border line
+ * too: its roads and rivers lie on the true relief (raw DEM), and a coarser one let them show
+ * through it in trenches 10–16 m deep (14/9515/6394, where the belts left four vertices)
+ */
+export const Z14_RELIEF_TOL_M = 5;
 
-  // the bed outlines, senior first, while the vertices last (crossings come on top: built, counted,
-  // and built again with fewer if over)
-  const counts = pull.beds.map((b) => b.edges.reduce((s, e) => s + e.length, 0));
-  // a tenth of the outline vertices again for where they cross the isolines and each other
-  let room = (MAX_SURFACE_VERTS - base.vx.length - points.length - pull.borderPoints.length) / 1.1;
-  let tin: TerrainTin | undefined;
+export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
+  const { roads, ...given } = opts;
+  const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
+  if (!roads || !roads.net.ways.length) return buildTerrainTin(tile, grid, heights, tinOpts);
+  const pull = buildRoadPull(tile, grid, roads);
+  // the bed outlines, the water first (a river is long and in plain sight), then the senior roads
+  const beds = [...pull.beds.filter((b) => roads.net.ways[b.way].water), ...pull.beds.filter((b) => !roads.net.ways[b.way].water)];
+  const counts = beds.map((b) => b.edges.reduce((s, e) => s + e.length, 0));
   let picked = 0;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    picked = 0;
-    for (let used = 0; picked < counts.length && used + counts[picked] <= room; picked++) used += counts[picked];
-    tin = buildTerrainTin(tile, grid, heights, {
-      ...tinOpts,
-      fixedLines: pull.beds.slice(0, picked).flatMap((b) => b.edges),
-      extraPoints: [...points, ...pull.borderPoints],
-      reshape: (x, y, h) => pull.height(x, y, h),
-    });
-    if (tin.vx.length <= MAX_SURFACE_VERTS || picked === 0) break;
-    room -= (tin.vx.length - MAX_SURFACE_VERTS) * 1.2 + 16;
-  }
+  const tin = buildTerrainTin(tile, grid, heights, {
+    ...tinOpts,
+    // planned on the relief once it is built (one relief build, however many surface builds)
+    surface: (relief): SurfacePlan => {
+      // the fall from a road to the relief: points on rows along the roads in their bands (not the
+      // lattice: that made the bands square), and on the border the lattice nodes the roads pull
+      // (the neighbour has the same) and where the outlines and rows cross it
+      const points: Pt[] = pull.bandPoints(MAX_BAND_POINTS);
+      for (let k = 0; k <= grid; k++) {
+        for (const [i, j] of [[k, 0], [k, grid], [0, k], [grid, k]]) if (pull.weight(i, j) > 0) points.push({ x: i, y: j });
+      }
+      points.push(...pull.borderPoints);
+      // and along the relief's fixed edges (isolines, coast) through the bands: an edge there is
+      // straight between vertices far apart while the pulled ground under it is not
+      const step = BAND_EDGE_STEP_M / (tileSizeMeters(tile) / grid);
+      for (const [u, v] of relief.constraints) {
+        const ax = relief.vx[u], ay = relief.vy[u], bx = relief.vx[v], by = relief.vy[v];
+        if ((ax === bx && (ax === 0 || ax === grid)) || (ay === by && (ay === 0 || ay === grid))) continue; // the border: shared points only
+        const n = Math.floor(Math.hypot(bx - ax, by - ay) / step);
+        for (let k = 1; k < n; k++) {
+          const x = ax + ((bx - ax) * k) / n, y = ay + ((by - ay) * k) / n;
+          if (pull.weight(x, y) > 0) points.push({ x, y });
+        }
+      }
+      // the outlines while the vertices last; a third of their vertices again for where they cross
+      // the isolines, each other and the band points: one build, mostly
+      let room = (MAX_SURFACE_VERTS - relief.vx.length - points.length) / 1.3;
+      let attempt = 0;
+      const pick = () => {
+        picked = 0;
+        for (let used = 0; picked < counts.length && used + counts[picked] <= room; picked++) used += counts[picked];
+        return beds.slice(0, picked).flatMap((b) => b.edges);
+      };
+      return {
+        extraPoints: points,
+        reshape: (x, y, h) => pull.height(x, y, h),
+        next: (vertices) => {
+          if (vertices === undefined) return pick();
+          if (vertices <= MAX_SURFACE_VERTS || picked === 0 || ++attempt >= 6) return undefined;
+          room -= (vertices - MAX_SURFACE_VERTS) * 1.2 + 16;
+          return pick();
+        },
+      };
+    },
+  });
   const loose = new Set<OsmLine>();
-  for (const b of pull.beds.slice(picked)) loose.add(roads.net.ways[b.way].line);
-  return loose.size ? { ...tin!, loose } : tin!;
+  for (const b of beds.slice(picked)) loose.add(roads.net.ways[b.way].line);
+  return loose.size ? { ...tin, loose } : tin;
 }
 
 /**

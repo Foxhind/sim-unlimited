@@ -3,6 +3,7 @@ import { RAMP } from '../src/engine/palette';
 import { gridLatLon, type Tile } from '../src/world/geodesy';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import { buildSurfaceTin } from '../src/world/surface-tin';
 
 const TILE: Tile = { z: 14, x: 9000, y: 6000 };
 const GRID = 32;
@@ -40,7 +41,8 @@ describe('terrain TIN sampler', () => {
 
   it('matches the rendered mesh: land faces are the TIN triangles, in order, at the same heights', () => {
     const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: hills, skirtDepth: 10 });
-    const tin = buildTerrainTin(TILE, GRID, hills);
+    // the mesh's own surface (a z14 tile's: surface-tin.ts)
+    const tin = buildSurfaceTin(TILE, GRID, hills);
     const sample = tinSampler(tin, TILE);
     expect(m.vertexCount / 3).toBeGreaterThanOrEqual(tin.tris.length);
     tin.tris.forEach((t, ti) => {

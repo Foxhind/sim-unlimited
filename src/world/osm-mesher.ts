@@ -284,6 +284,11 @@ export function osmWidthM(value: string | undefined): number | undefined {
 const LANE_WIDTH_M = 3.5;
 /** width of a waterway line without a `width` tag, metres */
 const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
+/** a waterway's drawn width, metres (its `width`, else by kind); undefined for anything else */
+export function waterwayWidth(tags: Record<string, string>): number | undefined {
+  const ww = tags.waterway;
+  return ww && WATERWAY_WIDTH_M[ww] !== undefined ? osmWidthM(tags.width) ?? WATERWAY_WIDTH_M[ww] : undefined;
+}
 
 /**
  * Roads drawn near, by highway=*: carriageway width without `width` or `lanes`, and the shoulder

@@ -97,6 +97,13 @@ export interface TinOptions {
   borders?: TileBorders;
   /** vertical tolerance of the simplified tile border, metres (default BORDER_TOL_M) */
   borderTol?: number;
+  /**
+   * After the belts: every lattice node (off the border) where the TIN is off the lattice by more
+   * than this many metres becomes a vertex at the lattice's height, a few rounds, at most
+   * MAX_RELIEF_POINTS. The detailed tiles use it: their roads and rivers lie on the true relief,
+   * and a relief coarser than that lets them show through it in trenches. Undefined: belts only.
+   */
+  reliefTol?: number;
   /** filled with intermediate results when given (inspector tool); does not change the output */
   debug?: TinDebug;
   /** colour labels over the tile: free edges are also flipped toward single-colour triangles */
@@ -142,6 +149,20 @@ export interface TinOptions {
    * two tiles draw the same border.
    */
   reshape?: (x: number, y: number, h: number) => number;
+  /**
+   * A surface over the relief (surface-tin.ts), planned once the relief is built: it is given the
+   * relief's vertices and fixed edges, and gives the extra points, the final heights, and the
+   * fixed lines — again after each build, from its vertex count, until it returns none (that build
+   * stands). Takes the place of fixedLines, extraPoints and reshape.
+   */
+  surface?: (relief: { vx: ReadonlyArray<number>; vy: ReadonlyArray<number>; constraints: ReadonlyArray<readonly [number, number]> }) => SurfacePlan;
+}
+
+export interface SurfacePlan {
+  extraPoints: ReadonlyArray<Pt>;
+  reshape: (x: number, y: number, h: number) => number;
+  /** the fixed lines for the first build (no argument), or for another after a build of `vertices`; undefined: that build stands */
+  next(vertices?: number): ReadonlyArray<ReadonlyArray<Pt>> | undefined;
 }
 
 /** land beside an OSM coastline is lifted to at least this height (the DEM has it at or below 0) */
@@ -518,6 +539,9 @@ const REFINE_PER_ROUND = 4;
 const REFINE_SPACING = 4;
 /** vertices refinement may add to a tile (checked after each round) */
 export const MAX_REFINE_VERTS = 60;
+/** TinOptions.reliefTol: rounds, and lattice nodes it may add to a tile */
+const RELIEF_ROUNDS = 3;
+export const MAX_RELIEF_POINTS = 2500;
 
 /** signed TIN − lattice error at every lattice node (water clamped to 0 on both sides) */
 function latticeError(t: { vx: number[]; vy: number[]; vh: number[]; tris: Tri[] }, heights: Float32Array, grid: number): Float64Array {
@@ -693,7 +717,7 @@ function insertColourLines(
  * Fixed lines and extra points (TinOptions.fixedLines / extraPoints) into the fixed edges, like
  * insertColourLines but over thousands of segments: the fixed edges are found by cell. A segment
  * crossing a fixed edge splits both there (the height interpolated along the fixed edge); a point
- * on a fixed edge splits it; an extra point on a fixed edge is left out. Deterministic.
+ * on a fixed edge (a line's or an extra one) splits it. Deterministic.
  */
 function insertFixedLines(
   lines: ReadonlyArray<ReadonlyArray<Pt>>,
@@ -776,12 +800,6 @@ function insertFixedLines(
     return undefined;
   };
 
-  /** whether p lies within SNAP of a fixed edge */
-  const nearEdge = (p: Pt): boolean => nearBox(p.x, p.y, p.x, p.y).some((ci) => {
-    const [u, v] = constraints[ci];
-    return distToSeg(p, { x: vx[u], y: vy[u] }, { x: vx[v], y: vy[v] }) < SNAP;
-  });
-
   for (const line of lines) {
     let prev = -1;
     for (let k = 0; k < line.length; k++) {
@@ -819,7 +837,8 @@ function insertFixedLines(
     }
   }
   for (const p of points) {
-    if (isEnd(p) || nearEdge(p)) continue;
+    // on a fixed edge it splits it (or is its end), as a line's point does
+    if (isEnd(p) || onEdge(p) !== undefined) continue;
     vid(p, heightAt(p));
   }
 }
@@ -983,7 +1002,8 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const edgeLen = tileRowMeters(pz, e === 0 ? py : e === 1 ? py + 1 : py + 0.5);
     const pts: Pt[] = Array.from(prof, (h, k) => ({ x: (k / (prof.length - 1)) * edgeLen, y: h }));
     const off = ((e < 2 ? tile.x : tile.y) % 2) / 2;
-    const line = simplifyBorder(pts, borderTol).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
+    // as the parent simplifies it (its own tolerance: a coarser tile never refines its border)
+    const line = simplifyBorder(pts, BORDER_TOL_M).map((q) => ({ f: (q.x / edgeLen - off) * 2, h: q.y }));
     for (const q of line) if (q.f > 0 && q.f < 1) borderPts.push({ p: place(e, q.f), h: lineAt(simplified[e], q.f) });
     return line;
   });
@@ -1167,6 +1187,12 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
         { verts: 0, crossings: 0 }, (p) => edgeOf(p) >= 0, (ci, added) => { if (coast[ci]) coast[added] = true; });
     }
 
+    // lattice nodes the belts missed by more than reliefTol, at the lattice's height
+    if (reliefPts.length) {
+      insertFixedLines([], reliefPts, constraints, vx, vy, vh, vid, (p) => latticeHeight(heights, grid, p), (p) => edgeOf(p) >= 0,
+        (ci, added) => { if (coast[ci]) coast[added] = true; });
+    }
+
     // colour boundaries: fixed edges too, with a vertex wherever they cross an isoline (at its
     // level) or another boundary
     if (colourHeight) insertColourLines(colourPicked, constraints, vx, vy, vh, vid, (p) => {
@@ -1224,8 +1250,10 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
 
   let lastColourFlips = 0;
   const stats = { verts: 0, crossings: 0 };
-  const fixedLines = (opts.fixedLines ?? []).filter((l) => l.length >= 2);
-  const extraPoints = opts.extraPoints ?? [];
+  let fixedLines = (opts.fixedLines ?? []).filter((l) => l.length >= 2);
+  /** lattice nodes added as vertices (TinOptions.reliefTol) */
+  const reliefPts: Pt[] = [];
+  let extraPoints = opts.extraPoints ?? [];
   /** the final heights (TinOptions.reshape), and the border kept to what both neighbours draw */
   const reshapeHeights = (r: { vx: number[]; vy: number[]; vh: number[]; coastEdges: Set<number>; shared: Set<number> }, reshape: (x: number, y: number, h: number) => number) => {
     const { vx, vy, vh } = r;
@@ -1318,12 +1346,42 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     added = res.vx.length - baseVerts;
   }
 
+  // The detailed tiles' relief to reliefTol: the nodes the belts miss by more, as vertices at their
+  // own height, a few rounds (each changes the faces round it)
+  if (opts.reliefTol !== undefined) {
+    const inRelief = new Set<number>();
+    for (let round = 0; round < RELIEF_ROUNDS && reliefPts.length < MAX_RELIEF_POINTS; round++) {
+      const err = latticeError(res, heights, grid);
+      const worst: number[] = [];
+      for (let j = 1; j < grid; j++) for (let i = 1; i < grid; i++) {
+        const k = j * side + i;
+        if (Math.abs(err[k]) > opts.reliefTol && !inRelief.has(k)) worst.push(k);
+      }
+      if (!worst.length) break;
+      worst.sort((p, q) => Math.abs(err[q]) - Math.abs(err[p]) || p - q);
+      for (const k of worst.slice(0, MAX_RELIEF_POINTS - reliefPts.length)) {
+        inRelief.add(k);
+        reliefPts.push({ x: k % side, y: Math.floor(k / side) });
+      }
+      res = triangulate(chains);
+    }
+  }
+
   // Colour boundaries last, and on the relief surface built so far: they cut it into faces of
   // one colour without reshaping it. Their vertices used to take the lattice height instead, which
   // made every one of them a sample of relief finer than the belts carry — bumps inside a tile,
   // and next to the border a strip tilted against the coarser border line (a ridge or a groove
   // along every seam). A tile of one belt stays two flat triangles however it is coloured.
-  // The fixed lines and extra points (road beds) the same way: on the relief built so far.
+  // The fixed lines and extra points (road beds) the same way: on the relief built so far. With
+  // a surface plan (TinOptions.surface) they come from it, chosen against the vertex count.
+  let reshape = opts.reshape;
+  const plan = opts.surface?.({ vx: res.vx, vy: res.vy, constraints: res.constraints });
+  if (plan) {
+    extraPoints = plan.extraPoints;
+    reshape = plan.reshape;
+  }
+  let planned = plan ? plan.next() : undefined;
+  if (planned) fixedLines = planned.filter((l) => l.length >= 2);
   const surfacePass = fixedLines.length > 0 || extraPoints.length > 0;
   if (colourPicked.length || surfacePass) {
     const locate = latticeLocator(res, grid);
@@ -1335,9 +1393,17 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       const t = tris[r.tri];
       return relief[t.a] * r.w[0] + relief[t.b] * r.w[1] + relief[t.c] * r.w[2];
     };
-    res = triangulate(chains, colourPicked.length ? onRelief : undefined, surfacePass ? onRelief : undefined);
+    for (;;) {
+      const built = triangulate(chains, colourPicked.length ? onRelief : undefined, surfacePass ? onRelief : undefined);
+      planned = plan?.next(built.vx.length);
+      if (!planned) {
+        res = built;
+        break;
+      }
+      fixedLines = planned.filter((l) => l.length >= 2);
+    }
   }
-  if (opts.reshape) reshapeHeights(res, opts.reshape);
+  if (reshape) reshapeHeights(res, reshape);
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
   const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid, seaAt);
@@ -1380,37 +1446,62 @@ export function seaFaces(
   /** the OSM coastline's verdict for a point (TinOptions.coast); the DEM decides without it */
   seaAt?: (p: Pt) => boolean,
 ): Uint8Array {
-  const byEdge = new Map<number, number[]>();
-  tris.forEach((t, i) => {
-    for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
-      const k = edgeKey(u, v);
-      const l = byEdge.get(k);
-      if (l) l.push(i);
-      else byEdge.set(k, [i]);
+  // the faces across each edge (none crossed where it is a coastline edge); with no coastline the
+  // TIN is one region
+  const across = new Int32Array(tris.length * 3).fill(-1);
+  if (coastEdges.size) {
+    const byEdge = new Map<number, number>();
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[i];
+      for (let e = 0; e < 3; e++) {
+        const u = e === 0 ? t.a : e === 1 ? t.b : t.c, v = e === 0 ? t.b : e === 1 ? t.c : t.a;
+        const k = edgeKey(u, v);
+        if (coastEdges.has(k)) continue;
+        const o = byEdge.get(k);
+        if (o === undefined) byEdge.set(k, i * 3 + e);
+        else {
+          across[i * 3 + e] = Math.floor(o / 3);
+          across[o] = i;
+        }
+      }
     }
-  });
+  }
   const region = new Int32Array(tris.length).fill(-1);
   const sea = new Uint8Array(tris.length);
   for (let start = 0; start < tris.length; start++) {
     if (region[start] >= 0) continue;
-    const members: number[] = [start];
-    region[start] = start;
-    let vote = 0;
-    for (let q = 0; q < members.length; q++) {
-      const t = tris[members[q]];
-      const area = Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2;
-      const c = { x: (vx[t.a] + vx[t.b] + vx[t.c]) / 3, y: (vy[t.a] + vy[t.b] + vy[t.c]) / 3 };
-      vote += (seaAt ? seaAt(c) : latticeHeight(heights, grid, c) < COAST_LEVEL) ? area : -area;
-      for (const [u, v] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
-        const k = edgeKey(u, v);
-        if (coastEdges.has(k)) continue;
-        for (const n of byEdge.get(k)!) {
-          if (region[n] < 0) {
+    let members: number[];
+    if (!coastEdges.size) {
+      members = tris.map((_, i) => i);
+      region.fill(start);
+    } else {
+      members = [start];
+      region[start] = start;
+      for (let q = 0; q < members.length; q++) {
+        const f = members[q];
+        for (let e = 0; e < 3; e++) {
+          const n = across[f * 3 + e];
+          if (n >= 0 && region[n] < 0) {
             region[n] = start;
             members.push(n);
           }
         }
       }
+    }
+    // the vote, by area: the largest faces first, stopped once the rest cannot turn it (the same
+    // verdict as asking every face; the many small ones by the roads mostly go unasked)
+    const area = members.map((m) => {
+      const t = tris[m];
+      return Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2;
+    });
+    const order = members.map((_, k) => k).sort((p, q) => area[q] - area[p] || p - q);
+    let vote = 0, rest = area.reduce((a, b) => a + b, 0);
+    for (const k of order) {
+      if (Math.abs(vote) > rest) break;
+      const t = tris[members[k]];
+      const c = { x: (vx[t.a] + vx[t.b] + vx[t.c]) / 3, y: (vy[t.a] + vy[t.b] + vy[t.c]) / 3 };
+      vote += (seaAt ? seaAt(c) : latticeHeight(heights, grid, c) < COAST_LEVEL) ? area[k] : -area[k];
+      rest -= area[k];
     }
     if (vote > 0) for (const m of members) sea[m] = 1;
   }

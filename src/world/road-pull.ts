@@ -36,6 +36,12 @@ export interface RoadPull {
    * (it may be cut out on one side of the border only): the neighbour has the same points
    */
   borderPoints: Pt[];
+  /**
+   * Points of the pull bands for the mesh: on rows along each road (BAND_ROWS of its band, the last
+   * on the band's edge, where the ground is the relief's own), thinned to at most `limit` and off
+   * every bed. They carry the fall from a road to the relief along the road, not on the lattice.
+   */
+  bandPoints(limit: number): Pt[];
 }
 
 /**
@@ -53,6 +59,10 @@ const BED_MAX_SEG_M = 60;
 const BED_ALONG_M = 3;
 /** ... and fades out over this much beyond the bed's edge */
 const BED_GRACE_M = 1;
+/** rows of points along a road in its pull band, as fractions of the band (the last on its edge) */
+const BAND_ROWS = [0.3, 0.65, 1];
+/** band points no closer than this, metres (more where a tile has too many) */
+const BAND_SPACING_M = 12;
 /** an outline's mitre on the inside of a bend reaches at most this many times its offset */
 const MITRE_MAX = 4;
 /** an approach's pull band fades out over this many metres before its end at a bridge or tunnel */
@@ -122,17 +132,46 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   }
   const near = (x: number, y: number): number[] => cells.get(ckey(Math.floor(x / CELL), Math.floor(y / CELL))) ?? [];
 
-  /**
-   * distance (lattice cells) from (x, y) to segment s, the fraction along it, how far (cells) the
-   * projection was clamped, and the unclamped fraction
-   */
-  const project = (s: Seg, x: number, y: number): [number, number, number, number] => {
-    const ax = sx[s.i], ay = sy[s.i], dx = sx[s.j] - ax, dy = sy[s.j] - ay;
-    const l2 = dx * dx + dy * dy;
+  // the stretches' geometry, flat: start, direction, squared length, length (lattice cells) and
+  // the box their reach can touch
+  const nSeg = segs.length;
+  const gAx = new Float64Array(nSeg), gAy = new Float64Array(nSeg), gDx = new Float64Array(nSeg), gDy = new Float64Array(nSeg);
+  const gL2 = new Float64Array(nSeg), gLen = new Float64Array(nSeg);
+  const gX0 = new Float64Array(nSeg), gX1 = new Float64Array(nSeg), gY0 = new Float64Array(nSeg), gY1 = new Float64Array(nSeg);
+  {
+    const cellsPerM = 1 / Math.min(mpc(0), mpc(grid));
+    for (let q = 0; q < nSeg; q++) {
+      const { i, j, way } = segs[q];
+      gAx[q] = sx[i];
+      gAy[q] = sy[i];
+      gDx[q] = sx[j] - sx[i];
+      gDy[q] = sy[j] - sy[i];
+      gL2[q] = gDx[q] * gDx[q] + gDy[q] * gDy[q];
+      gLen[q] = Math.sqrt(gL2[q]);
+      const w = net.ways[way], r = (w.half + BED_GRACE_M + w.band * maxScale) * cellsPerM * 1.01;
+      gX0[q] = Math.min(sx[i], sx[j]) - r;
+      gX1[q] = Math.max(sx[i], sx[j]) + r;
+      gY0[q] = Math.min(sy[i], sy[j]) - r;
+      gY1[q] = Math.max(sy[i], sy[j]) + r;
+    }
+  }
+  /** the stretch starting at each sample, −1 for none */
+  const segOf = new Int32Array(net.samples.length).fill(-1);
+  segs.forEach((g, q) => (segOf[g.i] = q));
+  /** the last projection: distance (lattice cells), how far it was clamped (cells), the unclamped fraction */
+  let pDist = 0, pOver = 0, pRaw = 0;
+  /** project (x, y) on stretch q (into pDist, pOver, pRaw) */
+  const project = (q: number, x: number, y: number): void => {
+    const ax = gAx[q], ay = gAy[q], dx = gDx[q], dy = gDy[q], l2 = gL2[q];
     const raw = l2 > 0 ? ((x - ax) * dx + (y - ay) * dy) / l2 : 0;
-    const t = Math.max(0, Math.min(1, raw));
-    return [Math.hypot(x - ax - t * dx, y - ay - t * dy), t, Math.abs(raw - t) * Math.sqrt(l2), raw];
+    const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+    const ex = x - ax - t * dx, ey = y - ay - t * dy;
+    pDist = Math.sqrt(ex * ex + ey * ey);
+    pOver = Math.abs(raw - t) * gLen[q];
+    pRaw = raw;
   };
+  /** whether (x, y) is outside the box stretch q can reach */
+  const outOfReach = (q: number, x: number, y: number): boolean => x < gX0[q] || x > gX1[q] || y < gY0[q] || y > gY1[q];
   // seniority: priority, then the order in the network (only the outlines' cutting uses the order;
   // heights never do: two tiles may list the ways differently)
   const senior = (a: number, b: number) => net.ways[a].prio > net.ways[b].prio || (net.ways[a].prio === net.ways[b].prio && a < b);
@@ -160,8 +199,10 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   });
   /** 1 well inside a way's reach, falling to 0 at an end at a structure; −1 past it (nothing there) */
   const reachOf = (way: number, x: number, y: number, m: number): number => {
+    const ends = structureEnds[way];
+    if (!ends.length) return 1;
     let f = 1;
-    for (const [ex, ey, dx, dy] of structureEnds[way]) {
+    for (const [ex, ey, dx, dy] of ends) {
       const past = ((x - ex) * dx + (y - ey) * dy) * m;
       if (past > 0) return -1;
       f = Math.min(f, smoothStep(-past / STRUCTURE_FADE_M));
@@ -169,8 +210,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     return f;
   };
   /** the height of stretch s at unclamped fraction raw: its grade carried at most BED_ALONG_M past its ends */
-  const zAlong = (s: Seg, raw: number, m: number): number => {
-    const len = Math.hypot(sx[s.j] - sx[s.i], sy[s.j] - sy[s.i]) * m;
+  const zAlong = (q: number, raw: number, m: number): number => {
+    const s = segs[q];
+    const len = gLen[q] * m;
     const over = len > 0 ? BED_ALONG_M / len : 0;
     const t = Math.max(-over, Math.min(1 + over, raw));
     return z[s.i] + (z[s.j] - z[s.i]) * t;
@@ -188,12 +230,13 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     const list = near(x, y);
     let w = 0, top = -Infinity, sc = 0, scz = 0;
     for (const si of list) {
+      if (outOfReach(si, x, y)) continue;
       const s = segs[si];
       const way = net.ways[s.way];
       const reach = reachOf(s.way, x, y, m);
       if (reach < 0) continue;
-      const [dc, , ec, raw] = project(s, x, y);
-      const d = dc * m;
+      project(si, x, y);
+      const d = pDist * m;
       if (d <= way.half) {
         top = Math.max(top, way.prio);
         continue;
@@ -203,9 +246,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       if (u <= 0) continue;
       w = Math.max(w, u);
       // u / (1 − u) grows without bound towards a bed; capped where u rounds to 1
-      const c = (u / Math.max(1e-12, 1 - u)) * alongWeight(ec, m);
+      const c = (u / Math.max(1e-12, 1 - u)) * alongWeight(pOver, m);
       sc += c;
-      scz += c * zAlong(s, raw, m);
+      scz += c * zAlong(si, pRaw, m);
     }
     if (top === -Infinity) return { w, bed: false, r: sc > 0 ? scz / sc : NaN };
     // on a bed: the height of the senior roads whose beds hold the point (all of equal priority,
@@ -214,14 +257,15 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     // (BED_ALONG_M) and how near it is to its bed (BED_GRACE_M beyond), each at its own grade
     let kz = 0, k = 0;
     for (const si of list) {
+      if (outOfReach(si, x, y)) continue;
       const s = segs[si];
       const way = net.ways[s.way];
       if (way.prio !== top || reachOf(s.way, x, y, m) < 0) continue;
-      const [dc, , ec, raw] = project(s, x, y);
-      const d = dc * m;
+      project(si, x, y);
+      const d = pDist * m;
       if (d > way.half + BED_GRACE_M) continue;
-      const wk = alongWeight(ec, m) * smoothStep((way.half + BED_GRACE_M - d) / BED_GRACE_M);
-      kz += wk * zAlong(s, raw, m);
+      const wk = alongWeight(pOver, m) * smoothStep((way.half + BED_GRACE_M - d) / BED_GRACE_M);
+      kz += wk * zAlong(si, pRaw, m);
       k += wk;
     }
     return { w: 1, bed: true, r: k > 0 ? kz / k : NaN };
@@ -234,7 +278,128 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     return e.w > 0 ? base + e.w * (e.r - base) : base;
   };
   const borderPoints: Pt[] = [];
-  return { weight, height, beds: bedOutlines(), borderPoints };
+  /** each sample's latitude and the band scale there */
+  const latAt = Float64Array.from(sy, (y) => latOf(y));
+  const scaleAt = Float64Array.from(latAt, (lat) => {
+    const w = roadWindow(lat);
+    return w < MIN_WINDOW_M ? 0 : w / ROAD_WINDOW_M;
+  });
+  /** whether a run's samples come within `metres` of the tile */
+  const reachesTile = (run: number[], metres: number): boolean => {
+    const r = metres / Math.min(mpc(0), mpc(grid));
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const k of run) { x0 = Math.min(x0, sx[k]); x1 = Math.max(x1, sx[k]); y0 = Math.min(y0, sy[k]); y1 = Math.max(y1, sy[k]); }
+    return x1 >= -r && x0 <= grid + r && y1 >= -r && y0 <= grid + r;
+  };
+  /** the band rows' points inside the tile, the senior roads' first */
+  const rowPoints: Pt[] = [];
+  const beds = bedOutlines();
+  return { weight, height, beds, borderPoints, bandPoints };
+
+  /** where the polyline crosses the tile border: shared points (the neighbour has them too) */
+  function crossBorder(pts: Pt[]): void {
+    for (let k = 1; k < pts.length; k++) {
+      for (const t of squareCuts(pts[k - 1], pts[k])) {
+        const q = snapBorder(lerp(pts[k - 1], pts[k], t), grid);
+        if (q.x >= 0 && q.x <= grid && q.y >= 0 && q.y <= grid && (q.x === 0 || q.x === grid || q.y === 0 || q.y === grid)) borderPoints.push(q);
+      }
+    }
+  }
+
+  function squareCuts(a: Pt, b: Pt): number[] {
+    const ts: number[] = [];
+    for (const [pa, pb] of [[a.x, b.x], [a.y, b.y]]) {
+      for (const edge of [0, grid]) {
+        if (pa === pb) continue;
+        const t = (edge - pa) / (pb - pa);
+        if (t > 0 && t < 1) ts.push(t);
+      }
+    }
+    return ts;
+  }
+
+  /**
+   * One side of a run of samples offset `metres(k)` from its axis, mitred at its bends; round on the
+   * outside of a turn sharper than a right angle, the inside mitred up to MITRE_MAX times
+   */
+  /** per sample of a run: the unit normals (left) of the stretches before and after it */
+  function runNormals(run: number[]): Array<Array<[number, number]>> {
+    const closed = run.length > 3 && sx[run[0]] === sx[run[run.length - 1]] && sy[run[0]] === sy[run[run.length - 1]];
+    return run.map((k, q) => {
+      const prev = q > 0 ? run[q - 1] : closed ? run[run.length - 2] : -1;
+      const next = q + 1 < run.length ? run[q + 1] : closed ? run[1] : -1;
+      const normals: Array<[number, number]> = [];
+      for (const [a, b] of [[prev, k], [k, next]]) {
+        if (a < 0 || b < 0) continue;
+        const dx = sx[b] - sx[a], dy = sy[b] - sy[a], l = Math.hypot(dx, dy);
+        if (l > 0) normals.push([-dy / l, dx / l]);
+      }
+      return normals;
+    });
+  }
+
+  function offsetRun(run: number[], metres: (k: number) => number, side: number, normalsOf: Array<Array<[number, number]>> = runNormals(run)): PtK[] {
+    const pts: PtK[] = [];
+    run.forEach((k, q) => {
+      const normals = normalsOf[q];
+      const r = (side * metres(k)) / (cellM * Math.cos((latAt[k] * Math.PI) / 180));
+      const at = (nx: number, ny: number, f: number) => pts.push({ x: sx[k] + nx * r * f, y: sy[k] + ny * r * f, k });
+      if (normals.length < 2) {
+        const [nx, ny] = normals[0] ?? [0, 0];
+        at(nx, ny, 1);
+        return;
+      }
+      const [[ax, ay], [bx, by]] = normals;
+      const mx = ax + bx, my = ay + by, ml = Math.hypot(mx, my);
+      const cosHalf = ml / 2;
+      // the turn to the left (> 0) has the left side inside
+      const outside = side * (ax * by - ay * bx) < 0;
+      if (cosHalf >= Math.SQRT1_2 || (!outside && ml > 1e-9)) {
+        at(mx / ml, my / ml, Math.min(1 / Math.max(cosHalf, 1e-9), MITRE_MAX));
+        return;
+      }
+      // round: from the one stretch's normal to the other's in steps of 30° at most
+      const a0 = Math.atan2(ay, ax);
+      let da = Math.atan2(by, bx) - a0;
+      while (da > Math.PI) da -= 2 * Math.PI;
+      while (da < -Math.PI) da += 2 * Math.PI;
+      const steps = Math.max(1, Math.ceil(Math.abs(da) / (Math.PI / 6)));
+      for (let i = 0; i <= steps; i++) at(Math.cos(a0 + (da * i) / steps), Math.sin(a0 + (da * i) / steps), 1);
+    });
+    return pts;
+  }
+
+  /** the band rows' points thinned to at most `limit` (closer than BAND_SPACING_M, more if need be), off every bed */
+  function bandPoints(limit: number): Pt[] {
+    const m = mpc(grid / 2);
+    let r = BAND_SPACING_M / m;
+    for (let attempt = 0; ; attempt++) {
+      // the points kept so far by cell of side r: a linked list per cell
+      const side = Math.ceil(grid / r) + 1;
+      const head = new Int32Array(side * side).fill(-1);
+      const nextKept: number[] = [];
+      const kept: Pt[] = [];
+      for (const p of rowPoints) {
+        const cx = Math.floor(p.x / r), cy = Math.floor(p.y / r);
+        let near = false;
+        for (let i = Math.max(0, cx - 1); i <= Math.min(side - 1, cx + 1) && !near; i++) {
+          for (let j = Math.max(0, cy - 1); j <= Math.min(side - 1, cy + 1) && !near; j++) {
+            for (let q = head[j * side + i]; q >= 0; q = nextKept[q]) {
+              const o = kept[q];
+              if ((o.x - p.x) ** 2 + (o.y - p.y) ** 2 < r * r) { near = true; break; }
+            }
+          }
+        }
+        if (near) continue;
+        const c = cy * side + cx;
+        nextKept.push(head[c]);
+        head[c] = kept.length;
+        kept.push(p);
+      }
+      if (kept.length <= limit || attempt >= 6) return kept.filter((p) => !evaluate(p.x, p.y).bed).map(({ x, y }) => ({ x, y }));
+      r *= Math.sqrt(kept.length / limit) * 1.05;
+    }
+  }
 
   // --- the bed outlines ---
   function bedOutlines(): Array<{ way: number; edges: Pt[][] }> {
@@ -246,6 +411,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     order.forEach((w, k) => (rank[w] = k));
     // the outline segments laid so far (of more senior beds), by cell
     const laid: Array<[Pt, Pt]> = [];
+    /** laidCuts' marks: each laid segment once per call */
+    const laidSeen: number[] = [];
+    let laidStamp = 0;
     const laidCells = new Map<number, number[]>();
     const lay = (a: Pt, b: Pt) => {
       const id = laid.push([a, b]) - 1;
@@ -264,7 +432,19 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       // runs of samples with a height
       let run: number[] = [];
       const flush = () => {
-        if (run.length >= 2) for (const side of [-1, 1]) for (const piece of sideLine(run, way.half, side, wi)) edges.push(piece);
+        if (run.length >= 2) {
+          const normals = runNormals(run);
+          for (const side of [-1, 1]) {
+            for (const piece of sideLine(run, way.half, side, wi, normals)) edges.push(piece);
+            // the band's rows along it (only where its band reaches the tile)
+            if (!reachesTile(run, way.half + BED_MARGIN_M + way.band)) continue;
+            for (const f of BAND_ROWS) {
+              const row = offsetRun(run, (k) => way.half + BED_MARGIN_M + way.band * scaleAt[k] * f, side, normals);
+              crossBorder(row);
+              for (const p of row) if (p.x > 0 && p.x < grid && p.y > 0 && p.y < grid) rowPoints.push(p);
+            }
+          }
+        }
         run = [];
       };
       for (let k = way.first; k < way.first + way.count; k++) {
@@ -279,50 +459,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
     return out;
 
     /** one side of a run's bed: offset, clipped to the tile, cut out of senior beds, simplified */
-    function sideLine(run: number[], half: number, side: number, wi: number): Pt[][] {
-      const closed = run.length > 3 && sx[run[0]] === sx[run[run.length - 1]] && sy[run[0]] === sy[run[run.length - 1]];
-      // offset by half + BED_MARGIN_M from the axis, mitred at its bends; round on the outside of a
-      // turn sharper than a right angle, the inside mitred up to MITRE_MAX times
-      const pts: PtK[] = [];
-      run.forEach((k, q) => {
-        const prev = q > 0 ? run[q - 1] : closed ? run[run.length - 2] : -1;
-        const next = q + 1 < run.length ? run[q + 1] : closed ? run[1] : -1;
-        const normals: Array<[number, number]> = [];
-        for (const [a, b] of [[prev, k], [k, next]]) {
-          if (a < 0 || b < 0) continue;
-          const dx = sx[b] - sx[a], dy = sy[b] - sy[a], l = Math.hypot(dx, dy);
-          if (l > 0) normals.push([-dy / l, dx / l]);
-        }
-        const r = (side * (half + BED_MARGIN_M)) / mpc(sy[k]);
-        const at = (nx: number, ny: number, f: number) => pts.push({ x: sx[k] + nx * r * f, y: sy[k] + ny * r * f, k });
-        if (normals.length < 2) {
-          const [nx, ny] = normals[0] ?? [0, 0];
-          at(nx, ny, 1);
-          return;
-        }
-        const [[ax, ay], [bx, by]] = normals;
-        const mx = ax + bx, my = ay + by, ml = Math.hypot(mx, my);
-        const cosHalf = ml / 2;
-        // the turn to the left (> 0) has the left side inside
-        const outside = side * (ax * by - ay * bx) < 0;
-        if (cosHalf >= Math.SQRT1_2 || (!outside && ml > 1e-9)) {
-          at(mx / ml, my / ml, Math.min(1 / Math.max(cosHalf, 1e-9), MITRE_MAX));
-          return;
-        }
-        // round: from the one stretch's normal to the other's in steps of 30° at most
-        const a0 = Math.atan2(ay, ax);
-        let da = Math.atan2(by, bx) - a0;
-        while (da > Math.PI) da -= 2 * Math.PI;
-        while (da < -Math.PI) da += 2 * Math.PI;
-        const steps = Math.max(1, Math.ceil(Math.abs(da) / (Math.PI / 6)));
-        for (let i = 0; i <= steps; i++) at(Math.cos(a0 + (da * i) / steps), Math.sin(a0 + (da * i) / steps), 1);
-      });
-      for (let k = 1; k < pts.length; k++) {
-        for (const t of squareCuts(pts[k - 1], pts[k])) {
-          const q = onSquare(lerp(pts[k - 1], pts[k], t));
-          if (q.x >= 0 && q.x <= grid && q.y >= 0 && q.y <= grid && (q.x === 0 || q.x === grid || q.y === 0 || q.y === grid)) borderPoints.push(q);
-        }
-      }
+    function sideLine(run: number[], half: number, side: number, wi: number, normals: Array<Array<[number, number]>>): Pt[][] {
+      const pts = offsetRun(run, () => half + BED_MARGIN_M, side, normals);
+      crossBorder(pts);
       // split at the tile square and at the senior outlines; keep the pieces off senior beds and inside
       const pieces: PtK[][] = [];
       let cur: PtK[] = [];
@@ -331,8 +470,9 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
         const m = mpc(y), r = rank[wi];
         for (const si of near(x, y)) {
           const s = segs[si], rs = rank[s.way];
-          if (rs < 0 || rs >= r || reachOf(s.way, x, y, m) < 0) continue;
-          if (project(s, x, y)[0] * m <= net.ways[s.way].half + BED_MARGIN_M + 0.05) return true;
+          if (rs < 0 || rs >= r || outOfReach(si, x, y) || reachOf(s.way, x, y, m) < 0) continue;
+          project(si, x, y);
+          if (pDist * m <= net.ways[s.way].half + BED_MARGIN_M + 0.05) return true;
         }
         return false;
       };
@@ -371,26 +511,14 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       return snapBorder(p, grid);
     }
 
-    function squareCuts(a: Pt, b: Pt): number[] {
-      const ts: number[] = [];
-      for (const [pa, pb] of [[a.x, b.x], [a.y, b.y]]) {
-        for (const edge of [0, grid]) {
-          if (pa === pb) continue;
-          const t = (edge - pa) / (pb - pa);
-          if (t > 0 && t < 1) ts.push(t);
-        }
-      }
-      return ts;
-    }
-
     function laidCuts(a: Pt, b: Pt): number[] {
       const ts: number[] = [];
-      const seen = new Set<number>();
+      laidStamp++;
       for (let cx = Math.floor(Math.min(a.x, b.x) / CELL); cx <= Math.floor(Math.max(a.x, b.x) / CELL); cx++) {
         for (let cy = Math.floor(Math.min(a.y, b.y) / CELL); cy <= Math.floor(Math.max(a.y, b.y) / CELL); cy++) {
           for (const id of laidCells.get(ckey(cx, cy)) ?? []) {
-            if (seen.has(id)) continue;
-            seen.add(id);
+            if (laidSeen[id] === laidStamp) continue;
+            laidSeen[id] = laidStamp;
             const [c, d] = laid[id];
             const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
             if (den === 0) continue;
@@ -423,11 +551,16 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
           const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
           const plan = (Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) * m) / BED_PLAN_TOL_M;
           const vert = Math.abs(h[k] - (h[i] + (h[j] - h[i]) * t)) / BED_HEIGHT_TOL_M;
-          const e = Math.max(plan, vert, (Math.sqrt(l2) * m) / BED_MAX_SEG_M);
+          const e = Math.max(plan, vert);
           if (e > worst) {
             worst = e;
             at = k;
           }
+        }
+        // a chord too long though within the tolerances: split in the middle
+        if (worst <= 1 && (Math.sqrt(l2) * m) / BED_MAX_SEG_M > 1) {
+          worst = 2;
+          at = (i + j) >> 1;
         }
         if (worst > 1) {
           keepIdx[at] = 1;
@@ -442,11 +575,11 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       const w = net.ways[wi], m = mpc(y);
       let kz = 0, kk = 0;
       for (let i = Math.max(w.first, k - 2); i < Math.min(w.first + w.count - 1, k + 2); i++) {
-        if (!Number.isFinite(z[i]) || !Number.isFinite(z[i + 1])) continue;
-        const seg = { i, j: i + 1, way: wi };
-        const [, , ec, raw] = project(seg, x, y);
-        const a = alongWeight(ec, m);
-        kz += a * zAlong(seg, raw, m);
+        const q = segOf[i];
+        if (q < 0) continue;
+        project(q, x, y);
+        const a = alongWeight(pOver, m);
+        kz += a * zAlong(q, pRaw, m);
         kk += a;
       }
       return kk > 0 ? kz / kk : z[k];
