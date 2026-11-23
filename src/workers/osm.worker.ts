@@ -7,6 +7,7 @@ import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { insertAt } from '../world/bridge-mesher';
+import { buildPiers } from '../world/pier-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
@@ -24,8 +25,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands
-export const OSM_MESH_SCHEMA = 84;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts
+export const OSM_MESH_SCHEMA = 85;
 
 export interface OsmRequest {
   type: 'osm';
@@ -234,10 +235,13 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const masts = buildMasts(clipped.points, tile, drape);
     // bridge bodies and embankments (bridge-mesher.ts) are solid like the buildings and drawn with
     // them: after the buildings' core, as part of it (the far LOD and the shadows draw the core only)
-    const core = houses.coreVertexCount, decks = mesh.bridges.ramps.length;
+    // piers and breakwaters (pier-mesher.ts) likewise: solid, with the bridges in the core
+    const piers = buildPiers(tile, clipped.lines, clipped.areas, drape);
+    const solid = { vertices: concatF32(mesh.bridges.vertices, piers.vertices), ramps: concatU32(mesh.bridges.ramps, piers.ramps) };
+    const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {
-      vertices: concatF32(insertAt(houses.vertices, mesh.bridges.vertices, core * 6), masts.vertices),
-      ramps: concatU32(insertAt(houses.ramps, mesh.bridges.ramps, core), masts.ramps),
+      vertices: concatF32(insertAt(houses.vertices, solid.vertices, core * 6), masts.vertices),
+      ramps: concatU32(insertAt(houses.ramps, solid.ramps, core), masts.ramps),
       // masts and bridges have no windows
       windows: concatF32(insertAt(houses.windows, new Float32Array(decks * WINDOW_ATTR_FLOATS), core * WINDOW_ATTR_FLOATS), new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
     };
@@ -251,7 +255,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
     applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);
     applyGlow(bmesh.vertices, bmesh.ramps, tile, locate, levels);
-    const instances = concatF32(concatF32(props.trees, houses.acs), mesh.lampPosts);
+    // sorted by type: trees, air conditioners, lamp posts, then the marinas' yachts (props-mesher INSTANCE)
+    const instances = concatF32(concatF32(concatF32(props.trees, houses.acs), mesh.lampPosts), props.yachts);
     applyGlowToTrees(instances, tile, locate, levels);
     const out = {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,

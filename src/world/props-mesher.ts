@@ -1,7 +1,8 @@
-import { GLOW_SHIFT, LIGHT, PAYLOAD_MASK, RAMP, rampIndex, snowy } from '../engine/palette';
+import { colourOf, GLOW_SHIFT, LIGHT, PAYLOAD_MASK, RAMP, rampIndex, snowy } from '../engine/palette';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import { clipTileData } from './clip';
-import type { LonLat, OsmDetail, OsmTileData } from './osm-types';
+import type { LonLat, OsmDetail, OsmLine, OsmTileData } from './osm-types';
+import { pierWidth } from './pier-mesher';
 import type { HeightSampler } from './terrain-source';
 
 export interface PropsOptions {
@@ -18,6 +19,8 @@ export interface PropsData {
   trees: Float32Array;
   /** per light: x, y, z, palette index (stride 4) */
   lights: Float32Array;
+  /** yachts moored in the marinas (MARINA): instances as `trees`, sailing yachts then motor yachts (after every other type) */
+  yachts: Float32Array;
 }
 
 function mulberry32(seed: number): () => number {
@@ -64,7 +67,7 @@ export const TREE_TYPES = 5;
  */
 export const TREE_STRIDE = 8;
 /** instanced props drawn with the trees, by their type (after the tree types) */
-export const INSTANCE = { AC: TREE_TYPES, LAMP: TREE_TYPES + 1 } as const;
+export const INSTANCE = { AC: TREE_TYPES, LAMP: TREE_TYPES + 1, SAILBOAT: TREE_TYPES + 2, MOTORBOAT: TREE_TYPES + 3 } as const;
 
 /** appends one instance (TREE_STRIDE floats) */
 export function pushInstance(out: number[], x: number, y: number, z: number, scale: number, packed: number, type: number, yaw: number): void {
@@ -164,6 +167,41 @@ function palm(): Shape {
   return s;
 }
 
+/**
+ * A yacht a unit long (the instance's scale is its length), stern at x = 0, bow toward +x, the
+ * waterline at y = 0: a hull narrowing to the bow, its teak deck (the trunk's part, bark-coloured),
+ * then a sailing yacht's mast or a motor yacht's cabin (the hull's colour).
+ */
+function yacht(sail: boolean): Shape {
+  const s = new Shape();
+  const C = YACHT_HULL;
+  // deck and waterline outlines, stern to bow: [x, half beam]
+  const deck: [number, number][] = [[0, C.BEAM], [0.62, C.BEAM], [1, 0]];
+  const water: [number, number][] = [[0.03, C.BEAM * 0.8], [0.6, C.BEAM * 0.75], [0.94, 0]];
+  const centre: V3 = [0.5, C.FREEBOARD / 2, 0];
+  const d = (k: number, side: number): V3 => [deck[k][0], C.FREEBOARD, deck[k][1] * side];
+  const w = (k: number, side: number): V3 => [water[k][0], 0, water[k][1] * side];
+  for (const side of [1, -1]) {
+    for (let k = 0; k + 1 < deck.length; k++) {
+      s.tri(d(k, side), d(k + 1, side), w(k + 1, side), CROWN, centre);
+      s.tri(d(k, side), w(k + 1, side), w(k, side), CROWN, centre);
+    }
+  }
+  // the transom
+  s.tri(d(0, 1), d(0, -1), w(0, -1), CROWN, centre);
+  s.tri(d(0, 1), w(0, -1), w(0, 1), CROWN, centre);
+  // the deck
+  s.tri(d(0, 1), d(0, -1), d(1, -1), TRUNK);
+  s.tri(d(0, 1), d(1, -1), d(1, 1), TRUNK);
+  s.tri(d(1, 1), d(1, -1), d(2, 1), TRUNK);
+  if (sail) s.box(0.52, C.FREEBOARD, -0.008, 0.535, C.MAST, 0.008, CROWN);
+  else s.box(0.18, C.FREEBOARD, -C.BEAM * 0.7, 0.58, C.FREEBOARD + C.CABIN, C.BEAM * 0.7, CROWN);
+  return s;
+}
+
+/** a yacht's proportions to its length: half beam, freeboard, a cabin's height, the mast's top */
+const YACHT_HULL = { BEAM: 0.16, FREEBOARD: 0.1, CABIN: 0.14, MAST: 1.35 } as const;
+
 const SHAPES: Shape[] = [
   // spruce: the old pyramid, as a narrow four-sided cone
   new Shape().lathe([[0.3 * Math.SQRT2, 0], [0, 1]], 4, CROWN, Math.PI / 4),
@@ -180,6 +218,9 @@ const SHAPES: Shape[] = [
   new Shape()
     .box(-LAMP_SHAPE.POLE_HALF, 0, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN)
     .box(LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT - 2 * LAMP_SHAPE.POLE_HALF, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.ARM + LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN),
+  // INSTANCE.SAILBOAT, INSTANCE.MOTORBOAT
+  yacht(true),
+  yacht(false),
 ];
 
 /** all silhouettes in one buffer (TREE_VERTEX_FLOATS per vertex) */
@@ -338,10 +379,98 @@ function plantOrchard(
   }
 }
 
+/**
+ * Yachts in a marina: moored stern-to along both sides of its pontoons (man_made=pier lines), as
+ * Mediterranean marinas moor them, one every SLOT_M, a slot taken by OCCUPANCY of them. Only at a
+ * marina: a pontoon with a vertex within RADIUS_M of a leisure=marina point or inside a marina
+ * area, and only where the yacht lies on the water (the ground at its middle and its bow at or under
+ * WATER_MAX_M).
+ */
+export const MARINA = {
+  RADIUS_M: 400,
+  SLOT_M: 4.6,
+  OCCUPANCY: 0.8,
+  /** the stern this far off the pontoon's edge */
+  GAP_M: 0.6,
+  LENGTH_M: [9, 16] as [number, number],
+  SAIL_SHARE: 0.65,
+  /** hulls: mostly white, some navy */
+  WHITE: [238, 238, 234] as const,
+  NAVY: [38, 56, 96] as const,
+  NAVY_SHARE: 0.12,
+  WATER_MAX_M: 0.3,
+  /** a pontoon wider than this is a quay or a pier for ships, not a pontoon */
+  MAX_PONTOON_M: 8,
+} as const;
+
+/** the pontoons of the marinas among `data`, whole (not clipped to a tile) */
+export function marinaPontoons(data: Pick<OsmTileData, 'lines' | 'areas' | 'points'>): OsmLine[] {
+  const marinas = data.points.filter((p) => p.tags.leisure === 'marina').map((p) => p.at);
+  const areas = data.areas.filter((a) => a.tags.leisure === 'marina');
+  if (!marinas.length && !areas.length) return [];
+  const near = ([lon, lat]: LonLat): boolean => {
+    for (const [mlon, mlat] of marinas) {
+      const dx = (lon - mlon) * 111320 * Math.cos((mlat * Math.PI) / 180), dy = (lat - mlat) * 111320;
+      if (dx * dx + dy * dy <= MARINA.RADIUS_M * MARINA.RADIUS_M) return true;
+    }
+    return areas.some((a) => a.rings[0] && insideRing(lon, lat, a.rings[0]));
+  };
+  return data.lines.filter((l) => l.tags.man_made === 'pier' && pierWidth(l.tags) <= MARINA.MAX_PONTOON_M && l.points.some(near));
+}
+
+/** the yachts of `pontoons` whose sterns lie in `tile`: instances by type (SAILBOAT, then MOTORBOAT) */
+function mooredYachts(
+  pontoons: ReadonlyArray<OsmLine>,
+  tile: Tile,
+  sampleHeight: HeightSampler,
+  enu: (lon: number, lat: number) => [number, number],
+): number[][] {
+  const out: number[][] = [[], []];
+  const b = tileBounds(tile);
+  for (const l of pontoons) {
+    const half = pierWidth(l.tags) / 2;
+    const [lon0, lat0] = l.points[0];
+    const kx = 111320 * Math.cos((lat0 * Math.PI) / 180), ky = 111320;
+    const salt = Math.round(lon0 * 1e6) ^ Math.round(lat0 * 1e6);
+    for (let i = 0; i + 1 < l.points.length; i++) {
+      const [alon, alat] = l.points[i], [blon, blat] = l.points[i + 1];
+      // the segment in metres east (x), north (y) of its start
+      const dx = (blon - alon) * kx, dy = (blat - alat) * ky;
+      const len = Math.hypot(dx, dy);
+      const slots = Math.floor(len / MARINA.SLOT_M);
+      if (slots < 1) continue;
+      const ux = dx / len, uy = dy / len;
+      for (let k = 0; k < slots; k++) {
+        const along = (len - slots * MARINA.SLOT_M) / 2 + (k + 0.5) * MARINA.SLOT_M;
+        for (const side of [1, -1]) {
+          const r = (n: number) => hash2(i * 4096 + k, side, salt + n);
+          if (r(0) >= MARINA.OCCUPANCY) continue;
+          // out from the pontoon: its right (side 1) or left, east/north
+          const ox = uy * side, oy = -ux * side;
+          const length = MARINA.LENGTH_M[0] + r(1) * (MARINA.LENGTH_M[1] - MARINA.LENGTH_M[0]);
+          const at = (m: number): LonLat => [alon + (ux * along + ox * m) / kx, alat + (uy * along + oy * m) / ky];
+          const stern = at(half + MARINA.GAP_M);
+          const [slon, slat] = stern;
+          if (slon < b.west || slon >= b.east || slat <= b.south || slat > b.north) continue;
+          const mid = at(half + MARINA.GAP_M + length / 2), bow = at(half + MARINA.GAP_M + length);
+          if (sampleHeight(mid[0], mid[1]) > MARINA.WATER_MAX_M || sampleHeight(bow[0], bow[1]) > MARINA.WATER_MAX_M) continue;
+          const [x, z] = enu(slon, slat);
+          // the bow away from the pontoon: (ox, oy) east/north is (ox, −oy) in x, z
+          const yaw = Math.atan2(-oy, ox);
+          const sail = r(2) < MARINA.SAIL_SHARE;
+          const hull = colourOf(r(3) < MARINA.NAVY_SHARE ? [...MARINA.NAVY] : [...MARINA.WHITE]);
+          pushInstance(out[sail ? 0 : 1], x, 0, z, length, hull, sail ? INSTANCE.SAILBOAT : INSTANCE.MOTORBOAT, yaw);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /** Q36 instanced trees of several types + Q7 runway/taxiway light points, deterministic per tile. */
 export function buildProps(opts: PropsOptions): PropsData {
   const { tile, data, sampleHeight } = opts;
-  if (opts.detail !== 'full') return { trees: new Float32Array(0), lights: new Float32Array(0) };
+  if (opts.detail !== 'full') return { trees: new Float32Array(0), lights: new Float32Array(0), yachts: new Float32Array(0) };
   // trees in OSM wood/forest (no fill: Landsat colours the ground), cut at the tile border;
   // lights follow whole runways but only those inside the tile are kept
   const areas = clipTileData({ ...data, lines: [], points: [], buildings: [] }, tile).areas;
@@ -449,5 +578,7 @@ export function buildProps(opts: PropsOptions): PropsData {
     }
   }
 
-  return { trees: new Float32Array(byType.flat()), lights: new Float32Array(lights) };
+  // yachts at the marinas' pontoons, from the whole pontoons (their sterns in the tile)
+  const yachts = mooredYachts(marinaPontoons(data), tile, sampleHeight, enu).flat();
+  return { trees: new Float32Array(byType.flat()), lights: new Float32Array(lights), yachts: new Float32Array(yachts) };
 }

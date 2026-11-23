@@ -26,6 +26,9 @@ export const REACH_SELECTORS = [
   'relation["natural"="water"]',
   // a cliff's rock band reaches up to MITER_LIMIT × MAX_M off its line (cliffs.ts): into the next tile
   'way["natural"="cliff"]',
+  // the yachts of a pontoon past the border, and of a marina mapped there (props-mesher MARINA)
+  'way["man_made"="pier"]',
+  'node["leisure"="marina"]',
 ];
 
 /** a tile's bounds grown by ROAD_REACH_M */
@@ -39,6 +42,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
 // orchards for their rows of trees and a tint, vineyards for a tint; other landuse is not fetched.
 // Cliff lines give bands of bare rock (cliffs.ts), summits their height to the relief (peaks.ts).
+// Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -59,6 +63,7 @@ const FULL_FILTER = `
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
+  way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
 `;
 
 // summits far too: they raise the relief's lattice (peaks.ts)
@@ -126,12 +131,17 @@ function isAreaTags(tags: Record<string, string>): boolean {
   // an island's coastline closes on itself, but it is a line: land on its left (see coast.ts);
   // so is a cliff round a plateau: the low side on its right (cliffs.ts)
   if (tags.natural === 'coastline' || tags.natural === 'cliff') return false;
-  return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking';
+  // a closed pier or breakwater is its outline (pier-mesher.ts)
+  return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking' || isPierTags(tags);
+}
+
+function isPierTags(tags: Record<string, string>): boolean {
+  return tags.man_made === 'pier' || tags.man_made === 'breakwater' || tags.man_made === 'groyne';
 }
 
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
-    tags.natural === 'coastline' || tags.natural === 'cliff';
+    tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags);
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {
@@ -177,7 +187,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak')) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina')) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);

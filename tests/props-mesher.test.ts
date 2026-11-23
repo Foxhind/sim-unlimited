@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -33,7 +33,7 @@ function props(data: OsmTileData, detail: 'full' | 'large' = 'full', sample = fl
 
 describe('tree geometry', () => {
   it('packs one unit-height silhouette per tree type (then the props), with unit normals', () => {
-    expect(TREE_MESHES.length).toBe(TREE_TYPES + 2);
+    expect(TREE_MESHES.length).toBe(TREE_TYPES + 4);
     let next = 0;
     for (const m of TREE_MESHES) {
       expect(m.first).toBe(next);
@@ -274,5 +274,74 @@ describe('orchards (landuse=orchard)', () => {
     for (const [, , , type] of trees(props(orchard(plot(60, 40), { trees: 'palm_trees' })).trees)) expect(type).toBe(TREE.PALM);
     const vineyard: OsmTileData = { ...empty, areas: [{ rings: [plot(60, 40)], tags: { landuse: 'vineyard' } }] };
     expect(props(vineyard).trees.length).toBe(0);
+  });
+});
+
+describe('yachts in a marina', () => {
+  const center = tileCenter(TILE);
+  const M = 111320;
+  const cos = Math.cos((center.lat * Math.PI) / 180);
+  const at = (x: number, y: number): [number, number] => [center.lon + x / (M * cos), center.lat + y / M];
+  // a pontoon 100 m long running east, over the sea
+  const pontoon = { points: [at(-50, 0), at(50, 0)], tags: { man_made: 'pier', width: '3' } };
+  const marina = { at: at(0, 80), tags: { leisure: 'marina' } };
+  const sea = () => -4;
+  const yachts = (data: OsmTileData, sample = sea) => buildProps({ tile: TILE, detail: 'full', data, sampleHeight: sample }).yachts;
+
+  it('moors yachts on both sides of a marina pontoon, stern to it, bow out, on the water', () => {
+    const y = yachts({ ...empty, lines: [pontoon], points: [marina] });
+    const n = y.length / TREE_STRIDE;
+    const slots = 2 * Math.floor(100 / MARINA.SLOT_M);
+    expect(n).toBeGreaterThan(slots * MARINA.OCCUPANCY * 0.6);
+    expect(n).toBeLessThanOrEqual(slots);
+    let north = 0, south = 0;
+    for (let i = 0; i < y.length; i += TREE_STRIDE) {
+      const [x, h, z, len, , type, , yaw] = [y[i], y[i + 1], y[i + 2], y[i + 3], y[i + 4], y[i + 5], y[i + 6], y[i + 7]];
+      expect([INSTANCE.SAILBOAT, INSTANCE.MOTORBOAT]).toContain(type);
+      expect(h).toBe(0);
+      expect(len).toBeGreaterThanOrEqual(MARINA.LENGTH_M[0]);
+      expect(len).toBeLessThanOrEqual(MARINA.LENGTH_M[1]);
+      expect(Math.abs(x)).toBeLessThan(50);
+      // the stern on the pontoon's edge, the bow straight out (north: −z, south: +z)
+      expect(Math.abs(Math.abs(z) - (1.5 + MARINA.GAP_M))).toBeLessThan(0.5);
+      expect(Math.abs(Math.cos(yaw))).toBeLessThan(1e-6);
+      expect(Math.sign(Math.sin(yaw))).toBe(Math.sign(z));
+      if (z < 0) north++; else south++;
+    }
+    expect(north).toBeGreaterThan(0);
+    expect(south).toBeGreaterThan(0);
+    // sailing yachts first, then motor yachts: the instances stay sorted by type
+    const types = [];
+    for (let i = 5; i < y.length; i += TREE_STRIDE) types.push(y[i]);
+    expect(types).toEqual([...types].sort((a, b) => a - b));
+  });
+
+  it('none without a marina near, none on land, none at a wide quay', () => {
+    expect(yachts({ ...empty, lines: [pontoon] }).length).toBe(0);
+    expect(yachts({ ...empty, lines: [pontoon], points: [{ ...marina, at: at(0, 900) }] }).length).toBe(0);
+    expect(yachts({ ...empty, lines: [pontoon], points: [marina] }, () => 2).length).toBe(0);
+    expect(yachts({ ...empty, lines: [{ ...pontoon, tags: { man_made: 'pier', width: '20' } }], points: [marina] }).length).toBe(0);
+  });
+
+  it('a marina mapped as an area holds its pontoons', () => {
+    const ring = [at(-80, -60), at(80, -60), at(80, 60), at(-80, 60), at(-80, -60)];
+    const y = yachts({ ...empty, lines: [pontoon], areas: [{ rings: [ring], tags: { leisure: 'marina' } }] });
+    expect(y.length).toBeGreaterThan(0);
+  });
+
+  it('the yacht shapes: hull at the waterline, a sailing yacht taller than a motor yacht', () => {
+    const top = (t: number) => {
+      const { first, count } = TREE_MESHES[t];
+      let lo = Infinity, hi = -Infinity;
+      for (let i = first; i < first + count; i++) {
+        lo = Math.min(lo, TREE_GEOMETRY[i * TREE_VERTEX_FLOATS + 1]);
+        hi = Math.max(hi, TREE_GEOMETRY[i * TREE_VERTEX_FLOATS + 1]);
+      }
+      return [lo, hi];
+    };
+    expect(top(INSTANCE.SAILBOAT)[0]).toBe(0);
+    expect(top(INSTANCE.MOTORBOAT)[0]).toBe(0);
+    expect(top(INSTANCE.SAILBOAT)[1]).toBeGreaterThan(1);
+    expect(top(INSTANCE.MOTORBOAT)[1]).toBeLessThan(0.4);
   });
 });

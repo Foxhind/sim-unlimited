@@ -58,6 +58,7 @@ public class SimProfile implements Profile {
   static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course");
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
   static final Pattern ORCHARD = Pattern.compile("^(orchard|vineyard)$");
+  static final Pattern PIER = Pattern.compile("^(pier|breakwater|groyne)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -94,7 +95,7 @@ public class SimProfile implements Profile {
   static boolean isAreaTags(SourceFeature f) {
     if ("no".equals(s(f, "area")) || "coastline".equals(s(f, "natural")) || "cliff".equals(s(f, "natural"))) return false;
     for (String k : AREA_KEYS) if (f.hasTag(k)) return true;
-    return isCarPark(f);
+    return isCarPark(f) || find(PIER, s(f, "man_made"));
   }
 
   static boolean isCarPark(SourceFeature f) {
@@ -110,7 +111,8 @@ public class SimProfile implements Profile {
       find(NATURAL_WAY, s(f, "natural")) || "coastline".equals(s(f, "natural")) || "cliff".equals(s(f, "natural")) ||
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
       find(WATERWAY, s(f, "waterway")) ||
-      find(LEISURE, s(f, "leisure")) ||
+      find(LEISURE, s(f, "leisure")) || "marina".equals(s(f, "leisure")) ||
+      find(PIER, s(f, "man_made")) ||
       isCarPark(f) ||
       isMast(f);
   }
@@ -128,7 +130,8 @@ public class SimProfile implements Profile {
   }
 
   static boolean nodeWanted(SourceFeature f) {
-    return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural"));
+    return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
+      "marina".equals(s(f, "leisure"));
   }
 
   static Map<String, Object> keptTags(SourceFeature f) {
