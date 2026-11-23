@@ -5,7 +5,10 @@ import { tinLatticeSampler, type TerrainTin } from '../src/world/terrain-tin';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { Pad } from '../src/world/aerodrome';
 import type { RoadNet } from '../src/world/road-net';
-import type { GroundCover } from '../src/world/ground-cover';
+import { buildGroundCover, type GroundCover } from '../src/world/ground-cover';
+import { buildRoadNet } from '../src/world/road-net';
+import { solveRoadHeights } from '../src/world/road-heights';
+import { buildSurfaceTin, type SurfaceTin } from '../src/world/surface-tin';
 import { classifyLine } from '../src/world/way-styles';
 
 export const TILE: Tile = { z: 14, x: 9000, y: 6000 };
@@ -116,6 +119,75 @@ export function railOverRoad(): OsmLine[] {
 export const pointOnLiftedApproach: [number, number] = [18, 16];
 /** on the road under the rail bridge of railOverRoad */
 export const roadUnderRailBridge: [number, number] = [20, 16];
+
+/** a ring of `sides` lattice points of TILE, `r` cells round (cx, cy), the first at angle `a0` */
+export function polygon(cx: number, cy: number, r: number, sides: number, a0 = 0): [number, number][] {
+  return Array.from({ length: sides }, (_, k): [number, number] => {
+    const a = a0 + (2 * Math.PI * k) / sides;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  });
+}
+
+/** an area of TILE with the given tags, its rings lattice points of TILE */
+export function areaOf(tags: Record<string, string>, ...rings: [number, number][][]): OsmArea {
+  return { tags, rings: rings.map((r) => lonLats([...r, r[0]])) };
+}
+
+/**
+ * A small town on TILE, every kind of cover: a painted primary through a junction with a residential
+ * street, a dead-end service road, a footway, a railway over the street at a level crossing, a river,
+ * a park round a pond, a car park and a soccer pitch with its paint. Off the lattice nodes.
+ */
+export function townFixture(): { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] } {
+  const j: [number, number] = [31.9, 32.3];
+  const pitch = [[-52.5, -34], [52.5, -34], [52.5, 34], [-52.5, 34]].map(([x, y]): [number, number] => {
+    const c = Math.cos(0.3), s = Math.sin(0.3);
+    return [15.3 + (x * c - y * s) * M, 23.1 + (x * s + y * c) * M];
+  });
+  return {
+    lines: [
+      road({ highway: 'primary' }, [[3.3, 30.7], j, [61.1, 33.9]]),
+      road({ highway: 'residential' }, [[30.2, 3.7], j]),
+      road({ highway: 'residential' }, [j, [33.4, 60.6]]),
+      road({ highway: 'service' }, [[40.3, 34.8], [42.6, 44.1]]),
+      road({ highway: 'footway' }, [[10.4, 40.2], [25.7, 52.3]]),
+      rail([[2.6, 12.4], [61.4, 18.7]]),
+      road({ waterway: 'river' }, [[12.3, 61.5], [20.1, 45.3], [8.2, 35.1]]),
+    ],
+    areas: [
+      areaOf({ leisure: 'park' }, polygon(47.3, 47.6, 9.1, 7, 0.2), polygon(47.3, 47.6, 3.2, 6, 0.1)),
+      areaOf({ natural: 'water' }, polygon(47.3, 47.6, 3.2, 6, 0.1)),
+      areaOf({ amenity: 'parking' }, [[50.4, 20.6], [58.7, 21.3], [58.1, 27.4], [50.9, 26.8]]),
+      areaOf({ leisure: 'pitch', sport: 'soccer' }, pitch),
+    ],
+    points: [],
+  };
+}
+
+/**
+ * A town of `parks` small parks (twelve-gons in rows across TILE) and a few streets through them:
+ * more park edges than the surface's vertex budget holds
+ */
+export function denseTown(parks: number): { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] } {
+  const side = Math.ceil(Math.sqrt(parks)), step = 62 / side;
+  const areas = Array.from({ length: parks }, (_, k) =>
+    areaOf({ leisure: 'park' }, polygon(1 + step * ((k % side) + 0.5), 1 + step * (Math.floor(k / side) + 0.5), step * 0.35, 12, k * 0.37)));
+  const lines = [
+    road({ highway: 'primary' }, [[1.3, 30.7], [62.6, 33.9]]),
+    ...[8.3, 21.7, 40.2, 55.9].map((x) => road({ highway: 'residential' }, [[x, 1.4], [x + 1.7, 62.2]])),
+  ];
+  return { lines, areas, points: [] };
+}
+
+/**
+ * The surface of `tile` with its ground cover over a relief given in metres: the roads' heights from
+ * that relief, the cover from the whole OSM (`d`, lattice of TILE)
+ */
+export function coverTin(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, fn: (xm: number, ym: number) => number, tile: Tile = TILE): { tin: SurfaceTin; cover: GroundCover } {
+  const net = buildRoadNet(d.lines), roads = { net, z: solveRoadHeights(net, demOf(net, fn)) };
+  const cover = buildGroundCover(tile, GRID, d, roads);
+  return { tin: buildSurfaceTin(tile, GRID, lattice(fn, tile), { borders: bordersOf(fn, tile), roads, cover }), cover };
+}
 
 /** metres east and south of TILE's north-west corner at lon/lat */
 export function metresOf(lon: number, lat: number): [number, number] {

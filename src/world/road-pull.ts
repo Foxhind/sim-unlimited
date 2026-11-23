@@ -615,7 +615,7 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
 }
 
 /** within 1e-9 of the tile's border: exactly on it, its position along rounded to 1e-6 cell (the neighbour's too) */
-function snapBorder(p: Pt, grid: number): Pt {
+export function snapBorder(p: Pt, grid: number): Pt {
   const on = (v: number) => (Math.abs(v) < 1e-9 ? 0 : Math.abs(v - grid) < 1e-9 ? grid : undefined);
   const x = on(p.x), y = on(p.y);
   if (x !== undefined) return { x, y: y ?? Math.round(p.y * 1e6) / 1e6 };

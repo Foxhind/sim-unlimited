@@ -48,8 +48,11 @@ export interface CoverShape {
 export interface GroundCover {
   /** the shapes, the senior first */
   shapes: CoverShape[];
-  /** the index of the senior shape with a triangle holding lattice point (x, y), or −1 (the bare ground) */
-  locate(x: number, y: number): number;
+  /**
+   * the index of the senior shape with a triangle holding lattice point (x, y), or −1 (the bare
+   * ground); the shapes `skip` returns true for are passed over (the surface's dropped ribbons)
+   */
+  locate(x: number, y: number, skip?: (shape: number) => boolean): number;
 }
 
 /** lift is probed along a way at least this often, metres */
@@ -390,13 +393,13 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   g = 0;
   for (const s of shapes) for (let k = 0; k < s.tris.length / 6; k++, g++) { const gi = g; eachCell(s.tris, 6 * k, (cell) => { entries[fill[cell]++] = gi; }); }
 
-  /** the first triangle (in the shapes' order) of shape `only` (any: −1) holding (x, y): its global index, or −1 */
-  const find = (x: number, y: number, only: number): number => {
+  /** the first triangle (in the shapes' order) of shape `only` (any: −1, but those `skip` passes over) holding (x, y): its global index, or −1 */
+  const find = (x: number, y: number, only: number, skip?: (shape: number) => boolean): number => {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return -1;
     const cell = cellOf(y) * cells + cellOf(x);
     for (let e = start[cell]; e < start[cell + 1]; e++) {
       const gi = entries[e], si = triShape[gi];
-      if (only >= 0 && si !== only) continue;
+      if (only >= 0 ? si !== only : skip?.(si)) continue;
       if (holds(shapes[si].tris, 6 * triLocal[gi], x, y)) return gi;
     }
     return -1;
@@ -417,8 +420,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
 
   return {
     shapes,
-    locate: (x, y) => {
-      const gi = find(x, y, -1);
+    locate: (x, y, skip) => {
+      const gi = find(x, y, -1, skip);
       return gi < 0 ? -1 : triShape[gi];
     },
   };

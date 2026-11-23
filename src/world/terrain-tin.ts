@@ -715,9 +715,11 @@ function insertColourLines(
 
 /**
  * Fixed lines and extra points (TinOptions.fixedLines / extraPoints) into the fixed edges, like
- * insertColourLines but over thousands of segments: the fixed edges are found by cell. A segment
- * crossing a fixed edge splits both there (the height interpolated along the fixed edge); a point
- * on a fixed edge (a line's or an extra one) splits it. Deterministic.
+ * insertColourLines but over thousands of segments: the fixed edges and the vertices are found by
+ * cell. A segment crossing a fixed edge splits both there (the height interpolated along the fixed
+ * edge); a segment running through a vertex (an end of a collinear edge: the square ends of a road's
+ * carriageway and shoulder lie on one line) is split there; a point on a fixed edge (a line's or an
+ * extra one) splits it. Deterministic.
  */
 function insertFixedLines(
   lines: ReadonlyArray<ReadonlyArray<Pt>>,
@@ -733,40 +735,104 @@ function insertFixedLines(
   const CELL = 1;
   const cells = new Map<number, number[]>();
   const key = (cx: number, cy: number) => (cx + 1024) * 4096 + (cy + 1024);
+  /** the cells with a point within SNAP of segment a–b, column by column (not its box: an edge across the tile) */
+  const alongCells = (ax: number, ay: number, bx: number, by: number, visit: (k: number) => void) => {
+    const x0 = Math.min(ax, bx), x1 = Math.max(ax, bx);
+    for (let cx = Math.floor((x0 - SNAP) / CELL); cx <= Math.floor((x1 + SNAP) / CELL); cx++) {
+      let lo = Math.min(ay, by), hi = Math.max(ay, by);
+      if (ax !== bx) {
+        // the segment over the column widened by SNAP
+        const xa = Math.max(x0, cx * CELL - SNAP), xb = Math.min(x1, (cx + 1) * CELL + SNAP);
+        const ya = ay + ((by - ay) * (xa - ax)) / (bx - ax), yb = ay + ((by - ay) * (xb - ax)) / (bx - ax);
+        lo = Math.min(ya, yb);
+        hi = Math.max(ya, yb);
+      }
+      for (let cy = Math.floor((lo - SNAP) / CELL); cy <= Math.floor((hi + SNAP) / CELL); cy++) visit(key(cx, cy));
+    }
+  };
   const index = (ci: number) => {
     const [u, v] = constraints[ci];
-    const x0 = Math.floor((Math.min(vx[u], vx[v]) - SNAP) / CELL), x1 = Math.floor((Math.max(vx[u], vx[v]) + SNAP) / CELL);
-    const y0 = Math.floor((Math.min(vy[u], vy[v]) - SNAP) / CELL), y1 = Math.floor((Math.max(vy[u], vy[v]) + SNAP) / CELL);
-    for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
-      const k = key(cx, cy);
+    alongCells(vx[u], vy[u], vx[v], vy[v], (k) => {
       const l = cells.get(k);
       if (l) l.push(ci);
       else cells.set(k, [ci]);
-    }
+    });
   };
   for (let ci = 0; ci < constraints.length; ci++) index(ci);
+  // every vertex by cell (while there are lines to run through them)
+  const vcells = new Map<number, number[]>();
+  const indexVertex = (k: number) => {
+    const c = key(Math.floor(vx[k] / CELL), Math.floor(vy[k] / CELL));
+    const l = vcells.get(c);
+    if (l) l.push(k);
+    else vcells.set(c, [k]);
+  };
+  if (lines.length) for (let k = 0; k < vx.length; k++) indexVertex(k);
+  const vertex = (p: Pt, h: number): number => {
+    const n = vx.length, id = vid(p, h);
+    if (id === n && lines.length) indexVertex(id);
+    return id;
+  };
   const add = (u: number, v: number) => {
     constraints.push([u, v]);
     index(constraints.length - 1);
   };
-  /** the fixed edges whose cells the box touches, each once (in a deterministic order) */
+  /** the fixed edges in the cells along segment a–b (a point: a = b), each once (in a deterministic order) */
   const seen: number[] = [];
   let stamp = 0;
-  const nearBox = (x0: number, y0: number, x1: number, y1: number): number[] => {
+  const nearSeg = (a: Pt, b: Pt): number[] => {
     const out: number[] = [];
     stamp++;
-    for (let cx = Math.floor((x0 - SNAP) / CELL); cx <= Math.floor((x1 + SNAP) / CELL); cx++) {
-      for (let cy = Math.floor((y0 - SNAP) / CELL); cy <= Math.floor((y1 + SNAP) / CELL); cy++) {
-        const list = cells.get(key(cx, cy));
-        if (!list) continue;
-        for (const ci of list) {
-          if (seen[ci] === stamp) continue;
-          seen[ci] = stamp;
-          out.push(ci);
-        }
+    alongCells(a.x, a.y, b.x, b.y, (k) => {
+      for (const ci of cells.get(k) ?? []) {
+        if (seen[ci] === stamp) continue;
+        seen[ci] = stamp;
+        out.push(ci);
       }
-    }
+    });
     return out;
+  };
+  /** the fixed edges that may pass within SNAP of a point: those of its cell (each is in every cell within SNAP of it) */
+  const nearPoint = (x: number, y: number): ReadonlyArray<number> => cells.get(key(Math.floor(x / CELL), Math.floor(y / CELL))) ?? [];
+  /**
+   * where segment a–b crosses fixed edge ci: fractions along both, or undefined. Near-parallel
+   * lines (collinear pieces of one line) give a point that is on neither: none.
+   */
+  const crossingOf = (a: Pt, b: Pt, ci: number): { t: number; s: number } | undefined => {
+    const [u, v] = constraints[ci];
+    const c = { x: vx[u], y: vy[u] }, d = { x: vx[v], y: vy[v] };
+    const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+    if (den === 0) return undefined;
+    const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+    const s = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+    if (s < 0 || s > 1) return undefined;
+    const gap = Math.hypot(a.x + (b.x - a.x) * t - c.x - (d.x - c.x) * s, a.y + (b.y - a.y) * t - c.y - (d.y - c.y) * s);
+    return gap <= SNAP ? { t, s } : undefined;
+  };
+  /**
+   * every fixed edge passing within SNAP of vertex w (off its ends) split there: it runs through w
+   * (one collinear with the edge w split, or by the crossing w is on)
+   */
+  const pierce = (w: number): void => {
+    for (const ci of nearPoint(vx[w], vy[w])) {
+      const [u, v] = constraints[ci];
+      if (u === w || v === w) continue;
+      const ax = vx[u], ay = vy[u], dx = vx[v] - ax, dy = vy[v] - ay, len = Math.hypot(dx, dy);
+      if (len === 0) continue;
+      const s = ((vx[w] - ax) * dx + (vy[w] - ay) * dy) / (len * len);
+      if (s * len <= SNAP || (1 - s) * len <= SNAP) continue;
+      if (Math.abs((vx[w] - ax) * dy - (vy[w] - ay) * dx) / len >= SNAP) continue;
+      through(ci, w);
+    }
+  };
+  /** fixed edge ci bent to run through vertex w (up to SNAP off its line: into the cells round its new course too) */
+  const through = (ci: number, w: number): void => {
+    const [u, v] = constraints[ci];
+    if (u === w || v === w) return;
+    constraints[ci] = [u, w];
+    index(ci);
+    add(w, v);
+    onSplit(ci, constraints.length - 1);
   };
   /** split fixed edge ci at fraction s: the new vertex */
   const split = (ci: number, s: number): number => {
@@ -776,11 +842,12 @@ function insertFixedLines(
       x: vx[u] === vx[v] ? vx[u] : vx[u] + (vx[v] - vx[u]) * s,
       y: vy[u] === vy[v] ? vy[u] : vy[u] + (vy[v] - vy[u]) * s,
     };
-    const w = vid(q, vh[u] + (vh[v] - vh[u]) * s);
+    const w = vertex(q, vh[u] + (vh[v] - vh[u]) * s);
     if (w === u || w === v) return w;
     constraints[ci] = [u, w]; // still in its old cells: they cover the shorter edge
     add(w, v);
     onSplit(ci, constraints.length - 1);
+    pierce(w);
     return w;
   };
   /**
@@ -788,7 +855,7 @@ function insertFixedLines(
    * its end when that is within SNAP; undefined off every fixed edge
    */
   const onEdge = (p: Pt): number | undefined => {
-    for (const ci of nearBox(p.x, p.y, p.x, p.y)) {
+    for (const ci of nearPoint(p.x, p.y)) {
       const [u, v] = constraints[ci];
       const ax = vx[u], ay = vy[u], dx = vx[v] - ax, dy = vy[v] - ay, len = Math.hypot(dx, dy);
       if (len === 0) continue;
@@ -805,31 +872,57 @@ function insertFixedLines(
     for (let k = 0; k < line.length; k++) {
       const p = line[k];
       let id: number;
-      const on = (k === 0 || k === line.length - 1) && isEnd(p) ? undefined : onEdge(p);
-      id = on ?? vid(p, heightAt(p));
+      const end = (k === 0 || k === line.length - 1) && isEnd(p);
+      const on = end ? undefined : onEdge(p);
+      const known = vx.length;
+      id = on ?? vertex(p, heightAt(p));
+      // a fixed edge passing within SNAP of it runs through it: an end on the border (not snapped
+      // to one) or a vertex there before (off every edge, a new point is off them all)
+      if (on === undefined && (end || id < known)) pierce(id);
       if (prev >= 0 && prev !== id) {
         const a = { x: vx[prev], y: vy[prev] }, b = { x: vx[id], y: vy[id] };
         const segLen = Math.hypot(b.x - a.x, b.y - a.y);
-        const hits: Array<{ t: number; ci: number; s: number }> = [];
-        for (const ci of nearBox(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y))) {
+        // the vertices it runs through (within SNAP, off its ends): split there; ci −1
+        const hits: Array<{ t: number; ci: number; w?: number }> = [];
+        const onSeg = new Set<number>();
+        alongCells(a.x, a.y, b.x, b.y, (k) => {
+          for (const m of vcells.get(k) ?? []) {
+            if (m === prev || m === id) continue;
+            const t = ((vx[m] - a.x) * (b.x - a.x) + (vy[m] - a.y) * (b.y - a.y)) / (segLen * segLen);
+            if (t * segLen <= SNAP || (1 - t) * segLen <= SNAP) continue;
+            if (Math.abs((vx[m] - a.x) * (b.y - a.y) - (vy[m] - a.y) * (b.x - a.x)) / segLen >= SNAP) continue;
+            hits.push({ t, ci: -1, w: m });
+            onSeg.add(m);
+          }
+        });
+        for (const ci of nearSeg(a, b)) {
           const [u, v] = constraints[ci];
-          if (u === prev || v === prev || u === id || v === id) continue;
-          const c = { x: vx[u], y: vy[u] }, d = { x: vx[v], y: vy[v] };
-          const den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
-          if (den === 0) continue;
-          const t = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
-          const s2 = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
-          if (t * segLen <= SNAP || (1 - t) * segLen <= SNAP || s2 < 0 || s2 > 1) continue;
-          hits.push({ t, ci, s: s2 });
+          // an edge from a vertex it runs through meets it there (or lies along it)
+          if (u === prev || v === prev || u === id || v === id || onSeg.has(u) || onSeg.has(v)) continue;
+          const x = crossingOf(a, b, ci);
+          if (!x || x.t < 0 || x.t > 1) continue;
+          // crossing it at an end: it runs through that end (a few millimetres off its line)
+          if (x.t * segLen <= SNAP) through(ci, prev);
+          else if ((1 - x.t) * segLen <= SNAP) through(ci, id);
+          else hits.push({ t: x.t, ci });
         }
-        hits.sort((h1, h2) => h1.t - h2.t || h1.ci - h2.ci);
-        let from = prev;
+        hits.sort((h1, h2) => h1.t - h2.t || h1.ci - h2.ci || (h1.w ?? 0) - (h2.w ?? 0));
+        let from = prev, along = 0;
         for (const h of hits) {
-          const [u, v] = constraints[h.ci];
-          const len = Math.hypot(vx[v] - vx[u], vy[v] - vy[u]);
-          const w = h.s * len < SNAP ? u : (1 - h.s) * len < SNAP ? v : split(h.ci, h.s);
+          let w = h.w;
+          if (w === undefined) {
+            // the edge as it is now (a split here may have cut it at a vertex placed on the segment:
+            // it meets the segment there), and its crossing ahead of the last vertex placed
+            const [u, v] = constraints[h.ci];
+            if (u === from || v === from) continue;
+            const x = crossingOf(a, b, h.ci);
+            if (!x || x.t <= along || x.t >= 1) continue;
+            const len = Math.hypot(vx[v] - vx[u], vy[v] - vy[u]);
+            w = x.s * len < SNAP ? u : (1 - x.s) * len < SNAP ? v : split(h.ci, x.s);
+          }
           if (w !== from) add(from, w);
           from = w;
+          along = Math.max(along, ((vx[w] - a.x) * (b.x - a.x) + (vy[w] - a.y) * (b.y - a.y)) / (segLen * segLen));
         }
         if (from !== id) add(from, id);
       }
@@ -839,7 +932,7 @@ function insertFixedLines(
   for (const p of points) {
     // on a fixed edge it splits it (or is its end), as a line's point does
     if (isEnd(p) || onEdge(p) !== undefined) continue;
-    vid(p, heightAt(p));
+    vertex(p, heightAt(p));
   }
 }
 
@@ -1065,9 +1158,11 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const vx: number[] = [];
     const vy: number[] = [];
     const vh: number[] = [];
-    const ids = new Map<string, number>();
+    const ids = new Map<number, number>();
+    /** a point to 1/4096 cell as one number (exact below 2^53 for any tile's lattice) */
+    const keyOf = (p: Pt) => (Math.round(p.x * 4096) + 16777216) * 67108864 + Math.round(p.y * 4096) + 16777216;
     const vid = (p: Pt, h: number): number => {
-      const key = `${Math.round(p.x * 4096)},${Math.round(p.y * 4096)}`;
+      const key = keyOf(p);
       let id = ids.get(key);
       if (id === undefined) {
         id = vx.length;
@@ -1136,7 +1231,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     const borderVerts = vx.length;
     // corners belong to two edges
     for (const p of [place(0, 0), place(0, 1), place(1, 0), place(1, 1)]) {
-      const c = ids.get(`${Math.round(p.x * 4096)},${Math.round(p.y * 4096)}`);
+      const c = ids.get(keyOf(p));
       if (c !== undefined) shared.add(c);
       for (let e = 0; e < 4; e++) if (edgeOf(p) !== e && (e < 2 ? p.y === (e ? grid : 0) : p.x === (e === 3 ? grid : 0))) onBorder[e].push(p);
     }

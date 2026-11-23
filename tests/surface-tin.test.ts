@@ -1,10 +1,12 @@
 import { expect, it } from 'vitest';
-import type { OsmLine } from '../src/world/osm-types';
+import type { GroundCover } from '../src/world/ground-cover';
+import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
+import type { P2 } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions } from '../src/world/surface-tin';
-import { buildTerrainTin, tinLatticeSampler } from '../src/world/terrain-tin';
-import { area, at, cracks, demOf, GRID, lattice, M, padAround, road, seeded, SIZE, TILE } from './roads-helpers';
+import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceTin } from '../src/world/surface-tin';
+import { buildTerrainTin, tinLatticeSampler, type TerrainTin } from '../src/world/terrain-tin';
+import { area, at, coverTin, cracks, demOf, denseTown, GRID, lattice, M, padAround, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
 
 const slope = lattice((x, y) => 500 + 0.2 * x + 0.05 * y);
 const surfaceOf = (roads: OsmLine[], h: Float32Array = slope, opts: SurfaceOptions = {}) => {
@@ -56,7 +58,7 @@ it('keeps an aerodrome pad flat under a road across it', () => {
 });
 it('lets the youngest roads’ edges go over the budget, and still steps nowhere', () => {
   const rnd = seeded(5);
-  const roads = Array.from({ length: 2500 }, () => { const x = rnd() * 62 + 1, y = rnd() * 62 + 1; return road({ highway: 'residential' }, [[x, y], [x + rnd() - 0.5, y + rnd() - 0.5]]); });
+  const roads = Array.from({ length: 8000 }, () => { const x = rnd() * 62 + 1, y = rnd() * 62 + 1; return road({ highway: 'residential' }, [[x, y], [x + rnd() - 0.5, y + rnd() - 0.5]]); });
   const { tin } = surfaceOf(roads);
   expect(tin.vx.length).toBeLessThanOrEqual(MAX_SURFACE_VERTS);
   expect(tin.loose!.size).toBeGreaterThan(0);
@@ -100,8 +102,183 @@ it('follows the relief within Z14_RELIEF_TOL_M on a z14 tile, hills lower than a
 });
 it('outlines the roads before the rivers when the vertices run short', () => {
   const rnd = seeded(5);
-  const roads = Array.from({ length: 2500 }, () => { const x = rnd() * 62 + 1, y = rnd() * 62 + 1; return road({ highway: 'residential' }, [[x, y], [x + rnd() - 0.5, y + rnd() - 0.5]]); });
+  const roads = Array.from({ length: 8000 }, () => { const x = rnd() * 62 + 1, y = rnd() * 62 + 1; return road({ highway: 'residential' }, [[x, y], [x + rnd() - 0.5, y + rnd() - 0.5]]); });
   const canal = road({ waterway: 'canal' }, [[2, 30], [62, 34]]);
   const { tin } = surfaceOf([canal, ...roads]);
   expect(tin.loose!.has(canal)).toBe(true);
+});
+
+// --- the ground covers in the surface ---
+
+const coverSurface = (d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }) => coverTin(d, (x, y) => 500 + 0.2 * x + 0.05 * y);
+
+/**
+ * a TIN edge passes this close to a point of a cover edge it carries, lattice cells: the fixed lines
+ * snap to a vertex or an edge within 1e-3 (terrain-tin.ts insertFixedLines, a few centimetres)
+ */
+const ON_EDGE = 1.1e-3;
+/** the TIN's edges by lattice cell: ax, ay, bx, by */
+const edgeIndex = new WeakMap<TerrainTin, Map<number, number[][]>>();
+function edgesAround(tin: TerrainTin, x: number, y: number): number[][] {
+  let index = edgeIndex.get(tin);
+  if (!index) {
+    const idx = new Map<number, number[][]>();
+    for (const t of tin.tris) for (const [p, q] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
+      const e = [tin.vx[p], tin.vy[p], tin.vx[q], tin.vy[q]];
+      for (let i = Math.floor(Math.min(e[0], e[2])); i <= Math.floor(Math.max(e[0], e[2])); i++) {
+        for (let j = Math.floor(Math.min(e[1], e[3])); j <= Math.floor(Math.max(e[1], e[3])); j++) {
+          const k = i * 4096 + j;
+          (idx.get(k) ?? idx.set(k, []).get(k)!).push(e);
+        }
+      }
+    }
+    edgeIndex.set(tin, (index = idx));
+  }
+  const out: number[][] = [];
+  for (let i = Math.floor(x - ON_EDGE); i <= Math.floor(x + ON_EDGE); i++) {
+    for (let j = Math.floor(y - ON_EDGE); j <= Math.floor(y + ON_EDGE); j++) out.push(...(index.get(i * 4096 + j) ?? []));
+  }
+  return out;
+}
+/** whether the part of a cover edge (lattice polyline) inside the tile runs along edges of the TIN */
+function edgeInTin(tin: TerrainTin, line: P2[]): boolean {
+  const g = tin.grid;
+  for (let k = 1; k < line.length; k++) {
+    const [ax, ay] = line[k - 1], [bx, by] = line[k], dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy);
+    if (len === 0) continue;
+    // the segment clipped to the tile
+    let t0 = 0, t1 = 1;
+    for (const [p, q] of [[-dx, ax], [dx, g - ax], [-dy, ay], [dy, g - ay]]) {
+      if (p === 0) { if (q < 0) t1 = -1; continue; }
+      if (p < 0) t0 = Math.max(t0, q / p);
+      else t1 = Math.min(t1, q / p);
+    }
+    if ((t1 - t0) * len < 1e-6) continue;
+    for (const f of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+      const t = t0 + (t1 - t0) * f, x = ax + dx * t, y = ay + dy * t;
+      // a TIN edge along it through the point
+      const along = edgesAround(tin, x, y).some(([px, py, qx, qy]) => {
+        const ex = qx - px, ey = qy - py, el = Math.hypot(ex, ey);
+        // along it, but for the turn a snapped end gives a short edge
+        if (el === 0 || Math.abs(ex * dy - ey * dx) / (el * len) > 0.02 + (2 * ON_EDGE) / el) return false;
+        const s = ((x - px) * ex + (y - py) * ey) / (el * el);
+        return s >= -ON_EDGE / el && s <= 1 + ON_EDGE / el && Math.abs((x - px) * ey - (y - py) * ex) / el < ON_EDGE;
+      });
+      if (!along) return false;
+    }
+  }
+  return true;
+}
+const centre = (tin: TerrainTin, f: number): [number, number] => {
+  const t = tin.tris[f];
+  return [(tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3];
+};
+/** faces with a point inside them (30 % of the way from the centre to a corner) under another cover than their centre */
+function straddling(tin: TerrainTin, cover: GroundCover): number {
+  let n = 0;
+  tin.tris.forEach((t, f) => {
+    const [cx, cy] = centre(tin, f), at0 = cover.locate(cx, cy);
+    if ([t.a, t.b, t.c].some((v) => cover.locate(cx + 0.3 * (tin.vx[v] - cx), cy + 0.3 * (tin.vy[v] - cy)) !== at0)) n++;
+  });
+  return n;
+}
+/** the summed area of the faces with cover `s`, lattice cells² */
+function coverArea(tin: SurfaceTin, s: number): number {
+  let a = 0;
+  tin.tris.forEach((t, f) => {
+    if (tin.cover![f] !== s) return;
+    a += Math.abs((tin.vx[t.b] - tin.vx[t.a]) * (tin.vy[t.c] - tin.vy[t.a]) - (tin.vx[t.c] - tin.vx[t.a]) * (tin.vy[t.b] - tin.vy[t.a])) / 2;
+  });
+  return a;
+}
+/**
+ * The area of each shape inside the tile less its seniors', lattice cells²: on rows across the tile
+ * (exact along a row, rows 0.008 cells apart), each shape's triangles' spans less its seniors'
+ */
+const ownAreas = new WeakMap<GroundCover, Float64Array>();
+function ownArea(cover: GroundCover, s: number): number {
+  let own = ownAreas.get(cover);
+  if (!own) {
+    own = new Float64Array(cover.shapes.length);
+    const rows = 8000, dy = GRID / rows;
+    const tris: { s: number; t: Float64Array; o: number; y0: number; y1: number }[] = [];
+    cover.shapes.forEach((sh, si) => {
+      for (let o = 0; o < sh.tris.length; o += 6) {
+        const ys = [sh.tris[o + 1], sh.tris[o + 3], sh.tris[o + 5]];
+        tris.push({ s: si, t: sh.tris, o, y0: Math.min(...ys), y1: Math.max(...ys) });
+      }
+    });
+    for (let r = 0; r < rows; r++) {
+      const y = (r + 0.5) * dy;
+      // the spans of each shape on the row, the senior first
+      const spans: [number, number, number][] = [];
+      for (const { s: si, t, o, y0, y1 } of tris) {
+        if (y < y0 || y > y1) continue;
+        let lo = Infinity, hi = -Infinity;
+        for (let e = 0; e < 3; e++) {
+          const px = t[o + 2 * e], py = t[o + 2 * e + 1], qx = t[o + (2 * e + 2) % 6], qy = t[o + (2 * e + 3) % 6];
+          if (py === qy || y < Math.min(py, qy) || y > Math.max(py, qy)) continue;
+          const x = px + ((qx - px) * (y - py)) / (qy - py);
+          lo = Math.min(lo, x);
+          hi = Math.max(hi, x);
+        }
+        lo = Math.max(lo, 0);
+        hi = Math.min(hi, GRID);
+        if (hi > lo) spans.push([si, lo, hi]);
+      }
+      spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      /** the row covered by the seniors so far: disjoint spans in order */
+      let taken: [number, number][] = [];
+      for (let i = 0; i < spans.length;) {
+        const si = spans[i][0];
+        // the shape's own spans merged
+        const mine: [number, number][] = [];
+        for (; i < spans.length && spans[i][0] === si; i++) {
+          const [, lo, hi] = spans[i];
+          if (mine.length && lo <= mine[mine.length - 1][1]) mine[mine.length - 1][1] = Math.max(mine[mine.length - 1][1], hi);
+          else mine.push([lo, hi]);
+        }
+        // less what the seniors took
+        for (const [lo, hi] of mine) {
+          let len = hi - lo;
+          for (const [tl, th] of taken) len -= Math.max(0, Math.min(hi, th) - Math.max(lo, tl));
+          own[si] += len * dy;
+        }
+        // and taken with them
+        const all = [...taken, ...mine].sort((a, b) => a[0] - b[0]);
+        taken = [];
+        for (const [lo, hi] of all) {
+          if (taken.length && lo <= taken[taken.length - 1][1]) taken[taken.length - 1][1] = Math.max(taken[taken.length - 1][1], hi);
+          else taken.push([lo, hi]);
+        }
+      }
+    }
+    ownAreas.set(cover, own);
+  }
+  return own[s];
+}
+/** the kinds of the shapes whose edges are not all in the surface */
+const droppedKinds = (tin: TerrainTin, cover: GroundCover): string[] =>
+  [...new Set(cover.shapes.filter((s) => !s.outline.every((l) => edgeInTin(tin, l))).map((s) => s.kind))].sort();
+
+it('puts every edge of every cover into the surface', () => {
+  const { tin, cover } = coverSurface(townFixture());
+  for (const s of cover.shapes) for (const line of s.outline) expect(edgeInTin(tin, line)).toBe(true);
+});
+it('gives each face one cover, the senior shape under its centre, and no face straddles a cover edge', () => {
+  const { tin, cover } = coverSurface(townFixture());
+  for (let f = 0; f < tin.tris.length; f++) expect(tin.cover![f]).toBe(cover.locate(...centre(tin, f)));
+  expect(straddling(tin, cover)).toBe(0);
+});
+it('covers each shape’s area less its seniors’, to the outline’s simplification', () => {
+  const { tin, cover } = coverSurface(townFixture());
+  // within 2 % (the plan's ruling 1: the seniors' areas taken off on rows across the tile)
+  for (let s = 0; s < cover.shapes.length; s++) expect(Math.abs(coverArea(tin, s) - ownArea(cover, s))).toBeLessThanOrEqual(0.02 * ownArea(cover, s) + 1e-9);
+});
+it('drops the parks before the roads when over the budget, and cracks nowhere', () => {   // Review Focus 4
+  const { tin, cover } = coverSurface(denseTown(2500));
+  expect(tin.vx.length).toBeLessThanOrEqual(MAX_SURFACE_VERTS);
+  expect(tin.loose?.size ?? 0).toBe(0);
+  expect(droppedKinds(tin, cover)).toEqual(['area']);
+  expect(cracks(tin)).toBe(0);
 });

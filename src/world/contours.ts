@@ -244,6 +244,87 @@ export function delaunay(points: Pt[]): Tri[] {
 }
 
 /**
+ * Constrainautor's set of edges to flip, iterated as its own bit set iterates (the smallest first;
+ * one added past the last visited is visited in the same pass, one behind it in the next) but over
+ * the edges in it: the bit set scans every edge of the triangulation after each constraint, most
+ * of the time of a surface with tens of thousands of fixed edges (surface-tin.ts)
+ */
+class FlipSet {
+  private readonly bits: Uint8Array;
+  /** whether an edge has an entry in the heap (perhaps stale: deleted since) */
+  private readonly queued: Uint8Array;
+  /** a min-heap of edges */
+  private readonly heap: number[] = [];
+  constructor(len: number) {
+    this.bits = new Uint8Array(len);
+    this.queued = new Uint8Array(len);
+  }
+  has(i: number): boolean {
+    return this.bits[i] === 1;
+  }
+  add(i: number): this {
+    this.bits[i] = 1;
+    if (!this.queued[i]) {
+      this.queued[i] = 1;
+      this.push(i);
+    }
+    return this;
+  }
+  delete(i: number): this {
+    this.bits[i] = 0;
+    return this;
+  }
+  set(i: number, val: boolean): boolean {
+    if (val) this.add(i);
+    else this.delete(i);
+    return val;
+  }
+  forEach(fn: (i: number) => void): this {
+    const later: number[] = [];
+    let last = -1;
+    while (this.heap.length) {
+      const i = this.pop();
+      this.queued[i] = 0;
+      if (!this.bits[i]) continue;
+      if (i <= last) later.push(i);
+      else {
+        last = i;
+        fn(i);
+      }
+    }
+    for (const i of later) if (this.bits[i] && !this.queued[i]) this.add(i);
+    return this;
+  }
+  private push(i: number): void {
+    const h = this.heap;
+    let k = h.push(i) - 1;
+    while (k > 0) {
+      const up = (k - 1) >> 1;
+      if (h[up] <= i) break;
+      h[k] = h[up];
+      k = up;
+    }
+    h[k] = i;
+  }
+  private pop(): number {
+    const h = this.heap, top = h[0], end = h.pop()!;
+    if (h.length) {
+      let k = 0;
+      for (;;) {
+        let c = 2 * k + 1;
+        if (c >= h.length) break;
+        if (c + 1 < h.length && h[c + 1] < h[c]) c++;
+        if (h[c] >= end) break;
+        h[k] = h[c];
+        k = c;
+      }
+      h[k] = end;
+    }
+    return top;
+  }
+}
+
+/**
  * Constrained Delaunay triangulation: Delaunay of `points` (Delaunator), then every segment of
  * `constraints` is forced in as an edge and the Delaunay property restored around it
  * (Constrainautor, exact predicates). `prefer(u, v, p, q)`, when given, is a final flip pass on
@@ -262,6 +343,7 @@ export function constrainedDelaunay(
   if (n < 3) return { tris: [], missing: constraints.filter(([a, b]) => a !== b).length };
   const del = new Delaunator(coordsOf(points));
   const con = new Constrainautor(del);
+  (con as unknown as { flips: FlipSet }).flips = new FlipSet(del.triangles.length);
   const lone = new Set(con.untriangulatedPoints());
   const fixed = new Set<number>();
   const U = (u: number, v: number) => (u < v ? u * n + v : v * n + u);
@@ -294,11 +376,19 @@ export function constrainedDelaunay(
   };
 
   if (prefer) {
+    // an edge whose two triangles are as they were when it was last looked at gives the same
+    // answer again: it is passed over (a pass looks at the few a flip changed, not every edge)
+    const changed = new Int32Array(tri.length / 3);
+    const looked = new Int32Array(tri.length).fill(-1);
+    let clock = 0;
     for (let pass = 0; pass < 200; pass++) {
       let flips = 0;
       for (let e = 0; e < tri.length; e++) {
         const o = he[e];
         if (o < e) continue; // the hull, or visited from its twin
+        const te = (e / 3) | 0, to = (o / 3) | 0;
+        if (looked[e] >= changed[te] && looked[e] >= changed[to]) continue;
+        looked[e] = clock;
         const a = tri[e], b = tri[o];
         if (fixed.has(U(a, b))) continue;
         const e2 = prev(e), o2 = prev(o);
@@ -315,6 +405,8 @@ export function constrainedDelaunay(
         link(e, heO2);
         link(o, heE2);
         link(e2, o2); // p→q and q→p
+        clock++;
+        changed[te] = changed[to] = clock;
         flips++;
       }
       if (!flips) break;
