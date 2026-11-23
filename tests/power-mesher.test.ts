@@ -32,29 +32,44 @@ describe('supportHeight', () => {
 describe('buildPower', () => {
   const line = { points: [at(-150, 0), at(150, 0)], tags: { power: 'line', voltage: '154000' } };
 
-  it('a steel pylon at every vertex, from the ground to its height', () => {
+  it('a steel lattice pylon at every vertex, from the ground to its height, insulators on its arms', () => {
     const p = buildPower(TILE, [line], ground);
     expect(p.vertices.length).toBe(p.ramps.length * 6);
-    for (const r of p.ramps) expect(r).toBe(colourOf(POWER.STEEL));
-    let top = -Infinity, low = Infinity;
-    for (let i = 1; i < p.vertices.length; i += 6) { top = Math.max(top, p.vertices[i]); low = Math.min(low, p.vertices[i]); }
+    const colours = new Set(p.ramps);
+    expect(colours).toEqual(new Set([colourOf(POWER.STEEL), colourOf(POWER.INSULATOR_RGB)]));
+    let top = -Infinity, low = Infinity, wide = 0;
+    for (let i = 0; i < p.vertices.length; i += 6) {
+      top = Math.max(top, p.vertices[i + 1]); low = Math.min(low, p.vertices[i + 1]);
+      // the pylon at x = −150: its reach across the line (z)
+      if (Math.abs(p.vertices[i] + 150) < 10) wide = Math.max(wide, Math.abs(p.vertices[i + 2]));
+    }
     expect(top).toBeGreaterThan(50 + 36 - 0.5);
     expect(top).toBeLessThan(50 + 36 + 0.5);
     expect(low).toBeLessThan(50);
+    // the middle tier's arms are the longest
+    const longest = Math.max(...POWER.TIERS.map(([, a]) => a)) * 36;
+    expect(wide).toBeGreaterThan(longest - 0.5);
+    expect(wide).toBeLessThan(longest + 0.5);
   });
 
-  it('three conductors a span, sagging at mid-span, hung from the arms square to the line', () => {
+  it('six conductors and an earth wire a span: three tiers each side, sagging, square to the line', () => {
     const w = wirePts(buildPower(TILE, [line], ground).wires);
-    expect(w.length).toBe(3 * POWER.PIECES * 2);
-    // the arms run north–south (across an east–west line): conductors at z = ±arm and on the axis
-    const arm = 36 * POWER.ARM;
-    const zs = [...new Set(w.map(([, , z]) => Math.round(z * 10) / 10))].sort((a, b) => a - b);
-    expect(zs).toEqual([-arm, 0, arm].map((v) => Math.round(v * 10) / 10));
-    // mid-span: lower than the ends by SAG of the span
-    const side = w.filter(([, , z]) => z > 1);
-    const ends = Math.max(...side.map(([, y]) => y));
-    const mid = Math.min(...side.map(([, y]) => y));
+    expect(w.length).toBe(7 * POWER.PIECES * 2);
+    // the arms run north–south (across an east–west line): conductors at z = ± each tier's arm, the earth wire on the axis
+    const round = (v: number) => Math.round(v * 10) / 10;
+    const zs = [...new Set(w.map(([, , z]) => round(z)))].sort((a, b) => a - b);
+    const arms = [...new Set(POWER.TIERS.map(([, a]) => a * 36))];
+    expect(zs).toEqual([...arms.map((a) => -a), 0, ...arms].map(round).sort((a, b) => a - b));
+    // the earth wire is the highest, hung from the peak
+    expect(Math.max(...w.map(([, y]) => y))).toBeCloseTo(50 + 36, 3);
+    // a conductor (the outermost on one side): mid-span lower than the ends by SAG of the span
+    const one = w.filter(([, , z]) => round(z) === round(Math.max(...arms)));
+    const ends = Math.max(...one.map(([, y]) => y));
+    const mid = Math.min(...one.map(([, y]) => y));
     expect(ends - mid).toBeCloseTo(300 * POWER.SAG, 1);
+    // it hangs an insulator string under its arm's tip
+    const [hy] = POWER.TIERS[1];
+    expect(ends).toBeCloseTo(50 + (hy - POWER.INSULATOR) * 36, 3);
   });
 
   it('a minor line: concrete poles, its conductors near the top', () => {

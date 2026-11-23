@@ -16,12 +16,22 @@ export const POWER = {
   /** a pylon's height without `height`, by the line's voltage (V): [from voltage, height m], highest first */
   PYLON_M: [[300000, 45], [150000, 36], [60000, 28], [0, 22]] as [number, number][],
   POLE_M: 10,
-  /** a pylon's crossarm at this share of its height, each arm this share of the height long */
-  ARM_AT: 0.78,
-  ARM: 0.25,
-  /** a pylon's foot (half the width) to its height, its waist at the crossarm */
+  /**
+   * A pylon is the common double-circuit lattice tower: three tiers of crossarms on both sides (the
+   * middle one the longest), a conductor hanging from each arm's tip on an insulator string, and an
+   * earth wire on the peak. Per tier: its height share and its arm's length share of the height.
+   */
+  TIERS: [[0.6, 0.17], [0.73, 0.21], [0.86, 0.17]] as [number, number][],
+  /** an insulator string hangs this share of the height under its arm's tip */
+  INSULATOR: 0.06,
+  /** a pylon's foot (half the width) to its height, its waist at the lowest tier, its top at the highest */
   FOOT: 0.12,
-  WAIST: 0.035,
+  WAIST: 0.04,
+  TOP: 0.03,
+  /** panels of bracing under the waist */
+  PANELS: 5,
+  /** a crossarm's top chord's thickness to the height (the bottom chord 0.7 of it, an insulator 0.5) */
+  CHORD: 0.03,
   /** a pole's arm, each side, metres */
   POLE_ARM_M: 0.9,
   /** a span sags this share of its length at mid-span */
@@ -30,6 +40,8 @@ export const POWER = {
   PIECES: 8,
   STEEL: [146, 150, 156] as RGB,
   CONCRETE: [176, 172, 164] as RGB,
+  /** glass insulator strings */
+  INSULATOR_RGB: [96, 112, 104] as RGB,
 } as const;
 
 /** a conductor's colour: dark grey 1 px lines */
@@ -95,53 +107,79 @@ export function buildPower(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
       if (tl < 1e-6) [tx, tz] = d0; else { tx /= tl; tz /= tl; }
       return [-tz, tx] as [number, number];
     });
-    const armLen = pylon ? H * POWER.ARM : POWER.POLE_ARM_M;
-    const armY = pylon ? H * POWER.ARM_AT : H - 0.4;
-    /** where conductor k (−1, 0 top, +1) of support i hangs */
-    const attach = (i: number, k: number): V3 => {
-      const [x, z] = pts[i], [ax, az] = arms[i];
-      if (k === 0) return [x, base[i] + (pylon ? H : H + 0.4), z];
-      return [x + ax * armLen * k, base[i] + armY, z + az * armLen * k];
+    /**
+     * Where support i's conductors hang, in the same order at every support: a pylon's six (per tier,
+     * the arm's tip on each side, an insulator string under it) then its earth wire on the peak; a
+     * pole's two arm ends and its top.
+     */
+    const attach = (i: number): V3[] => {
+      const [x, z] = pts[i], [ax, az] = arms[i], y0 = base[i];
+      const at = (s: number, y: number): V3 => [x + ax * s, y, z + az * s];
+      if (!pylon) return [at(-POWER.POLE_ARM_M, y0 + H - 0.4), at(POWER.POLE_ARM_M, y0 + H - 0.4), at(0, y0 + H + 0.4)];
+      const out: V3[] = [];
+      for (const [hy, arm] of POWER.TIERS) for (const side of [-1, 1]) out.push(at(side * arm * H, y0 + (hy - POWER.INSULATOR) * H));
+      out.push(at(0, y0 + H));
+      return out;
     };
+    const hangs = pts.map((_, i) => attach(i));
 
     for (let i = 0; i < n; i++) {
       if (!owns(l.points[i])) continue;
       const [x, z] = pts[i], [ax, az] = arms[i];
       const y0 = base[i];
       if (pylon) {
-        // four legs from a wide foot to a narrow waist under the crossarm, then up to the peak
-        const foot = H * POWER.FOOT, waist = H * POWER.WAIST;
         const t = Math.max(0.18, H * 0.008);
-        // the legs' corners, in the arm's frame (along the arm, along the line)
-        const corner = (s: number, k: number, y: number): V3 => {
+        const insulator = colourOf(POWER.INSULATOR_RGB);
+        // the body's corners at a height share f: its half-width tapers from the foot to the waist
+        // (the lowest tier), then less to the top tier; in the arm's frame (along the arm, along the line)
+        const [waistAt] = POWER.TIERS[0], [topAt] = POWER.TIERS[POWER.TIERS.length - 1];
+        const half = (f: number) => f <= waistAt
+          ? H * (POWER.FOOT + ((POWER.WAIST - POWER.FOOT) * f) / waistAt)
+          : H * (POWER.WAIST + ((POWER.TOP - POWER.WAIST) * Math.min(1, (f - waistAt) / (topAt - waistAt))));
+        const lx = -az, lz = ax;
+        const corner = (f: number, k: number): V3 => {
           const [cu, cv] = [[1, 1], [-1, 1], [-1, -1], [1, -1]][k];
-          const lx = -az, lz = ax;
-          return [x + (ax * cu + lx * cv) * s, y, z + (az * cu + lz * cv) * s];
+          const s = half(f);
+          return [x + (ax * cu + lx * cv) * s, y0 + f * H, z + (az * cu + lz * cv) * s];
         };
-        const yWaist = y0 + armY;
+        // the levels of the body's frames: panels under the waist, then each tier, the top tier last
+        const levels: number[] = [];
+        for (let p = 0; p <= POWER.PANELS; p++) levels.push((waistAt * p) / POWER.PANELS);
+        for (const [hy] of POWER.TIERS.slice(1)) levels.push(hy);
         for (let k = 0; k < 4; k++) {
-          pushPrism(verts, ramps, steel, corner(foot, k, y0 - 1), corner(waist, k, yWaist), t);
-          pushPrism(verts, ramps, steel, corner(waist, k, yWaist), [x, y0 + H, z], t * 0.8);
+          // the legs (sunk a metre on slopes), then the peak's four members up to the earth wire
+          const foot = corner(0, k);
+          pushPrism(verts, ramps, steel, [foot[0], y0 - 1, foot[2]], foot, t);
+          for (let lv = 0; lv + 1 < levels.length; lv++) pushPrism(verts, ramps, steel, corner(levels[lv], k), corner(levels[lv + 1], k), t);
+          pushPrism(verts, ramps, steel, corner(topAt, k), [x, y0 + H, z], t * 0.8);
         }
-        // frames at three levels and an X on each face between them
-        const levels = [0, 0.33, 0.62, 1].map((f) => ({ y: y0 + armY * f, s: foot + (waist - foot) * f }));
+        // a frame at every level and an X on every face between levels
         for (let lv = 1; lv < levels.length; lv++) {
-          const { y, s } = levels[lv], lo = levels[lv - 1];
           for (let k = 0; k < 4; k++) {
             const k2 = (k + 1) % 4;
-            pushPrism(verts, ramps, steel, corner(s, k, y), corner(s, k2, y), t * 0.7);
-            pushPrism(verts, ramps, steel, corner(lo.s, k, lo.y), corner(s, k2, y), t * 0.5);
-            pushPrism(verts, ramps, steel, corner(lo.s, k2, lo.y), corner(s, k, y), t * 0.5);
+            pushPrism(verts, ramps, steel, corner(levels[lv], k), corner(levels[lv], k2), t * 0.7);
+            pushPrism(verts, ramps, steel, corner(levels[lv - 1], k), corner(levels[lv], k2), t * 0.5);
+            pushPrism(verts, ramps, steel, corner(levels[lv - 1], k2), corner(levels[lv], k), t * 0.5);
           }
         }
-        // the crossarm: out to both conductors, braced back to the body
-        const left = attach(i, -1), right = attach(i, 1);
-        pushPrism(verts, ramps, steel, left, right, t);
-        for (const end of [left, right]) pushPrism(verts, ramps, steel, end, [x, yWaist + H * 0.08, z], t * 0.6);
+        // the crossarms: per tier and side, a top and a bottom chord from the body to the tip, the
+        // insulator string hanging from the tip to its conductor
+        POWER.TIERS.forEach(([hy, arm], ti) => {
+          for (const side of [-1, 1]) {
+            const tip: V3 = [x + ax * side * arm * H, y0 + hy * H, z + az * side * arm * H];
+            const w = half(hy);
+            const root = (dy: number): V3 => [x + ax * side * w, y0 + hy * H + dy, z + az * side * w];
+            // a crossarm is a lattice girder a metre or so deep: its chords as solid bars of that
+            // weight (thin members vanish under a pixel within a few hundred metres)
+            pushPrism(verts, ramps, steel, root(0), tip, H * POWER.CHORD);
+            pushPrism(verts, ramps, steel, root(-H * 0.035), tip, H * POWER.CHORD * 0.7);
+            pushPrism(verts, ramps, insulator, tip, hangs[i][ti * 2 + (side + 1) / 2], H * POWER.CHORD * 0.5);
+          }
+        });
       } else {
         // a pole and its arm
         pushPrism(verts, ramps, concrete, [x, y0 - 0.5, z], [x, y0 + H + 0.4, z], 0.28);
-        pushPrism(verts, ramps, concrete, attach(i, -1), attach(i, 1), 0.12);
+        pushPrism(verts, ramps, concrete, hangs[i][0], hangs[i][1], 0.12);
       }
     }
 
@@ -151,8 +189,8 @@ export function buildPower(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
       if (!owns([(alon + blon) / 2, (alat + blat) / 2])) continue;
       const span = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
       const sag = span * POWER.SAG;
-      for (const k of [-1, 0, 1]) {
-        const a = attach(i, k), c = attach(i + 1, k);
+      for (let k = 0; k < hangs[i].length; k++) {
+        const a = hangs[i][k], c = hangs[i + 1][k];
         let prev: V3 = a;
         for (let s = 1; s <= POWER.PIECES; s++) {
           const t = s / POWER.PIECES;
