@@ -7,11 +7,13 @@ import { describe, expect, it } from 'vitest';
 import { coastlineWays } from '../src/world/coast';
 import { buildGroundCover } from '../src/world/ground-cover';
 import type { Pad } from '../src/world/aerodrome';
-import type { Tile } from '../src/world/geodesy';
+import { tileSizeMeters, type Tile } from '../src/world/geodesy';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, type SurfaceStats } from '../src/world/surface-tin';
 import type { TileBorders } from '../src/world/terrain-source';
+import type { TinDebug } from '../src/world/terrain-tin';
+import { cracks } from './roads-helpers';
 
 interface Fixture {
   tile: Tile;
@@ -32,17 +34,22 @@ async function surfaceOf(name: string) {
   const net = buildRoadNet(fx.data.lines);
   const roads = fx.roadDem ? roadSurfaceOf(fx.tile, fx.data, net, Float64Array.from(fx.roadDem)) : undefined;
   const cover = buildGroundCover(fx.tile, fx.grid, fx.data, roads);
-  const stats = {} as SurfaceStats;
-  const tin = buildSurfaceTin(fx.tile, fx.grid, f32(fx.heights), { borders, coast: coastlineWays(fx.data.lines), pads: fx.pads, roads, cover, stats });
-  return { tin, cover, stats };
+  const stats = {} as SurfaceStats, debug = {} as TinDebug;
+  const tin = buildSurfaceTin(fx.tile, fx.grid, f32(fx.heights), { borders, coast: coastlineWays(fx.data.lines), pads: fx.pads, roads, cover, stats, debug });
+  return { tin, cover, stats, debug };
 }
+
+/** Fethiye's tile */
+const fixtureTile: Tile = { z: 14, x: 9517, y: 6397 };
 
 /** the roads above a service road */
 const MAJOR = /^(motorway|trunk|primary|secondary|tertiary)(_link)?$|^(unclassified|living_street)$/;
 
 describe('real dense tiles in the surface budget', () => {
-  it('Fethiye 14/9517/6397: every way and pool in the surface, in one build', async () => {
-    const { tin, cover, stats } = await surfaceOf('surface-14-9517-6397');
+  it('Fethiye 14/9517/6397: every way and pool in the surface, in one build, every fixed edge in and no crack', async () => {
+    const { tin, cover, stats, debug } = await surfaceOf('surface-14-9517-6397');
+    expect(cracks(tin)).toBe(0);
+    expect(debug.missing).toBe(0);
     expect(stats.builds).toBe(1);
     expect(tin.vx.length).toBeLessThanOrEqual(MAX_SURFACE_VERTS);
     expect(tin.loose).toBeUndefined();
@@ -52,23 +59,43 @@ describe('real dense tiles in the surface budget', () => {
 
   it('Fethiye 14/9517/6397: each face lies in its own cover (the canal along the bank roads at 36.64774, 29.12803 included)', async () => {
     const { tin, cover } = await surfaceOf('surface-14-9517-6397');
-    // halfway from a face's centre to each corner: in the face's cover. Four tiny faces (under a
-    // square metre) are what is left: two at Cahit Gündüz Caddesi's sharp turn, whose triangles
-    // reach 15 cm past its outline, two footway slivers where the fixed lines snapped by under 3 cm;
-    // they were there before the tuning too, with some 750 faces more (dropped pools and areas
-    // painted by their centre, loose footways)
-    const off: string[] = [];
+    // halfway from a face's centre to each corner: in the face's cover, but in faces the fixed lines'
+    // snapping (insertFixedLines, 1e-3 lattice: 3 cm here) left a sliver of another cover in. At
+    // most four reach further, carriageway, shoulder or path, none 20 cm: before the tuning some 750
+    // faces did (dropped pools and areas painted by their centre, loose footways); the round end of a
+    // cover's stretch shorter than its width reached past its square end (a bridge's cover cut where
+    // its deck lifts) until its caps were halves
+    const SNAP = 1.1e-3, mPer = 1 / (tin.grid / tileSizeMeters(fixtureTile));
+    const off: { kind: string; reach: number }[] = [];
     tin.tris.forEach((t, f) => {
       const own = tin.cover![f];
       const cx = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, cy = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
-      if ([t.a, t.b, t.c].some((v) => cover.locate((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) off.push(own < 0 ? 'ground' : cover.shapes[own].kind);
+      if (![t.a, t.b, t.c].some((v) => cover.locate((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) return;
+      // how far into the face the other cover reaches (from its sides), lattice cells
+      const P = [t.a, t.b, t.c].map((v) => [tin.vx[v], tin.vy[v]]);
+      let reach = 0;
+      for (let i = 0; i <= 30; i++) for (let j = 0; i + j <= 30; j++) {
+        const a = i / 30, b = j / 30, c = 1 - a - b, x = a * P[0][0] + b * P[1][0] + c * P[2][0], y = a * P[0][1] + b * P[1][1] + c * P[2][1];
+        if (cover.locate(x, y) === own) continue;
+        reach = Math.max(reach, Math.min(...[0, 1, 2].map((e) => {
+          const [ax, ay] = P[e], [bx, by] = P[(e + 1) % 3], dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+          const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+          return Math.hypot(x - ax - dx * u, y - ay - dy * u);
+        })));
+      }
+      off.push({ kind: own < 0 ? 'ground' : cover.shapes[own].kind, reach });
     });
-    expect(off.length).toBeLessThanOrEqual(4);
-    expect(off.filter((k) => !['carriageway', 'shoulder', 'path'].includes(k))).toEqual([]);
+    const deep = off.filter((o) => o.reach > SNAP);
+    expect(deep.length).toBeLessThanOrEqual(4);
+    expect(deep.filter((o) => !['carriageway', 'shoulder', 'path'].includes(o.kind))).toEqual([]);
+    expect(Math.max(0, ...off.map((o) => o.reach)) * mPer).toBeLessThan(0.2);
+    expect(off.length).toBeLessThanOrEqual(12);
   });
 
-  it('Innsbruck 14/8710/5744: the budget filled in one build, no road above a service road nor a track’s ballast left out', async () => {
-    const { tin, cover, stats } = await surfaceOf('surface-14-8710-5744');
+  it('Innsbruck 14/8710/5744: the budget filled in one build, no road above a service road nor a track’s ballast left out, no crack', async () => {
+    const { tin, cover, stats, debug } = await surfaceOf('surface-14-8710-5744');
+    expect(cracks(tin)).toBe(0);
+    expect(debug.missing).toBe(0);
     expect(stats.builds).toBe(1);
     expect(tin.vx.length).toBeLessThanOrEqual(MAX_SURFACE_VERTS);
     expect(tin.vx.length).toBeGreaterThan(0.9 * MAX_SURFACE_VERTS);
