@@ -8,14 +8,16 @@
  * lifted stretches of the ways (the approaches to the bridges) cover nothing: they run over it.
  */
 import earcut from 'earcut';
-import { DEFAULT_AREA_STYLES } from './area-styles';
+import { colourOf, RAMP, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
+import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-styles';
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted } from './road-levels';
 import type { RoadSurface } from './road-pull';
-import { classifyArea, classifyLine, isOpenCarPark, isTunnel, RAIL_ZONE_M, roadPriority, tieBreak, waterwayWidth, type AreaStyle } from './way-styles';
+import { PITCH_LIT_MIN_M2 } from './osm-mesher';
+import { BALLAST_RAMP, classifyArea, classifyLine, isLitRoad, isOpenCarPark, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'area';
 
@@ -53,6 +55,56 @@ export interface GroundCover {
    * ground); the shapes `skip` returns true for are passed over (the surface's dropped ribbons)
    */
   locate(x: number, y: number, skip?: (shape: number) => boolean): number;
+}
+
+/** the area of a ring, m² (local flat plane about its first point) */
+function ringAreaM2(ring: [number, number][]): number {
+  if (ring.length < 3) return 0;
+  const origin = { lon: ring[0][0], lat: ring[0][1] };
+  const pts = ring.map(([lon, lat]) => latLonToEnu(origin, lat, lon, 0));
+  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % pts.length];
+    a += x0 * y1 - x1 * y0;
+  }
+  return Math.abs(a) / 2;
+}
+
+/** a floodlit pitch: its whole outline (the shape's source) is big enough (osm-mesher litPitch) */
+const isLitPitch = (source: CoverShape['source']): boolean =>
+  'rings' in source && source.tags.leisure === 'pitch' && ringAreaM2(source.rings[0] ?? []) >= PITCH_LIT_MIN_M2;
+
+/**
+ * The colour a cover is drawn with (what the ribbons and areas of osm-mesher give it today): glow
+ * bits included; `imagery` the imagery colour of the face under it (none: a material ramp, or no
+ * imagery), which an area with a filter draws through the filter
+ */
+export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | undefined): number {
+  const tags = shape.source.tags;
+  const lit = isLitRoad(tags);
+  switch (shape.kind) {
+    case 'shoulder': return lit ? withGlow(SHOULDER_RAMP, LIT_ROAD_GLOW) : SHOULDER_RAMP;
+    case 'path':
+    case 'carriageway': {
+      const ramp = classifyLine(tags)?.ramp ?? RAMP.ASPHALT;
+      return lit ? withGlow(ramp, LIT_ROAD_GLOW) : tags.highway ? withGlow(ramp, UNLIT_ROAD_GLOW) : ramp;
+    }
+    case 'ballast': return BALLAST_RAMP;
+    case 'railZone': return RAIL_ZONE_RAMP;
+    case 'runway':
+    case 'aeroArea': return RAMP.ASPHALT;
+    case 'carPark': return withGlow(RAMP.ASPHALT, UNLIT_ROAD_GLOW);
+    case 'pitchPaint': return isLitPitch(shape.source) ? withGlow(RAMP.SNOW, PITCH_GLOW) : RAMP.SNOW;
+    case 'water': return RAMP.WATER;
+    case 'pitch':
+    case 'area': {
+      const style = classifyArea(tags, styles);
+      if (!style) return RAMP.GRASS;
+      const ramp = shape.kind === 'pitch' && isLitPitch(shape.source) ? withGlow(style.ramp, PITCH_GLOW) : style.ramp;
+      return style.filter && imagery ? withGlow(snowy(colourOf(filterColour(imagery, style.filter))), rampGlowLevel(ramp)) : ramp;
+    }
+  }
 }
 
 /** lift is probed along a way at least this often, metres */

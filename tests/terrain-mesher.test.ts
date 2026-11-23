@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, snowy } from '../src/engine/palette';
+import { RAMP, snowy, withGlow } from '../src/engine/palette';
+import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
+import { coverRamp } from '../src/world/ground-cover';
+import { LIT_ROAD_GLOW, SHOULDER_RAMP } from '../src/world/way-styles';
+import { GRID as GRID_TOWN, kindsInRange, townFixture, townMesh, vertexOfFace } from './roads-helpers';
 import { tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 
@@ -152,5 +156,58 @@ describe('buildTerrainMesh (isoline belts)', () => {
 
   it('rejects mismatched height grids', () => {
     expect(() => buildTerrainMesh({ tile: TILE, grid: GRID, heights: new Float32Array(10) })).toThrow();
+  });
+});
+
+describe('buildTerrainMesh (faces by their cover)', () => {
+  const relief = () => 100;
+  const town = townMesh(townFixture(), relief);
+  const faceWhere = (pick: (kind: string, tags: Record<string, string>) => boolean): number =>
+    town.tin.tris.findIndex((_, f) => {
+      const c = town.tin.cover![f];
+      return c >= 0 && pick(town.cover.shapes[c].kind, town.cover.shapes[c].source.tags);
+    });
+
+  it('colours a park face by its filter and a shoulder face by the shoulder', () => {
+    const m = buildTerrainMesh({ ...town.opts, areaStyles: DEFAULT_AREA_STYLES });
+    const park = faceWhere((k, t) => k === 'area' && t.leisure === 'park');
+    const shoulder = faceWhere((k) => k === 'shoulder');
+    expect(park).toBeGreaterThanOrEqual(0);
+    expect(shoulder).toBeGreaterThanOrEqual(0);
+    const parkShape = town.cover.shapes[town.tin.cover![park]];
+    expect(m.ramps[vertexOfFace(m, town.tin, park)]).toBe(coverRamp(parkShape, DEFAULT_AREA_STYLES, town.imagery));
+    // the primary road is street-lit: its shoulder glows as its ribbon does
+    expect(m.ramps[vertexOfFace(m, town.tin, shoulder)]).toBe(withGlow(SHOULDER_RAMP, LIT_ROAD_GLOW));
+  });
+
+  it('puts the road, rail and runway faces after the ground and skirts, the water last', () => {
+    const m = buildTerrainMesh({ ...town.opts });
+    expect(kindsInRange(m, town.tin, town.cover, 0, m.nearCount!)).not.toContain('carriageway');
+    expect(kindsInRange(m, town.tin, town.cover, m.nearCount!, m.farCount!)).toEqual(new Set(['carriageway', 'ballast']));
+    expect(kindsInRange(m, town.tin, town.cover, m.farCount!, m.vertexCount)).toEqual(new Set(['water']));
+  });
+
+  it('keeps the morph rows with their vertices through the reordering', () => {
+    const side = GRID_TOWN + 1;
+    const coarse = { n: new Float32Array(side).fill(5), e: new Float32Array(side).fill(-3) };
+    const m = buildTerrainMesh({ ...town.opts, borders: { ...town.opts.borders!, coarse } });
+    expect(m.morph).toHaveLength(m.vertexCount * 2);
+    // a point has one morph however many faces and skirts share it
+    const seen = new Map<string, string>();
+    let moving = 0;
+    for (let v = 0; v < m.vertexCount; v++) {
+      if (m.vertices[v * 6 + 1] < 0) continue; // a skirt's bottom
+      const key = `${m.vertices[v * 6]},${m.vertices[v * 6 + 2]}`, row = `${m.morph![v * 2]},${m.morph![v * 2 + 1]}`;
+      expect(seen.get(key) ?? row).toBe(row);
+      seen.set(key, row);
+      if (m.morph![v * 2 + 1] !== 0) moving++;
+    }
+    expect(moving).toBeGreaterThan(0);
+  });
+
+  it('is drawn whole without a cover', () => {
+    const m = buildTerrainMesh({ tile: TILE, grid: GRID, heights: heights(() => 100), skirtDepth: 50 });
+    expect(m.nearCount).toBe(m.vertexCount);
+    expect(m.farCount).toBe(m.vertexCount);
   });
 });

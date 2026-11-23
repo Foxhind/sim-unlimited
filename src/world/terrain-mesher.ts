@@ -1,8 +1,10 @@
-import { RAMP, snowy, withGlow } from '../engine/palette';
+import { isMaterial, RAMP, rampGlowLevel, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { DEFAULT_AREA_STYLES, type AreaStyles } from './area-styles';
+import { coverRamp, type GroundCover } from './ground-cover';
 import type { FaceColor } from './landsat';
 import type { TileBorders } from './terrain-source';
 import { isSeaFace, type TerrainTin, type TinOptions } from './terrain-tin';
-import { buildSurfaceTin, type RoadSurface } from './surface-tin';
+import { buildSurfaceTin, type RoadSurface, type SurfaceTin } from './surface-tin';
 import type { Tri } from './contours';
 import { gridLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 
@@ -13,6 +15,15 @@ export interface TerrainMeshData {
   vertexCount: number;
   /** per vertex: metres to the coarser neighbour's border line, and the edge bits it applies to (TerrainTin.coarse) */
   morph?: Float32Array;
+  /**
+   * With `cover`, the vertices in the order: the ground and the covers other than the below, the
+   * skirts, the roads, rails and runways, the water. The first `nearCount` are the ground and the
+   * skirts (what is drawn near), the first `farCount` also the roads, rails and runways (far); the
+   * water faces are never drawn. Without `cover`: both are `vertexCount`. (Optional: the OSM and
+   * building meshes share this shape and have no such split.)
+   */
+  nearCount?: number;
+  farCount?: number;
 }
 
 export interface TerrainMeshOptions {
@@ -38,6 +49,12 @@ export interface TerrainMeshOptions {
   pads?: TinOptions['pads'];
   /** the tile's roads with their heights: the surface is built under them (surface-tin.ts) */
   roads?: RoadSurface;
+  /** the tile's ground covers: each face is coloured by its cover (coverRamp), the surface is built along them */
+  cover?: GroundCover;
+  /** the area filters (default DEFAULT_AREA_STYLES) */
+  areaStyles?: AreaStyles;
+  /** the night glow level of each face of the surface TIN (night-glow.ts glowLevels), taken into the face's colour */
+  glow?: (tin: SurfaceTin) => Uint8Array;
 }
 
 function faceRamp(avgH: number, ny: number): number {
@@ -158,7 +175,8 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const { vx, vy, vh, tris, coarse, sea } = buildSurfaceTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads, roads: opts.roads });
+  const surface = buildSurfaceTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads, roads: opts.roads, cover: opts.cover });
+  const { vx, vy, vh, tris, coarse, sea } = surface;
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);
   const vyH = vh.map((h) => Math.max(h, 0));
@@ -202,17 +220,46 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const edgeInfo = new Map<number, { n: [number, number, number]; ramp: number }>();
   const ekey = (u: number, v: number) => (u < v ? u * vx.length + v : v * vx.length + u);
   const tin = { vx, vy, vh, tris, grid, sea };
+  const levels = opts.glow?.(surface);
+  const styles = opts.areaStyles ?? DEFAULT_AREA_STYLES;
+  /** the imagery colour of a face (none: a material ramp, or no imagery), as osm-mesher's imageryOf */
+  const imageryOf = (t: Tri): RGB | undefined => {
+    if (!opts.faceColor) return undefined;
+    const packed = opts.faceColor(vx[t.a], vy[t.a], vx[t.b], vy[t.b], vx[t.c], vy[t.c]);
+    return isMaterial(packed) ? undefined : rgbOf(packed);
+  };
+  /** the order of the faces: 0 ground and the covers drawn with it, 1 roads, rails and runways, 2 water */
+  const GROUND = 0, ROAD = 1, WATER = 2;
+  const faces: { n: [number, number, number]; ramp: number; group: number }[] = [];
   for (let ti = 0; ti < tris.length; ti++) {
     const t = tris[ti];
-    const idx = [t.a, t.b, t.c];
     const [ax, ay, az] = faceNormal(wx, vyH, wz, t);
-    const ramp = terrainFaceRamp(tin, ti, ay, opts.faceColor);
-    const info = { n: [ax, ay, az] as [number, number, number], ramp };
+    let ramp = terrainFaceRamp(tin, ti, ay, opts.faceColor);
+    let group = GROUND;
+    const shape = surface.cover && surface.cover[ti] >= 0 ? surface.cover[ti] : -1;
+    if (opts.cover && shape >= 0) {
+      const { kind } = opts.cover.shapes[shape];
+      const causeway = kind === 'carriageway' || kind === 'ballast' || kind === 'runway';
+      group = causeway ? ROAD : kind === 'water' ? WATER : GROUND;
+      // the sea stays the sea, but for a road across it
+      if (!isSeaFace(tin, ti) || causeway) ramp = coverRamp(opts.cover.shapes[shape], styles, imageryOf(t));
+    }
+    if (levels) ramp = withGlow(ramp, Math.max(rampGlowLevel(ramp), levels[ti]));
+    const info = { n: [ax, ay, az] as [number, number, number], ramp, group };
+    faces.push(info);
     edgeInfo.set(ekey(t.a, t.b), info);
     edgeInfo.set(ekey(t.b, t.c), info);
     edgeInfo.set(ekey(t.c, t.a), info);
-    for (const k of idx) pushV(wx[k], vyH[k], wz[k], info.n, ramp, k);
   }
+  const pushFaces = (group: number) => {
+    for (let ti = 0; ti < tris.length; ti++) {
+      const f = faces[ti];
+      if (f.group !== group) continue;
+      const t = tris[ti];
+      for (const k of [t.a, t.b, t.c]) pushV(wx[k], vyH[k], wz[k], f.n, f.ramp, k);
+    }
+  };
+  pushFaces(GROUND);
 
   for (const line of borders) {
     for (let q = 0; q + 1 < line.length; q++) {
@@ -230,6 +277,10 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
       for (const [x, y, z, k] of quad) pushV(x, y, z, n, ramp, k);
     }
   }
+  const nearCount = ri;
+  pushFaces(ROAD);
+  const farCount = ri;
+  pushFaces(WATER);
 
-  return { vertices: vertices.subarray(0, fi), ramps: ramps.subarray(0, ri), vertexCount: ri, morph: morph?.subarray(0, ri * 2) };
+  return { vertices: vertices.subarray(0, fi), ramps: ramps.subarray(0, ri), vertexCount: ri, morph: morph?.subarray(0, ri * 2), nearCount, farCount: opts.cover ? farCount : ri };
 }

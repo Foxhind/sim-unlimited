@@ -10,6 +10,8 @@ import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildSurfaceTin, type SurfaceTin } from '../src/world/surface-tin';
 import { classifyLine } from '../src/world/way-styles';
+import { colourOf, type RGB } from '../src/engine/palette';
+import { tinToWorld, type TerrainMeshData, type TerrainMeshOptions } from '../src/world/terrain-mesher';
 
 export const TILE: Tile = { z: 14, x: 9000, y: 6000 };
 /** the tests' own lattice (their geometry is laid out on it) */
@@ -282,4 +284,66 @@ export function cracks(tin: TerrainTin): number {
     }
   }
   return found.size;
+}
+
+/**
+ * `coverTin`'s tile as buildTerrainMesh takes it: the options (with the cover and the roads) and the
+ * surface TIN the mesh builds, over the same relief; `faceColor` a flat imagery colour on every face
+ */
+export function townMesh(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, fn: (xm: number, ym: number) => number, extra: Partial<TerrainMeshOptions> = {}): { opts: TerrainMeshOptions; tin: SurfaceTin; cover: GroundCover; imagery: RGB } {
+  const net = buildRoadNet(d.lines), roads = { net, z: solveRoadHeights(net, demOf(net, fn)) };
+  const cover = buildGroundCover(TILE, GRID, d, roads);
+  const imagery: RGB = [90, 140, 60];
+  const opts: TerrainMeshOptions = { tile: TILE, grid: GRID, heights: lattice(fn), borders: bordersOf(fn), roads, cover, faceColor: () => colourOf(imagery), ...extra };
+  const tin = buildSurfaceTin(TILE, GRID, opts.heights, { borders: opts.borders, roads, cover });
+  return { opts, tin, cover, imagery };
+}
+
+/** the mesh's triangles by their centre, 0.1 m cells (once per mesh) */
+const centres = new WeakMap<TerrainMeshData, Map<string, number[]>>();
+function centresOf(m: TerrainMeshData): Map<string, number[]> {
+  let map = centres.get(m);
+  if (map) return map;
+  map = new Map();
+  for (let v = 0; v + 2 < m.vertexCount; v += 3) {
+    const x = (m.vertices[v * 6] + m.vertices[(v + 1) * 6] + m.vertices[(v + 2) * 6]) / 3;
+    const z = (m.vertices[v * 6 + 2] + m.vertices[(v + 1) * 6 + 2] + m.vertices[(v + 2) * 6 + 2]) / 3;
+    const key = `${Math.round(x * 10)},${Math.round(z * 10)}`;
+    map.set(key, [...(map.get(key) ?? []), v]);
+  }
+  centres.set(m, map);
+  return map;
+}
+
+/** the world x, z of a TIN's vertices (once per TIN) */
+const worlds = new WeakMap<SurfaceTin, { wx: number[]; wz: number[] }>();
+
+/** the first vertex of the mesh triangle standing on TIN face `face` (matched by its centre) */
+export function vertexOfFace(m: TerrainMeshData, tin: SurfaceTin, face: number, tile: Tile = TILE): number {
+  const t = tin.tris[face];
+  let world = worlds.get(tin);
+  if (!world) worlds.set(tin, world = tinToWorld(tile, GRID, tin.vx, tin.vy));
+  const { wx, wz } = world;
+  const cx = (wx[t.a] + wx[t.b] + wx[t.c]) / 3, cz = (wz[t.a] + wz[t.b] + wz[t.c]) / 3;
+  const map = centresOf(m);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      for (const v of map.get(`${Math.round(cx * 10) + dx},${Math.round(cz * 10) + dz}`) ?? []) {
+        const x = (m.vertices[v * 6] + m.vertices[(v + 1) * 6] + m.vertices[(v + 2) * 6]) / 3;
+        const z = (m.vertices[v * 6 + 2] + m.vertices[(v + 1) * 6 + 2] + m.vertices[(v + 2) * 6 + 2]) / 3;
+        if (Math.abs(x - cx) < 0.05 && Math.abs(z - cz) < 0.05) return v;
+      }
+    }
+  }
+  return -1;
+}
+
+/** the cover kinds of the TIN faces standing on the mesh's vertices [from, to) (skirts stand on none) */
+export function kindsInRange(m: TerrainMeshData, tin: SurfaceTin, cover: GroundCover, from: number, to: number): Set<string> {
+  const kinds = new Set<string>();
+  tin.tris.forEach((_, f) => {
+    const v = vertexOfFace(m, tin, f);
+    if (v >= from && v < to) kinds.add(tin.cover![f] < 0 ? 'ground' : cover.shapes[tin.cover![f]].kind);
+  });
+  return kinds;
 }

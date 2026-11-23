@@ -17,6 +17,7 @@ import { parseFilter } from '../src/world/osm-api';
 import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
+import { townFixture, townMesh, vertexOfFace } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GROUND = 100;
@@ -420,6 +421,22 @@ describe('night glow by building density', () => {
       expect(rampGlowLevel(g.ramps[k])).toBe(5);
       expect(withGlow(g.ramps[k], 0)).toBe(terrain.ramps[under * 3 + k]);
     }
+  });
+
+  it('lights a built-up face by its glow level, not by a lifted copy', () => {
+    const town = townMesh(townFixture(), () => 100);
+    // a bare ground face (no cover of its own), lit; a street-lit road face keeps its brighter level
+    const litFace = town.tin.cover!.findIndex((c) => c < 0);
+    const roadFace = town.tin.cover!.findIndex((c) => c >= 0 && town.cover.shapes[c].kind === 'carriageway');
+    expect(litFace).toBeGreaterThanOrEqual(0);
+    const levels = new Uint8Array(town.tin.tris.length);
+    levels[litFace] = 5;
+    levels[roadFace] = 2;
+    const m = buildTerrainMesh({ ...town.opts, glow: () => levels });
+    expect(rampGlowLevel(m.ramps[vertexOfFace(m, town.tin, litFace)])).toBe(levels[litFace]);
+    expect(rampGlowLevel(m.ramps[vertexOfFace(m, town.tin, roadFace)])).toBe(LIT_ROAD_GLOW);
+    const dark = buildTerrainMesh({ ...town.opts });
+    expect(rampGlowLevel(dark.ramps[vertexOfFace(dark, town.tin, litFace)])).toBe(0);
   });
 
   it('roads, buildings and trees on a lit triangle take its level; elsewhere they stay plain', () => {
