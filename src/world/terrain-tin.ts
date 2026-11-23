@@ -732,7 +732,9 @@ function insertFixedLines(
   onSplit: (ci: number, added: number) => void,
 ): void {
   const SNAP = 1e-3; // lattice cells
-  const CELL = 1;
+  // a quarter cell: a city's fixed lines are dozens to a lattice cell, and every point and segment
+  // tries the lines of the cells it touches
+  const CELL = 0.25;
   const cells = new Map<number, number[]>();
   const key = (cx: number, cy: number) => (cx + 1024) * 4096 + (cy + 1024);
   /** the cells with a point within SNAP of segment a–b, column by column (not its box: an edge across the tile) */
