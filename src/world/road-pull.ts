@@ -152,27 +152,42 @@ const DECK_EDGE_M = 0.01;
 /** a bridge's low stretch shorter than this is lifted with the rest, metres (its deck's ends meet its approaches) */
 const DECK_LOW_MIN_M = 1;
 
-/** a bridge's deck is lifted this far either side of a way it crosses, past that way's half width, metres */
-const CROSSING_REACH_M = 2;
+/** a bridge's deck over the bed of a road beside its crossing is probed this often along it and across it, metres ... */
+const BESIDE_PROBE_M = 0.5;
+/** ... and where it leaves the bed found to this */
+const BESIDE_EDGE_M = 0.01;
 
 /**
  * Per way of `net` (its index), where a bridge crosses a mapped way (a road, a path, a railway or
  * a waterway, not a bridge or a tunnel, not joined to it): the stretch of it within that way's half
- * width and CROSSING_REACH_M of the crossing, the network's metres along it. From the two ways'
- * nodes alone, on a plane round the bridge's first point: every tile that has both agrees (a canal
- * cut below the raw DEM under a bridge level with its banks: 14/9517/6397)
+ * width and BANK_M (its bank) of the crossing, the network's metres along it, less where any of the
+ * deck's width lies over the bed of a network road it does not cross (that bed holds the ground at
+ * the road's height, its shoulder under the deck: the bank roads of 14/9517/6397 run inside the
+ * canal's width and met the deck's ends within a centimetre of it). The deck spans the water and
+ * its banks; beyond them the bridge is a cover at the deck's height. From the ways' nodes alone, on
+ * a plane round the bridge's first point: every tile that has them agrees (a canal cut below the
+ * raw DEM under a bridge level with its banks: 14/9517/6397)
  */
 export function bridgeCrossings(net: RoadNet, lines: ReadonlyArray<OsmLine>): Array<Array<[number, number]>> {
   const out = net.ways.map((): Array<[number, number]> => []);
   /** each line's nodes, to tell a joined one */
   const nodes = new Map<OsmLine, Set<string>>();
   const keysOf = (l: OsmLine) => nodes.get(l) ?? nodes.set(l, new Set(l.points.map((p) => `${p[0]},${p[1]}`))).get(l)!;
+  /** each line's box: west, east, south, north */
+  const boxes = new Map<OsmLine, [number, number, number, number]>();
+  const boxOf = (l: OsmLine): [number, number, number, number] => {
+    let box = boxes.get(l);
+    if (!box) {
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const [lon, lat] of l.points) { x0 = Math.min(x0, lon); x1 = Math.max(x1, lon); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat); }
+      boxes.set(l, (box = [x0, x1, y0, y1]));
+    }
+    return box;
+  };
   const under = lines.flatMap((l) => {
     const style = classifyLine(l.tags);
     if (!style || l.points.length < 2 || isBridge(l.tags) || isTunnel(l.tags) || (l.tags.tunnel && l.tags.tunnel !== 'no')) return [];
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const [lon, lat] of l.points) { x0 = Math.min(x0, lon); x1 = Math.max(x1, lon); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat); }
-    return [{ l, half: style.width / 2 + (style.shoulder ?? 0), box: [x0, x1, y0, y1] }];
+    return [{ l, half: style.width / 2 + (style.shoulder ?? 0), box: boxOf(l) }];
   });
   net.ways.forEach((w, wi) => {
     if (!w.bridge || w.count < 2) return;
@@ -191,11 +206,67 @@ export function bridgeCrossings(net: RoadNet, lines: ReadonlyArray<OsmLine>): Ar
     }
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (const [lon, lat] of pts) { x0 = Math.min(x0, lon); x1 = Math.max(x1, lon); y0 = Math.min(y0, lat); y1 = Math.max(y1, lat); }
+    /**
+     * the roads beside its crossings (set below), each the segments of its axis whose bed (the
+     * carriageway and the shoulder) may reach under the deck, on the plane: [x, y, x, y, whether its
+     * start is the road's own, whether its end]
+     */
+    const beside: Array<{ segs: Array<[number, number, number, number, boolean, boolean]>; half: number }> = [];
+    const p = pts.map(plane), d0 = net.samples[w.first].d, total = at[at.length - 1] - d0, deckHalf = (classifyLine(w.line.tags)?.width ?? 0) / 2;
+    const across = Math.max(1, Math.ceil((2 * deckHalf) / BESIDE_PROBE_M));
+    /** whether any of the deck's width at `d` along it lies over the bed of a road beside (no bed past that road's own ends) */
+    const onBeside = (d: number): boolean => {
+      let i = 1;
+      while (i < p.length - 1 && at[i] - d0 < d) i++;
+      const a = p[i - 1], b = p[i], span = at[i] - at[i - 1], t = span > 0 ? (d - (at[i - 1] - d0)) / span : 0;
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+      for (let k = 0; k <= across; k++) {
+        const o = deckHalf * ((2 * k) / across - 1), x = a[0] + (b[0] - a[0]) * t + nx * o, y = a[1] + (b[1] - a[1]) * t + ny * o;
+        for (const { segs, half } of beside) {
+          // the nearest of the road's axis: past its own end it has no bed
+          let best = Infinity, end = false;
+          for (const [cx, cy, ex, ey, first, last] of segs) {
+            const sx = ex - cx, sy = ey - cy, u = ((x - cx) * sx + (y - cy) * sy) / (sx * sx + sy * sy);
+            const v = Math.max(0, Math.min(1, u)), far = Math.hypot(x - cx - sx * v, y - cy - sy * v);
+            if (far < best) { best = far; end = (u <= 0 && first) || (u >= 1 && last); }
+          }
+          if (best <= half && !end) return true;
+        }
+      }
+      return false;
+    };
+    /** [from, to] along it, less its stretches over the beds of the roads beside */
+    const offBeside = (from: number, to: number): Array<[number, number]> => {
+      if (!beside.length) return [[from, to]];
+      const lo = Math.max(0, from), hi = Math.min(total, to), runs: Array<[number, number]> = [];
+      if (hi <= lo) return [];
+      const steps = Math.max(1, Math.ceil((hi - lo) / BESIDE_PROBE_M));
+      let prev = lo, was = !onBeside(lo), start = was ? from : NaN;
+      for (let k = 1; k <= steps; k++) {
+        const d = lo + ((hi - lo) * k) / steps, is = !onBeside(d);
+        if (is !== was) {
+          let x0 = prev, x1 = d;
+          while (x1 - x0 > BESIDE_EDGE_M) {
+            const m = (x0 + x1) / 2;
+            if (!onBeside(m) === was) x0 = m;
+            else x1 = m;
+          }
+          // each run to its own side of the bed's edge
+          if (was) runs.push([start, x0]);
+          else start = x1;
+        }
+        prev = d;
+        was = is;
+      }
+      if (was) runs.push([start, to]);
+      return runs;
+    };
+    const found: Array<[number, number]> = [], crossed = new Set<OsmLine>();
     for (const { l, half, box } of under) {
       if (l === w.line || box[1] < x0 || box[0] > x1 || box[3] < y0 || box[2] > y1 || l.points.some((p) => own.has(`${p[0]},${p[1]}`))) continue;
       const q = l.points.map(plane);
       for (let i = 1; i < pts.length; i++) {
-        const a = plane(pts[i - 1]), b = plane(pts[i]);
+        const a = p[i - 1], b = p[i];
         for (let j = 1; j < q.length; j++) {
           const c = q[j - 1], d = q[j];
           const den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0]);
@@ -203,11 +274,29 @@ export function bridgeCrossings(net: RoadNet, lines: ReadonlyArray<OsmLine>): Ar
           const t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den;
           const u = ((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) / den;
           if (t < 0 || t > 1 || u < 0 || u > 1) continue;
-          const nd = at[i - 1] + (at[i] - at[i - 1]) * t - net.samples[w.first].d, r = half + CROSSING_REACH_M;
-          out[wi].push([nd - r, nd + r]);
+          const nd = at[i - 1] + (at[i] - at[i - 1]) * t - d0, r = half + BANK_M;
+          found.push([nd - r, nd + r]);
+          crossed.add(l);
         }
       }
     }
+    if (!found.length) return;
+    // the network's roads it does not cross whose beds reach under its width
+    let px0 = Infinity, px1 = -Infinity, py0 = Infinity, py1 = -Infinity;
+    for (const [x, y] of p) { px0 = Math.min(px0, x); px1 = Math.max(px1, x); py0 = Math.min(py0, y); py1 = Math.max(py1, y); }
+    for (const j of net.ways) {
+      if (j === w || j.water || j.bridge || j.tunnel || crossed.has(j.line) || j.line.points.length < 2) continue;
+      const padY = (deckHalf + j.half) / ky, padX = (deckHalf + j.half) / kx, b = boxOf(j.line);
+      if (b[1] < x0 - padX || b[0] > x1 + padX || b[3] < y0 - padY || b[2] > y1 + padY) continue;
+      const q = j.line.points.map(plane), reach = deckHalf + j.half, segs: (typeof beside)[number]['segs'] = [];
+      for (let i = 1; i < q.length; i++) {
+        const c = q[i - 1], e = q[i];
+        if ((c[0] === e[0] && c[1] === e[1]) || Math.max(c[0], e[0]) < px0 - reach || Math.min(c[0], e[0]) > px1 + reach || Math.max(c[1], e[1]) < py0 - reach || Math.min(c[1], e[1]) > py1 + reach) continue;
+        segs.push([c[0], c[1], e[0], e[1], i === 1, i === q.length - 1]);
+      }
+      if (segs.length) beside.push({ segs, half: j.half });
+    }
+    for (const [from, to] of found) out[wi].push(...offBeside(from, to));
   });
   return out;
 }

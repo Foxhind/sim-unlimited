@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { coastlineWays } from '../src/world/coast';
 import { buildGroundCover } from '../src/world/ground-cover';
 import type { Pad } from '../src/world/aerodrome';
-import { latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from '../src/world/geodesy';
+import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, classifyLine, type OsmMeshOptions } from '../src/world/osm-mesher';
 import { tinLocator, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
@@ -164,6 +164,41 @@ describe('real dense tiles in the surface budget', () => {
     }
     expect(off).toEqual([]);
     expect(worstStep).toBeLessThanOrEqual(0.05);
+  }, 30_000);
+
+  it('Fethiye 14/9517/6397: under a drawn piece of the deck of Celal Bayar Caddesi no terrain face (ground, shoulder, bank, water) within 0.3 m of it', async () => {
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
+    const c = tileCenter(fx.tile);
+    const enu = (lon: number, lat: number): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
+    const sample = tinSampler(tin, fx.tile), locate = tinLocator(tin, fx.tile);
+    const m = buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: sample, tin, buildings: false, roads, cover, faceColor: () => 0 } as OsmMeshOptions).roads;
+    const net = roads!.net, w = net.ways.find((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4)!;
+    const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]].map(([lon, lat]) => enu(lon, lat));
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uz = (b[1] - a[1]) / len, half = classifyLine(w.line.tags)!.width / 2 - 0.1;
+    const runs = bridgeDecks(fx.tile, fx.grid, roads!, ([lon, lat]) => enu(lon, lat)).get(w.line)!;
+    const near: string[] = [];
+    let probes = 0, decked = 0;
+    for (let o = -half; o <= half + 1e-9; o += half / 7) {
+      for (let d = 0.05; d < len; d += 0.1) {
+        const x = a[0] + ux * d - uz * o, z = a[1] + uz * d + ux * o, { lon, lat } = enuToLatLon(c, x, -z, 0);
+        // but at the deck's very ends: the bank falls from the cover's edge there, 0.3 m of it in its first centimetres
+        if (runs.some((r) => r.some((e) => Math.abs(d - e) < 0.05))) continue;
+        probes++;
+        // the terrain's face there: one no road's face of the mesh (a carriageway's is the asphalt itself)
+        const own = tin.cover![locate(lon, lat)!.tri], kind = own >= 0 ? cover.shapes[own].kind : 'ground';
+        if (['carriageway', 'ballast', 'runway'].includes(kind)) continue;
+        const ground = sample(lon, lat);
+        for (const h of surfacesOver(m, x, z)) {
+          decked++;
+          if (h - ground < 0.3) near.push(`${d.toFixed(1)} ${o.toFixed(1)}: deck ${h.toFixed(2)} over ${kind} ${ground.toFixed(2)}`);
+        }
+      }
+    }
+    expect(probes).toBeGreaterThan(1400);
+    // the deck drawn over the canal and its banks
+    expect(runs.length).toBe(1);
+    expect(decked).toBeGreaterThan(200);
+    expect(near).toEqual([]);
   }, 30_000);
 
   it('Innsbruck 14/8710/5744: the budget filled in one build, no road above a service road nor a track’s ballast left out, no crack', async () => {
