@@ -426,7 +426,7 @@ describe('lifted roads in the mesh', () => {
     expect(asphalt).toBeGreaterThan(0);
   });
 
-  it('a bridge’s deck level with the bank roads over an oblique canal: its asphalt at the deck’s height over its whole footprint, no step where the deck lifts', () => {
+  it('a bridge’s deck level with the bank roads over an oblique canal: its asphalt at the deck’s height over its whole footprint, no step where the deck lifts, no face within 0.3 m under a lifted piece', () => {
     // flat ground at 500 m: a tertiary bridge running south over a canal (8 m wide, its water 2.5 m
     // down) crossing it at 45°, from a street along one bank (12 m off the canal) to one along the other
     const M = COVER_GRID / tileSizeMeters(COVER_TILE), k = (12 * M) / Math.SQRT2, s = 2 * k;
@@ -441,19 +441,33 @@ describe('lifted roads in the mesh', () => {
     const m = buildOsmMesh({ ...opts, cover }).roads;
     const [ax, az] = coverEnu(32, 32 - s), [bx, bz] = coverEnu(32, 32 + s), len = Math.hypot(bx - ax, bz - az), ux = (bx - ax) / len, uz = (bz - az) / len;
     const half = classifyLine({ highway: 'tertiary' })!.width / 2 - 0.1;
-    const off: string[] = [];
-    let worstStep = 0;
+    const off: string[] = [], near: string[] = [], c = tileCenter(COVER_TILE);
+    let worstStep = 0, lifted = 0, brows = 0;
     for (const o of [-half, -half / 2, 0, half / 2, half]) {
       let prev: number | undefined;
       for (let d = 0.05; d < len - 0.05; d += 0.1) {
-        const hs = surfacesOver(m, ax + ux * d - uz * o, az + uz * d + ux * o);
+        const x = ax + ux * d - uz * o, z = az + uz * d + ux * o, hs = surfacesOver(m, x, z);
         // one surface: the deck's ribbon or the bridge's asphalt on the ground pulled to it
         if (hs.length !== 1 || Math.abs(hs[0] - deck) > 0.3) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))}`);
-        if (hs.length === 1 && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
-        prev = hs.length === 1 ? hs[0] : undefined;
+        // a lifted piece clears the face under it by the deck's floor, whatever the face (a shoulder's, the ground's, a bank's)
+        const { lon, lat } = enuToLatLon(c, x, -z, 0), ground = opts.sampleHeight(lon, lat);
+        for (const h of hs) {
+          if (Math.abs(h - ground) < 1e-3) continue;
+          lifted++;
+          if (h - ground < 0.3) near.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${h.toFixed(2)} over ${ground.toFixed(2)}`);
+        }
+        // but on a bank's brow: under its floor the deck lies on the face, down to the floor under its height
+        const brow = hs.length === 1 && hs[0] < deck - 0.05 && Math.abs(hs[0] - ground) < 1e-3;
+        if (brow) brows++;
+        if (hs.length === 1 && !brow && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
+        prev = hs.length === 1 && !brow ? hs[0] : undefined;
       }
     }
     expect(off).toEqual([]);
     expect(worstStep).toBeLessThanOrEqual(0.05);
+    expect(lifted).toBeGreaterThan(100);
+    expect(near).toEqual([]);
+    // 10 of some 1700 probes: one or three stations a row at a bank
+    expect(brows).toBeLessThanOrEqual(10);
   });
 });

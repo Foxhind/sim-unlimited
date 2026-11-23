@@ -13,7 +13,7 @@ import { tinLocator, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, type SurfaceStats } from '../src/world/surface-tin';
-import { bridgeDecks, roadPullOf } from '../src/world/road-pull';
+import { BANK_M, bridgeCrossings, bridgeDecks, roadPullOf } from '../src/world/road-pull';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { TinDebug } from '../src/world/terrain-tin';
 import { cracks } from './roads-helpers';
@@ -118,55 +118,72 @@ describe('real dense tiles in the surface budget', () => {
     expect(wet).toEqual([]);
   });
 
-  it('Fethiye 14/9517/6397: the deck of Celal Bayar Caddesi lifted over the canal it crosses, the canal’s water under it, no road’s cover over the water', async () => {
+  it('Fethiye 14/9517/6397: the deck of Celal Bayar Caddesi lifted over the whole reach of the canal it crosses, the canal’s water under all its width, no road’s cover over the water', async () => {
     const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
     const c = tileCenter(fx.tile), enu = ([lon, lat]: [number, number]): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
-    const net = roads!.net, w = net.ways.find((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4)!;
+    const net = roads!.net, wi = net.ways.findIndex((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4), w = net.ways[wi];
     const runs = bridgeDecks(fx.tile, fx.grid, roads!, enu).get(w.line)!;
     const pull = roadPullOf(fx.tile, fx.grid, roads!, true), toL = tileLattice(fx.tile, fx.grid), locate = tinLocator(tin, fx.tile);
-    const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]], len = Math.hypot(...([0, 1] as const).map((k) => enu(b)[k] - enu(a)[k]) as [number, number]);
-    let water = 0;
-    for (let d = 0.05; d < len; d += 0.1) {
-      const p: [number, number] = [a[0] + ((b[0] - a[0]) * d) / len, a[1] + ((b[1] - a[1]) * d) / len], [x, y] = toL(p);
-      // over the canal's water (its level, whatever the relief): the deck lifted, the face under it the canal's, at its level
-      const level = pull.surface(x, y, 0);
-      if (level !== pull.surface(x, y, 1000) || level === pull.surface(x, y, 0, () => true)) continue;
-      expect(runs.some(([r0, r1]) => d >= r0 && d <= r1)).toBe(true);
-      const f = locate(p[0], p[1])!.tri, own = tin.cover![f], kind = own >= 0 ? cover.shapes[own].kind : pull.bank(x, y) ? 'bank' : 'ground';
-      // the water, or its bank down from a road's cover's edge; never a road's cover
-      expect(['water', 'bank']).toContain(kind);
-      if (kind === 'water') water++;
+    const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]].map(enu);
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uz = (b[1] - a[1]) / len, half = classifyLine(w.line.tags)!.width / 2 - 0.1;
+    // one stretch: the canal's half width (4 m) and its bank either side of the crossing, whatever the bank roads under it
+    const reach = bridgeCrossings(net, fx.data.lines)[wi];
+    expect(reach.length).toBe(1);
+    expect(reach[0][1] - reach[0][0]).toBeCloseTo(2 * (4 + BANK_M), 6);
+    expect(runs.length).toBe(1);
+    expect(runs[0][0]).toBeLessThanOrEqual(Math.max(0, reach[0][0]) + 0.02);
+    expect(runs[0][1]).toBeGreaterThanOrEqual(Math.min(len, reach[0][1]) - 0.02);
+    for (let o = -half; o <= half + 1e-9; o += half / 4) {
+      let water = 0;
+      for (let d = 0.05; d < len; d += 0.1) {
+        const { lon, lat } = enuToLatLon(c, a[0] + ux * d - uz * o, -(a[1] + uz * d + ux * o), 0), [x, y] = toL([lon, lat]);
+        // over the canal's water (its level, whatever the relief): the deck lifted, the face under it the canal's, at its level
+        const level = pull.surface(x, y, 0);
+        if (level !== pull.surface(x, y, 1000) || level === pull.surface(x, y, 0, () => true)) continue;
+        expect(runs.some(([r0, r1]) => d >= r0 && d <= r1)).toBe(true);
+        const f = locate(lon, lat)!.tri, own = tin.cover![f], kind = own >= 0 ? cover.shapes[own].kind : pull.bank(x, y) ? 'bank' : 'ground';
+        // the water, or its bank down from a road's cover's edge; never a road's cover
+        expect(['water', 'bank']).toContain(kind);
+        if (kind === 'water') water++;
+      }
+      // the channel between the bank roads' beds: 2.5 m of it or more across all the deck's width
+      expect(water).toBeGreaterThanOrEqual(25);
     }
-    expect(water).toBeGreaterThan(5);
   });
 
   it('Fethiye 14/9517/6397: over the deck of Celal Bayar Caddesi (its bridge over the canal) one asphalt within 0.3 m of the deck, no step where it lifts', async () => {
     const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
     const c = tileCenter(fx.tile);
     const enu = (lon: number, lat: number): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
-    const m = buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: tinSampler(tin, fx.tile), tin, buildings: false, roads, cover, faceColor: () => 0 } as OsmMeshOptions).roads;
+    const sample = tinSampler(tin, fx.tile);
+    const m = buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: sample, tin, buildings: false, roads, cover, faceColor: () => 0 } as OsmMeshOptions).roads;
     const net = roads!.net, w = net.ways.find((x) => x.bridge && Math.abs(x.line.points[0][1] - 36.64778) < 2e-4 && Math.abs(x.line.points[0][0] - 29.12805) < 2e-4)!;
     const deck = Array.from(roads!.z.subarray(w.first, w.first + w.count));
     const [a, b] = [w.line.points[0], w.line.points[w.line.points.length - 1]].map(([lon, lat]) => enu(lon, lat));
     const len = Math.hypot(b[0] - a[0], b[1] - a[1]), ux = (b[0] - a[0]) / len, uz = (b[1] - a[1]) / len, half = classifyLine(w.line.tags)!.width / 2 - 0.1;
     const off: string[] = [];
-    let worstStep = 0;
+    let worstStep = 0, brows = 0;
     for (let o = -half; o <= half + 1e-9; o += half / 4) {
       let prev: number | undefined;
       for (let d = 0.05; d < len - 0.05; d += 0.1) {
-        const hs = surfacesOver(m, a[0] + ux * d - uz * o, a[1] + uz * d + ux * o);
+        const x = a[0] + ux * d - uz * o, z = a[1] + uz * d + ux * o, hs = surfacesOver(m, x, z);
         // the deck's own height there (its samples' along it)
         const f = (d / len) * (deck.length - 1), i = Math.min(deck.length - 2, Math.floor(f)), here = deck[i] + (deck[i + 1] - deck[i]) * (f - i);
         if (hs.length !== 1 || hs[0] < here - 0.3 || hs[0] > here + 0.05) off.push(`${d.toFixed(1)} ${o.toFixed(1)}: ${hs.map((h) => h.toFixed(2))} deck ${here.toFixed(2)}`);
-        if (hs.length === 1 && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
-        prev = hs.length === 1 ? hs[0] : undefined;
+        // but on a bank's brow: under its floor the deck lies on the face, down to the floor under its height
+        const { lon, lat } = enuToLatLon(c, x, -z, 0), brow = hs.length === 1 && hs[0] < here - 0.05 && Math.abs(hs[0] - sample(lon, lat)) < 1e-3;
+        if (brow) brows++;
+        if (hs.length === 1 && !brow && prev !== undefined) worstStep = Math.max(worstStep, Math.abs(hs[0] - prev));
+        prev = hs.length === 1 && !brow ? hs[0] : undefined;
       }
     }
     expect(off).toEqual([]);
     expect(worstStep).toBeLessThanOrEqual(0.05);
+    // 10 of the 909 probes
+    expect(brows).toBeLessThanOrEqual(10);
   }, 30_000);
 
-  it('Fethiye 14/9517/6397: under a drawn piece of the deck of Celal Bayar Caddesi no terrain face (ground, shoulder, bank, water) within 0.3 m of it', async () => {
+  it('Fethiye 14/9517/6397: under a drawn piece of the deck of Celal Bayar Caddesi no face of the surface (ground, bank, shoulder, carriageway, water) within 0.3 m of it', async () => {
     const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6397');
     const c = tileCenter(fx.tile);
     const enu = (lon: number, lat: number): [number, number] => { const [e, n] = latLonToEnu(c, lat, lon, 0); return [e, -n]; };
@@ -181,14 +198,12 @@ describe('real dense tiles in the surface budget', () => {
     for (let o = -half; o <= half + 1e-9; o += half / 7) {
       for (let d = 0.05; d < len; d += 0.1) {
         const x = a[0] + ux * d - uz * o, z = a[1] + uz * d + ux * o, { lon, lat } = enuToLatLon(c, x, -z, 0);
-        // but at the deck's very ends: the bank falls from the cover's edge there, 0.3 m of it in its first centimetres
-        if (runs.some((r) => r.some((e) => Math.abs(d - e) < 0.05))) continue;
         probes++;
-        // the terrain's face there: one no road's face of the mesh (a carriageway's is the asphalt itself)
         const own = tin.cover![locate(lon, lat)!.tri], kind = own >= 0 ? cover.shapes[own].kind : 'ground';
-        if (['carriageway', 'ballast', 'runway'].includes(kind)) continue;
         const ground = sample(lon, lat);
         for (const h of surfacesOver(m, x, z)) {
+          // on the face itself: a carriageway's own face, or the deck's asphalt under its floor laid on the ground's (a depth level over it)
+          if (Math.abs(h - ground) < 1e-3) continue;
           decked++;
           if (h - ground < 0.3) near.push(`${d.toFixed(1)} ${o.toFixed(1)}: deck ${h.toFixed(2)} over ${kind} ${ground.toFixed(2)}`);
         }

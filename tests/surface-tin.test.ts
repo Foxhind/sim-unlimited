@@ -517,3 +517,31 @@ it('lifts a bridge’s deck by its own heights and DEM alone: the low stretches 
   expect([...a.keys()].sort()).toEqual([...b.keys()].sort());
   for (const [y, h] of a) expect(Math.abs(b.get(y)! - h)).toBeLessThan(0.05);
 });
+
+it('a bridge over a canal at the border with a road along the canal’s bank: the two tiles’ border rows agree', () => {
+  // a 20 m tertiary bridge across the border to the east tile over a canal along it, a bank road
+  // beside the canal ending near the bridge, over relief sloped along the border
+  const relief = (xm: number, ym: number) => 500 + 1.5 * Math.sin(xm / 40) + 0.02 * ym;
+  const B = GRID;
+  for (const [cx, bank] of [
+    [B + M, road({ highway: 'residential' }, [[B - 3 * M, 4], [B - 3 * M, 32 - M]])],
+    [B - 2 * M, road({ highway: 'residential' }, [[B + M, 4], [B + 3 * M, 32 - 1.5 * M]])],
+    [B, road({ highway: 'residential' }, [[B + 4.5 * M, 60], [B + 3 * M, 32 + 0.5 * M]])],
+  ] as const) {
+    const lines = [
+      road({ highway: 'tertiary' }, [[B - 40 * M, 32], [B - 10 * M, 32]]), road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[B - 10 * M, 32], [B + 10 * M, 32]]),
+      road({ highway: 'tertiary' }, [[B + 10 * M, 32], [B + 40 * M, 32]]), road({ waterway: 'canal' }, [[cx, 2], [cx, 62]]), bank,
+    ];
+    const tileOf = (t: typeof TILE) => {
+      const d = data(lines), net = buildRoadNet(d.lines), roads = roadSurfaceOf(t, d, net, demOf(net, relief)), cover = buildGroundCover(t, GRID, d, roads);
+      return buildSurfaceTin(t, GRID, lattice(relief, t), { borders: bordersOf(relief, t), roads, cover });
+    };
+    const west = tileOf(TILE), east = tileOf({ ...TILE, x: TILE.x + 1 });
+    const on = (tin: SurfaceTin, x: number) => new Map(tin.vx.flatMap((vx, k) => (vx === x ? [[tin.vy[k].toFixed(6), tin.vh[k]] as const] : [])));
+    const a = on(west, GRID), b = on(east, 0);
+    expect([...a.keys()].sort()).toEqual([...b.keys()].sort());
+    for (const [y, h] of a) expect(Math.abs(b.get(y)! - h)).toBeLessThan(0.05);
+    expect(cracks(west)).toBe(0);
+    expect(cracks(east)).toBe(0);
+  }
+});

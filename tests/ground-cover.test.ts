@@ -375,19 +375,19 @@ describe('coverLifted', () => {
       expect([5.5, 14.5].map((d) => lifted(bridge, d))).toEqual([false, false]);
     }
   });
-  it('a bridge level with the DEM is a cover over the bed of a road beside the way it crosses: its deck spans the water and its banks alone', () => {
+  it('a bridge level with the DEM over a way it crosses keeps its whole reach lifted, a road along that way’s bank or none', () => {
     // the same bridge over the canal; a bank road along the canal, 4 m from its axis, ends 1 m short
     // of the bridge's axis: its bed (the shoulder too) lies under the deck's width, inside the canal's
     const s = 10 * M;
     const bridge = road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[32, 32 - s], [32, 32 + s]]);
     const bank = road({ highway: 'residential' }, [[4, 32 - 4 * M], [32 - M, 32 - 4 * M]]);
     const lines = [road({ highway: 'tertiary' }, [[32, 4], [32, 32 - s]]), bridge, road({ highway: 'tertiary' }, [[32, 32 + s], [32, 60]]), road({ waterway: 'canal' }, [[4, 32], [60, 32]]), bank];
-    const net = buildRoadNet(lines), half = net.ways.find((w) => w.line === bank)!.half;
+    const net = buildRoadNet(lines);
     const roads = roadSurfaceOf(TILE, { lines, areas: [] }, net, new Float64Array(net.samples.length).fill(500));
+    // the canal's reach [5.7, 14.3], the bank road's bed (round 6 m) inside it
+    expect(roads.over![net.ways.findIndex((w) => w.line === bridge)].map((r) => r.map((v) => +v.toFixed(2)))).toEqual([[5.7, 14.3]]);
     const lifted = coverLifted(roads, buildRoadLevels(lines, [], ([lon, lat]) => enu(lon, lat)), bridgeDecks(TILE, GRID, roads, ([lon, lat]) => enu(lon, lat)));
-    // the canal's reach [5.7, 14.3] less the bank road's bed [6 − half, 6 + half]
-    expect(6 + half).toBeLessThan(12);
-    expect([2, 5.8, 6 + half - 0.2, 6 + half + 0.2, 14, 14.5].map((d) => lifted(bridge, d))).toEqual([false, false, false, true, true, false]);
+    expect([2, 5.5, 5.8, 6, 7, 10, 14, 14.5].map((d) => lifted(bridge, d))).toEqual([false, false, true, true, true, true, true, false]);
   });
   it('a way of the network with heights: lifted only on a bridge', () => {
     const roadBridge = road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[30, 6], [30, 8]]);
