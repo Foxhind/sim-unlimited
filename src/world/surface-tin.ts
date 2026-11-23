@@ -38,6 +38,8 @@ export interface SurfaceOptions extends TinOptions {
   roads?: RoadSurface;
   /** the tile's ground covers: every edge of them a fixed edge while the vertices last, each face its cover */
   cover?: GroundCover;
+  /** the vertex budget, MAX_SURFACE_VERTS unless given (tests: a tile over it without thousands of ways) */
+  maxSurfaceVerts?: number;
 }
 
 export interface SurfaceTin extends TerrainTin {
@@ -77,7 +79,7 @@ interface Unit {
 export const Z14_RELIEF_TOL_M = 5;
 
 export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
-  const { roads, cover, ...given } = opts;
+  const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, ...given } = opts;
   const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
   const pull = roads && roads.net.ways.length ? buildRoadPull(tile, grid, roads) : undefined;
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
@@ -115,7 +117,7 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
       points.push(...coverBorder);
       // the outlines while the vertices last; a third of their vertices again for where they cross
       // the isolines, each other and the band points: one build, mostly
-      let room = (MAX_SURFACE_VERTS - relief.vx.length - points.length) / 1.3;
+      let room = (maxSurfaceVerts - relief.vx.length - points.length) / 1.3;
       let attempt = 0;
       const pick = () => {
         picked = 0;
@@ -127,19 +129,22 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
         reshape: pull ? (x, y, h) => pull.height(x, y, h) : (_x, _y, h) => h,
         next: (vertices) => {
           if (vertices === undefined) return pick();
-          if (vertices <= MAX_SURFACE_VERTS || picked === 0 || ++attempt >= 6) return undefined;
-          room -= (vertices - MAX_SURFACE_VERTS) * 1.2 + 16;
+          if (vertices <= maxSurfaceVerts || picked === 0 || ++attempt >= 6) return undefined;
+          room -= (vertices - maxSurfaceVerts) * 1.2 + 16;
           return pick();
         },
       };
     },
   });
+  // the units the budget left out: a way drawn as a ribbon (a road, path, railway or runway, or a bed
+  // without a shape) is drawn over the ground as before; an area or water still colours its faces
   const loose = new Set<OsmLine>();
   for (const u of units.slice(picked)) if (u.way) loose.add(u.way);
   const out: SurfaceTin = loose.size ? { ...tin, loose } : tin;
   if (!cover) return out;
   // each face the senior cover under its centre: all its edges are the faces' (but a dropped unit's),
-  // so the centre tells; a dropped ribbon is passed over (its ribbon lies over the faces)
+  // so the centre tells. A dropped ribbon's shapes are passed over: its faces take the junior cover
+  // under them (a park the road crosses), −1 only on the bare ground, and its ribbon lies over them
   const dropped = new Uint8Array(cover.shapes.length);
   for (const u of units.slice(picked)) for (const si of u.shapes) if (RIBBON_KINDS.has(cover.shapes[si].kind)) dropped[si] = 1;
   const skip = (si: number) => dropped[si] === 1;

@@ -1,12 +1,12 @@
 import { expect, it } from 'vitest';
-import type { GroundCover } from '../src/world/ground-cover';
+import { buildGroundCover, type GroundCover } from '../src/world/ground-cover';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import type { P2 } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceTin } from '../src/world/surface-tin';
-import { buildTerrainTin, tinLatticeSampler, type TerrainTin } from '../src/world/terrain-tin';
-import { area, at, coverTin, cracks, demOf, denseTown, GRID, lattice, M, padAround, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
+import { buildTerrainTin, tinLatticeSampler, type TerrainTin, type TinDebug } from '../src/world/terrain-tin';
+import { area, areaOf, at, bordersOf, coverTin, cracks, demOf, denseTown, GRID, lattice, M, padAround, polygon, randomTown, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
 
 const slope = lattice((x, y) => 500 + 0.2 * x + 0.05 * y);
 const surfaceOf = (roads: OsmLine[], h: Float32Array = slope, opts: SurfaceOptions = {}) => {
@@ -281,4 +281,56 @@ it('drops the parks before the roads when over the budget, and cracks nowhere', 
   expect(tin.loose?.size ?? 0).toBe(0);
   expect(droppedKinds(tin, cover)).toEqual(['area']);
   expect(cracks(tin)).toBe(0);
+});
+
+/** the surface of a random town, roads only or with its cover, and how many fixed edges the triangulation lost */
+const townSurface = (seed: number, withCover: boolean) => {
+  const relief = (x: number, y: number) => 500 + 25 * Math.sin(x / 300) + 0.06 * y;
+  const d = randomTown(seed), net = buildRoadNet(d.lines), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+  const debug = {} as TinDebug;
+  const cover = withCover ? buildGroundCover(TILE, GRID, d, roads) : undefined;
+  return { tin: buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), roads, cover, debug }), missing: debug.missing };
+};
+for (const seed of [10, 12]) it(`keeps every fixed edge and cracks nowhere under a random town's roads (seed ${seed})`, () => {
+  const { tin, missing } = townSurface(seed, false);
+  expect(missing).toBe(0);
+  expect(cracks(tin)).toBe(0);
+});
+it('keeps every fixed edge and cracks nowhere under a random town with its covers', () => {
+  const { tin, missing } = townSurface(12, true);
+  expect(missing).toBe(0);
+  expect(cracks(tin)).toBe(0);
+});
+
+it('lays a dropped road over the cover under it: the park it crosses, the bare ground elsewhere', () => {
+  // a street through a park, and a lane in the network with no cover of its own (a bed alone)
+  const street = road({ highway: 'residential' }, [[4.3, 20.2], [60.1, 22.7]]);
+  const lane = road({ highway: 'service' }, [[10.3, 40.1], [50.2, 43.3]]);
+  const parkArea = areaOf({ leisure: 'park' }, polygon(30.2, 21.4, 8.1, 9, 0.2));
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  const net = buildRoadNet([street, lane]), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+  const cover = buildGroundCover(TILE, GRID, { lines: [street], areas: [parkArea], points: [] }, roads);
+  const park = cover.shapes.findIndex((s) => s.kind === 'area');
+  const ofStreet = (s: number) => s >= 0 && cover.shapes[s].source === street;
+  // a budget below the relief's own vertices: every edge left out
+  const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { roads, cover, maxSurfaceVerts: 0 });
+  expect([...tin.loose!].sort((a, b) => a.tags.highway.localeCompare(b.tags.highway))).toEqual([street, lane]);
+  const under = new Set<number>();
+  tin.tris.forEach((_, f) => {
+    const [x, y] = centre(tin, f);
+    expect(ofStreet(tin.cover![f])).toBe(false);
+    if (!ofStreet(cover.locate(x, y))) {
+      expect(tin.cover![f]).toBe(cover.locate(x, y));
+      return;
+    }
+    // on the street: what lies under it
+    const inPark = cover.shapes[park].tris.length > 0 && cover.locate(x, y, (s) => s !== park) === park;
+    expect(tin.cover![f]).toBe(inPark ? park : -1);
+    under.add(tin.cover![f]);
+  });
+  expect([...under].sort((a, b) => a - b)).toEqual([-1, park]);
+  // within the budget both keep their edges (nothing loose) and the street its faces
+  const kept = buildSurfaceTin(TILE, GRID, lattice(relief), { roads, cover });
+  expect(kept.loose).toBeUndefined();
+  expect([...kept.cover!].some(ofStreet)).toBe(true);
 });

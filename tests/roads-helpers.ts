@@ -180,6 +180,32 @@ export function denseTown(parks: number): { lines: OsmLine[]; areas: OsmArea[]; 
 }
 
 /**
+ * A town of seeded random ways across TILE and beyond: 40 roads of every class, two or three nodes
+ * among 30 shared ones (junctions, hairpins, near-parallel and collinear sides), a railway and a
+ * river; then 25 areas of every kind, 3 to 11 sides. Seeds 2, 7, 9, 10 and 12 lost fixed edges and
+ * cracked in the road-only surface before insertFixedLines ran its lines through the vertices and
+ * edges within SNAP of them.
+ */
+export function randomTown(seed: number): { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] } {
+  const rnd = seeded(seed);
+  const at = (): [number, number] => [rnd() * 70 - 3, rnd() * 70 - 3];
+  const nodes = Array.from({ length: 30 }, at);
+  const kinds = ['primary', 'secondary', 'residential', 'residential', 'service', 'footway', 'tertiary', 'track'];
+  const lines: OsmLine[] = [];
+  for (let k = 0; k < 40; k++) {
+    const a = nodes[Math.floor(rnd() * 30)], b = nodes[Math.floor(rnd() * 30)], c = nodes[Math.floor(rnd() * 30)];
+    lines.push(road({ highway: kinds[Math.floor(rnd() * kinds.length)] }, rnd() < 0.5 ? [a, b] : [a, b, c]));
+  }
+  lines.push(rail([at(), at()]), road({ waterway: 'river' }, [at(), at(), at()]));
+  const tags: Record<string, string>[] = [{ leisure: 'park' }, { natural: 'water' }, { amenity: 'parking' }, { landuse: 'grass' }, { natural: 'wood' }];
+  const areas = Array.from({ length: 25 }, (_, k) => {
+    const [x, y] = at();
+    return areaOf(tags[k % tags.length], polygon(x, y, 1 + rnd() * 6, 3 + Math.floor(rnd() * 9), rnd() * 6));
+  });
+  return { lines, areas, points: [] };
+}
+
+/**
  * The surface of `tile` with its ground cover over a relief given in metres: the roads' heights from
  * that relief, the cover from the whole OSM (`d`, lattice of TILE)
  */
