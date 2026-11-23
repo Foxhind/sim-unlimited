@@ -8,6 +8,7 @@ import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { insertAt } from '../world/bridge-mesher';
 import { buildPiers } from '../world/pier-mesher';
+import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
@@ -25,8 +26,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts
-export const OSM_MESH_SCHEMA = 85;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets
+export const OSM_MESH_SCHEMA = 86;
 
 export interface OsmRequest {
   type: 'osm';
@@ -237,7 +238,17 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // them: after the buildings' core, as part of it (the far LOD and the shadows draw the core only)
     // piers and breakwaters (pier-mesher.ts) likewise: solid, with the bridges in the core
     const piers = buildPiers(tile, clipped.lines, clipped.areas, drape);
-    const solid = { vertices: concatF32(mesh.bridges.vertices, piers.vertices), ramps: concatU32(mesh.bridges.ramps, piers.ramps) };
+    // and the minarets (minaret-mesher.ts): mapped, or guessed by the tile's mosques; the whole fetch's
+    // mapped ones keep a mosque by the border from a guess; far away a line each, as the masts
+    const known = [
+      ...data.points.filter((p) => isMappedMinaret(p.tags)).map((p) => p.at),
+      ...data.buildings.filter((b) => isMappedMinaret(b.tags) && b.rings[0]?.length).map((b) => b.rings[0][0]),
+    ];
+    const minarets = buildMinarets(minaretSites(clipped.points, own, known), tile, drape);
+    const solid = {
+      vertices: concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices),
+      ramps: concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps),
+    };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {
       vertices: concatF32(insertAt(houses.vertices, solid.vertices, core * 6), masts.vertices),
@@ -269,7 +280,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
-      beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
+      beacons: masts.beacons.slice().buffer, mastLines: concatF32(masts.lines, minarets.lines).buffer as ArrayBuffer,
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer, rAttrs: mesh.roadAttrs.slice().buffer,
       wVertices: mesh.water.vertices.slice().buffer, wRamps: mesh.water.ramps.slice().buffer,
       roadLines: mesh.roadLines.slice().buffer,

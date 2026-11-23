@@ -61,6 +61,7 @@ const FULL_FILTER = `
   way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
+  node["man_made"="tower"]["tower:type"="minaret"]; way["man_made"="tower"]["tower:type"="minaret"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
@@ -259,8 +260,10 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     const geom = wayGeom(w);
     if (geom.length < 2) continue;
     const closed = geom.length > 3 && geom[0][0] === geom[geom.length - 1][0] && geom[0][1] === geom[geom.length - 1][1];
-    // a mast mapped by its footprint (often the guyed giants, e.g. the 442 m Balashikha mast) stands at its vertex mean
-    if (!usedWays.has(w.id) && !hasBuildingTags(tags) && isAntenna(tags)) {
+    // a mast mapped by its footprint (often the guyed giants, e.g. the 442 m Balashikha mast) stands at
+    // its vertex mean; so does a minaret mapped so (minaret-mesher.ts)
+    const minaret = tags.man_made === 'tower' && tags['tower:type'] === 'minaret';
+    if (!usedWays.has(w.id) && !hasBuildingTags(tags) && (isAntenna(tags) || minaret)) {
       const n = closed ? geom.length - 1 : geom.length;
       let lon = 0, lat = 0;
       for (let i = 0; i < n; i++) { lon += geom[i][0]; lat += geom[i][1]; }

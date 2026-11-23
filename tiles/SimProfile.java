@@ -69,7 +69,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -126,7 +126,9 @@ public class SimProfile implements Profile {
   }
 
   static boolean isMast(SourceFeature f) {
-    return find(MAST, s(f, "man_made")) || ("tower".equals(s(f, "man_made")) && "communication".equals(s(f, "tower:type")));
+    // with the masts: the minarets (tower:type=minaret), points or footprints (minaret-mesher.ts)
+    String tt = s(f, "tower:type");
+    return find(MAST, s(f, "man_made")) || ("tower".equals(s(f, "man_made")) && ("communication".equals(tt) || "minaret".equals(tt)));
   }
 
   static boolean nodeWanted(SourceFeature f) {
