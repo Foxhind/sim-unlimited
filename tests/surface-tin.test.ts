@@ -4,9 +4,9 @@ import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import type { P2 } from '../src/world/ribbon-shapes';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceStats, type SurfaceTin } from '../src/world/surface-tin';
+import { buildSurfaceTin, MAX_SURFACE_VERTS, roadSurfaceOf, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceStats, type SurfaceTin } from '../src/world/surface-tin';
 import { buildTerrainTin, tinLatticeSampler, type TerrainTin, type TinDebug } from '../src/world/terrain-tin';
-import { BED_MARGIN_M } from '../src/world/road-pull';
+import { BANK_M, BED_MARGIN_M, ROAD_BED_REACH_M } from '../src/world/road-pull';
 import { classifyLine } from '../src/world/way-styles';
 import { area, areaOf, at, bordersOf, coverTin, cracks, data, demOf, denseTown, GRID, lattice, M, padAround, polygon, randomTown, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
 
@@ -425,4 +425,34 @@ it('lays a dropped road over the cover under it: the park it crosses, the bare g
   const kept = buildSurfaceTin(TILE, GRID, lattice(relief), { roads, cover });
   expect(kept.loose).toBeUndefined();
   expect([...kept.cover!].some(ofStreet)).toBe(true);
+});
+
+it('lays a road’s bank down to the water its bed reaches over as one steep strip: no water face spans the step', () => {
+  // flat ground at 503 m: a residential with a canal (18 m wide, its water 2.5 m down) 10 m off it,
+  // and another with a stream (5 m wide, 1 m down) across it, no culvert
+  const main = road({ highway: 'residential' }, [[4, 40], [60, 40]]), side = road({ highway: 'residential' }, [[4, 12], [60, 12]]);
+  const canal = road({ waterway: 'canal', width: '18' }, [[-4, 40 + 10 * M], [68, 40 + 10 * M]]);
+  const stream = road({ waterway: 'stream', width: '5' }, [[20, 2], [20, 24]]);
+  const d = data([main, side, canal, stream]), flat = () => 503, net = buildRoadNet(d.lines);
+  const roads = roadSurfaceOf(TILE, d, net, demOf(net, flat)), cover = buildGroundCover(TILE, GRID, d, roads);
+  const tin = buildSurfaceTin(TILE, GRID, lattice(flat), { borders: bordersOf(flat), roads, cover });
+  const edge = net.ways[0].half + ROAD_BED_REACH_M;
+  /** metres off the nearer road's axis (round its ends) */
+  const off = (v: number) => Math.min(...[40, 12].map((y) => Math.hypot(tin.vx[v] - Math.max(4, Math.min(60, tin.vx[v])), tin.vy[v] - y) / M));
+  const levels = new Set<number>(), tilted: string[] = [];
+  tin.tris.forEach((t, f) => {
+    const own = tin.cover![f];
+    if (own < 0 || cover.shapes[own].kind !== 'water') return;
+    const hs = [t.a, t.b, t.c].map((v) => tin.vh[v]);
+    for (const h of hs) levels.add(Math.round(h * 10) / 10);
+    if (Math.max(...hs) - Math.min(...hs) <= 1) return;
+    // a face of the bank: every corner within half a metre of the road's bed's edge
+    if ([t.a, t.b, t.c].every((v) => Math.abs(off(v) - edge) <= 0.5)) return;
+    tilted.push(`${centre(tin, f).map((c) => (c / M).toFixed(1))} ${hs.map((h) => h.toFixed(2))}`);
+  });
+  // the canal's water and the stream's, each at its own level
+  expect([...levels]).toEqual(expect.arrayContaining([500.5, 502]));
+  expect(tilted).toEqual([]);
+  expect(BANK_M).toBeLessThanOrEqual(0.5);
+  expect(cracks(tin)).toBe(0);
 });

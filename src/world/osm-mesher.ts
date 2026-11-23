@@ -15,7 +15,7 @@ import type { TerrainMeshData } from './terrain-mesher';
 import type { SurfaceTin } from './surface-tin';
 import { coverRamp, cumulative, liftedJoints, liftedRuns, runPart, type CoverKind, type GroundCover } from './ground-cover';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './road-levels';
-import type { RoadSurface } from './road-pull';
+import { bridgeDecks, type RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import {
@@ -536,7 +536,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
   const levels = plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels;
   /** with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts) */
-  const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels) : undefined;
+  const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels, opts.roads && bridgeDecks(tile, tin!.grid, opts.roads, ([lon, lat]) => enu(lon, lat))) : undefined;
   /** with the cover: the ends of the ways where a lifted run ends, as the cover has them (ground-cover liftedJoints) */
   const coverJoints = coverLift ? liftedJoints(opts.data.lines, enu, toLattice, coverLift) : undefined;
   /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */

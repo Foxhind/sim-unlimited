@@ -33,10 +33,17 @@ it('joins ways at a shared node and nowhere else', () => {
 it('survives degenerate ways', () => {
   expect(() => buildRoadNet([road({ highway: 'primary' }, [[4, 4]]), road({ highway: 'primary' }, [[4, 4], [4, 4]]), road({ highway: 'primary' }, [[4, 4], [8, 4], [4, 4]])])).not.toThrow();
 });
+it('takes an untagged canal 8 m wide, a river 18 m, a tagged width as it is', () => {
+  // a town's canal (14/9517/6397): at 18 m it reached under the roads along its banks
+  const net = buildRoadNet([
+    road({ waterway: 'canal' }, [[4, 4], [20, 4]]), road({ waterway: 'river' }, [[4, 8], [20, 8]]), road({ waterway: 'canal', width: '30' }, [[4, 12], [20, 12]]),
+  ]);
+  expect(net.ways.map((w) => w.half)).toEqual([4, 9, 15]);
+});
 it('takes rivers, canals and streams as water ways, below every road, not a culvert', () => {
   const net = buildRoadNet([
     road({ waterway: 'river' }, [[4, 4], [20, 4]]), road({ waterway: 'stream', width: '5' }, [[4, 8], [20, 8]]),
-    road({ waterway: 'canal', tunnel: 'culvert' }, [[4, 12], [20, 12]]), road({ waterway: 'ditch' }, [[4, 16], [20, 16]]),
+    road({ waterway: 'canal', tunnel: 'culvert', width: '18' }, [[4, 12], [20, 12]]), road({ waterway: 'ditch' }, [[4, 16], [20, 16]]),
     road({ highway: 'service' }, [[4, 20], [20, 20]]),
   ]);
   expect(net.ways.map((w) => [w.water, w.half, w.band, w.tunnel])).toEqual([[true, 9, 30, false], [true, 2.5, 12, false], [true, 9, 30, true], [false, 2.5, 25, false]]);

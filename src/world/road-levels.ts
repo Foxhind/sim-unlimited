@@ -497,13 +497,18 @@ export function buildRoadLevels(
   };
 }
 
+/** whether a way is lifted d metres along its points; `probes`: where else to look along it (where its lift may begin or end between the probes) */
+export type Lifted = ((line: OsmLine, d: number) => boolean) & { probes?: (line: OsmLine) => number[] };
+
 /**
  * Whether a way is lifted off the ground cover `d` metres from its start (ground-cover.ts): a way of
  * the network with its own heights (every sample a number) only where it is a bridge, its approaches
- * lying on the ground pulled up to it; any other way where the plain levels lift it LIFT_EPS_M or
- * more. From geometry and tags alone, no TIN: every tile that sees the way agrees.
+ * lying on the ground pulled up to it, and of a bridge only its stretches in `decks` (road-pull
+ * bridgeDecks: where its deck lies DECK_CLEAR_M or more over the pulled ground; a bridge not in it,
+ * whole); any other way where the plain levels lift it LIFT_EPS_M or more. From geometry and tags
+ * alone, no TIN: every tile that sees the way agrees.
  */
-export function coverLifted(roads: RoadSurface | undefined, plain: RoadLevels): (line: OsmLine, d: number) => boolean {
+export function coverLifted(roads: RoadSurface | undefined, plain: RoadLevels, decks?: ReadonlyMap<OsmLine, ReadonlyArray<[number, number]>>): Lifted {
   /** the network's ways with heights: whether each is a bridge */
   const own = new Map<OsmLine, boolean>();
   if (roads) {
@@ -513,5 +518,13 @@ export function coverLifted(roads: RoadSurface | undefined, plain: RoadLevels): 
       own.set(w.line, w.bridge);
     });
   }
-  return (line, d) => own.get(line) ?? plain.liftAt(line, d) >= LIFT_EPS_M;
+  const lifted: Lifted = (line, d) => {
+    const bridge = own.get(line);
+    if (bridge === undefined) return plain.liftAt(line, d) >= LIFT_EPS_M;
+    const runs = bridge ? decks?.get(line) : undefined;
+    return runs ? runs.some(([a, b]) => d >= a && d <= b) : bridge;
+  };
+  // a deck's stretch may be shorter than a probe's step: its ends, and a hair outside them
+  lifted.probes = (line) => (own.get(line) ? decks?.get(line) ?? [] : []).flatMap(([a, b]) => [a - 1e-3, a, b, b + 1e-3]);
+  return lifted;
 }

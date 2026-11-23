@@ -14,7 +14,7 @@ import type { P2 } from './ribbon-shapes';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
 import { buildRoadNet, type RoadNet } from './road-net';
-import { BED_MARGIN_M, BED_PLAN_TOL_M, buildRoadPull, snapBorder, type RoadSurface } from './road-pull';
+import { BED_MARGIN_M, BED_PLAN_TOL_M, roadPullOf, snapBorder, type RoadSurface } from './road-pull';
 import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 import { classifyLine, roadPriority, tieBreak } from './way-styles';
 
@@ -108,11 +108,13 @@ export const Z14_RELIEF_TOL_M = 5;
 export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
   const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, stats, ...given } = opts;
   const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
-  const pull = roads && roads.net.ways.length ? buildRoadPull(tile, grid, roads) : undefined;
+  const pull = roads && roads.net.ways.length ? roadPullOf(tile, grid, roads) : undefined;
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
   // where the covers' edges cross the tile border, whether kept or not: the neighbour has them too
   const coverBorder: Pt[] = [];
-  const units = cover ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], roads?.net, grid / tileSizeMeters(tile)) : bedUnits(pull!.beds, roads!.net);
+  const units = cover
+    ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], pull?.banks ?? [], roads?.net, grid / tileSizeMeters(tile))
+    : bedUnits(pull!.beds, pull!.banks, roads!.net, grid, coverBorder);
   let picked = 0;
   const tin = buildTerrainTin(tile, grid, heights, {
     ...tinOpts,
@@ -203,11 +205,24 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   return { ...out, cover: faces };
 }
 
-/** each road's or river's bed outline alone, the senior first (as road-pull lays them) */
-function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: RoadNet): Unit[] {
-  return beds.map((b, i) => ({
-    lines: b.edges, count: b.edges.reduce((s, e) => s + e.length, 0), shapes: [], way: net.ways[b.way].line, rank: 0, prio: 0, tie: 0, first: i,
-  }));
+/**
+ * each road's or river's bed outline alone, the senior first (as road-pull lays them), a road's
+ * bank with it (cut to the tile, where it crosses the border into `border`)
+ */
+function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: ReadonlyArray<{ way: number; lines: Pt[][] }>, net: RoadNet, grid: number, border: Pt[]): Unit[] {
+  const units = beds.map((b, i): Unit => ({ lines: [...b.edges], count: 0, shapes: [], way: net.ways[b.way].line, rank: 0, prio: 0, tie: 0, first: i }));
+  const byWay = new Map(beds.map((b, i) => [b.way, units[i]]));
+  for (const b of banks) {
+    let u = byWay.get(b.way);
+    if (!u) {
+      u = { lines: [], count: 0, shapes: [], way: net.ways[b.way].line, rank: 0, prio: 0, tie: 0, first: units.length };
+      byWay.set(b.way, u);
+      units.push(u);
+    }
+    for (const line of b.lines) u.lines.push(...clipToTile(line.map((p): P2 => [p.x, p.y]), grid, border));
+  }
+  for (const u of units) u.count = u.lines.reduce((s, e) => s + e.length, 0);
+  return units;
 }
 
 /**
@@ -222,11 +237,14 @@ function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: Road
  * whenever this one is.
  */
 function coverUnits(
-  cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: RoadNet | undefined, latticePerMetre: number,
+  cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, banks: ReadonlyArray<{ way: number; lines: Pt[][] }>,
+  net: RoadNet | undefined, latticePerMetre: number,
 ): Unit[] {
   const units: Unit[] = [];
   /** each covered way's bed outline: its points go onto the way's own edges when it is picked */
   const profiles = new Map<Unit, Pt[][]>();
+  /** each covered way's bank (cut to the tile): its lines once it is picked */
+  const shores = new Map<Unit, Pt[][]>();
   const bySource = new Map<object, Unit>();
   cover.shapes.forEach((s, si) => {
     let u = bySource.get(s.source);
@@ -256,6 +274,9 @@ function coverUnits(
       }
       const bed = profiles.get(u);
       if (bed) profileOnto(u.lines, bed, (BED_MARGIN_M + BED_PLAN_TOL_M + 0.1 + (u.way ? classifyLine(u.way.tags)?.shoulder ?? 0 : 0)) * latticePerMetre, PROFILE_GAP_M * latticePerMetre);
+      // the bank where its bed meets the water, whole: a senior cover over it may be a bridge's,
+      // which holds no ground at its height (road-pull), the bank's step under it
+      for (const line of shores.get(u) ?? []) u.lines.push(line);
       u.count = distinctPoints(u.lines);
     };
   });
@@ -274,6 +295,23 @@ function coverUnits(
     };
     bySource.set(line, u);
     units.push(u);
+  });
+  // a road's bank goes with its covers, or with its bed alone (a bank without either: on its own, as a bed)
+  banks.forEach((b, i) => {
+    const line = net!.ways[b.way].line;
+    const pieces = b.lines.flatMap((l) => clipToTile(l.map((p): P2 => [p.x, p.y]), grid, border));
+    if (!pieces.length) return;
+    let u = bySource.get(line);
+    if (!u) {
+      u = {
+        lines: [], count: 0, shapes: [], way: line, rank: COVER_RANK.carriageway, prio: roadPriority(line.tags, classifyLine(line.tags)?.width ?? 0),
+        tie: tieBreak(line.points[0]), first: cover.shapes.length + beds.length + i,
+      };
+      bySource.set(line, u);
+      units.push(u);
+    }
+    if (u.settle) shores.set(u, [...(shores.get(u) ?? []), ...pieces]);
+    else u.lines.push(...pieces);
   });
   // the vertices a unit brings: its lines' points, each once (a cut's ends are its sides' points)
   for (const u of units) if (!u.settle) u.count = distinctPoints(u.lines);
@@ -427,5 +465,5 @@ export function roadSurfaceOf(tile: Tile, data: { lines: OsmLine[]; areas: OsmAr
   const ky = (EARTH_R * Math.PI) / 180, kx = ky * Math.cos((c.lat * Math.PI) / 180);
   const levels = buildRoadLevels(data.lines, data.areas, ([lon, lat]) => [(lon - c.lon) * kx, -(lat - c.lat) * ky], { height: heightAt });
   const z = Float64Array.from(net.samples, (s, i) => h[i] + levels.liftAt(net.ways[s.way].line, s.d));
-  return { net, z };
+  return { net, z, dem };
 }

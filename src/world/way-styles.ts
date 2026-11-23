@@ -124,8 +124,11 @@ export function osmWidthM(value: string | undefined): number | undefined {
 
 /** carriageway width per lane when a road has `lanes` but no `width` */
 const LANE_WIDTH_M = 3.5;
-/** width of a waterway line without a `width` tag, metres */
-const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 18, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
+/**
+ * width of a waterway line without a `width` tag, metres: a canal as a town's (14/9517/6397: at
+ * 18 m it reached under the roads along its banks)
+ */
+const WATERWAY_WIDTH_M: Record<string, number> = { river: 18, canal: 8, stream: 3, brook: 2, ditch: 1.5, drain: 1.5 };
 /** a waterway's drawn width, metres (its `width`, else by kind); undefined for anything else */
 export function waterwayWidth(tags: Record<string, string>): number | undefined {
   const ww = tags.waterway;

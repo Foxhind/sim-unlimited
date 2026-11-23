@@ -16,8 +16,8 @@ import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
-import { buildRoadLevels, coverLifted } from './road-levels';
-import type { RoadSurface } from './road-pull';
+import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
+import { bridgeDecks, type RoadSurface } from './road-pull';
 import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'area';
@@ -261,15 +261,22 @@ export function cutNeeded(c: ReadonlyArray<P2>, half: number | number[], i: numb
  * The stretches of a way on the ground, metres from its start (along its points, `e` in ENU), and
  * its length: probed every LIFT_PROBE_M, each flip found to LIFT_SNAP_M and kept to the ground's side
  */
-export function groundRuns(line: OsmLine, e: P2[], lifted: (line: OsmLine, d: number) => boolean): { runs: [number, number][]; len: number } {
+export function groundRuns(line: OsmLine, e: P2[], lifted: Lifted): { runs: [number, number][]; len: number } {
   let len = 0;
   for (let i = 1; i < e.length; i++) len += Math.hypot(e[i][0] - e[i - 1][0], e[i][1] - e[i - 1][1]);
   const onGround = (d: number) => !lifted(line, d);
   const runs: [number, number][] = [];
   const steps = Math.max(1, Math.ceil(len / LIFT_PROBE_M));
+  // the probes: every LIFT_PROBE_M, and where the lift says to look (a bridge's deck shorter than that)
+  const at = Array.from({ length: steps }, (_, k) => (len * (k + 1)) / steps);
+  const more = lifted.probes?.(line).filter((d) => d > 0 && d < len);
+  if (more?.length) {
+    at.push(...more);
+    at.sort((a, b) => a - b);
+  }
   let prev = 0, was = onGround(0), start: number | undefined = was ? 0 : undefined;
-  for (let k = 1; k <= steps; k++) {
-    const d = (len * k) / steps, is = onGround(d);
+  for (const d of at) {
+    const is = onGround(d);
     if (is !== was) {
       // the flip between the two probes, to LIFT_SNAP_M: the cover keeps to the ground's side of it
       let lo = prev, hi = d;
@@ -292,7 +299,7 @@ export function groundRuns(line: OsmLine, e: P2[], lifted: (line: OsmLine, d: nu
  * The lifted stretches of a way: what groundRuns leaves of it (the cover ends where they begin, so
  * the two meet exactly), and its length
  */
-export function liftedRuns(line: OsmLine, e: P2[], lifted: (line: OsmLine, d: number) => boolean): { runs: [number, number][]; len: number } {
+export function liftedRuns(line: OsmLine, e: P2[], lifted: Lifted): { runs: [number, number][]; len: number } {
   const { runs: ground, len } = groundRuns(line, e, lifted);
   const runs: [number, number][] = [];
   let at = 0;
@@ -422,7 +429,13 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = grid / tileSizeMeters(tile);
   const net = lineNetwork(data.lines, enu, toLattice, latticePerMetre);
-  const lifted = coverLifted(roads, buildRoadLevels(data.lines, data.areas, ([lon, lat]) => enu(lon, lat)));
+  const lifted = coverLifted(roads, buildRoadLevels(data.lines, data.areas, ([lon, lat]) => enu(lon, lat)), roads && bridgeDecks(tile, grid, roads, ([lon, lat]) => enu(lon, lat)));
+  /**
+   * the nodes of the network's bridges and tunnels (a culvert): a river's bed stops square at an end
+   * there (road-pull), and so does its water
+   */
+  const structureNodes = new Set<string>();
+  for (const w of roads?.net.ways ?? []) if (w.bridge || w.tunnel) for (const p of w.line.points) structureNodes.add(`${p[0]},${p[1]}`);
   const joints = liftedJoints(data.lines, enu, toLattice, lifted);
   /**
    * the nodes a way's lifted run ends at (a bridge ending on the middle of the bank road), by their
@@ -523,7 +536,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       return;
     }
     if (!road) {
-      along(waterwayWidth(line.tags) !== undefined ? 'water' : 'runway', c, half, ROUND_ENDS);
+      const water = waterwayWidth(line.tags) !== undefined, at = (p: LonLat) => water && structureNodes.has(`${p[0]},${p[1]}`);
+      along(water ? 'water' : 'runway', c, half, { capStart: !at(line.points[0]), capEnd: !at(line.points[line.points.length - 1]) });
       return;
     }
     const ends = net.roadEnds(line);

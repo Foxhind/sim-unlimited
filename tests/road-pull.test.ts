@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { buildRoadNet, type RoadNet } from '../src/world/road-net';
-import { BED_MARGIN_M, buildRoadPull } from '../src/world/road-pull';
+import { BANK_M, BED_MARGIN_M, buildRoadPull, ROAD_BED_REACH_M } from '../src/world/road-pull';
 import { GRID, M, road, TILE } from './roads-helpers';
 
 const flatAt = (h: number) => (net: RoadNet) => ({ net, z: new Float64Array(net.samples.length).fill(h) });
@@ -89,7 +89,7 @@ it('lets a road outrank a river beside it: its band is the road’s alone, the w
 });
 it('keeps a road’s outline at the road’s height where a river’s bed runs under it', () => {
   // a canal (18 m wide) whose bed reaches over the road's edge
-  const main = road({ highway: 'residential' }, [[4, 32], [60, 32]]), canal = road({ waterway: 'canal' }, [[4, 32 + 10 * M], [60, 32 + 10 * M]]);
+  const main = road({ highway: 'residential' }, [[4, 32], [60, 32]]), canal = road({ waterway: 'canal', width: '18' }, [[4, 32 + 10 * M], [60, 32 + 10 * M]]);
   const net = buildRoadNet([main, canal]);
   const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) });
   for (const p of pull.beds.find((b) => b.way === 0)!.edges.flat()) expect(pull.height(p.x, p.y, 503)).toBeCloseTo(506, 2);
@@ -106,8 +106,45 @@ it('keeps the outline round a bend at the road’s height, rivers’ beds under 
   const pts: [number, number][] = [[4, 24], [30, 30], [50, 46]]; // a 26° bend, then on
   const bend = road({ highway: 'residential' }, pts);
   // a canal on either side, its bed reaching under the road's edges
-  const side = (o: number) => road({ waterway: 'canal' }, pts.map(([x, y]): [number, number] => [x - o * M * 0.3, y + o * M]));
+  const side = (o: number) => road({ waterway: 'canal', width: '18' }, pts.map(([x, y]): [number, number] => [x - o * M * 0.3, y + o * M]));
   const net = buildRoadNet([bend, side(11), side(-11)]);
   const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (p) => (net.ways[p.way].water ? 497.5 : 506)) });
   for (const p of pull.beds.find((b) => b.way === 0)!.edges.flat()) expect(pull.height(p.x, p.y, 503)).toBeCloseTo(506, 2);
+});
+it('lays the bank where a road’s bed meets a river’s water: a row inside the bed’s edge at the road’s height, one BANK_M beyond it at the water’s', () => {
+  // a residential at 506 m, a canal (18 m wide) 10 m off it at 497.5 m: its bed reaches under the road's
+  const main = road({ highway: 'residential' }, [[4, 32], [60, 32]]), canal = road({ waterway: 'canal', width: '18' }, [[-4, 32 + 10 * M], [68, 32 + 10 * M]]);
+  const net = buildRoadNet([main, canal]);
+  const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) });
+  const edge = net.ways[0].half + ROAD_BED_REACH_M;
+  const lines = pull.banks.filter((b) => b.way === 0).flatMap((b) => b.lines);
+  expect(lines.length).toBeGreaterThanOrEqual(2);
+  const rows = { road: [] as number[], water: [] as number[] };
+  for (const p of lines.flat()) {
+    // off the road's axis (round its ends), metres
+    const off = Math.hypot(p.x - Math.max(4, Math.min(60, p.x)), p.y - 32) / M, h = pull.height(p.x, p.y, 503);
+    if (off <= edge) {
+      // the road's row: a hair inside the bed's edge, at the road's height
+      expect(edge - off).toBeLessThanOrEqual(0.1);
+      expect(h).toBeCloseTo(506, 6);
+      rows.road.push(p.x);
+    } else {
+      // the water's: a strip no wider than BANK_M beyond it, at the water's height on the canal
+      expect(off - edge).toBeCloseTo(BANK_M, 6);
+      if (Math.abs(p.y - 32 - 10 * M) / M < 9) {
+        expect(h).toBeCloseTo(497.5, 6);
+        rows.water.push(p.x);
+      }
+    }
+  }
+  // both rows along the whole road: from round its end to round its other end
+  for (const xs of [rows.road, rows.water]) {
+    expect(Math.min(...xs)).toBeLessThan(4);
+    expect(Math.max(...xs)).toBeGreaterThan(60);
+  }
+});
+it('lays no bank where a road’s bed meets no water', () => {
+  const net = buildRoadNet([road({ highway: 'residential' }, [[4, 32], [60, 32]]), road({ waterway: 'canal' }, [[4, 32 + 30 * M], [60, 32 + 30 * M]])]);
+  const pull = buildRoadPull(TILE, GRID, { net, z: Float64Array.from(net.samples, (s) => (net.ways[s.way].water ? 497.5 : 506)) });
+  expect(pull.banks).toEqual([]);
 });
