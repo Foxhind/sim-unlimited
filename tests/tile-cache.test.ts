@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickEvictions } from '../src/world/tile-cache';
+import { meshBytes, pickEvictions } from '../src/world/tile-cache';
 
 const entries = [
   { key: 'a', ts: 300, bytes: 400 },
@@ -21,5 +21,12 @@ describe('pickEvictions', () => {
   });
   it('handles empty cache', () => {
     expect(pickEvictions([], 0, 0)).toEqual([]);
+  });
+});
+describe('meshBytes', () => {
+  it('counts the mesh buffers; a stale glow ground of an old record is not one of them', () => {
+    const buf = (n: number) => new ArrayBuffer(n);
+    const old = { vertices: buf(8), ramps: buf(4), rVertices: buf(16), glowVertices: buf(100), glowRamps: buf(50) };
+    expect(meshBytes(old)).toBe(28);
   });
 });

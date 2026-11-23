@@ -10,7 +10,7 @@ import {
 } from '../src/world/night-glow';
 import { farLightSize } from '../src/world/osm-manager';
 import { INSTANCE, LAMP_SHAPE, setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
-import { buildGlowGround, buildTerrainMesh, GLOW_GROUND_LIFT_M } from '../src/world/terrain-mesher';
+import { buildTerrainMesh } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
@@ -405,22 +405,6 @@ describe('night glow by building density', () => {
     expect(WORLD_VS).toContain(`lvl * ${LUT_SIZE}u`);
     expect(TREE_VS).toContain('uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);');
     expect(TREE_VS).toContain('shadeColour(packed');
-  });
-
-  it('the lit ground copies the built-up terrain face, raised a little, its ramp carrying the level', () => {
-    const levels = new Uint8Array(tin.tris.length);
-    levels[under] = 5;
-    const g = buildGlowGround(TILE, tin, levels);
-    expect(g.ramps.length).toBe(3);
-    const terrain = buildTerrainMesh({ tile: TILE, grid, heights });
-    for (let k = 0; k < 3; k++) {
-      const o = (under * 3 + k) * 6;
-      expect(g.vertices[k * 6]).toBe(terrain.vertices[o]);
-      expect(g.vertices[k * 6 + 2]).toBe(terrain.vertices[o + 2]);
-      expect(g.vertices[k * 6 + 1]).toBeCloseTo(terrain.vertices[o + 1] + GLOW_GROUND_LIFT_M, 5);
-      expect(rampGlowLevel(g.ramps[k])).toBe(5);
-      expect(withGlow(g.ramps[k], 0)).toBe(terrain.ramps[under * 3 + k]);
-    }
   });
 
   it('lights a built-up face by its glow level, not by a lifted copy', () => {

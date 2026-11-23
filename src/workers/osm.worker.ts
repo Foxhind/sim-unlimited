@@ -15,15 +15,15 @@ import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
 import { greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
-import { gridForZoom } from '../world/chunks';
+import { DETAIL_Z, gridForZoom } from '../world/chunks';
+import { buildGroundCover, type GroundCover } from '../world/ground-cover';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { climateFaceColor } from '../world/climate-colour';
-import { buildGlowGround } from '../world/terrain-mesher';
 import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 68;
+export const OSM_MESH_SCHEMA = 69;
 
 export interface OsmRequest {
   type: 'osm';
@@ -57,15 +57,12 @@ export interface OsmMeshResponse {
   beacons: ArrayBuffer;
   /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
   mastLines: ArrayBuffer;
-  /** night: street-lit copy of the built-up terrain faces (pos+normal, Uint32 face colours with glow level) */
-  glowVertices: ArrayBuffer;
-  glowRamps: ArrayBuffer;
   /** road ribbons (near, pos+normal with Uint32 face colours) and their far 1 px GL lines (x, y, z, palette index) */
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   /** per road vertex WINDOW_ATTR_FLOATS: the railway track's u, v (osm-mesher roadAttrs) */
   rAttrs: ArrayBuffer;
-  /** water areas and river ribbons (pos+normal with Uint32 face colours), drawn without depth writes */
+  /** water areas and river ribbons (pos+normal with Uint32 face colours), drawn with depth writes: nothing overlaps them */
   wVertices: ArrayBuffer;
   wRamps: ArrayBuffer;
   roadLines: ArrayBuffer;
@@ -81,8 +78,9 @@ export interface OsmMeshResponse {
    */
   coast: boolean;
   /**
-   * The tile's OSM, just downloaded, has roads the terrain is built under (surface-tin.ts): its
-   * terrain was built without them and is rebuilt. From the cache false, like `coast`.
+   * The tile's OSM, just downloaded, gave this build its ground covers (z14: ground-cover.ts, roads or
+   * not; the surface is built under the roads and the covers): the terrain was built without them and
+   * is rebuilt. From the cache false, like `coast`.
    */
   roads: boolean;
 }
@@ -146,7 +144,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
-      res.roofLights, res.nightDots, res.beacons, res.mastLines, res.glowVertices, res.glowRamps,
+      res.roofLights, res.nightDots, res.beacons, res.mastLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps,
     ]);
   };
@@ -166,7 +164,6 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
-        glowVertices: cached.glowVertices ?? empty(), glowRamps: cached.glowRamps ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(), pitchLines: cached.pitchLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
         lamps: cached.lamps ?? empty(),
@@ -186,7 +183,9 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const ls = { faceColor: climateFaceColor(tile, grid, lattice) };
     // the same TIN as the terrain worker builds from the same OSM: coastline and roads included
     const roads = detail === 'full' ? await fetchRoadSurface(tile, data, pads) : undefined;
-    const tin = buildSurfaceTin(tile, grid, lattice, { borders, coast: coastlineWays(data.lines), pads, roads });
+    // and the covers the terrain worker builds (z14 with its OSM, roads or not): the drape is on the same faces
+    const cover: GroundCover | undefined = detail === 'full' && tile.z === DETAIL_Z ? buildGroundCover(tile, grid, data, roads) : undefined;
+    const tin = buildSurfaceTin(tile, grid, lattice, { borders, coast: coastlineWays(data.lines), pads, roads, cover });
     const drape = tinSampler(tin, tile);
     // foliage: the colour of the land face under the tree, pulled to the nearest green land colour
     const locate = tinLocator(tin, tile);
@@ -197,7 +196,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
     };
-    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles, roads });
+    const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles, roads, cover });
     const clipped = clipTileData(data, tile);
     const own = clipped.buildings;
     // entrances from the whole fetch, not only the tile's own share: one by the border may belong to an own building
@@ -227,7 +226,6 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
     // night glow: each terrain triangle lit by how densely it is built up, and everything on it too
     const levels = glowLevels(buildingCoverage(tin, tile, own, locate));
-    const glow = buildGlowGround(tile, tin, levels, ls.faceColor);
     applyGlow(mesh.vertices, mesh.ramps, tile, locate, levels);
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
     applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);
@@ -244,7 +242,6 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: masts.lines.slice().buffer,
-      glowVertices: glow.vertices.slice().buffer, glowRamps: glow.ramps.slice().buffer,
       rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer, rAttrs: mesh.roadAttrs.slice().buffer,
       wVertices: mesh.water.vertices.slice().buffer, wRamps: mesh.water.ramps.slice().buffer,
       roadLines: mesh.roadLines.slice().buffer,
@@ -252,7 +249,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       lamps: mesh.lamps.slice().buffer,
     };
     if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
-    send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }), roads: roads !== undefined });
+    send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }), roads: cover !== undefined });
   } catch (err) {
     const res: OsmErrorResponse = {
       type: 'error',

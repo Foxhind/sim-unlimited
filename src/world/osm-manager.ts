@@ -55,7 +55,7 @@ interface OsmChunk {
   mesh?: Mesh;
   /** road ribbons (near) and their far 1 px lines */
   rmesh?: Mesh;
-  /** water areas and river ribbons: drawn after every drape, without depth writes, so roads win */
+  /** water areas and river ribbons: drawn after every drape */
   wmesh?: Mesh;
   roadLines?: PropSet;
   /** pitch markings (near) */
@@ -76,8 +76,6 @@ interface OsmChunk {
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
   mastLines?: PropSet;
-  /** night: street-lit copy of the built-up terrain faces */
-  glow?: Mesh;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
@@ -102,8 +100,6 @@ interface MeshPayload {
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
-  glowVertices: ArrayBuffer;
-  glowRamps: ArrayBuffer;
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   rAttrs: ArrayBuffer;
@@ -179,7 +175,6 @@ export class OsmManager {
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
-            glowVertices: buf(msg.glowVertices), glowRamps: buf(msg.glowRamps),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
@@ -205,7 +200,7 @@ export class OsmManager {
     }
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
-        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.glow ? 1 : 0);
+        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -369,7 +364,6 @@ export class OsmManager {
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
-    chunk.glow = this.worldMesh(chunk, data.glowVertices, data.glowRamps);
     chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps);
     chunk.roadLines = this.points(chunk, data.roadLines);
@@ -435,7 +429,7 @@ export class OsmManager {
     chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = undefined;
-    chunk.glow = chunk.rmesh = chunk.wmesh = undefined;
+    chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
   }
 
@@ -453,15 +447,13 @@ export class OsmManager {
     dayWindows = false,
   ): void {
     for (const c of this.renderList) {
-      // the ground of built-up terrain faces, street-lit (renderer.nightGlow), just above the terrain
-      if (c.glow && lightsOn) renderer.drawWorld(c.glow, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       renderer.speckle = false;
     }
-    // water over every tile's drape, but leaving no depth: roads (and all drawn after) always win over it
+    // water over every tile's drape; nothing overlaps it any more (the ground leaves it out), so it writes depth
     for (const c of this.renderList) {
-      if (c.wmesh) renderer.drawWorld(c.wmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, 0, false);
+      if (c.wmesh) renderer.drawWorld(c.wmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
     }
     for (const c of this.renderList) {
       const dx = camPos[0] - c.centerEnu[0];

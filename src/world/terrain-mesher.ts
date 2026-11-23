@@ -131,41 +131,6 @@ function terrainFaceRamp(tin: TerrainTin, ti: number, ny: number, faceColor?: Fa
 }
 
 /**
- * Night glow of the ground: a copy of every TIN face with glow level > 0, the same corners and
- * colour as the terrain mesh, its ramp carrying the level, raised `lift` metres so it covers the
- * terrain face (drapes sit 0.3 m and more above the ground, so they stay on top).
- */
-export function buildGlowGround(
-  tile: Tile,
-  tin: TerrainTin,
-  levels: Uint8Array,
-  faceColor?: FaceColor,
-  lift = GLOW_GROUND_LIFT_M,
-): { vertices: Float32Array; ramps: Uint32Array } {
-  const { vx, vy, vh, tris } = tin;
-  let lit = 0;
-  for (let i = 0; i < tris.length; i++) if (levels[i] > 0) lit++;
-  const vertices = new Float32Array(lit * 18);
-  const ramps = new Uint32Array(lit * 3);
-  if (lit === 0) return { vertices, ramps };
-  const { wx, wz } = tinToWorld(tile, tin.grid, vx, vy);
-  const wy = vh.map((h) => Math.max(h, 0));
-  let fi = 0, ri = 0;
-  tris.forEach((t, i) => {
-    if (levels[i] === 0) return;
-    const n = faceNormal(wx, wy, wz, t);
-    const ramp = withGlow(terrainFaceRamp(tin, i, n[1], faceColor), levels[i]);
-    for (const k of [t.a, t.b, t.c]) {
-      vertices.set([wx[k], wy[k] + lift, wz[k], n[0], n[1], n[2]], fi);
-      fi += 6;
-      ramps[ri++] = ramp;
-    }
-  });
-  return { vertices, ramps };
-}
-export const GLOW_GROUND_LIFT_M = 0.15;
-
-/**
  * Relief as simplified isoline belts: contours every `step` meters are traced
  * on the work lattice, simplified (Douglas–Peucker), joined with a simplified
  * tile border, and triangulated (Delaunay). Flat normals, one ramp per face.
