@@ -3,7 +3,7 @@
  * paint, ramp) and of an area, a road's rank, priority and layer where it meets others, and the
  * biases and glows the ground cover is drawn with
  */
-import { colour, RAMP, ROAD_MARK, snowy, withGlow } from '../engine/palette';
+import { colour, colourOf, RAMP, ROAD_MARK, snowy, withGlow, type RGB } from '../engine/palette';
 import type { AreaFilter, AreaKind, AreaStyles } from './area-styles';
 import { CLIFF_TAG } from './cliffs';
 import type { LonLat } from './osm-types';
@@ -60,6 +60,21 @@ export function isOpenCarPark(tags: Record<string, string>): boolean {
   return !(Number.isFinite(layer) && layer < 0);
 }
 
+/**
+ * Swimming pools (leisure=swimming_pool): from the air a resort town is its pools, bright turquoise
+ * by every hotel. One flat colour; over the park or garden they lie in (ground-cover 'pool').
+ */
+export const POOL_RGB: RGB = [62, 196, 214];
+/** over the areas round it on the drape (no cover) */
+export const POOL_BIAS = 0.62;
+
+/** a pool seen from the air: not indoor, covered, on a roof or underground */
+export function isOpenPool(tags: Record<string, string>): boolean {
+  if (tags.indoor === 'yes' || tags.covered === 'yes' || tags.building !== undefined) return false;
+  const loc = tags.location;
+  return loc !== 'indoor' && loc !== 'roof' && loc !== 'rooftop' && loc !== 'underground';
+}
+
 export function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaStyle | undefined {
   /** open ground (fields, parks, beaches...): snow covers it in winter */
   const ground = (ramp: number, bias: number, kind: AreaKind): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter: styles[kind] });
@@ -77,6 +92,8 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   }
   // open car parks: the roads' asphalt, a little lit at night like an unlit road
   if (tags.amenity === 'parking' && isOpenCarPark(tags)) return { ramp: withGlow(RAMP.ASPHALT, UNLIT_ROAD_GLOW), bias: CAR_PARK_BIAS, water: false };
+  // an open-air pool: a turquoise patch of its own, not the sea's colour (none under a roof or on one)
+  if (leisure === 'swimming_pool') return isOpenPool(tags) ? { ramp: colourOf(POOL_RGB), bias: POOL_BIAS, water: false } : undefined;
   // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
   if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');

@@ -58,7 +58,7 @@ const FULL_FILTER = `
   way["natural"="coastline"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];
-  way["leisure"~"park|pitch|golf_course"];
+  way["leisure"~"park|pitch|golf_course|swimming_pool"];
   way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];

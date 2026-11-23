@@ -20,11 +20,11 @@ import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
 import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
-export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'area';
+export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area';
 
 /** seniority of the covers: the lower lies over the higher where they overlap */
 export const COVER_RANK: Record<CoverKind, number> = {
-  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, area: 11,
+  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11,
 };
 
 export interface CoverShape {
@@ -92,6 +92,7 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
     case 'pitchPaint': return isLitPitch(shape.source) ? withGlow(RAMP.SNOW, PITCH_GLOW) : RAMP.SNOW;
     case 'water': return RAMP.WATER;
     case 'pitch':
+    case 'pool':
     case 'area': {
       const style = classifyArea(tags, styles);
       if (!style) return RAMP.GRASS;
@@ -405,6 +406,7 @@ function areaKind(tags: Record<string, string>, style: AreaStyle): CoverKind {
   if (tags.amenity === 'parking' && isOpenCarPark(tags)) return 'carPark';
   const n = tags.natural;
   if (n === 'scrub' || n === 'beach' || n === 'bare_rock' || n === 'scree' || tags.landuse === 'farmland') return 'area';
+  if (tags.leisure === 'swimming_pool') return 'pool';
   return tags.leisure === 'pitch' ? 'pitch' : 'area';
 }
 

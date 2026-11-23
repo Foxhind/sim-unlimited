@@ -55,7 +55,7 @@ public class SimProfile implements Profile {
   static final Pattern AEROWAY = Pattern.compile("runway|taxiway|apron|helipad");
   static final Pattern NATURAL_WAY = Pattern.compile("water|wood|scrub|beach|bare_rock");
   static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
-  static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course");
+  static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course|swimming_pool");
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
   static final Pattern ORCHARD = Pattern.compile("^(orchard|vineyard)$");
   static final Pattern PIER = Pattern.compile("^(pier|breakwater|groyne)$");
@@ -69,7 +69,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "covered");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};

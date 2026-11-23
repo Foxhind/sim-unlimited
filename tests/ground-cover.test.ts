@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildGroundCover, COVER_RANK, type CoverShape } from '../src/world/ground-cover';
+import { buildGroundCover, COVER_RANK, coverRamp, type CoverShape } from '../src/world/ground-cover';
+import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
+import { colourOf } from '../src/engine/palette';
+import { isOpenPool, POOL_RGB } from '../src/world/way-styles';
+import { overpassQuery } from '../src/world/overpass';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileLattice } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
@@ -326,8 +330,22 @@ describe('ground cover', () => {
   });
   it('ranks the covers as the plan does', () => {
     expect(Object.entries(COVER_RANK).sort((a, b) => a[1] - b[1]).map(([k]) => k)).toEqual([
-      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'area',
+      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area',
     ]);
+  });
+  it('an open pool lies over the garden it is in, in its own turquoise; an indoor one is no cover', () => {
+    const garden: OsmArea = { ...park(square(20, 20, 10)), tags: { leisure: 'garden' } };
+    // a pool about 22 × 22 m in it
+    const pool: OsmArea = { ...park(square(22, 22, 11 * M)), tags: { leisure: 'swimming_pool' } };
+    const c = buildGroundCover(TILE, GRID, data([], [garden, pool]));
+    expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area']);
+    expect(c.locate(22, 22)).toBe(0);
+    expect(c.locate(15, 15)).toBe(1);
+    expect(coverRamp(c.shapes[0], DEFAULT_AREA_STYLES, [90, 120, 60])).toBe(colourOf(POOL_RGB));
+    const indoor = buildGroundCover(TILE, GRID, data([], [{ ...pool, tags: { leisure: 'swimming_pool', indoor: 'yes' } }]));
+    expect(indoor.shapes).toEqual([]);
+    expect(isOpenPool({ leisure: 'swimming_pool', location: 'roof' })).toBe(false);
+    expect(overpassQuery(TILE, 'full')).toContain('way["leisure"~"park|pitch|golf_course|swimming_pool"];');
   });
 });
 
