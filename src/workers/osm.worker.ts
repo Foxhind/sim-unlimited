@@ -145,8 +145,13 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const grade = e.data.grade ?? NEUTRAL_GRADE;
   const areaStyles = e.data.areaStyles;
   const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles));
-  // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on
-  const key = `${tileKey(osmSourceMode() === 'pmtiles' ? 'osmmesh-pm' : 'osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}`;
+  // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on,
+  // and near ('full': on the surface built under its roads and covers) for the raw OSM it was built
+  // from, by its download time (`raw`), as the terrain worker's mesh is: a raw fetched anew by
+  // whoever is another surface
+  const keyOf = (raw?: { ts: number }) =>
+    `${tileKey(osmSourceMode() === 'pmtiles' ? 'osmmesh-pm' : 'osmmesh', tile, OSM_MESH_SCHEMA)}/t${SCHEMA_VERSION}/${detail}${detail === 'full' && raw ? `@${raw.ts}` : ''}`;
+  const rawNow = () => (detail === 'full' ? getOsmRaw(osmRawKey(tile)).catch(() => undefined) : Promise.resolve(undefined));
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
@@ -157,12 +162,12 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   };
   const empty = () => new ArrayBuffer(0);
   try {
-    const cached = useCache ? await getCachedMesh(key) : undefined;
     // the cached drape lies on a surface built under the roads of the tile's raw OSM; once that has
     // expired the terrain and the collision ground are built without them: build again (the OSM is
     // fetched anew, and the terrain rebuilt on the 'roads' flag)
-    const rawKept = !cached || detail !== 'full' || await getOsmRaw(osmRawKey(tile)).then((r) => !!r, () => false);
-    if (cached && rawKept) {
+    const raw = useCache ? await rawNow() : undefined;
+    const cached = useCache && (detail !== 'full' || raw) ? await getCachedMesh(keyOf(raw)) : undefined;
+    if (cached) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
         levels: cached.levels ?? empty(), rLevels: cached.rLevels ?? empty(), wLevels: cached.wLevels ?? empty(),
@@ -257,7 +262,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       pitchLines: mesh.pitchLines.slice().buffer,
       lamps: mesh.lamps.slice().buffer,
     };
-    if (useCache) await putCachedMesh({ key, ts: Date.now(), ...out });
+    // under the raw it was built from (just fetched, or kept)
+    if (useCache) await putCachedMesh({ key: keyOf(await rawNow()), ts: Date.now(), ...out });
     send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }), roads: cover !== undefined });
   } catch (err) {
     const res: OsmErrorResponse = {

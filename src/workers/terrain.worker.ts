@@ -65,8 +65,11 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const osmRaw = tile.z >= 12
       ? await getOsmRaw(osmRawKey(tile)).catch(() => undefined)
       : undefined;
-    // meshes flattened by our own tiles' aerodromes (M6) are kept apart from Overpass-flattened ones
-    const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? (osmSourceMode() === 'pmtiles' ? '/op' : '/o') : '');
+    // meshes flattened by our own tiles' aerodromes (M6) are kept apart from Overpass-flattened ones;
+    // and a mesh is of the raw OSM that built it (its download time): once that has expired and was
+    // fetched anew the OSM mesh is built from the new one, on a surface this mesh must share face for
+    // face (a cached mesh of the old one left holes and overlaps along the roads and the water)
+    const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? `${osmSourceMode() === 'pmtiles' ? '/op' : '/o'}@${osmRaw.ts}` : '');
     const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
       const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph, nearCount: cached.nearCount, farCount: cached.farCount };

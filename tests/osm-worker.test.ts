@@ -5,12 +5,14 @@ import type { SurfaceTin } from '../src/world/surface-tin';
 const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
 const store = new Map<string, unknown>();
 let osmJson: string | undefined;
+/** when the raw OSM was downloaded */
+let osmTs = 0;
 
 vi.mock('../src/world/tile-cache', () => ({
   SCHEMA_VERSION: 65,
   getCachedMesh: async (key: string) => store.get(key),
   putCachedMesh: async (r: { key: string }) => void store.set(r.key, r),
-  getOsmRaw: async () => (osmJson ? { key: 'raw', ts: 0, json: osmJson } : undefined),
+  getOsmRaw: async () => (osmJson ? { key: 'raw', ts: osmTs, json: osmJson } : undefined),
 }));
 vi.mock('../src/world/terrain-source', async (orig) => ({
   ...(await orig<typeof import('../src/world/terrain-source')>()),
@@ -52,6 +54,7 @@ async function osmReply(detail: 'full' | 'large' = 'full'): Promise<{ res: Recor
 beforeEach(() => {
   store.clear();
   osmJson = townOverpassJson();
+  osmTs = 0;
 });
 
 describe('the OSM worker with the covers', () => {
@@ -72,6 +75,24 @@ describe('the OSM worker with the covers', () => {
     // from the cache the flag is false
     const again = await osmReply();
     expect(again.res.roads).toBe(false);
+  });
+
+  it('builds again once the raw OSM was downloaded anew, on the surface the terrain worker builds from it', async () => {
+    const first = await osmReply();
+    expect(first.tin).toBeDefined();
+    expect((await osmReply()).tin).toBeUndefined();
+    // the raw was fetched again (by whoever): neither worker serves the mesh of the old one
+    osmJson = parkOverpassJson();
+    osmTs = 1000;
+    const { res, tin } = await osmReply();
+    expect(tin).toBeDefined();
+    expect(res.roads).toBe(true);
+    const t = await terrainTin();
+    expect(t.tris).toEqual(tin!.tris);
+    expect(t.cover).toEqual(tin!.cover);
+    // and both from the cache after
+    expect((await osmReply()).tin).toBeUndefined();
+    expect(await terrainTin()).toBeUndefined();
   });
 
   it('builds no cover below the detail zoom', async () => {

@@ -7,12 +7,14 @@ const store = new Map<string, unknown>();
 const getCachedMesh = vi.fn(async (key: string) => store.get(key));
 const putCachedMesh = vi.fn(async (r: { key: string }) => void store.set(r.key, r));
 let osmJson: string | undefined;
+/** when the raw OSM was downloaded */
+let osmTs = 0;
 
 vi.mock('../src/world/tile-cache', () => ({
   SCHEMA_VERSION: 65,
   getCachedMesh: (key: string) => getCachedMesh(key),
   putCachedMesh: (r: { key: string }) => putCachedMesh(r),
-  getOsmRaw: async () => (osmJson ? { key: 'raw', ts: 0, json: osmJson } : undefined),
+  getOsmRaw: async () => (osmJson ? { key: 'raw', ts: osmTs, json: osmJson } : undefined),
 }));
 vi.mock('../src/world/terrain-source', async (orig) => ({
   ...(await orig<typeof import('../src/world/terrain-source')>()),
@@ -40,6 +42,7 @@ beforeEach(() => {
   getCachedMesh.mockClear();
   putCachedMesh.mockClear();
   osmJson = townOverpassJson();
+  osmTs = 0;
 });
 
 describe('the terrain worker with the covers', () => {
@@ -56,6 +59,21 @@ describe('the terrain worker with the covers', () => {
     const again = await ask({});
     expect([again.nearCount, again.farCount]).toEqual([m.nearCount, m.farCount]);
     expect(putCachedMesh).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds again once the raw OSM was downloaded anew: a cached mesh is of the raw OSM that built it', async () => {
+    const town = await ask({});
+    expect(putCachedMesh).toHaveBeenCalledTimes(1);
+    // the raw expired and was fetched again (another day's OSM): the OSM mesh is built from it, so is the terrain
+    osmJson = parkOverpassJson();
+    osmTs = 1000;
+    const park = await ask({});
+    expect(putCachedMesh).toHaveBeenCalledTimes(2);
+    expect(putCachedMesh.mock.calls[1][0].key).not.toBe(putCachedMesh.mock.calls[0][0].key);
+    expect(park.farCount - park.nearCount).not.toBe(town.farCount - town.nearCount);
+    // the same raw again: the cached mesh
+    await ask({});
+    expect(putCachedMesh).toHaveBeenCalledTimes(2);
   });
 
   it('has no counts without OSM: the whole mesh is drawn as ever', async () => {
