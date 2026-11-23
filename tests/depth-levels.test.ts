@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { depthLevels, type LevelItem } from '../src/world/depth-levels';
+import { clipToBox, depthLevels, type LevelItem } from '../src/world/depth-levels';
 
-const item = (key: number, c: [number, number][], reach = 0.1): LevelItem => ({ key, c, reach });
+const item = (key: number, c: [number, number][], reach = 0.1): LevelItem => ({ key, lines: [c], reach });
 
 describe('depth levels of the loose ribbons', () => {
   it('a piece over another it overlaps takes the next level: the higher key over the lower', () => {
@@ -41,5 +41,21 @@ describe('depth levels of the loose ribbons', () => {
   it('long segments find each other wherever they cross, a single point too', () => {
     const a = item(1.4, [[0, 0], [60, 60]]), b = item(1.5, [[0, 60], [60, 0]]), p = item(1.6, [[30, 30]]);
     expect(depthLevels([a, b, p])).toEqual([1, 2, 3]);
+  });
+
+  it('a centre line clipped to a box keeps its parts inside, in order, each a line of its own', () => {
+    // in, out over the corner, back in: two parts; a point inside stays a point
+    const parts = clipToBox([[1, 1], [3, 1], [3, 5], [1, 5], [1, 3]], 0, 0, 4, 4);
+    expect(parts).toEqual([[[1, 1], [3, 1], [3, 4]], [[1, 4], [1, 3]]]);
+    expect(clipToBox([[-2, 2], [6, 2]], 0, 0, 4, 4)).toEqual([[[0, 2], [4, 2]]]);
+    expect(clipToBox([[-2, -2], [-1, 6]], 0, 0, 4, 4)).toEqual([]);
+    expect(clipToBox([[2, 2]], 0, 0, 4, 4)).toEqual([[[2, 2]]]);
+  });
+
+  it('an overlap outside the lines it is given raises nothing: pieces crossing beyond the tile share a level', () => {
+    const a = item(1.4, [[-2, 2], [4, 2]]), b = item(1.5, [[-1, 0], [-1, 4], [1, 6]]);
+    expect(depthLevels([a, b])).toEqual([1, 2]);
+    const box = (it: LevelItem): LevelItem => ({ ...it, lines: it.lines.flatMap((l) => clipToBox(l, 0, 0, 10, 10)) });
+    expect(depthLevels([box(a), box(b)])).toEqual([1, 1]);
   });
 });

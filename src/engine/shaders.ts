@@ -29,12 +29,18 @@ export const REVERSED_NEAR = 0.5;
  * positions' float32 rounding (heights to 4 km: 0.25 mm; w within the rebase distance plus the roads'
  * radius: 1 mm), the last one stretched along a slanting ray by 1 / sin of its angle to the face. So
  * a level is M + PER_M × distance, divided by that sine (no less than SIN_MIN): a fixed height of
- * pull as much as a fixed depth, 10× the errors down to a 3° slant (tests/shaders.test.ts).
+ * pull as much as a fixed depth, 10× the errors down to a 3° slant (tests/shaders.test.ts). An
+ * orthographic view's depth is linear over its far plane (ORTHO_VS), a step of far / 2^24 in either
+ * depth (the relief inspector: 180 km, 1.1 cm): there a level is ORTHO × far (16 steps), M at least.
  */
-export const DEPTH_PULL = { M: 0.01, PER_M: 1e-5, SIN_MIN: 0.05 } as const;
-/** the pull of depth level `level`, metres toward the eye, `dist` metres from it, its ray at `sin` to the face (WORLD_VS depthPulled) */
-export function depthPull(level: number, dist: number, sin: number): number {
-  return (level * (DEPTH_PULL.M + DEPTH_PULL.PER_M * dist)) / Math.max(Math.abs(sin), DEPTH_PULL.SIN_MIN);
+export const DEPTH_PULL = { M: 0.01, PER_M: 1e-5, SIN_MIN: 0.05, ORTHO: 2 ** -20 } as const;
+/**
+ * the pull of depth level `level`, metres toward the eye, `dist` metres from it, its ray at `sin` to
+ * the face; `orthoFar` > 0: in an orthographic view with that far plane (WORLD_VS depthPullM)
+ */
+export function depthPull(level: number, dist: number, sin: number, orthoFar = 0): number {
+  const unit = orthoFar > 0 ? Math.max(DEPTH_PULL.M, orthoFar * DEPTH_PULL.ORTHO) : DEPTH_PULL.M + DEPTH_PULL.PER_M * dist;
+  return (level * unit) / Math.max(Math.abs(sin), DEPTH_PULL.SIN_MIN);
 }
 /** sunset glow round the sun (SKY_FS): its radius in radians (~29°) and how many rings it steps in */
 const GLOW_RADIUS = 0.5;
@@ -1018,14 +1024,12 @@ flat out vec3 vWinEdge;
 flat out vec3 vRef;
 uniform highp int uWindows;
 ${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
-// a point of depth level aDepthLevel moved toward the eye along its ray (DEPTH_PULL, depthPull): the
-// same place on screen, a nearer depth; never more than half way to the eye
-vec3 depthPulled(vec3 wp, vec3 n) {
-  if (aDepthLevel <= 0.0) return wp;
+// how far a point of depth level aDepthLevel is pulled toward the eye, metres (DEPTH_PULL, depthPull)
+float depthPullM(vec3 wp, vec3 n) {
+  if (aDepthLevel <= 0.0) return 0.0;
   vec3 e = toEye(wp);
-  vec3 dir = e / max(length(e), 1e-6);
-  float pull = aDepthLevel * (${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * eyeDist(wp - uCamPos)) / max(abs(dot(n, dir)), ${DEPTH_PULL.SIN_MIN.toFixed(3)});
-  return wp + dir * (uOrthoFar > 0.0 ? pull : min(pull, 0.5 * length(e)));
+  float unit = uOrthoFar > 0.0 ? max(${DEPTH_PULL.M.toFixed(4)}, uOrthoFar * ${DEPTH_PULL.ORTHO.toExponential(6)}) : ${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * length(e);
+  return aDepthLevel * unit / max(abs(dot(n, e / max(length(e), 1e-6))), ${DEPTH_PULL.SIN_MIN.toFixed(3)});
 }
 void main() {
   vWinUV = aWinUV;
@@ -1054,7 +1058,14 @@ void main() {
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   vWater = water && !frozenWater(aRamp, tempC) ? 1.0 : 0.0;
   vRay = wp - uCamPos;
-  gl_Position = uProj * uView * vec4(depthPulled(wp, n), 1.0);
+  // a ribbon on the ground's faces comes nearer by its depth level, where it is on screen unchanged:
+  // in perspective along its own ray (never more than half way to the eye)
+  float pull = depthPullM(wp, n);
+  vec3 drawn = pull > 0.0 && uOrthoFar <= 0.0 ? wp + normalize(uCamPos - wp) * min(pull, 0.5 * length(uCamPos - wp)) : wp;
+  gl_Position = uProj * uView * vec4(drawn, 1.0);
+  // orthographic: the clip depth itself, linear there and nearer lower (ORTHO_VS); so the vertical
+  // exaggeration of the view does not tilt the pull
+  if (uOrthoFar > 0.0) gl_Position.z -= 2.0 * pull / uOrthoFar;
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);
 }

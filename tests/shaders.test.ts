@@ -15,8 +15,11 @@ describe('logarithmic depth', () => {
   it('pulls a loose ribbon toward the eye by its depth level, along its own ray (WORLD_VS aDepthLevel)', () => {
     expect(WORLD_VS).toContain('layout(location=6) in float aDepthLevel;');
     // the pulled point drawn, the true one lit, fogged and shadowed
-    expect(WORLD_VS).toContain('gl_Position = uProj * uView * vec4(depthPulled(wp, n), 1.0);');
-    expect(WORLD_VS).toContain(`aDepthLevel * (${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * eyeDist(wp - uCamPos)) / max(abs(dot(n, dir)), ${DEPTH_PULL.SIN_MIN.toFixed(3)})`);
+    expect(WORLD_VS).toContain('gl_Position = uProj * uView * vec4(drawn, 1.0);');
+    expect(WORLD_VS).toContain(`float unit = uOrthoFar > 0.0 ? max(${DEPTH_PULL.M.toFixed(4)}, uOrthoFar * ${DEPTH_PULL.ORTHO.toExponential(6)}) : ${DEPTH_PULL.M.toFixed(4)} + ${DEPTH_PULL.PER_M.toExponential(1)} * length(e);`);
+    expect(WORLD_VS).toContain(`return aDepthLevel * unit / max(abs(dot(n, e / max(length(e), 1e-6))), ${DEPTH_PULL.SIN_MIN.toFixed(3)});`);
+    // orthographic: the clip depth itself (linear there), whatever the vertical exaggeration
+    expect(WORLD_VS).toContain('if (uOrthoFar > 0.0) gl_Position.z -= 2.0 * pull / uOrthoFar;');
     expect(depthPull(0, 3500, 1)).toBe(0);
     expect(depthPull(2, 3500, 0.5)).toBeCloseTo(2 * (DEPTH_PULL.M + DEPTH_PULL.PER_M * 3500) / 0.5, 9);
     expect(depthPull(1, 100, 0.001)).toBeCloseTo(depthPull(1, 100, DEPTH_PULL.SIN_MIN), 9);
@@ -38,6 +41,19 @@ describe('logarithmic depth', () => {
         expect(log(t) - log(t - (step - err))).toBeGreaterThan(4);
       }
     }
+    // orthographic (the relief inspector: its far plane 2 × 90 km, the ground about half way):
+    // linear depth, reversed (1 − d / far, a float) or 24-bit; the clip z of a point 90 km off in
+    // float32 is good to 1 cm
+    const far = 2 * 90000;
+    for (const d of [30000, 60000, 90000, 120000]) {
+      for (const sin of [1, 0.3, 0.05]) {
+        const step = depthPull(1, d, sin, far), err = 0.02;
+        const near = 1 - (d - (step - err)) / far, at = 1 - d / far;
+        expect((near - at) / f32ulp(at)).toBeGreaterThan(8);
+        expect(((step - err) / far) * 2 ** 24).toBeGreaterThan(4);
+      }
+    }
+    expect(depthPull(1, 90000, 1, 5000)).toBe(DEPTH_PULL.M);
     // and the highest level of a dense tile (11, Innsbruck) seen across at 3.5 km is no more in the
     // way of what stands on the ground than half a metre of height
     expect(11 * depthPull(1, 3500, 1)).toBeLessThan(0.5);

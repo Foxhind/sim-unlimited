@@ -18,7 +18,7 @@ import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './roa
 import { bridgeDecks, type RoadSurface } from './road-pull';
 import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
-import { depthLevels, type LevelItem } from './depth-levels';
+import { clipToBox, depthLevels, type LevelItem } from './depth-levels';
 import {
   AEROWAY_LINE_BIAS, classifyArea, classifyLine, isBridge, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
   RAIL_ZONE_RAMP, ROAD_LAYER_STEP_M, ROAD_RANK_STEP_M, ROAD_TIE_M, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW,
@@ -799,7 +799,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     ribbon(c, half, ramp, 0, part, segs, ends, lift);
     if (!part.ramps.length) return;
     const widest = typeof half === 'number' ? half : half.reduce((a, b) => Math.max(a, b), 0);
-    loose.push({ item: { key: bias, c, reach: (widest * LOOSE_REACH + LOOSE_MARGIN_M) * latticePerMetre }, out, part });
+    const reach = (widest * LOOSE_REACH + LOOSE_MARGIN_M) * latticePerMetre, g = tin!.grid;
+    // only what of its centre line can reach into the tile: an overlap beyond it raises nothing here
+    loose.push({ item: { key: bias, lines: clipToBox(c, -reach, -reach, g + reach, g + reach), reach }, out, part });
   };
   /** the dropped ways' ribbons into their meshes, each vertex with its ribbon's depth level (depth-levels.ts) */
   const flushLoose = (): void => {

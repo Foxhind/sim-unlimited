@@ -10,11 +10,48 @@
  */
 import type { P2 } from './ribbon-shapes';
 
-/** a ribbon: its key (what lies higher), its centre line and how far from it the ribbon reaches (lattice units) */
+/**
+ * a ribbon: its key (what lies higher), its centre line (the parts of it that count: clipToBox) and
+ * how far from it the ribbon reaches (lattice units)
+ */
 export interface LevelItem {
   key: number;
-  c: P2[];
+  lines: P2[][];
   reach: number;
+}
+
+/**
+ * The parts of a polyline inside the box [x0, x1] × [y0, y1], in order, each a polyline of its own
+ * (Liang–Barsky per segment); a single point inside stays one
+ */
+export function clipToBox(c: readonly P2[], x0: number, y0: number, x1: number, y1: number): P2[][] {
+  const inside = (p: P2) => p[0] >= x0 && p[0] <= x1 && p[1] >= y0 && p[1] <= y1;
+  if (c.length === 1) return inside(c[0]) ? [[c[0]]] : [];
+  const parts: P2[][] = [];
+  let cur: P2[] = [];
+  for (let k = 0; k + 1 < c.length; k++) {
+    const a = c[k], b = c[k + 1], dx = b[0] - a[0], dy = b[1] - a[1];
+    let t0 = 0, t1 = 1, hit = true;
+    for (const [p, q] of [[-dx, a[0] - x0], [dx, x1 - a[0]], [-dy, a[1] - y0], [dy, y1 - a[1]]]) {
+      if (p === 0) { if (q < 0) hit = false; continue; }
+      const r = q / p;
+      if (p < 0) t0 = Math.max(t0, r);
+      else t1 = Math.min(t1, r);
+    }
+    if (!hit || t0 > t1) {
+      if (cur.length) parts.push(cur);
+      cur = [];
+      continue;
+    }
+    const at = (t: number): P2 => (t === 0 ? a : t === 1 ? b : [a[0] + dx * t, a[1] + dy * t]);
+    // entering: what was before ends here
+    if (t0 > 0 && cur.length) { parts.push(cur); cur = []; }
+    if (!cur.length) cur.push(at(t0));
+    cur.push(at(t1));
+    if (t1 < 1) { parts.push(cur); cur = []; }
+  }
+  if (cur.length) parts.push(cur);
+  return parts;
 }
 
 /** distance between segments ab and cd */
@@ -39,8 +76,8 @@ export function depthLevels(items: readonly LevelItem[], cell = 1): number[] {
   // the centre lines in pieces no longer than a cell, each in the cells its reach touches
   const pieces: { item: number; a: P2; b: P2 }[] = [];
   const grid = new Map<string, number[]>();
-  items.forEach((it, i) => {
-    const c = it.c.length === 1 ? [it.c[0], it.c[0]] : it.c;
+  items.forEach((it, i) => it.lines.forEach((line) => {
+    const c = line.length === 1 ? [line[0], line[0]] : line;
     for (let k = 0; k + 1 < c.length; k++) {
       const a = c[k], b = c[k + 1];
       const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / cell));
@@ -60,7 +97,7 @@ export function depthLevels(items: readonly LevelItem[], cell = 1): number[] {
         }
       }
     }
-  });
+  }));
   // the pairs of items that overlap: a piece of each within both reaches of the other
   const near: number[][] = items.map(() => []);
   const found = new Set<number>();

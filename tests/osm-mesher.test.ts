@@ -685,6 +685,17 @@ describe('roads and water as the terrain’s own faces', () => {
     expect(shoulder).toBeLessThan(footway);
     expect(footway).toBeLessThan(street);
     expect(street).toBeLessThan(track);
+    // two ways that cross only beyond the tile: their pieces here do not overlap, one level
+    const beyond = osmMeshOf({
+      lines: [
+        coverRoad({ highway: 'footway', name: 'west' }, [[-10.2, 20.1], [20.3, 20.4]]),
+        coverRoad({ highway: 'cycleway', name: 'north' }, [[-3.1, 10.2], [-3.2, 30.1], [10.3, 43.2]]),
+      ],
+      areas: [], points: [],
+    }, rolling, 0);
+    const b = buildOsmMesh({ ...beyond.opts, cover: beyond.cover });
+    expect(b.roads.vertexCount).toBeGreaterThan(0);
+    expect(new Set(b.roadDepthLevels)).toEqual(new Set([1]));
     // without the cover nothing has a level: the ribbons are lifted as ever
     const plain = buildOsmMesh(opts);
     expect(plain.roadDepthLevels.length + plain.depthLevels.length + plain.waterDepthLevels.length).toBe(0);
