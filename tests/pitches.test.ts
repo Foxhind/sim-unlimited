@@ -6,6 +6,8 @@ import type { LonLat, OsmTileData } from '../src/world/osm-types';
 import { baseballMarkings, orientedRect, pitchFrame, pitchMarkings, pitchSport, pitchSurface, type PitchSport } from '../src/world/pitch-markings';
 import { INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import { buildGroundCover } from '../src/world/ground-cover';
+import { buildSurfaceTin } from '../src/world/surface-tin';
 
 describe('pitch kinds', () => {
   it('reads the first marked sport of sport=a;b', () => {
@@ -128,6 +130,24 @@ describe('pitches in the mesh', () => {
     }
     expect(m.lamps.length / 4).toBe(4);
     expect(Array.from(m.ramps).some((r) => rampGlowLevel(r) === PITCH_GLOW)).toBe(true);
+  });
+
+  it('draws no area fill and no pitch line over the cover', () => {
+    const data = pitch({ sport: 'soccer' });
+    const park = { tags: { leisure: 'park' }, rings: data.areas[0].rings.map((r) => r.map(([lon, lat]): LonLat => [lon + 0.002, lat])) };
+    data.areas.push(park);
+    const cover = buildGroundCover(TILE, GRID, data);
+    const surface = buildSurfaceTin(TILE, GRID, new Float32Array((GRID + 1) * (GRID + 1)).fill(100), { cover });
+    const pitchParkOpts = { tile: TILE, detail: 'full' as const, data, sampleHeight: tinSampler(surface, TILE), tin: surface };
+    // without the cover: the fill and the markings as ever
+    const plain = buildOsmMesh(pitchParkOpts);
+    expect(plain.vertexCount).toBeGreaterThan(0);
+    expect(plain.pitchLines.length).toBeGreaterThan(0);
+    const m = buildOsmMesh({ ...pitchParkOpts, cover });
+    expect(m.vertexCount).toBe(0);
+    expect(m.pitchLines.length).toBe(0);
+    // the floodlights still stand
+    expect(lampPosts(m)).toHaveLength(4);
   });
 
   it('no sport: no markings, still floodlit; a small one: neither', () => {

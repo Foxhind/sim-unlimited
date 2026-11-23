@@ -135,7 +135,7 @@ function distance2(t: Float64Array, o: number, x: number, y: number): number {
 }
 
 /** lengths along polyline c from its start, at each vertex */
-function cumulative(c: P2[]): number[] {
+export function cumulative(c: P2[]): number[] {
   const cum = [0];
   for (let i = 1; i < c.length; i++) cum.push(cum[i - 1] + Math.hypot(c[i][0] - c[i - 1][0], c[i][1] - c[i - 1][1]));
   return cum;
@@ -162,6 +162,69 @@ function slice(c: P2[], cum: number[], half: number | number[], s0: number, s1: 
     c: [a.p, ...c.slice(i0 + 1, i1 + 1), b.p],
     half: typeof half === 'number' ? half : [a.h, ...half.slice(i0 + 1, i1 + 1), b.h],
     first: i0,
+  };
+}
+
+/**
+ * The stretches of a way on the ground, metres from its start (along its points, `e` in ENU), and
+ * its length: probed every LIFT_PROBE_M, each flip found to LIFT_SNAP_M and kept to the ground's side
+ */
+export function groundRuns(line: OsmLine, e: P2[], lifted: (line: OsmLine, d: number) => boolean): { runs: [number, number][]; len: number } {
+  let len = 0;
+  for (let i = 1; i < e.length; i++) len += Math.hypot(e[i][0] - e[i - 1][0], e[i][1] - e[i - 1][1]);
+  const onGround = (d: number) => !lifted(line, d);
+  const runs: [number, number][] = [];
+  const steps = Math.max(1, Math.ceil(len / LIFT_PROBE_M));
+  let prev = 0, was = onGround(0), start: number | undefined = was ? 0 : undefined;
+  for (let k = 1; k <= steps; k++) {
+    const d = (len * k) / steps, is = onGround(d);
+    if (is !== was) {
+      // the flip between the two probes, to LIFT_SNAP_M: the cover keeps to the ground's side of it
+      let lo = prev, hi = d;
+      while (hi - lo > LIFT_SNAP_M) {
+        const m = (lo + hi) / 2;
+        if (onGround(m) === was) lo = m;
+        else hi = m;
+      }
+      if (was) runs.push([start!, lo]);
+      start = was ? undefined : hi;
+    }
+    prev = d;
+    was = is;
+  }
+  if (start !== undefined) runs.push([start, len]);
+  return { runs: runs.filter(([a, b]) => b - a > 1e-3), len };
+}
+
+/**
+ * The lifted stretches of a way: what groundRuns leaves of it (the cover ends where they begin, so
+ * the two meet exactly), and its length
+ */
+export function liftedRuns(line: OsmLine, e: P2[], lifted: (line: OsmLine, d: number) => boolean): { runs: [number, number][]; len: number } {
+  const { runs: ground, len } = groundRuns(line, e, lifted);
+  const runs: [number, number][] = [];
+  let at = 0;
+  for (const [a, b] of ground) {
+    if (a > at) runs.push([at, a]);
+    at = b;
+  }
+  if (at < len) runs.push([at, len]);
+  return { runs: runs.filter(([a, b]) => b - a > 1e-3), len };
+}
+
+/**
+ * Stretch [d0, d1] (metres along a way `len` long) of a ribbon along it: its centre line cl at the
+ * same share of its length (cum: cumulative(cl)), half widths interpolated at its ends, `first` the
+ * segment of cl its first segment lies on; and its ends — the ribbon's own at the way's ends, square
+ * (no cap, no mitre) where a stretch begins or ends inside the way
+ */
+export function runPart(cl: P2[], cum: number[], half: number | number[], ends: RibbonEnds, d0: number, d1: number, len: number): { c: P2[]; half: number | number[]; first: number; ends: RibbonEnds } {
+  const total = cum[cum.length - 1];
+  const part = slice(cl, cum, half, (d0 / len) * total, (d1 / len) * total);
+  const atStart = d0 <= 0, atEnd = d1 >= len;
+  return {
+    ...part,
+    ends: { start: atStart ? ends.start : undefined, capStart: atStart && ends.capStart, end: atEnd ? ends.end : undefined, capEnd: atEnd && ends.capEnd },
   };
 }
 
@@ -229,34 +292,6 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     add(kind, line, prio, flat(g.tris), outline, tie, segs, segs ? Int32Array.from(g.triSeg, (s) => s + first) : undefined);
   };
 
-  /** the stretches of a way on the ground, metres from its start (along its points, `e` in ENU), and its length */
-  const groundRuns = (line: OsmLine, e: P2[]): { runs: [number, number][]; len: number } => {
-    let len = 0;
-    for (let i = 1; i < e.length; i++) len += Math.hypot(e[i][0] - e[i - 1][0], e[i][1] - e[i - 1][1]);
-    const onGround = (d: number) => !lifted(line, d);
-    const runs: [number, number][] = [];
-    const steps = Math.max(1, Math.ceil(len / LIFT_PROBE_M));
-    let prev = 0, was = onGround(0), start: number | undefined = was ? 0 : undefined;
-    for (let k = 1; k <= steps; k++) {
-      const d = (len * k) / steps, is = onGround(d);
-      if (is !== was) {
-        // the flip between the two probes, to LIFT_SNAP_M: the cover keeps to the ground's side of it
-        let lo = prev, hi = d;
-        while (hi - lo > LIFT_SNAP_M) {
-          const m = (lo + hi) / 2;
-          if (onGround(m) === was) lo = m;
-          else hi = m;
-        }
-        if (was) runs.push([start!, lo]);
-        start = was ? undefined : hi;
-      }
-      prev = d;
-      was = is;
-    }
-    if (start !== undefined) runs.push([start, len]);
-    return { runs: runs.filter(([a, b]) => b - a > 1e-3), len };
-  };
-
   const buildLine = (line: OsmLine): void => {
     const style = classifyLine(line.tags);
     if (!style || line.points.length < 2 || isTunnel(line.tags) || isBridge(line.tags)) return;
@@ -271,7 +306,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     // nothing of it reaches the tile: skip the work
     const r = (half + shoulder + zone) * latticePerMetre;
     if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > grid + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > grid + r)) return;
-    const { runs, len } = groundRuns(line, e);
+    const { runs, len } = groundRuns(line, e, lifted);
     if (!runs.length) return;
     const tie = tieBreak(line.points[0]);
     /**
@@ -279,15 +314,10 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
      * length as of the way's), its own ends at the way's ends, square where the lift begins
      */
     const along = (kind: CoverKind, cl: P2[], w: number | number[], ends: RibbonEnds, prio = 0, segs?: VertexAttr[]): void => {
-      const cum = cumulative(cl), total = cum[cum.length - 1];
+      const cum = cumulative(cl);
       for (const [d0, d1] of runs) {
-        const part = slice(cl, cum, w, (d0 / len) * total, (d1 / len) * total);
-        const atStart = d0 <= 0, atEnd = d1 >= len;
-        const own: RibbonEnds = {
-          start: atStart ? ends.start : undefined, capStart: atStart && ends.capStart,
-          end: atEnd ? ends.end : undefined, capEnd: atEnd && ends.capEnd,
-        };
-        ribbon(kind, line, part.c, part.half, own, prio, tie, segs, part.first);
+        const part = runPart(cl, cum, w, ends, d0, d1, len);
+        ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first);
       }
     };
     if (style.rail) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { RAMP, withGlow } from '../src/engine/palette';
 import { WORLD_FS } from '../src/engine/shaders';
 import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
-import { latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { gridLatLon, latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { parseFilter } from '../src/world/osm-api';
 import {
   BALLAST_RAMP, BALLAST_WIDTH_M, buildOsmMesh, CAR_PARK_BIAS, classifyLine, DIRT_ROAD_RAMP, GRAVEL_ROAD_RAMP, RAIL_ZONE_M, RAIL_ZONE_RAMP, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, roadLayer, roadMarks, roadRank,
@@ -11,6 +11,7 @@ import {
 import type { OsmTileData } from '../src/world/osm-types';
 import { osmFilter, parseOverpass } from '../src/world/overpass';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import { GRID as COVER_GRID, M as COVER_M, osmMeshOf, rail, road, TILE as COVER_TILE } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GRID = 16;
@@ -537,5 +538,77 @@ describe('car parks', () => {
     const data = parseOverpass({ elements: [...nodes, { type: 'way', id: 9, nodes: [1, 2, 3, 4, 1], tags: { amenity: 'parking' } }] });
     expect(data.areas).toHaveLength(1);
     expect(data.lines).toHaveLength(0);
+  });
+});
+
+describe('paint on the terrain’s own faces', () => {
+  const j: [number, number] = [31.9, 32.3];
+  const lines = [
+    road({ highway: 'primary' }, [[3.3, 30.7], j, [61.1, 33.9]]),
+    road({ highway: 'secondary' }, [[30.2, 3.7], j]),
+    rail([[2.6, 12.4], [61.4, 18.7]]),
+  ];
+  const straightRoadOpts = osmMeshOf({ lines, areas: [], points: [] }, (x, y) => 200 + 30 * Math.sin(x / 60) * Math.cos(y / 80) - y / 30);
+  const { cover } = straightRoadOpts;
+  const center = tileCenter(COVER_TILE);
+  /** a lattice point of the tile in the mesh's metres */
+  const enuOf = ([x, y]: [number, number]): [number, number] => {
+    const ll = gridLatLon(COVER_TILE, x, y, COVER_GRID);
+    const [e, n] = latLonToEnu(center, ll.lat, ll.lon, 0);
+    return [e, -n];
+  };
+  /**
+   * The vertex attributes (u, v, edge codes) of the road mesh interpolated at lattice point `at`,
+   * from the topmost painted or track triangle over it; undefined over none
+   */
+  const markAt = (m: ReturnType<typeof buildOsmMesh>, at: [number, number]): number[] | undefined => {
+    const [x, z] = enuOf(at);
+    const v = m.roads.vertices, a = m.roadAttrs;
+    let best: number[] | undefined, top = -Infinity;
+    for (let t = 0; t + 2 < m.roads.vertexCount; t += 3) {
+      if (a[t * WINDOW_ATTR_FLOATS + 2] === 0) continue; // a shoulder or a zone: no paint
+      const p = [0, 1, 2].map((k) => [v[(t + k) * 6], v[(t + k) * 6 + 1], v[(t + k) * 6 + 2]]);
+      const det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+      if (Math.abs(det) < 1e-9) continue;
+      const w1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (z - p[0][2])) / det;
+      const w2 = ((p[1][0] - p[0][0]) * (z - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+      if (w1 < -1e-9 || w2 < -1e-9 || w1 + w2 > 1 + 1e-9) continue;
+      const w = [1 - w1 - w2, w1, w2];
+      const y = w[0] * p[0][1] + w[1] * p[1][1] + w[2] * p[2][1];
+      if (y <= top) continue;
+      top = y;
+      best = [0, 1, 2, 3, 4].map((f) => (f < 2 ? w.reduce((s, wk, k) => s + wk * a[(t + k) * WINDOW_ATTR_FLOATS + f], 0) : a[t * WINDOW_ATTR_FLOATS + f]));
+    }
+    return best;
+  };
+  /** probes along and across a way's segment from p to q (lattice), `half` metres each side */
+  const probes = (p: [number, number], q: [number, number], half: number): [number, number][] => {
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]), nx = -(q[1] - p[1]) / len, ny = (q[0] - p[0]) / len;
+    const out: [number, number][] = [];
+    for (let s = 0.07; s < 1; s += 0.11) {
+      for (const f of [-0.93, -0.61, -0.17, 0.23, 0.58, 0.91]) out.push([p[0] + (q[0] - p[0]) * s + nx * f * half * COVER_M, p[1] + (q[1] - p[1]) * s + ny * f * half * COVER_M]);
+    }
+    return out;
+  };
+
+  it('paints a road face as the ribbon painted it', () => {
+    const withCover = buildOsmMesh({ ...straightRoadOpts.opts, cover }), ribbon = buildOsmMesh(straightRoadOpts.opts);
+    const pts = [
+      ...probes([3.3, 30.7], j, 7), ...probes(j, [61.1, 33.9], 7), ...probes([30.2, 3.7], j, 5.5), ...probes([2.6, 12.4], [61.4, 18.7], BALLAST_WIDTH_M / 2),
+      // through the junction
+      ...Array.from({ length: 81 }, (_, k): [number, number] => [j[0] + ((k % 9) - 4.03) * 1.37 * COVER_M, j[1] + (Math.floor(k / 9) - 4.03) * 1.37 * COVER_M]),
+    ];
+    let painted = 0;
+    for (const probe of pts) {
+      const got = markAt(withCover, probe), want = markAt(ribbon, probe);
+      expect(got === undefined, `${probe}`).toBe(want === undefined);
+      if (!got || !want) continue;
+      painted++;
+      // u lies on ROAD_U_BASE: its float32 attribute is only good to its last bit (4 mm), in either mesh
+      expect(Math.abs(got[0] - want[0]), `u at ${probe}`).toBeLessThan(Math.max(1e-3, 2 ** (Math.floor(Math.log2(Math.abs(want[0]))) - 23)));
+      expect(Math.abs(got[1] - want[1]), `v at ${probe}`).toBeLessThan(1e-3);
+      expect(got.slice(2), `codes at ${probe}`).toEqual(want.slice(2));
+    }
+    expect(painted).toBeGreaterThan(250);
   });
 });

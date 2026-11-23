@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { colour, RAMP, snowy, withGlow } from '../src/engine/palette';
-import { enuToLatLon, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
+import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, isTunnel, osmWidthM } from '../src/world/osm-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import type { GroundCover } from '../src/world/ground-cover';
+import type { SurfaceTin } from '../src/world/surface-tin';
+import { areaOf, fnv, GRID as COVER_GRID, osmMeshOf, polygon, road as coverRoad, TILE as COVER_TILE, townFixture } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -476,3 +479,114 @@ describe('tunnels', () => {
     for (let i = 0; i < m.roads.vertexCount; i++) expect(m.roads.ramps[i]).not.toBe(DARK);
   });
 });
+
+/** a sloping, rolling relief over metres east and south of the tile's north-west corner */
+const rolling = (x: number, y: number) => 200 + 30 * Math.sin(x / 60) * Math.cos(y / 80) - y / 30;
+
+/** the town of roads-helpers with a tertiary bridged over its river and a helipad */
+function bridgedTown() {
+  const d = townFixture();
+  d.lines.push(
+    coverRoad({ highway: 'tertiary', name: 'west' }, [[4.2, 50.1], [15.9, 50.1]]),
+    coverRoad({ highway: 'tertiary', bridge: 'yes', layer: '1', name: 'bridge' }, [[15.9, 50.1], [19.7, 50.1]]),
+    coverRoad({ highway: 'tertiary', name: 'east' }, [[19.7, 50.1], [30.3, 50.1]]),
+  );
+  const ll = gridLatLon(COVER_TILE, 40.3, 9.7, COVER_GRID);
+  d.points.push({ at: [ll.lon, ll.lat], tags: { aeroway: 'helipad' } });
+  return d;
+}
+
+/** digests of every array of an OSM mesh */
+function digest(m: ReturnType<typeof buildOsmMesh>): number[] {
+  return [
+    m.vertexCount, fnv(m.vertices), fnv(m.ramps), m.roads.vertexCount, fnv(m.roads.vertices), fnv(m.roads.ramps), fnv(m.roadAttrs),
+    m.water.vertexCount, fnv(m.water.vertices), fnv(m.water.ramps), m.bridges.vertexCount, fnv(m.bridges.vertices), fnv(m.bridges.ramps),
+    fnv(m.roadLines), fnv(m.pitchLines), fnv(m.lamps), fnv(m.lampPosts),
+  ];
+}
+
+/**
+ * The largest distance of a mesh's vertices from the TIN vertex each stands on (Infinity when one
+ * stands on none): a vertex is the TIN's own, at its height (water and below at 0 m), lifted by nothing
+ */
+function maxLiftOverTin(m: { vertices: Float32Array; vertexCount: number }, tin: SurfaceTin): number {
+  const c = tileCenter(COVER_TILE);
+  const at = new Map<string, number[]>();
+  const key = (x: number, z: number) => `${Math.round(x * 100)},${Math.round(z * 100)}`;
+  tin.vx.forEach((vx, k) => {
+    const ll = gridLatLon(COVER_TILE, vx, tin.vy[k], tin.grid);
+    const [e, n] = latLonToEnu(c, ll.lat, ll.lon, 0);
+    const kk = key(e, -n);
+    at.set(kk, [...(at.get(kk) ?? []), Math.max(0, tin.vh[k])]);
+  });
+  let worst = 0;
+  for (let i = 0; i < m.vertexCount; i++) {
+    const x = m.vertices[i * 6], y = m.vertices[i * 6 + 1], z = m.vertices[i * 6 + 2];
+    let best = Infinity;
+    for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+      for (const h of at.get(`${Math.round(x * 100) + dx},${Math.round(z * 100) + dz}`) ?? []) best = Math.min(best, Math.abs(y - h));
+    }
+    worst = Math.max(worst, best);
+  }
+  return worst;
+}
+
+/** how many TIN faces have a cover of one of `kinds` */
+const facesOf = (tin: SurfaceTin, cover: GroundCover, kinds: string[]) =>
+  Array.from(tin.cover!).filter((s) => s >= 0 && kinds.includes(cover.shapes[s].kind)).length;
+
+describe('roads and water as the terrain’s own faces', () => {
+  it('draws the road faces on the terrain’s own vertices, lifted by nothing', () => {
+    const { opts, tin, cover } = osmMeshOf(townFixture(), rolling);
+    expect(tin.loose).toBeUndefined();
+    const m = buildOsmMesh({ ...opts, cover });
+    // every carriageway, ballast and runway face, nothing else (no bridge here: no lifted stretch)
+    expect(m.roads.vertexCount).toBe(3 * facesOf(tin, cover, ['carriageway', 'ballast', 'runway']));
+    expect(m.roads.vertexCount).toBeGreaterThan(0);
+    expect(maxLiftOverTin(m.roads, tin)).toBeLessThan(1e-4);
+    expect(m.roadAttrs.length).toBe(m.roads.vertexCount * 5);
+  });
+
+  it('draws the water faces on the terrain’s own vertices into the water mesh', () => {
+    const { opts, tin, cover } = osmMeshOf(townFixture(), rolling);
+    const m = buildOsmMesh({ ...opts, cover });
+    expect(m.water.vertexCount).toBe(3 * facesOf(tin, cover, ['water']));
+    expect(m.water.vertexCount).toBeGreaterThan(0);
+    expect(maxLiftOverTin(m.water, tin)).toBeLessThan(1e-4);
+    for (let i = 0; i < m.water.vertexCount; i++) expect(m.water.ramps[i]).toBe(RAMP.WATER);
+  });
+
+  it('draws no area, helipad or pitch line over the cover: the terrain does', () => {
+    const { opts, cover } = osmMeshOf(bridgedTown(), rolling);
+    const m = buildOsmMesh({ ...opts, cover });
+    expect(m.vertexCount).toBe(0);
+    expect(m.pitchLines.length).toBe(0);
+    // the pitch's floodlights and the street lamps still stand
+    expect(m.lampPosts.length).toBe(buildOsmMesh(opts).lampPosts.length);
+  });
+
+  it('still draws a road the budget dropped as a ribbon over the ground', () => {
+    const street = coverRoad({ highway: 'residential' }, [[4.3, 20.2], [60.1, 22.7]]);
+    const parkArea = areaOf({ leisure: 'park' }, polygon(30.2, 21.4, 8.1, 9, 0.2));
+    // a budget below the relief's own vertices: every edge left out
+    const { opts, tin, cover } = osmMeshOf({ lines: [street], areas: [parkArea], points: [] }, rolling, 0);
+    expect(tin.loose?.has(street)).toBe(true);
+    const m = buildOsmMesh({ ...opts, cover }), ribbon = buildOsmMesh(opts);
+    expect(m.roads.vertexCount).toBeGreaterThan(0);
+    // the ribbon of today, LINE_BIAS over the ground
+    expect(Array.from(m.roads.vertices)).toEqual(Array.from(ribbon.roads.vertices));
+    expect(Array.from(m.roadAttrs)).toEqual(Array.from(ribbon.roadAttrs));
+    expect(maxLiftOverTin(m.roads, tin)).toBeGreaterThan(1);
+  });
+
+  it('without the cover the mesh is what it was, byte for byte', () => {
+    const { opts } = osmMeshOf(bridgedTown(), rolling);
+    // digests of the output of the code before Task 6 on this input
+    expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
+  });
+});
+
+const GOLDEN_OSM_NO_COVER = [
+  6066, 2016892399, 3067500026, 10365, 1359097566, 545597248, 3551177572, 1173, 2274697990, 583978983, 546, 1714264376, 1187553749,
+  2893043461, 861862347, 1967087128, 3498056759,
+];

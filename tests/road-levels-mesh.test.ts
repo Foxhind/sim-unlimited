@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { RAMP, withGlow } from '../src/engine/palette';
-import { latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { gridLatLon, latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { LonLat, OsmLine, OsmTileData } from '../src/world/osm-types';
 import { LEVEL_M, LIFT_GRADE } from '../src/world/road-levels';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import { buildGroundCover } from '../src/world/ground-cover';
+import { buildSurfaceTin } from '../src/world/surface-tin';
+import { GRID as COVER_GRID, osmMeshOf, road, TILE as COVER_TILE } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GRID = 16;
@@ -37,6 +40,47 @@ function heights(m: { vertices: Float32Array; vertexCount: number }, x0: number,
     if (x >= x0 && x <= x1 && z >= z0 && z <= z1) out.push(m.vertices[i * 6 + 1] - GROUND);
   }
   return out;
+}
+
+/**
+ * At both joints of the bridge of the deck-step test (lattice x 15.9 and 19.7 on y 30.1 of
+ * roads-helpers' tile), on the axis and a few metres off it: how far the deck's ribbon (the top of the
+ * road mesh 5 cm into the bridge) lies from the approach's face (its bottom 5 cm into the approach)
+ */
+function deckEndStep(m: { roads: { vertices: Float32Array; vertexCount: number } }): number {
+  const c = tileCenter(COVER_TILE);
+  const enuOf = (x: number, y: number): [number, number] => {
+    const ll = gridLatLon(COVER_TILE, x, y, COVER_GRID);
+    const [e, n] = latLonToEnu(c, ll.lat, ll.lon, 0);
+    return [e, -n];
+  };
+  const v = m.roads.vertices;
+  /** the heights of the mesh's triangles over (x, z) */
+  const over = (x: number, z: number): number[] => {
+    const out: number[] = [];
+    for (let t = 0; t + 2 < m.roads.vertexCount; t += 3) {
+      const p = [0, 1, 2].map((k) => [v[(t + k) * 6], v[(t + k) * 6 + 1], v[(t + k) * 6 + 2]]);
+      const det = (p[1][0] - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (p[1][2] - p[0][2]);
+      if (Math.abs(det) < 1e-9) continue;
+      const w1 = ((x - p[0][0]) * (p[2][2] - p[0][2]) - (p[2][0] - p[0][0]) * (z - p[0][2])) / det;
+      const w2 = ((p[1][0] - p[0][0]) * (z - p[0][2]) - (x - p[0][0]) * (p[1][2] - p[0][2])) / det;
+      if (w1 < -1e-6 || w2 < -1e-6 || w1 + w2 > 1 + 1e-6) continue;
+      out.push(p[0][1] * (1 - w1 - w2) + p[1][1] * w1 + p[2][1] * w2);
+    }
+    return out;
+  };
+  let worst = 0;
+  // the bridge lies east of its western joint and west of its eastern one
+  for (const [jx, east] of [[15.9, 1], [19.7, -1]]) {
+    const [x, z] = enuOf(jx, 30.1);
+    for (const across of [-2.5, 0, 2.5]) {
+      // the deck on top on its side; on the other the approach's face, under the deck's round end
+      const deck = over(x + east * 0.05, z + across), approach = over(x - east * 0.05, z + across);
+      if (!deck.length || !approach.length) return Infinity;
+      worst = Math.max(worst, Math.abs(Math.max(...deck) - Math.min(...approach)));
+    }
+  }
+  return worst;
 }
 
 describe('lifted roads in the mesh', () => {
@@ -177,6 +221,45 @@ describe('lifted roads in the mesh', () => {
 
   it('a road on the ground has no body', () => {
     expect(meshOf([under]).bridges.vertexCount).toBe(0);
+  });
+
+  it('with the cover: only the lifted stretches are ribbons, lifted by nothing more than their lift', () => {
+    const lines: OsmLine[] = [
+      { tags: { highway: 'primary' }, points: [at(-300, 0), at(-20, 0)] },
+      { tags: { highway: 'primary', bridge: 'yes', layer: '1' }, points: [at(-20, 0), at(20, 0)] },
+      { tags: { highway: 'primary' }, points: [at(20, 0), at(300, 0)] },
+      under,
+    ];
+    const data: OsmTileData = { areas: [], points: [], buildings: [], lines };
+    const cover = buildGroundCover(TILE, GRID, data);
+    const tin = buildSurfaceTin(TILE, GRID, new Float32Array((GRID + 1) * (GRID + 1)).fill(GROUND), { cover });
+    const opts = { tile: TILE, detail: 'full' as const, data, sampleHeight: tinSampler(tin, TILE), tin };
+    const m = buildOsmMesh({ ...opts, cover }), plain = buildOsmMesh(opts);
+    // the approaches far from the bridge are the terrain's faces: at the ground, not over it
+    const far = [...heights(m.roads, -300, -150, -10, 10), ...heights(m.roads, 150, 300, -10, 10)];
+    expect(far.length).toBeGreaterThan(0);
+    for (const h of far) expect(Math.abs(h)).toBeLessThan(1e-3);
+    // the bridge at its lift alone (no LINE_BIAS over it), still over the road under it
+    const top = Math.max(...heights(m.roads, -3, 3, -8, 8));
+    expect(top).toBeGreaterThanOrEqual(LEVEL_M);
+    expect(top).toBeLessThan(Math.max(...heights(plain.roads, -3, 3, -8, 8)) - 1.3);
+    // the lifted stretch of an approach is a ribbon that climbs to the bridge
+    expect(Math.max(...heights(m.roads, -30, -22, -10, 10))).toBeGreaterThan(2.5);
+    // the bodies with no bias either
+    expect(Math.max(...heights(m.bridges, -1e9, 1e9, -1e9, 1e9))).toBeLessThan(Math.max(...heights(plain.bridges, -1e9, 1e9, -1e9, 1e9)) - 1.3);
+  });
+
+  it('meets a bridge’s deck with its approach without a step', () => {
+    // a tertiary over a river on a slope, the roads with their heights (the approaches on the ground pulled up to it)
+    const lines = [
+      road({ highway: 'tertiary', name: 'west' }, [[4.2, 30.1], [15.9, 30.1]]),
+      road({ highway: 'tertiary', bridge: 'yes', layer: '1', name: 'bridge' }, [[15.9, 30.1], [19.7, 30.1]]),
+      road({ highway: 'tertiary', name: 'east' }, [[19.7, 30.1], [30.3, 30.1]]),
+      road({ waterway: 'river' }, [[17.6, 4.3], [17.9, 60.2]]),
+    ];
+    const { opts, cover } = osmMeshOf({ lines, areas: [], points: [] }, (x, y) => 300 + x / 25 + 10 * Math.sin(y / 90));
+    const bridgeOpts = opts;
+    expect(deckEndStep(buildOsmMesh({ ...bridgeOpts, cover }))).toBeLessThan(0.02);
   });
 
   it('the lift keeps the ribbon the colour of the road', () => {

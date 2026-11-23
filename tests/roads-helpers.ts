@@ -1,14 +1,15 @@
 /** shared set-up of the road tests: a z14 tile over a relief given in metres, roads in lattice units */
 import { enuToLatLon, gridLatLon, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
-import { tinLatticeSampler, type TerrainTin } from '../src/world/terrain-tin';
+import { tinLatticeSampler, tinSampler, type TerrainTin } from '../src/world/terrain-tin';
+import type { OsmMeshOptions } from '../src/world/osm-mesher';
 import type { TileBorders } from '../src/world/terrain-source';
 import type { Pad } from '../src/world/aerodrome';
 import type { RoadNet } from '../src/world/road-net';
 import { buildGroundCover, type GroundCover } from '../src/world/ground-cover';
 import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { buildSurfaceTin, type SurfaceTin } from '../src/world/surface-tin';
+import { buildSurfaceTin, roadSurfaceOf, type SurfaceTin } from '../src/world/surface-tin';
 import { classifyLine } from '../src/world/way-styles';
 import { colourOf, type RGB } from '../src/engine/palette';
 import { tinToWorld, type TerrainMeshData, type TerrainMeshOptions } from '../src/world/terrain-mesher';
@@ -297,6 +298,28 @@ export function townMesh(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoi
   const opts: TerrainMeshOptions = { tile: TILE, grid: GRID, heights: lattice(fn), borders: bordersOf(fn), roads, cover, faceColor: () => colourOf(imagery), ...extra };
   const tin = buildSurfaceTin(TILE, GRID, opts.heights, { borders: opts.borders, roads, cover });
   return { opts, tin, cover, imagery };
+}
+
+/**
+ * `coverTin`'s tile as buildOsmMesh takes it, the roads' heights with their lifts (roadSurfaceOf):
+ * the options without the cover (the mesh of today), the cover and the surface TIN under both;
+ * `faceColor` a flat imagery colour on every face
+ */
+export function osmMeshOf(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, fn: (xm: number, ym: number) => number, maxSurfaceVerts?: number): { opts: OsmMeshOptions; tin: SurfaceTin; cover: GroundCover } {
+  const net = buildRoadNet(d.lines), roads = roadSurfaceOf(TILE, d, net, demOf(net, fn));
+  const cover = buildGroundCover(TILE, GRID, d, roads);
+  const tin = buildSurfaceTin(TILE, GRID, lattice(fn), { borders: bordersOf(fn), roads, cover, maxSurfaceVerts });
+  const opts: OsmMeshOptions = {
+    tile: TILE, detail: 'full', data: { ...d, buildings: [] }, sampleHeight: tinSampler(tin, TILE), tin, roads, faceColor: () => colourOf([90, 140, 60]),
+  };
+  return { opts, tin, cover };
+}
+
+/** FNV-1a of an array's bytes */
+export function fnv(a: ArrayBufferView): number {
+  let h = 0x811c9dc5;
+  for (const b of new Uint8Array(a.buffer, a.byteOffset, a.byteLength)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
+  return h;
 }
 
 /** the mesh's triangles by their centre, 0.1 m cells (once per mesh) */
