@@ -429,6 +429,7 @@ describe('night glow by building density', () => {
     const litFace = town.tin.cover!.findIndex((c) => c < 0);
     const roadFace = town.tin.cover!.findIndex((c) => c >= 0 && town.cover.shapes[c].kind === 'carriageway');
     expect(litFace).toBeGreaterThanOrEqual(0);
+    expect(roadFace).toBeGreaterThanOrEqual(0);
     const levels = new Uint8Array(town.tin.tris.length);
     levels[litFace] = 5;
     levels[roadFace] = 2;

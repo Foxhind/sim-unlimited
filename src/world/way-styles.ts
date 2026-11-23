@@ -7,6 +7,7 @@ import { colour, RAMP, ROAD_MARK, snowy, withGlow } from '../engine/palette';
 import type { AreaFilter, AreaKind, AreaStyles } from './area-styles';
 import type { LonLat } from './osm-types';
 import { pitchSurface } from './pitch-markings';
+export { PITCH_LIT_MIN_M2 } from './pitch-markings';
 
 /** runway, taxiway, apron and helipad areas above the aerodrome pad, m */
 export const AEROWAY_AREA_BIAS = 0.1;

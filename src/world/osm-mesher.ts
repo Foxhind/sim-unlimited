@@ -6,7 +6,8 @@ import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLatti
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
 import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
-import { pitchFrame } from './pitch-markings';
+import { isLitPitch, pitchFrame } from './pitch-markings';
+export { PITCH_LIT_MIN_M2 } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
 import type { LonLat, OsmArea, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -161,8 +162,6 @@ interface Pt {
   y: number;
 }
 
-/** a pitch at least this big (m²) has floodlights on its corners and is lit at night */
-export const PITCH_LIT_MIN_M2 = 300;
 /** the floodlight poles stand this far out from the pitch's corners, metres */
 const PITCH_LAMP_SETBACK_M = 1.5;
 /** pitch markings: white paint (the snow ramp, well lit) in the palette of the day */
@@ -422,21 +421,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
     return pts;
   };
-  const ringArea = (r: [number, number][]): number => {
-    let a = 0;
-    for (let i = 0; i < r.length; i++) {
-      const [x0, z0] = r[i], [x1, z1] = r[(i + 1) % r.length];
-      a += x0 * z1 - x1 * z0;
-    }
-    return Math.abs(a) / 2;
-  };
   /**
    * the whole outline (not this tile's share of it) decides, so the tiles a pitch spans agree; the
    * clipped share keeps the tags object of the whole (clip.ts)
    */
   const wholePitch = new Map<Record<string, string>, OsmArea>();
   for (const a of opts.data.areas) if (a.tags.leisure === 'pitch') wholePitch.set(a.tags, a);
-  const litPitch = (area: OsmArea): boolean => ringArea(pitchRing(wholePitch.get(area.tags) ?? area)) >= PITCH_LIT_MIN_M2;
+  const litPitch = (area: OsmArea): boolean => isLitPitch((wholePitch.get(area.tags) ?? area).rings[0] ?? []);
 
   /**
    * A pitch's markings (big-field sports, 1 px lines on the terrain faces, this tile's share) and the
@@ -451,7 +442,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const ll = enuToLatLon(center, x, -z, 0);
       return toLattice([ll.lon, ll.lat]);
     };
-    const lit = ringArea(ring) >= PITCH_LIT_MIN_M2;
+    const lit = litPitch(area);
     for (const [s0, t0, s1, t1] of segs ?? []) {
       lineOnFaces(lattice(frame(s0, t0)), lattice(frame(s1, t1)), PITCH_LINE_BIAS, pitchLines, lit ? LIT_PITCH_LINE_INDEX : PITCH_LINE_INDEX);
     }

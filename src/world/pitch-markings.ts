@@ -9,6 +9,28 @@
 
 import { colour, RAMP, snowy } from '../engine/palette';
 
+/** a pitch at least this big (m²) has floodlights on its corners and is lit at night */
+export const PITCH_LIT_MIN_M2 = 300;
+
+/**
+ * Whether a pitch is floodlit: its whole outline (lon/lat ring, not a tile's share of it) is at
+ * least PITCH_LIT_MIN_M2. Measured on a plane local to the ring (about its first point), so every
+ * tile a pitch spans, and the mesh and the ground cover, reach the same verdict.
+ */
+export function isLitPitch(ring: [number, number][]): boolean {
+  const pts = ring.slice();
+  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+  if (pts.length < 3) return false;
+  const [lon0, lat0] = pts[0], mPerDeg = (Math.PI / 180) * 6378137, k = Math.cos((lat0 * Math.PI) / 180);
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const x0 = (pts[i][0] - lon0) * k * mPerDeg, y0 = (pts[i][1] - lat0) * mPerDeg;
+    const x1 = (pts[(i + 1) % pts.length][0] - lon0) * k * mPerDeg, y1 = (pts[(i + 1) % pts.length][1] - lat0) * mPerDeg;
+    a += x0 * y1 - x1 * y0;
+  }
+  return Math.abs(a) / 2 >= PITCH_LIT_MIN_M2;
+}
+
 /** a marking segment: s0, t0, s1, t1 (pitch frame, metres) */
 export type Seg = [number, number, number, number];
 

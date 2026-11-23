@@ -326,16 +326,19 @@ export function vertexOfFace(m: TerrainMeshData, tin: SurfaceTin, face: number, 
   const { wx, wz } = world;
   const cx = (wx[t.a] + wx[t.b] + wx[t.c]) / 3, cz = (wz[t.a] + wz[t.b] + wz[t.c]) / 3;
   const map = centresOf(m);
+  // the nearest centre within 5 cm (thin faces, a paint strip's, lie close to their neighbours')
+  let best = -1, bestD = 0.05;
   for (let dx = -1; dx <= 1; dx++) {
     for (let dz = -1; dz <= 1; dz++) {
       for (const v of map.get(`${Math.round(cx * 10) + dx},${Math.round(cz * 10) + dz}`) ?? []) {
         const x = (m.vertices[v * 6] + m.vertices[(v + 1) * 6] + m.vertices[(v + 2) * 6]) / 3;
         const z = (m.vertices[v * 6 + 2] + m.vertices[(v + 1) * 6 + 2] + m.vertices[(v + 2) * 6 + 2]) / 3;
-        if (Math.abs(x - cx) < 0.05 && Math.abs(z - cz) < 0.05) return v;
+        const d = Math.hypot(x - cx, z - cz);
+        if (d < bestD) { bestD = d; best = v; }
       }
     }
   }
-  return -1;
+  return best;
 }
 
 /** the cover kinds of the TIN faces standing on the mesh's vertices [from, to) (skirts stand on none) */
