@@ -50,6 +50,23 @@ describe('real dense tiles in the surface budget', () => {
     expect(cover.shapes.filter((s) => s.kind === 'water').length).toBeGreaterThan(50);
   });
 
+  it('Fethiye 14/9517/6397: each face lies in its own cover (the canal along the bank roads at 36.64774, 29.12803 included)', async () => {
+    const { tin, cover } = await surfaceOf('surface-14-9517-6397');
+    // halfway from a face's centre to each corner: in the face's cover. Four tiny faces (under a
+    // square metre) are what is left: two at Cahit Gündüz Caddesi's sharp turn, whose triangles
+    // reach 15 cm past its outline, two footway slivers where the fixed lines snapped by under 3 cm;
+    // they were there before the tuning too, with some 750 faces more (dropped pools and areas
+    // painted by their centre, loose footways)
+    const off: string[] = [];
+    tin.tris.forEach((t, f) => {
+      const own = tin.cover![f];
+      const cx = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, cy = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
+      if ([t.a, t.b, t.c].some((v) => cover.locate((cx + tin.vx[v]) / 2, (cy + tin.vy[v]) / 2) !== own)) off.push(own < 0 ? 'ground' : cover.shapes[own].kind);
+    });
+    expect(off.length).toBeLessThanOrEqual(4);
+    expect(off.filter((k) => !['carriageway', 'shoulder', 'path'].includes(k))).toEqual([]);
+  });
+
   it('Innsbruck 14/8710/5744: the budget filled in one build, no road above a service road nor a track’s ballast left out', async () => {
     const { tin, cover, stats } = await surfaceOf('surface-14-8710-5744');
     expect(stats.builds).toBe(1);
