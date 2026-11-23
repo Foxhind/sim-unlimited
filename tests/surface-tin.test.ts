@@ -364,6 +364,9 @@ it('paints a face with a dropped area only when the face lies in it, centre and 
   expect(cover.locate(cx, cy)).toBe(0);
   expect(tin.vx.length).toBe(bare.vx.length);
   expect([...tin.cover!].every((c) => c === -1)).toBe(true);
+  // and is left to the mesh, to draw over the faces
+  expect(tin.looseShapes).toEqual([0]);
+  expect(tin.loose).toBeUndefined();
   // over the lake, every face lies in it
   const wet = surface([lake]);
   expect([...wet.tin.cover!].every((c) => c === 0)).toBe(true);

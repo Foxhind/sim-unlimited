@@ -81,6 +81,15 @@ export interface SurfaceTin extends TerrainTin {
    * centre, a dropped ribbon passed over), or −1 (the bare ground)
    */
   cover?: Int32Array;
+  /**
+   * The areas and waters whose edges the vertex budget left out (indices into `cover.shapes`, the
+   * senior first; a pitch's paint, a helipad's square and a river's water among them): a face is
+   * one's only where it lies wholly in it, so the mesh draws the rest of each over the faces it
+   * covers (osm-mesher), as it draws the ribbons of `loose`
+   */
+  looseShapes?: number[];
+  /** with `looseShapes`: whether a face is on a road's bank (the ground's, whatever water lies over it) */
+  bank?: (face: number) => boolean;
 }
 
 /**
@@ -191,7 +200,8 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
     },
   });
   // the units the budget left out: a way drawn as a ribbon (a road, path, railway or runway, or a bed
-  // without a shape) is drawn over the ground as before; an area or water still colours its faces
+  // without a shape) is drawn over the ground as before; an area or water still colours the faces
+  // that lie in it, the rest of it drawn over the faces by the mesh (looseShapes)
   const loose = new Set<OsmLine>();
   for (const u of units.slice(picked)) if (u.way) loose.add(u.way);
   const out: SurfaceTin = loose.size ? { ...tin, loose } : tin;
@@ -218,19 +228,25 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
     }
     return roadV[v] === 1;
   };
+  const looseShapes: number[] = [];
+  dropped.forEach((d, si) => { if (d === 2) looseShapes.push(si); });
+  const centre = (t: { a: number; b: number; c: number }): [number, number] => [(tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3];
+  // a road's bank (between its cover's edge and the water row BANK_M beyond it, or from a corner
+  // under a road's cover over a river, at the land's height, down to the water) is the ground's
+  const onBank = (t: { a: number; b: number; c: number }, x: number, y: number): boolean => !!pull?.bank(x, y) || [t.a, t.b, t.c].some(underRoad);
   tin.tris.forEach((t, f) => {
-    const x = (tin.vx[t.a] + tin.vx[t.b] + tin.vx[t.c]) / 3, y = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
+    const [x, y] = centre(t);
     passed = [];
     let si = cover.locate(x, y, skip);
     while (si >= 0 && dropped[si] === 2 && ![t.a, t.b, t.c].every((v) => holds(si, tin.vx[v], tin.vy[v]))) {
       passed.push(si);
       si = cover.locate(x, y, skip);
     }
-    // a road's bank (between its cover's edge and the water row BANK_M beyond it, or from a corner
-    // under a road's cover over a river, at the land's height, down to the water) is the ground's
-    faces[f] = si >= 0 && cover.shapes[si].kind === 'water' && (pull?.bank(x, y) || [t.a, t.b, t.c].some(underRoad)) ? -1 : si;
+    faces[f] = si >= 0 && cover.shapes[si].kind === 'water' && onBank(t, x, y) ? -1 : si;
   });
-  return { ...out, cover: faces };
+  if (!looseShapes.length) return { ...out, cover: faces };
+  // a dropped water is drawn over the faces: not over a road's bank, whatever that face's cover (asked of the few faces it reaches)
+  return { ...out, cover: faces, looseShapes, bank: (f) => onBank(tin.tris[f], ...centre(tin.tris[f])) };
 }
 
 /**

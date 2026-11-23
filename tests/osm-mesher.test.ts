@@ -5,9 +5,10 @@ import { buildOsmMesh, classifyLine, isTunnel, osmWidthM, RAIL_ZONE_RAMP, SHOULD
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmTileData } from '../src/world/osm-types';
-import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
+import { buildTerrainTin, tinLocator, tinSampler } from '../src/world/terrain-tin';
 import { buildGroundCover, coverRamp, type GroundCover } from '../src/world/ground-cover';
 import { buildSurfaceTin, type SurfaceTin } from '../src/world/surface-tin';
+import { tinToWorld } from '../src/world/terrain-mesher';
 import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
 import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/way-styles';
@@ -547,10 +548,20 @@ function maxOffTin(m: { vertices: Float32Array; vertexCount: number }, sampleHei
   return worst;
 }
 
-/** a mesh's vertices of one face colour */
-function onlyRamp(m: { vertices: Float32Array; ramps: Uint32Array }, ramp: number): { vertices: Float32Array; vertexCount: number } {
+/** the area of a mesh's triangles in plan, m² */
+function planArea(m: { vertices: Float32Array; vertexCount: number }): number {
+  let sum = 0;
+  for (let i = 0; i + 2 < m.vertexCount; i += 3) {
+    const [ax, az, bx, bz, cx, cz] = [m.vertices[i * 6], m.vertices[i * 6 + 2], m.vertices[i * 6 + 6], m.vertices[i * 6 + 8], m.vertices[i * 6 + 12], m.vertices[i * 6 + 14]];
+    sum += Math.abs((bx - ax) * (cz - az) - (cx - ax) * (bz - az)) / 2;
+  }
+  return sum;
+}
+
+/** a mesh's vertices of one face colour (`but`: of every other) */
+function onlyRamp(m: { vertices: Float32Array; ramps: Uint32Array }, ramp: number, but = false): { vertices: Float32Array; vertexCount: number } {
   const vertices: number[] = [];
-  m.ramps.forEach((r, i) => { if (r === ramp) vertices.push(...m.vertices.subarray(i * 6, i * 6 + 6)); });
+  m.ramps.forEach((r, i) => { if ((r === ramp) !== but) vertices.push(...m.vertices.subarray(i * 6, i * 6 + 6)); });
   return { vertices: Float32Array.from(vertices), vertexCount: vertices.length / 6 };
 }
 
@@ -646,9 +657,9 @@ describe('roads and water as the terrain’s own faces', () => {
     const { opts, tin, cover } = osmMeshOf(looseTown(), rolling, 0);
     for (const l of looseTown().lines) expect([...tin.loose!].some((d) => d.tags.name === l.tags.name)).toBe(true);
     const m = buildOsmMesh({ ...opts, cover }), ribbon = buildOsmMesh(opts);
-    // the ribbons of today, piece for piece, but on the faces: not LINE_BIAS and more over them (the
-    // drape: the railway's right-of-way strip, the park the terrain's)
-    for (const [a, b] of [[m.roads, ribbon.roads], [m, onlyRamp(ribbon, RAIL_ZONE_RAMP)]] as const) {
+    // the ribbons of today, piece for piece, but on the faces: not LINE_BIAS and more over them (of
+    // the drape the railway's right-of-way strip)
+    for (const [a, b] of [[m.roads, ribbon.roads], [onlyRamp(m, RAIL_ZONE_RAMP), onlyRamp(ribbon, RAIL_ZONE_RAMP)]] as const) {
       expect(a.vertexCount).toBeGreaterThan(0);
       expect(a.vertexCount).toBe(b.vertexCount);
       for (let i = 0; i < a.vertexCount; i++) {
@@ -659,6 +670,16 @@ describe('roads and water as the terrain’s own faces', () => {
       expect(maxOffTin(a, opts.sampleHeight)).toBeLessThan(1e-4);
     }
     expect(Array.from(m.roadAttrs)).toEqual(Array.from(ribbon.roadAttrs));
+    // and the park the budget dropped with them: the rest of the drape, on the faces, the same area as today's
+    const park = onlyRamp(m, RAIL_ZONE_RAMP, true);
+    expect(maxOffTin(park, opts.sampleHeight)).toBeLessThan(1e-4);
+    // what of it the faces wholly in it do not carry already (the terrain's): with them, today's area
+    const { wx, wz } = tinToWorld(COVER_TILE, COVER_GRID, tin.vx, tin.vy), si = cover.shapes.findIndex((sh) => sh.kind === 'area');
+    const own = tin.tris.reduce((sum, t, f) => sum + (tin.cover![f] === si ? Math.abs((wx[t.b] - wx[t.a]) * (wz[t.c] - wz[t.a]) - (wx[t.c] - wx[t.a]) * (wz[t.b] - wz[t.a])) / 2 : 0), 0);
+    expect(tin.looseShapes).toEqual([si]);
+    expect(own).toBeGreaterThan(10000);
+    expect(planArea(park)).toBeGreaterThan(10000);
+    expect(planArea(park) + own).toBeCloseTo(planArea(onlyRamp(ribbon, RAIL_ZONE_RAMP, true)), 0);
   });
 
   it('orders the dropped ways’ ribbons by depth levels, as their heights did: shoulder under carriageway, junior under senior', () => {
@@ -666,25 +687,47 @@ describe('roads and water as the terrain’s own faces', () => {
     const m = buildOsmMesh({ ...opts, cover });
     expect(m.roadDepthLevels.length).toBe(m.roads.vertexCount);
     expect(m.depthLevels.length).toBe(m.vertexCount);
-    const levelsOf = (ramps: Uint32Array, levels: Float32Array, ramp: number): number[] => {
-      const found = new Set<number>();
-      ramps.forEach((r, i) => { if (r === ramp) found.add(levels[i]); });
-      expect(found.size).toBe(1);
-      return [...found];
+    const { tin } = osmMeshOf(looseTown(), rolling, 0);
+    const locate = tinLocator(tin, COVER_TILE), c = tileCenter(COVER_TILE);
+    /** per TIN face, the lowest and the highest level of a mesh's triangles of one colour on it (by their centres) */
+    const levelsOf = (mesh: { vertices: Float32Array; ramps: Uint32Array }, levels: Float32Array, ramp: number, but = false): Map<number, [number, number]> => {
+      const found = new Map<number, [number, number]>();
+      for (let i = 0; i < mesh.ramps.length; i += 3) {
+        if ((mesh.ramps[i] === ramp) === but) continue;
+        const at = (k: number) => (mesh.vertices[i * 6 + k] + mesh.vertices[i * 6 + 6 + k] + mesh.vertices[i * 6 + 12 + k]) / 3;
+        const ll = enuToLatLon(c, at(0), -at(2), 0), f = locate(ll.lon, ll.lat)!.tri, r = found.get(f);
+        found.set(f, [Math.min(r?.[0] ?? Infinity, levels[i]), Math.max(r?.[1] ?? 0, levels[i])]);
+      }
+      expect(found.size).toBeGreaterThan(0);
+      return found;
     };
-    const [zone] = levelsOf(m.ramps, m.depthLevels, RAIL_ZONE_RAMP);
-    const [shoulder] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(SHOULDER_RAMP, LIT_ROAD_GLOW));
-    const [street] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(classifyLine({ highway: 'residential' })!.ramp, LIT_ROAD_GLOW));
-    const [footway] = levelsOf(m.roads.ramps, m.roadDepthLevels, withGlow(classifyLine({ highway: 'footway' })!.ramp, UNLIT_ROAD_GLOW));
-    const [track] = levelsOf(m.roads.ramps, m.roadDepthLevels, classifyLine({ railway: 'rail' })!.ramp);
+    /** on every face with both, all of `a` is under all of `b` (and some face has both) */
+    const under = (a: Map<number, [number, number]>, b: Map<number, [number, number]>): void => {
+      const both = [...a.keys()].filter((f) => b.has(f));
+      expect(both.length).toBeGreaterThan(0);
+      for (const f of both) expect(a.get(f)![1]).toBeLessThan(b.get(f)![0]);
+    };
+    const park = levelsOf(m, m.depthLevels, RAIL_ZONE_RAMP, true);
+    const zone = levelsOf(m, m.depthLevels, RAIL_ZONE_RAMP);
+    const shoulder = levelsOf(m.roads, m.roadDepthLevels, withGlow(SHOULDER_RAMP, LIT_ROAD_GLOW));
+    const street = levelsOf(m.roads, m.roadDepthLevels, withGlow(classifyLine({ highway: 'residential' })!.ramp, LIT_ROAD_GLOW));
+    const footway = levelsOf(m.roads, m.roadDepthLevels, withGlow(classifyLine({ highway: 'footway' })!.ramp, UNLIT_ROAD_GLOW));
+    const track = levelsOf(m.roads, m.roadDepthLevels, classifyLine({ railway: 'rail' })!.ramp);
     // every piece is over the ground (level 0)
     expect(Math.min(...m.roadDepthLevels, ...m.depthLevels)).toBeGreaterThanOrEqual(1);
-    // the right-of-way strip under the shoulder it crosses, the shoulder under its carriageway and
-    // under the footway, the footway under the street, the street under the railway's track
-    expect(zone).toBeLessThan(shoulder);
-    expect(shoulder).toBeLessThan(footway);
-    expect(footway).toBeLessThan(street);
-    expect(street).toBeLessThan(track);
+    // the ground's own (the dropped park, the right-of-way strip) lowest, level 1 where alone on a face
+    expect([...park.values()].every(([lo, hi]) => lo === 1 && hi === 1)).toBe(true);
+    expect([...zone.values()].every(([lo, hi]) => lo === 1 && hi === 1)).toBe(true);
+    // the park and the right-of-way strip under the shoulder that crosses them, the shoulder under
+    // its carriageway and under the footway, the footway under the street, the street under the
+    // railway's track
+    under(park, shoulder);
+    under(zone, shoulder);
+    under(shoulder, footway);
+    under(footway, street);
+    under(street, track);
+    // off the park and the strip the ribbons' own levels: the shoulder's the first
+    expect(Math.min(...[...shoulder.values()].map((r) => r[0]))).toBe(1);
     // two ways that cross only beyond the tile: their pieces here do not overlap, one level
     const beyond = osmMeshOf({
       lines: [
