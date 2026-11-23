@@ -14,7 +14,7 @@ import type { P2 } from './ribbon-shapes';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
 import { buildRoadNet, type RoadNet } from './road-net';
-import { buildRoadPull, snapBorder, type RoadSurface } from './road-pull';
+import { BED_MARGIN_M, BED_PLAN_TOL_M, buildRoadPull, snapBorder, type RoadSurface } from './road-pull';
 import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 import { classifyLine, roadPriority, tieBreak } from './way-styles';
 
@@ -26,11 +26,13 @@ export type { RoadSurface } from './road-pull';
  */
 export const MAX_SURFACE_VERTS = 30000;
 /**
- * the vertices the covers' and beds' lines make where they cross the isolines, the beds and each
- * other, per point of theirs: about 5 % on a city centre (Innsbruck 14/8710/5744), 8–17 % on
- * hillier tiles (Fethiye 14/9517/6397 and round it)
+ * the vertices the covers' lines make where they cross the isolines, the beds alone and each other,
+ * per point of theirs: −3 to +2 % on the real tiles measured (Innsbruck 14/8710/5744, Fethiye
+ * 14/9517/6397 and round it, Dalaman), up to 50 % on a random town's crossings off the nodes
  */
-const CROSSINGS = 0.12;
+const CROSSINGS = 0.05;
+/** a bed outline's point is put on a cover edge but within this of a point of it, metres (profileOnto) */
+const PROFILE_GAP_M = 0.5;
 /** over the budget, the next build takes this share of the room the last one's crossings leave (the rest cross more) */
 const RETRY_ROOM = 0.97;
 /** the base relief's fixed edges get a vertex this often where they run through a pull band, metres */
@@ -76,8 +78,8 @@ export interface SurfaceTin extends TerrainTin {
 }
 
 /**
- * What goes into the surface or out of it together: a way's or an area's covers with the bed
- * outline of its way of the network (a pitch with its paint), or a bed alone
+ * What goes into the surface or out of it together: a way's or an area's covers (a pitch with its
+ * paint; a way's outermost edge is its bed's), or a bed alone (no covers: roads only, or none here)
  */
 interface Unit {
   /** its fixed lines (lattice, inside the tile) and their vertices (distinct points), once `settle` has run */
@@ -110,7 +112,7 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
   // where the covers' edges cross the tile border, whether kept or not: the neighbour has them too
   const coverBorder: Pt[] = [];
-  const units = cover ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], roads?.net) : bedUnits(pull!.beds, roads!.net);
+  const units = cover ? coverUnits(cover, grid, coverBorder, pull?.beds ?? [], roads?.net, grid / tileSizeMeters(tile)) : bedUnits(pull!.beds, roads!.net);
   let picked = 0;
   const tin = buildTerrainTin(tile, grid, heights, {
     ...tinOpts,
@@ -209,14 +211,22 @@ function bedUnits(beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: Road
 }
 
 /**
- * The covers by source (a way's or an area's shapes together, a pitch with its paint), each with the
- * bed outline of its way of the network, the senior first; a bed without a shape on its own, ranked
- * as its way's carriageway or water. Their edges cut to the tile; where they cross its border into
- * `border`. A shape's edge inside a senior shape is left out (it parts faces of that one cover): a
- * senior whose unit comes no later, so it is in the surface whenever this one is.
+ * The covers by source (a way's or an area's shapes together, a pitch with its paint), the senior
+ * first; a bed of a way without a shape here on its own, ranked as its way's carriageway or water.
+ * A way's covers have no bed outline: their outermost edge (the shoulder's, the carriageway's, the
+ * water's) is its bed's edge, the pull giving every vertex its height (BED_MARGIN_M only kept a
+ * ribbon's bias off the bed's fall); the bed outline's points move onto that edge (profileOnto), so
+ * it bends with the road's height as the bed's did. A way the budget drops goes as before: its unit,
+ * and so its edges, out; its ribbon lies over the pulled ground. Their edges cut to the tile; where they cross its border into `border`. A shape's edge inside a senior shape is left out
+ * (it parts faces of that one cover): a senior whose unit comes no later, so it is in the surface
+ * whenever this one is.
  */
-function coverUnits(cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net?: RoadNet): Unit[] {
+function coverUnits(
+  cover: GroundCover, grid: number, border: Pt[], beds: ReadonlyArray<{ way: number; edges: Pt[][] }>, net: RoadNet | undefined, latticePerMetre: number,
+): Unit[] {
   const units: Unit[] = [];
+  /** each covered way's bed outline: its points go onto the way's own edges when it is picked */
+  const profiles = new Map<Unit, Pt[][]>();
   const bySource = new Map<object, Unit>();
   cover.shapes.forEach((s, si) => {
     let u = bySource.get(s.source);
@@ -241,33 +251,76 @@ function coverUnits(cover: GroundCover, grid: number, border: Pt[], beds: Readon
   units.forEach((u, i) => {
     u.settle = () => {
       u.settle = undefined;
-      // its shapes' edges before its bed's
-      const beds = u.lines;
-      u.lines = [];
       for (const { si, piece } of pending[i]) {
         for (const part of cover.outside(piece, si, (sj) => place[sj] <= place[si])) u.lines.push(part.map(([x, y]) => ({ x, y })));
       }
-      u.lines.push(...beds);
+      const bed = profiles.get(u);
+      if (bed) profileOnto(u.lines, bed, (BED_MARGIN_M + BED_PLAN_TOL_M + 0.1 + (u.way ? classifyLine(u.way.tags)?.shoulder ?? 0 : 0)) * latticePerMetre, PROFILE_GAP_M * latticePerMetre);
       u.count = distinctPoints(u.lines);
     };
   });
   beds.forEach((b, i) => {
     const line = net!.ways[b.way].line;
-    let u = bySource.get(line);
-    if (!u) {
-      const road = !!line.tags.highway;
-      u = {
-        lines: [], count: 0, shapes: [], way: line, rank: COVER_RANK[road ? 'carriageway' : 'water'],
-        prio: road ? roadPriority(line.tags, classifyLine(line.tags)?.width ?? 0) : 0, tie: road ? tieBreak(line.points[0]) : 0, first: cover.shapes.length + i,
-      };
-      bySource.set(line, u);
-      units.push(u);
+    // a way with covers: their edge is the bed's, its points the bed's
+    const own = bySource.get(line);
+    if (own) {
+      profiles.set(own, [...(profiles.get(own) ?? []), ...b.edges]);
+      return;
     }
-    u.lines.push(...b.edges);
+    const road = !!line.tags.highway;
+    const u: Unit = {
+      lines: b.edges, count: 0, shapes: [], way: line, rank: COVER_RANK[road ? 'carriageway' : 'water'],
+      prio: road ? roadPriority(line.tags, classifyLine(line.tags)?.width ?? 0) : 0, tie: road ? tieBreak(line.points[0]) : 0, first: cover.shapes.length + i,
+    };
+    bySource.set(line, u);
+    units.push(u);
   });
   // the vertices a unit brings: its lines' points, each once (a cut's ends are its sides' points)
   for (const u of units) if (!u.settle) u.count = distinctPoints(u.lines);
   return units.sort(byPlace);
+}
+
+/**
+ * Every point of a bed outline `bed` onto each of `lines` passing within `reach` of it (lattice), at
+ * its nearest point there, unless that is within `gap` of a point of the line: the bed's points are
+ * where its height along the road bends (road-pull simplifies it in height too), and so the sides
+ * of the asphalt and of the shoulder bend with it on their side, across from each other (a way's
+ * edges have only their plan's points: long faces across a straight road missed its rise between)
+ */
+function profileOnto(lines: Pt[][], bed: ReadonlyArray<ReadonlyArray<Pt>>, reach: number, gap: number): void {
+  /** per line, the points to put in each segment: segment index, fraction, point */
+  const adds = lines.map(() => [] as { k: number; t: number; p: Pt }[]);
+  for (const l of bed) for (const q of l) {
+    lines.forEach((line, li) => {
+      let best = reach, at = -1, tt = 0;
+      for (let k = 1; k < line.length; k++) {
+        const a = line[k - 1], b = line[k], dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        if (l2 === 0) continue;
+        const t = Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / l2));
+        const d = Math.hypot(q.x - a.x - dx * t, q.y - a.y - dy * t);
+        if (d < best) { best = d; at = k; tt = t; }
+      }
+      if (at < 0) return;
+      const a = line[at - 1], b = line[at], len = Math.hypot(b.x - a.x, b.y - a.y);
+      if (tt * len <= gap || (1 - tt) * len <= gap) return;
+      adds[li].push({ k: at, t: tt, p: { x: a.x + (b.x - a.x) * tt, y: a.y + (b.y - a.y) * tt } });
+    });
+  }
+  lines.forEach((line, li) => {
+    if (!adds[li].length) return;
+    const by = adds[li].sort((p, q) => p.k - q.k || p.t - q.t);
+    const out: Pt[] = [line[0]];
+    let j = 0;
+    for (let k = 1; k < line.length; k++) {
+      for (let last = -Infinity; j < by.length && by[j].k === k; j++) {
+        // two bed points onto one place: one
+        if (by[j].t - last > 1e-9) out.push(by[j].p);
+        last = by[j].t;
+      }
+      out.push(line[k]);
+    }
+    lines[li] = out;
+  });
 }
 
 /** the distinct points of `lines` (to a rare collision of two in one key: an estimate) */

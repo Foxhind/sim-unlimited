@@ -6,6 +6,8 @@ import { buildRoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildSurfaceTin, MAX_SURFACE_VERTS, Z14_RELIEF_TOL_M, type SurfaceOptions, type SurfaceStats, type SurfaceTin } from '../src/world/surface-tin';
 import { buildTerrainTin, tinLatticeSampler, type TerrainTin, type TinDebug } from '../src/world/terrain-tin';
+import { BED_MARGIN_M } from '../src/world/road-pull';
+import { classifyLine } from '../src/world/way-styles';
 import { area, areaOf, at, bordersOf, coverTin, cracks, data, demOf, denseTown, GRID, lattice, M, padAround, polygon, randomTown, road, seeded, SIZE, TILE, townFixture } from './roads-helpers';
 
 const slope = lattice((x, y) => 500 + 0.2 * x + 0.05 * y);
@@ -316,6 +318,24 @@ it('drops the parks before the roads when over the budget, and cracks nowhere', 
   expect(cracks(tin)).toBe(0);
 });
 
+it('takes a covered road’s shoulder edge for its bed’s: no fixed edge 0.3 m beyond it, the ground across it level', () => {
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  const r = road({ highway: 'primary' }, [[32, 6], [32, 58]]); // runs south across a 20 % cross slope
+  const net = buildRoadNet([r]), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
+  const cover = buildGroundCover(TILE, GRID, data([r]), roads);
+  const debug = {} as TinDebug;
+  const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), roads, cover, debug });
+  expect(tin.loose).toBeUndefined();
+  // the fixed edges along the road (lattice x of both ends near one offset), by their offset from its axis, metres
+  const edge = classifyLine({ highway: 'primary' })!, outer = edge.width / 2 + edge.shoulder!;
+  const offsets = debug.constraints!.flatMap(([u, v]) => {
+    const a = (tin.vx[u] - 32) / M, b = (tin.vx[v] - 32) / M;
+    return Math.abs(a - b) < 0.01 && Math.abs(tin.vy[u] - tin.vy[v]) > 0.05 ? [Math.abs(a)] : [];
+  });
+  expect(offsets.some((o) => Math.abs(o - outer) < 0.02)).toBe(true);
+  expect(offsets.filter((o) => Math.abs(o - outer - BED_MARGIN_M) < 0.1)).toEqual([]);
+  for (const y of [400, 800, 1200]) { const h = at(tin, SIZE / 2, y); for (const off of [-9, -4, 4, 9]) expect(at(tin, SIZE / 2 + off, y)).toBeCloseTo(h, 1); }
+});
 it('paints a face with a dropped area only when the face lies in it, centre and corners: a small pool goes', () => {
   const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
   // a budget below the relief's own vertices: every edge left out

@@ -50,7 +50,7 @@ export interface RoadPull {
  */
 export const BED_MARGIN_M = 0.3;
 /** bed outlines simplified to this in plan (metres) ... */
-const BED_PLAN_TOL_M = 0.4;
+export const BED_PLAN_TOL_M = 0.4;
 /** ... and to this in height along them (metres; checked every half sample, so 0.2 m between) */
 const BED_HEIGHT_TOL_M = 0.15;
 /** and no outline segment longer than this (metres): no long sliver faces over the bed */
