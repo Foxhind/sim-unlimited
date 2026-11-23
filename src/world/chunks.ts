@@ -187,11 +187,22 @@ export interface Chunk {
   lastAttempt: number;
 }
 
+/**
+ * a tile is drawn while a sphere this much wider than its own is in the frustum, metres: the terrain
+ * and what lies on its faces (osm-manager) by the one margin, or a tile at the screen's edge showed
+ * its ground without its roads and water
+ */
+export const CULL_MARGIN_M = 2500;
+
+/** the slant distance from the camera to a tile's centre (at sea level), metres: what the near and far draws of a tile are told apart by */
+export function slantTo(c: { centerEnu: vec3 }, camPos: vec3): number {
+  return Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
+}
+
 /** how many vertices of a tile to draw: `nearCount` within `osmRadius` of the camera, `farCount` beyond; the whole mesh without them */
 export function drawnCount(c: Pick<Chunk, 'centerEnu' | 'mesh' | 'nearCount' | 'farCount'>, camPos: vec3, osmRadius: number): number {
   const all = c.mesh?.vertexCount ?? 0;
-  const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
-  return (slant < osmRadius ? c.nearCount : c.farCount) ?? all;
+  return (slantTo(c, camPos) < osmRadius ? c.nearCount : c.farCount) ?? all;
 }
 
 export interface CameraWorld {
@@ -377,7 +388,7 @@ export class ChunkManager {
     // planes come from proj*view where view is a full lookAt (translation included): they live in
     // the same world frame as centerEnu, so the sphere centre must NOT be made camera-relative
     this.shownList = list;
-    this.renderList = list.filter((c) => sphereInFrustum(this.planes, c.centerEnu, c.radius + 2500));
+    this.renderList = list.filter((c) => sphereInFrustum(this.planes, c.centerEnu, c.radius + CULL_MARGIN_M));
 
     for (const [key, c] of this.chunks) {
       if (!needed.has(key) && !seen.has(key) && now - c.lastUsed > UNLOAD_DELAY_MS) {

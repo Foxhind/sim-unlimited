@@ -2,7 +2,7 @@ import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
-import { frustumPlanes, sphereInFrustum, type CameraWorld } from './chunks';
+import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { WINDOW_ATTR_FLOATS } from './building-mesher';
 import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
@@ -266,7 +266,7 @@ export class OsmManager {
       if (!c || c.status !== 'ready') continue;
       c.lastUsed = now;
       this.shownList.push(c);
-      if (sphereInFrustum(this.planes, c.centerEnu, c.radius + 2000)) this.renderList.push(c);
+      if (sphereInFrustum(this.planes, c.centerEnu, c.radius + CULL_MARGIN_M)) this.renderList.push(c);
     }
 
     for (const [key, c] of this.chunks) {
@@ -472,7 +472,7 @@ export class OsmManager {
     for (const c of this.renderList) {
       const dx = camPos[0] - c.centerEnu[0];
       const dz = camPos[2] - c.centerEnu[2];
-      const slant = Math.hypot(dx, dz, camPos[1]);
+      const slant = slantTo(c, camPos);
       if (slant < HOUSE_RADIUS_M) {
         if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         // pitch markings: 1 px white paint, pulled a hair toward the eye off the pitch under them
@@ -544,7 +544,7 @@ export class OsmManager {
       const houses = c.bcore ?? c.bmesh;
       if (houses) renderer.shadowMesh(houses, c.offset);
       if (!trees || !c.trees) continue;
-      const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]) - c.radius * 0.71;
+      const slant = slantTo(c, camPos) - c.radius * 0.71;
       for (const t of c.trees) {
         if (slant > (PROP_DETAIL_M[t.type] ?? Infinity)) continue;
         renderer.shadowTrees(t.vao, t.count, t.first, t.vertexCount, c.offset);
