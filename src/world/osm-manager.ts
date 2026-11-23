@@ -4,7 +4,7 @@ import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
-import { WINDOW_ATTR_FLOATS } from './building-mesher';
+import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
 import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
@@ -66,6 +66,8 @@ interface OsmChunk {
   bmesh?: Mesh;
   /** the same buildings without their small parts (the same VAO, its first vertices): the far LOD */
   bcore?: Mesh;
+  /** greenhouse glass: drawn blended with the sun's glints after everything else of the near tiles */
+  gmesh?: Mesh;
   dots?: PropSet;
   /** one set per tree type present */
   trees?: TreeSet[];
@@ -97,6 +99,8 @@ interface MeshPayload {
   bRamps: ArrayBuffer;
   bWindows: ArrayBuffer;
   bCore: number;
+  gVertices: ArrayBuffer;
+  gRamps: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -177,6 +181,7 @@ export class OsmManager {
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
             levels: buf(msg.levels), rLevels: buf(msg.rLevels), wLevels: buf(msg.wLevels),
             bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, dots: buf(msg.dots),
+            gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
             beacons: buf(msg.beacons), mastLines: buf(msg.mastLines),
@@ -371,6 +376,7 @@ export class OsmManager {
     const gl = this.gl;
     chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps, undefined, data.levels);
     chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
+    chunk.gmesh = this.worldMesh(chunk, data.gVertices, data.gRamps);
     chunk.bcore = chunk.bmesh && { vao: chunk.bmesh.vao, vertexCount: Math.min(data.bCore, chunk.bmesh.vertexCount) };
     chunk.dots = this.points(chunk, data.dots);
     chunk.lights = this.points(chunk, data.lights);
@@ -528,6 +534,17 @@ export class OsmManager {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
       }
     }
+    // greenhouse glass, last: see-through over the ground, the frame and the plants behind it, the
+    // sun glinting off it (WORLD_FS uGloss); near tiles only, like the buildings it belongs to
+    renderer.opacity = GREENHOUSE.OPACITY;
+    renderer.gloss = 1;
+    for (const c of this.renderList) {
+      if (!c.gmesh) continue;
+      const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
+      if (slant < HOUSE_RADIUS_M) renderer.drawWorld(c.gmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+    }
+    renderer.opacity = 1;
+    renderer.gloss = 0;
   }
 
   /**

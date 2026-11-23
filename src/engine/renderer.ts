@@ -119,6 +119,11 @@ export class Renderer {
   /** what drawWorld draws next adds its light to what is behind (glints), leaving no depth */
   additive = false;
   /**
+   * what drawWorld draws next is glass (greenhouses): 0..1 of the sun's glint where a face mirrors
+   * it to the eye, and of the sky's sheen toward grazing angles (WORLD_FS uGloss); 0 for any other mesh
+   */
+  gloss = 0;
+  /**
    * windows on what drawWorld draws next (a building mesh with facade attributes, WORLD_FS):
    * 'glass' dark panes, 'lit' at night with some of them lit, 'off' for every other mesh
    */
@@ -219,7 +224,7 @@ export class Renderer {
 
     const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
       const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
@@ -711,6 +716,11 @@ export class Renderer {
     gl.uniform1f(u.uEmit, this.selfLit ? this.selfLitGain : 1);
     const blend = this.additive || this.opacity < 1;
     gl.uniform1f(u.uClear, this.additive ? 0 : 1 - this.opacity);
+    if (this.gloss > 0) {
+      const g = this.sunGlint();
+      const k = (this.gloss * g.strength) / 255;
+      gl.uniform4f(u.uGloss, g.rgb[0] * k, g.rgb[1] * k, g.rgb[2] * k, this.gloss);
+    } else gl.uniform4f(u.uGloss, 0, 0, 0, 0);
     if (blend) {
       gl.enable(gl.BLEND);
       // colour blended or added; the destination's alpha (silhouette marks) left as it is

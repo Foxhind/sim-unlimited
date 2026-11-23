@@ -5,7 +5,7 @@ import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
-import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofModel, type XZ } from './roof-shapes';
+import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 
 /** floats per vertex of BuildingMeshData.windows */
 export const WINDOW_ATTR_FLOATS = 5;
@@ -25,6 +25,8 @@ export interface BuildingMeshData extends TerrainMeshData {
   coreVertexCount: number;
   /** air-conditioner units on the walls: instances of INSTANCE.AC (props-mesher TREE_STRIDE), drawn with the trees */
   acs: Float32Array;
+  /** see-through faces (greenhouse walls and roofs, GREENHOUSE): pos+normal with face colours, drawn blended */
+  glass: TerrainMeshData;
 }
 
 /** building values whose walls carry air-conditioner units */
@@ -305,7 +307,49 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
       ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
     if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = 'hipped';
   }
+  if (tags.building === 'greenhouse' && !isPart) greenhouseDefaults(tags, out, levels);
   return out;
+}
+
+/**
+ * A greenhouse (building=greenhouse): Fethiye's plain is thousands of them, low glass sheds spanning
+ * up to hectares. Without a shape or size in OSM: a shallow ridge whatever the footprint (a default
+ * pitch over a 50 m span would raise an 8 m roof). Drawn as see-through glass (its walls and roof go to
+ * BuildingMeshData.glass, drawn blended with the sun's glints, osm-manager) on a thin frame: posts
+ * along the walls, a beam on top of them, rafters across the roof and purlins along it.
+ */
+export const GREENHOUSE = {
+  /** top of the roof above the ground, without height and building:levels */
+  HEIGHT_M: 3.8,
+  /** the ridge above the eaves, without roof:height, roof:angle and roof:levels */
+  ROOF_M: 1.2,
+  /** the glass's tint without a colour or material in OSM */
+  GLASS: [196, 222, 226] as const,
+  /** how much of what is behind the glass it hides (renderer.opacity) */
+  OPACITY: 0.35,
+  /** the frame: galvanised steel */
+  FRAME: [206, 209, 210] as const,
+  /** posts along the walls and rafters across the roof this far apart, at most */
+  BAY_M: 4,
+  /** purlins along the roof (one on the ridge line) this far apart */
+  PURLIN_M: 6,
+  /** width of a bar of the frame */
+  BAR_M: 0.15,
+  /** the frame lies this far outside the glass, so no depth fight */
+  LIFT_M: 0.04,
+};
+
+/** a greenhouse, drawn as glass on a frame */
+export function isGlasshouse(tags: Record<string, string>): boolean {
+  return (tags['building:part'] || tags.building) === 'greenhouse';
+}
+
+function greenhouseDefaults(tags: Record<string, string>, out: Record<string, string>, levels: number | undefined): void {
+  if (tags['roof:shape'] === undefined) out['roof:shape'] = 'gabled';
+  if (tags['roof:height'] === undefined && tags['roof:angle'] === undefined && tags['roof:levels'] === undefined) {
+    out['roof:height'] = String(GREENHOUSE.ROOF_M);
+  }
+  if (parseLength(tags.height) === undefined && levels === undefined) out.height = String(GREENHOUSE.HEIGHT_M);
 }
 
 const defaultTagsCache = new WeakMap<OsmBuilding, Record<string, string>>();
@@ -490,6 +534,7 @@ export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
   const tagged = taggedRamp(tags, ['building:colour', 'building:color', 'colour', 'color'], 'building:material');
   if (tagged !== undefined) return tagged;
   const type = tags['building:part'] || tags.building || 'yes';
+  if (type === 'greenhouse') return rgbRamp([...GREENHOUSE.GLASS]);
   const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
   return rgbRamp(pickWeighted(wallPalette(type), t));
 }
@@ -526,6 +571,7 @@ function greyRamp(c: RGB): number {
 export function roofRamp(tags: Record<string, string>, seed = 0.5): number {
   const tagged = taggedRamp(tags, ['roof:colour', 'roof:color'], 'roof:material');
   if (tagged !== undefined) return tagged;
+  if (isGlasshouse(tags)) return rgbRamp([...GREENHOUSE.GLASS]);
   const flat = isFlatRoof(tags);
   const h = computeHeights(tags);
   const lowRise = !flat && h.wall + h.roof <= LOW_RISE_MAX_M && tags.building !== 'industrial' && tags.building !== 'warehouse';
@@ -644,6 +690,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   // the small parts go to their own arrays, appended after the rest (coreVertexCount)
   const core = { verts: [] as number[], ramps: [] as number[], win: [] as number[] };
   const small = { verts: [] as number[], ramps: [] as number[], win: [] as number[] };
+  // see-through faces (greenhouses): their own mesh; window attributes are kept only to be dropped
+  const glass = { verts: [] as number[], ramps: [] as number[], win: [] as number[] };
   let verts = core.verts;
   let ramps = core.ramps;
   let win = core.win;
@@ -722,6 +770,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       }
     }
 
+    // a greenhouse's walls and roof are glass (their own mesh), its frame opaque (after the roof)
+    const glassy = isGlasshouse(tags);
+    if (glassy) ({ verts, ramps, win } = glass);
+
     // walls up to the roof profile (gable ends close themselves); none under a canopy
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
@@ -730,7 +782,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
         }
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
-      if (h.min < 0.5 && h.wall >= 2.4) {
+      if (h.min < 0.5 && h.wall >= 2.4 && !glassy) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
           detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags));
         }
@@ -745,7 +797,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // a flat roof holds snow in winter
       // a parapet along the edges, the roof sunk behind it (not on a canopy or a too small building)
       const bb = bbox(outer);
-      const withParapet = !isCanopy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
+      const withParapet = !isCanopy && !glassy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
       if (withParapet && isChimney(tags)) {
         const soot = rgbRamp(CHIMNEY.SOOT);
         const floorY = wallTop - CHIMNEY.DEPTH * h.wall;
@@ -771,6 +823,86 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       radialRoof(outer, centroid, wallTop, h.roof, roof.profile, rRamp);
     } else {
       planarRoof(outer, holes, wallTop, roof.field, creases, rRamp);
+    }
+
+    if (glassy) {
+      ({ verts, ramps, win } = core);
+      // the frame is a small part: the far LOD draws the glass alone
+      detail(() => glassFrame(outer, wallBase, wallTop, roof, creases, frame, rgbRamp([...GREENHOUSE.FRAME]), centroid, isCanopy));
+    }
+  }
+
+  /**
+   * A greenhouse's frame as flat bars just outside its glass (2 triangles a bar: thousands of
+   * greenhouses to a tile): posts up the walls at most BAY_M apart, a beam along their tops (up the
+   * gables), and on a pitched or flat roof rafters across the ridge every BAY_M and purlins along it
+   * every PURLIN_M, one on the ridge line. Radial and fan roofs get the walls' bars only.
+   */
+  function glassFrame(outer: XZ[], yBase: number, yTop: number, roof: RoofModel, creases: Plane[], rf: RoofFrame, ramp: number, centroid: XZ, canopy: boolean): void {
+    const field = roof.kind === 'planar' ? roof.field : () => 0;
+    const top = (p: XZ): number => yTop + field(p);
+    const W = GREENHOUSE.BAR_M / 2, L = GREENHOUSE.LIFT_M;
+    if (!canopy) {
+      for (let i = 0; i < outer.length; i++) {
+        const p = outer[i], q = outer[(i + 1) % outer.length];
+        const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+        if (len < 1e-3) continue;
+        const ex = (q[0] - p[0]) / len, ez = (q[1] - p[1]) / len;
+        // outward: away from the footprint's centroid, as emitWallQuad turns the face
+        let ox = ez, oz = -ex;
+        if (ox * ((p[0] + q[0]) / 2 - centroid[0]) + oz * ((p[1] + q[1]) / 2 - centroid[1]) < 0) { ox = -ox; oz = -oz; }
+        const at = (t: number, s: number): XZ => [p[0] + ex * (t * len + s) + ox * L, p[1] + ez * (t * len + s) + oz * L];
+        const n = Math.max(1, Math.ceil(len / GREENHOUSE.BAY_M));
+        // a bar on the wall: a quad with no window attributes
+        const wallBar = (a0: V3, a1: V3, c1: V3, c0: V3): void => {
+          emitWallQuad(a0, a1, c1, c0, ramp, centroid);
+          for (let j = 0; j < 6; j++) win.push(0, 0, 0, 0, 0);
+        };
+        for (let k = 0; k <= n; k++) {
+          // posts, kept on the edge at its ends
+          const s0 = k === 0 ? 0 : -W, s1 = k === n ? 0 : W;
+          const a = at(k / n, s0), c = at(k / n, s1);
+          wallBar([a[0], yBase, a[1]], [a[0], top(a), a[1]], [c[0], top(c), c[1]], [c[0], yBase, c[1]]);
+        }
+        // the beam along the top, broken where the roof bends over the edge
+        const ts = [0, ...crossings(p, q, creases), 1];
+        for (let k = 0; k + 1 < ts.length; k++) {
+          const a = at(ts[k], 0), c = at(ts[k + 1], 0);
+          const ya = top(a), yc = top(c);
+          wallBar([a[0], ya - 2 * W, a[1]], [a[0], ya, a[1]], [c[0], yc, c[1]], [c[0], yc - 2 * W, c[1]]);
+        }
+      }
+    }
+    if (roof.kind !== 'planar' && roof.kind !== 'flat') return;
+    // bars on the roof: along `dir` through `origin`, where the line is inside the footprint
+    const bar = (origin: XZ, dir: XZ, side: XZ): void => {
+      for (const [t0, t1] of lineInside(origin, dir, outer)) {
+        const p: XZ = [origin[0] + dir[0] * t0, origin[1] + dir[1] * t0];
+        const q: XZ = [origin[0] + dir[0] * t1, origin[1] + dir[1] * t1];
+        const ts = [0, ...crossings(p, q, creases), 1];
+        for (let k = 0; k + 1 < ts.length; k++) {
+          const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
+          const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
+          const v = (b: XZ, s: number): V3 => {
+            const x: XZ = [b[0] + side[0] * s, b[1] + side[1] * s];
+            return [x[0], top(b) + L, x[1]];
+          };
+          emitTri(v(a, -W), v(c, -W), v(c, W), ramp, true);
+          emitTri(v(a, -W), v(c, W), v(a, W), ramp, true);
+        }
+      }
+    };
+    const { origin, u, v, halfU, halfV } = rf;
+    const rafters = Math.max(1, Math.ceil((2 * halfU) / GREENHOUSE.BAY_M));
+    for (let k = 1; k < rafters; k++) {
+      const s = -halfU + (2 * halfU * k) / rafters;
+      bar([origin[0] + u[0] * s, origin[1] + u[1] * s], v, u);
+    }
+    for (let k = 0; k * GREENHOUSE.PURLIN_M < halfV; k++) {
+      for (const sign of k === 0 ? [1] : [1, -1]) {
+        const s = sign * k * GREENHOUSE.PURLIN_M;
+        bar([origin[0] + v[0] * s, origin[1] + v[1] * s], u, v);
+      }
     }
   }
 
@@ -1062,7 +1194,30 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     coreVertexCount,
     windows: join(new Float32Array(core.win.length + small.win.length), core.win, small.win),
     acs: new Float32Array(acs),
+    glass: { vertices: new Float32Array(glass.verts), ramps: new Uint32Array(glass.ramps), vertexCount: glass.ramps.length },
   };
+}
+
+/**
+ * Where the line origin + t·dir runs inside a ring: [t0, t1] intervals in order (even-odd over the
+ * ring's edges; a vertex on the line counted once, by the half-open edge test).
+ */
+export function lineInside(origin: XZ, dir: XZ, ring: XZ[]): [number, number][] {
+  const ts: number[] = [];
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    // signed distances of the edge's ends across the line
+    const da = (a[0] - origin[0]) * dir[1] - (a[1] - origin[1]) * dir[0];
+    const db = (b[0] - origin[0]) * dir[1] - (b[1] - origin[1]) * dir[0];
+    if ((da > 0) === (db > 0)) continue;
+    const s = da / (da - db);
+    const x = a[0] + (b[0] - a[0]) * s, z = a[1] + (b[1] - a[1]) * s;
+    ts.push((x - origin[0]) * dir[0] + (z - origin[1]) * dir[1]);
+  }
+  ts.sort((p, q) => p - q);
+  const out: [number, number][] = [];
+  for (let i = 0; i + 1 < ts.length; i += 2) if (ts[i + 1] - ts[i] > 1e-6) out.push([ts[i], ts[i + 1]]);
+  return out;
 }
 
 /**

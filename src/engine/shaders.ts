@@ -353,6 +353,14 @@ const GLINT_SHEEN = 0.1;
 const SPECKLE_PER_PX = 120;
 const SPECKLE_BASE_M = 1;
 const SPECKLE_LIFT = 1.3;
+/**
+ * Glass (WORLD_FS uGloss, greenhouses): the sky's sheen toward grazing angles in GLASS_SHEEN_STEPS
+ * steps up to GLASS_SHEEN_MAX of the way to the haze, and the sun's glint in three rings by the cosine
+ * between the mirrored view ray and the sun (core, mid, rim): a flat pane mirrors the sun as a spot.
+ */
+const GLASS_SHEEN_STEPS = 4;
+const GLASS_SHEEN_MAX = 0.7;
+const GLASS_GLINT = ['0.9995', '0.998', '0.992'] as const;
 /** the water's twinkles: candidate dots (worldDot), one per TWINKLE_PER_PX dot pixels, each lit now and then */
 const TWINKLE_PER_PX = 40;
 const TWINKLE_BASE_M = 0.25;
@@ -1097,6 +1105,8 @@ uniform float uSelfLit;
 uniform float uEmit;
 // > 0: see-through (1 - renderer.opacity; 0, the default, in every other pass), the blend's source alpha
 uniform float uClear;
+// glass (renderer.gloss): rgb the sun's glint colour × its strength, w the gloss 0..1 (0: not glass)
+uniform vec4 uGloss;
 // 1: rare lighter dots on the ground (renderer.speckle: terrain and OSM areas)
 uniform int uSpeckle;
 // the water surface's inputs (WATER_GLSL), shared with WORLD_VS
@@ -1163,6 +1173,18 @@ void main() {
   if (uSelfLit > 0.5) c = emitLight(c, uEmit);
   // see-through: the blend's source alpha (the target's own alpha is kept, renderer.drawWorld)
   if (uClear > 0.0) alpha = 1.0 - uClear;
+  if (uGloss.w > 0.0) {
+    // glass: toward grazing angles it mirrors the sky (Fresnel) and hides what is behind it; stepped
+    float fres = pow(1.0 - abs(dot(gWinN, gWinD)), 5.0);
+    fres = floor(fres * ${GLASS_SHEEN_STEPS}.0 + 0.5) / ${GLASS_SHEEN_STEPS}.0 * ${GLASS_SHEEN_MAX.toFixed(2)} * uGloss.w;
+    c = mix(c, uHaze, fres);
+    alpha = mix(alpha, 1.0, fres);
+    // the sun mirrored to the eye: a stepped hot spot, opaque at its core
+    float s = dot(reflect(gWinD, gWinN), uSunDir);
+    float g = s > ${GLASS_GLINT[0]} ? 1.0 : s > ${GLASS_GLINT[1]} ? 0.55 : s > ${GLASS_GLINT[2]} ? 0.25 : 0.0;
+    c = min(c + uGloss.rgb * g, vec3(1.0));
+    alpha = mix(alpha, 1.0, g);
+  }
   oColor = vec4(c, alpha);
 }
 `;

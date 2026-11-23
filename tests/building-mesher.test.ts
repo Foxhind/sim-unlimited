@@ -9,6 +9,8 @@ import {
   BOOTH_TAG,
   FACADE_ZONES,
   footprintHeight,
+  GREENHOUSE,
+  lineInside,
   PARAPET,
   CHIMNEY,
   ROOFTOP,
@@ -542,5 +544,86 @@ describe('a house on a slope stands on a plinth', () => {
   it('has no plinth on flat ground', () => {
     const m = meshOn(0);
     for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).not.toBe(EARTH);
+  });
+});
+
+describe('greenhouses (building=greenhouse)', () => {
+  // ~70 × 45 m: a multi-span greenhouse of Fethiye
+  const gh = (extra: Record<string, string> = {}): OsmBuilding => ({ rings: [rect(0.0004, 0.0002)], tags: { building: 'greenhouse', ...extra } });
+
+  it('untagged: a low shed with a shallow gabled roof, whatever the footprint', () => {
+    expect(buildingTags(gh())['roof:shape']).toBe('gabled');
+    const h = buildingHeights(gh());
+    expect(h.min).toBe(0);
+    expect(h.wall + h.roof).toBeCloseTo(GREENHOUSE.HEIGHT_M, 5);
+    expect(h.roof).toBeCloseTo(GREENHOUSE.ROOF_M, 5);
+  });
+
+  it('OSM tags win over the defaults', () => {
+    const tagged = buildingTags(gh({ height: '6', 'roof:shape': 'round' }));
+    expect(tagged['roof:shape']).toBe('round');
+    const h = buildingHeights(gh({ height: '6', 'roof:shape': 'round' }));
+    expect(h.wall + h.roof).toBeCloseTo(6, 5);
+    expect(buildingTags(gh({ 'building:levels': '2' })).height).toBeUndefined();
+    expect(buildingTags(gh({ 'roof:height': '3' }))['roof:height']).toBe('3');
+  });
+
+  it('glass-tinted walls and roof unless OSM gives a colour or material', () => {
+    const near = (c: number, rgb: readonly number[]) => rgbOf(c).every((v, i) => Math.abs(v - rgb[i]) <= 1);
+    for (const s of [0.05, 0.4, 0.9]) {
+      expect(near(wallRamp(buildingTags(gh()), s), GREENHOUSE.GLASS)).toBe(true);
+      expect(near(roofRamp(buildingTags(gh()), s), GREENHOUSE.GLASS)).toBe(true);
+    }
+    expect(roofRamp(buildingTags(gh({ 'roof:colour': '#a06858' })))).toBe(colour(0xa0, 0x68, 0x58));
+    expect(wallRamp(buildingTags(gh({ 'building:material': 'glass' })))).toBe(colour(150, 190, 210));
+  });
+
+  it('walls and roof go to the glass mesh, the opaque mesh keeps only the frame', () => {
+    const m = build([gh()]);
+    const frame = colour(...GREENHOUSE.FRAME);
+    const glassRamp = colour(...GREENHOUSE.GLASS);
+    expect(m.glass.vertexCount).toBeGreaterThan(0);
+    expect(m.glass.vertices.length).toBe(m.glass.vertexCount * 6);
+    for (const r of m.glass.ramps) expect(rgbOf(r)).toEqual(rgbOf(glassRamp));
+    expect(m.vertexCount).toBeGreaterThan(0);
+    // the frame is a small part (the far LOD draws the glass alone); nothing of it is glass-coloured
+    expect(m.coreVertexCount).toBe(0);
+    for (const r of m.ramps) expect(rgbOf(r)).toEqual(rgbOf(frame));
+    expect(m.windows.length).toBe(m.vertexCount * 5);
+  });
+
+  it('the frame stays on the glass: up to the ridge, from the ground', () => {
+    const m = build([gh()]);
+    const top = Math.max(...ys({ vertices: m.glass.vertices, vertexCount: m.glass.vertexCount }));
+    const frameYs = ys(m);
+    expect(Math.min(...frameYs)).toBeCloseTo(100, 5);
+    expect(Math.max(...frameYs)).toBeGreaterThan(top);
+    expect(Math.max(...frameYs)).toBeLessThanOrEqual(top + GREENHOUSE.LIFT_M + 1e-3);
+  });
+
+  it('a bar every BAY_M or closer: the frame grows with the greenhouse', () => {
+    const small = build([{ rings: [rect(0.0001, 0.00005)], tags: { building: 'greenhouse' } }]).vertexCount;
+    const big = build([gh()]).vertexCount;
+    // a footprint 4× as long each way: posts grow with the perimeter, rafters and purlins with the area
+    expect(big).toBeGreaterThan(small * 2.5);
+    // no more than a few bars per bay: posts, beams, rafters and purlins, 6 vertices a bar
+    const perimeter = 2 * (70 + 45), area = 70 * 45;
+    expect(big).toBeLessThan(6 * 2 * (perimeter / GREENHOUSE.BAY_M + area / (GREENHOUSE.BAY_M * 20) + 40));
+  });
+
+  it('other buildings have no glass', () => {
+    expect(build([{ rings: [rect()], tags: { building: 'yes' } }]).glass.vertexCount).toBe(0);
+  });
+});
+
+describe('lineInside', () => {
+  it('gives the stretches of a line inside a ring', () => {
+    const sq: [number, number][] = [[0, 0], [10, 0], [10, 10], [0, 10]];
+    expect(lineInside([-5, 5], [1, 0], sq)).toEqual([[5, 15]]);
+    expect(lineInside([5, -5], [0, 1], sq)).toEqual([[5, 15]]);
+    expect(lineInside([-5, 20], [1, 0], sq)).toEqual([]);
+    // a U: the line through both arms comes out twice
+    const u: [number, number][] = [[0, 0], [9, 0], [9, 9], [6, 9], [6, 3], [3, 3], [3, 9], [0, 9]];
+    expect(lineInside([-1, 6], [1, 0], u)).toEqual([[1, 4], [7, 10]]);
   });
 });

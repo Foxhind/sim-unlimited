@@ -30,6 +30,9 @@ export interface CachedMesh {
   bWindows?: ArrayBuffer;
   /** the building vertices without the small parts (BuildingMeshData.coreVertexCount): the far LOD */
   bCore?: number;
+  /** OSM tiles: see-through faces (greenhouse glass), drawn blended */
+  gVertices?: ArrayBuffer;
+  gRamps?: ArrayBuffer;
   dots?: ArrayBuffer;
   /** OSM tiles, night: roof obstruction lights (near), building night dots (far), mast lines (far), mast beacons */
   roofLights?: ArrayBuffer;

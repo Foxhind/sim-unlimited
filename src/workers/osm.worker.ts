@@ -23,7 +23,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-export const OSM_MESH_SCHEMA = 82;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame
+export const OSM_MESH_SCHEMA = 83;
 
 export interface OsmRequest {
   type: 'osm';
@@ -55,6 +56,9 @@ export interface OsmMeshResponse {
   bWindows: ArrayBuffer;
   /** the first bCore building vertices: the buildings without their small parts (the far LOD) */
   bCore: number;
+  /** see-through faces: greenhouse glass (building-mesher BuildingMeshData.glass), drawn blended */
+  gVertices: ArrayBuffer;
+  gRamps: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -155,7 +159,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
-      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.dots, res.trees, res.lights,
+      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps,
     ]);
@@ -173,6 +177,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         levels: cached.levels ?? empty(), rLevels: cached.rLevels ?? empty(), wLevels: cached.wLevels ?? empty(),
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
         bCore: cached.bCore ?? (cached.bRamps?.byteLength ?? 0) / 4,
+        gVertices: cached.gVertices ?? empty(), gRamps: cached.gRamps ?? empty(),
         dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
@@ -251,6 +256,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
       // the masts come after the houses: small parts too
       bCore: core + decks,
+      gVertices: houses.glass.vertices.slice().buffer, gRamps: houses.glass.ramps.slice().buffer,
       dots: dotData.slice().buffer,
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
