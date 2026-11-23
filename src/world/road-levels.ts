@@ -22,6 +22,8 @@ import type { LonLat, OsmArea, OsmLine } from './osm-types';
 export const LEVEL_M = 6;
 /** over a river, a canal or a water area */
 export const WATER_CLEAR_M = 4;
+/** over a canal (in a town, under a street) */
+export const CANAL_CLEAR_M = 2;
 /** over a stream or a brook */
 export const STREAM_CLEAR_M = 1.5;
 /** the approaches' slope */
@@ -183,7 +185,7 @@ export function buildRoadLevels(
     const drawn = (tags.highway !== undefined || tags.railway !== undefined) && !tags.aeroway;
     if (drawn && isTunnel(tags)) continue;
     const ww = tags.waterway;
-    const clear = ww === 'river' || ww === 'canal' ? WATER_CLEAR_M : ww === 'stream' || ww === 'brook' ? STREAM_CLEAR_M : 0;
+    const clear = ww === 'river' ? WATER_CLEAR_M : ww === 'canal' ? CANAL_CLEAR_M : ww === 'stream' || ww === 'brook' ? STREAM_CLEAR_M : 0;
     if (!drawn && !clear) continue;
     const p = line.points.map(toXZ);
     let way: Way | undefined;

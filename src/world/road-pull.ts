@@ -65,6 +65,11 @@ const BAND_ROWS = [0.3, 0.65, 1];
 const BAND_SPACING_M = 12;
 /** an outline's mitre on the inside of a bend reaches at most this many times its offset */
 const MITRE_MAX = 4;
+/**
+ * a road's bed as it outranks the rest: to its outline, and the chords simplification cuts inside a
+ * bend (BED_PLAN_TOL_M), and a hair beyond
+ */
+const ROAD_BED_REACH_M = BED_MARGIN_M + BED_PLAN_TOL_M + 0.05;
 /** an approach's pull band fades out over this many metres before its end at a bridge or tunnel */
 const STRUCTURE_FADE_M = 10;
 /** below this window (far north: a tile sees too little beyond its border) nothing is pulled */
@@ -224,11 +229,15 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   };
 
   interface Eval { w: number; bed: boolean; r: number }
+  // What decides the ground, first to last: a road's bed; a river's (its water); a road's band
+  // (where any road reaches, the water does not: between them the ground breaks to the water at
+  // its bed); a river's band; the relief.
   const evaluate = (x: number, y: number): Eval => {
     const m = mpc(y), scale = bandScale(y);
     if (scale === 0) return { w: 0, bed: false, r: NaN };
     const list = near(x, y);
-    let w = 0, top = -Infinity, sc = 0, scz = 0;
+    let topRoad = -Infinity, topWater = -Infinity;
+    let wR = 0, scR = 0, sczR = 0, wW = 0, scW = 0, sczW = 0;
     for (const si of list) {
       if (outOfReach(si, x, y)) continue;
       const s = segs[si];
@@ -237,20 +246,33 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       if (reach < 0) continue;
       project(si, x, y);
       const d = pDist * m;
-      if (d <= way.half) {
-        top = Math.max(top, way.prio);
+      // a road's bed reaches to its outline (BED_MARGIN_M beyond its edge): a river's bed under it
+      // does not take the outline down to the water
+      if (d <= way.half + (way.water ? 0 : ROAD_BED_REACH_M)) {
+        if (way.water) topWater = Math.max(topWater, way.prio);
+        else topRoad = Math.max(topRoad, way.prio);
         continue;
       }
-      if (top > -Infinity) continue;
       const u = smoothStep(1 - (d - way.half) / (way.band * scale)) * reach;
       if (u <= 0) continue;
-      w = Math.max(w, u);
       // u / (1 − u) grows without bound towards a bed; capped where u rounds to 1
       const c = (u / Math.max(1e-12, 1 - u)) * alongWeight(pOver, m);
-      sc += c;
-      scz += c * zAlong(si, pRaw, m);
+      const zz = zAlong(si, pRaw, m);
+      if (way.water) {
+        wW = Math.max(wW, u);
+        scW += c;
+        sczW += c * zz;
+      } else {
+        wR = Math.max(wR, u);
+        scR += c;
+        sczR += c * zz;
+      }
     }
-    if (top === -Infinity) return { w, bed: false, r: sc > 0 ? scz / sc : NaN };
+    const top = topRoad > -Infinity ? topRoad : topWater;
+    if (top === -Infinity) {
+      if (wR > 0) return { w: wR, bed: false, r: sczR / scR };
+      return { w: wW, bed: false, r: scW > 0 ? sczW / scW : NaN };
+    }
     // on a bed: the height of the senior roads whose beds hold the point (all of equal priority,
     // blended: no order decides), a blend of their stretches round it so it does not jump where the
     // nearest one changes (inside a bend): each by how far the point projects past its ends
@@ -319,8 +341,8 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
   }
 
   /**
-   * One side of a run of samples offset `metres(k)` from its axis, mitred at its bends; round on the
-   * outside of a turn sharper than a right angle, the inside mitred up to MITRE_MAX times
+   * One side of a run of samples offset `metres(k)` from its axis: round on the outside of every
+   * bend (no point farther from the axis than the offset), mitred on the inside up to MITRE_MAX times
    */
   /** per sample of a run: the unit normals (left) of the stretches before and after it */
   function runNormals(run: number[]): Array<Array<[number, number]>> {
@@ -354,8 +376,13 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface): Roa
       const cosHalf = ml / 2;
       // the turn to the left (> 0) has the left side inside
       const outside = side * (ax * by - ay * bx) < 0;
-      if (cosHalf >= Math.SQRT1_2 || (!outside && ml > 1e-9)) {
-        at(mx / ml, my / ml, Math.min(1 / Math.max(cosHalf, 1e-9), MITRE_MAX));
+      if (!outside) {
+        if (ml > 1e-9) at(mx / ml, my / ml, Math.min(1 / Math.max(cosHalf, 1e-9), MITRE_MAX));
+        else at(ax, ay, 1);
+        return;
+      }
+      if (cosHalf > 0.99999) {
+        at(mx / ml, my / ml, 1);
         return;
       }
       // round: from the one stretch's normal to the other's in steps of 30° at most

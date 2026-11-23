@@ -98,3 +98,10 @@ it('follows the relief within Z14_RELIEF_TOL_M on a z14 tile, hills lower than a
   for (let j = 0; j <= GRID; j++) for (let i = 0; i <= GRID; i++) worst = Math.max(worst, Math.abs(s(i, j) - h[j * (GRID + 1) + i]));
   expect(worst).toBeLessThanOrEqual(Z14_RELIEF_TOL_M + 0.01);
 });
+it('outlines the roads before the rivers when the vertices run short', () => {
+  const rnd = seeded(5);
+  const roads = Array.from({ length: 2500 }, () => { const x = rnd() * 62 + 1, y = rnd() * 62 + 1; return road({ highway: 'residential' }, [[x, y], [x + rnd() - 0.5, y + rnd() - 0.5]]); });
+  const canal = road({ waterway: 'canal' }, [[2, 30], [62, 34]]);
+  const { tin } = surfaceOf([canal, ...roads]);
+  expect(tin.loose!.has(canal)).toBe(true);
+});

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LonLat, OsmArea, OsmLine } from '../src/world/osm-types';
-import { buildRoadLevels, LEVEL_M, LIFT_EPS_M, LIFT_GRADE, LIFT_REACH_M, MIN_BRIDGE_LIFT_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
+import { buildRoadLevels, CANAL_CLEAR_M, LEVEL_M, LIFT_EPS_M, LIFT_GRADE, LIFT_REACH_M, MIN_BRIDGE_LIFT_M, STREAM_CLEAR_M, WATER_CLEAR_M } from '../src/world/road-levels';
 
 /** points are given in metres (x east, y north) and stored as "degrees" of 1e-5 */
 const P = (x: number, y: number): LonLat => [x / 1e5, y / 1e5];
@@ -45,13 +45,13 @@ describe('road levels', () => {
     expect(l.liftAt(east, 10)).toBeCloseTo(l.liftAt(west, 190), 6);
   });
 
-  it('water: 4 m over a river, 1.5 m over a stream, none over a ditch', () => {
+  it('water: 4 m over a river, 2 m over a canal, 1.5 m over a stream, none over a ditch', () => {
     const over = (tags: Record<string, string>) => {
       const bridge = way(BRIDGE, [0, 0], [400, 0]);
       return levels([bridge, way(tags, [200, -100], [200, 100])]).maxLift(bridge);
     };
     expect(over({ waterway: 'river' })).toBeCloseTo(WATER_CLEAR_M, 2);
-    expect(over({ waterway: 'canal' })).toBeCloseTo(WATER_CLEAR_M, 2);
+    expect(over({ waterway: 'canal' })).toBeCloseTo(CANAL_CLEAR_M, 2);
     expect(over({ waterway: 'stream' })).toBeCloseTo(STREAM_CLEAR_M, 2);
     expect(over({ waterway: 'ditch' })).toBe(0);
   });

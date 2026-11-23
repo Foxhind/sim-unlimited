@@ -5,9 +5,9 @@ import { buildOsmMesh } from '../src/world/osm-mesher';
 import type { OsmLine, OsmTileData } from '../src/world/osm-types';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { LEVEL_M } from '../src/world/road-levels';
-import { buildRoadNet, type RoadNet } from '../src/world/road-net';
+import { buildRoadNet, WATER_DEPTH_M, type RoadNet } from '../src/world/road-net';
 import { buildRoadPull, BED_MARGIN_M } from '../src/world/road-pull';
-import { buildSurfaceTin } from '../src/world/surface-tin';
+import { buildSurfaceTin, roadSurfaceOf } from '../src/world/surface-tin';
 import { tinLatticeSampler, tinSampler, type TerrainTin } from '../src/world/terrain-tin';
 import { bordersOf, demOf, GRID, lattice, M, metresOf, road, TILE } from './roads-helpers';
 
@@ -104,4 +104,20 @@ it('has a height a hair off the bed edge', () => {
   const pull = buildRoadPull(TILE, GRID, { net, z: flatZ(net, 520) });
   // just past the edge, where the smooth step rounds to 1 (u / (1 − u) would be ∞ / ∞)
   for (let k = 1; k < 400; k++) expect(Number.isFinite(pull.height(32, 32 + (4 + k * 1e-15) * M, 500))).toBe(true);
+});
+
+it('keeps a short bridge over a canal level with the street: the water lies in its channel', () => {
+  // flat ground at 500 m; a 10 m tertiary bridge (layer 1) over a canal at a junction
+  const s = (10 * M) / 2;
+  const lines: OsmLine[] = [
+    road({ highway: 'tertiary' }, [[32, 10], [32, 32 - s]]), road({ highway: 'tertiary', bridge: 'yes', layer: '1' }, [[32, 32 - s], [32, 32 + s]]),
+    road({ highway: 'tertiary' }, [[32, 32 + s], [32, 54]]), road({ highway: 'residential' }, [[10, 32 - s], [32, 32 - s]]),
+    road({ waterway: 'canal' }, [[4, 32], [60, 32]]),
+  ];
+  const net = buildRoadNet(lines);
+  const roads = roadSurfaceOf(TILE, { lines, areas: [] }, net, new Float64Array(net.samples.length).fill(500));
+  const of = (k: number) => Array.from(roads.z.subarray(net.ways[k].first, net.ways[k].first + net.ways[k].count));
+  expect(Math.max(...of(1))).toBeLessThan(500 + 0.05); // the bridge: no hump
+  expect(Math.max(...of(0), ...of(2), ...of(3))).toBeLessThan(500 + 0.05); // nor ramps on the streets round it
+  for (const v of of(4)) expect(v).toBeCloseTo(500 - WATER_DEPTH_M.canal, 6); // the canal 2.5 m down
 });

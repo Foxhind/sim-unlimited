@@ -10,7 +10,7 @@ import { EARTH_R, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmArea, OsmLine } from './osm-types';
 import { fetchRoadDem, roadWindow, solveRoadHeights } from './road-heights';
 import { buildRoadLevels } from './road-levels';
-import { buildRoadNet } from './road-net';
+import { buildRoadNet, type RoadNet } from './road-net';
 import { buildRoadPull, type RoadSurface } from './road-pull';
 import { buildTerrainTin, type SurfacePlan, type TerrainTin, type TinOptions } from './terrain-tin';
 
@@ -46,8 +46,8 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
   if (!roads || !roads.net.ways.length) return buildTerrainTin(tile, grid, heights, tinOpts);
   const pull = buildRoadPull(tile, grid, roads);
-  // the bed outlines, the water first (a river is long and in plain sight), then the senior roads
-  const beds = [...pull.beds.filter((b) => roads.net.ways[b.way].water), ...pull.beds.filter((b) => !roads.net.ways[b.way].water)];
+  // the bed outlines, the senior first: the roads, then the water (a road outranks a river)
+  const beds = pull.beds;
   const counts = beds.map((b) => b.edges.reduce((s, e) => s + e.length, 0));
   let picked = 0;
   const tin = buildTerrainTin(tile, grid, heights, {
@@ -113,8 +113,16 @@ export async function fetchRoadSurface(
   if (tile.z !== ROADS_Z) return undefined;
   const net = buildRoadNet(data.lines);
   if (!net.ways.length) return undefined;
-  const dem = await fetchRoadDem(net, pads);
+  return roadSurfaceOf(tile, data, net, await fetchRoadDem(net, pads));
+}
+
+/**
+ * The heights of a tile's network from its raw DEM: the window along it, water down in its channel
+ * (WATER_DEPTH_M), and the lifts of bridges over what they cross between the two surfaces
+ */
+export function roadSurfaceOf(tile: Tile, data: { lines: OsmLine[]; areas: OsmArea[] }, net: RoadNet, dem: ArrayLike<number>): RoadSurface {
   const h = solveRoadHeights(net, dem, roadWindow(tileCenter(tile).lat));
+  net.samples.forEach((s, i) => (h[i] -= net.ways[s.way].depth));
   // H along each way by metres from its start
   const wayOf = new Map<OsmLine, number>();
   net.ways.forEach((w, k) => wayOf.set(w.line, k));

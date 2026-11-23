@@ -31,6 +31,8 @@ export interface NetWay {
   tunnel: boolean;
   /** a river, canal or stream: its bed is the water */
   water: boolean;
+  /** water: how far its surface lies under the ground the DEM gives there (its channel), metres; roads 0 */
+  depth: number;
   /** its samples: first .. first + count − 1, in the way's order */
   first: number;
   count: number;
@@ -67,6 +69,12 @@ export function isWaterWay(tags: Record<string, string>): boolean {
 /** banks pulled to the water this far beyond its edge, metres: rivers and canals, streams */
 const WATER_BAND_M = 30;
 const STREAM_BAND_M = 12;
+/**
+ * A waterway's surface under the ground the DEM gives along it, metres: the DEM's 30 m pixels do
+ * not see a channel a few metres wide, and the water at the DEM's height lay level with the street
+ * (a bridge over it then climbed its clearance over the street: 14/9517/6397)
+ */
+export const WATER_DEPTH_M: Readonly<Record<string, number>> = { river: 2.5, canal: 2.5, stream: 1 };
 /** below every road: a ford is the road's surface */
 const WATER_PRIO = -1;
 
@@ -127,6 +135,7 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
         line, prio: WATER_PRIO + Math.min(width, 100) / 1000, half: width / 2,
         band: line.tags.waterway === 'stream' ? STREAM_BAND_M : WATER_BAND_M, weight: 1,
         bridge: false, tunnel: !!line.tags.tunnel && line.tags.tunnel !== 'no', water: true,
+        depth: WATER_DEPTH_M[line.tags.waterway] ?? 0,
         first, count: samples.length - first,
       });
       continue;
@@ -141,6 +150,7 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
       bridge: !!line.tags.bridge && line.tags.bridge !== 'no',
       tunnel: isTunnel(line.tags),
       water: false,
+      depth: 0,
       first,
       count: samples.length - first,
     });
