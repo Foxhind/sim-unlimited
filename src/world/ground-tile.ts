@@ -5,7 +5,7 @@
  */
 import { applyPads, loadPads, type Pad } from './aerodrome';
 import { buildingFooting, buildingHeights } from './building-mesher';
-import { gridForZoom } from './chunks';
+import { DETAIL_Z, gridForZoom } from './chunks';
 import { coastlineWays } from './coast';
 import { latLonToEnu, type Tile } from './geodesy';
 import { osmRawKey } from './osm-source';
@@ -71,8 +71,8 @@ export async function buildGroundTile(tile: Tile): Promise<GroundTile> {
   // the same TIN as the mesh (no colour boundaries: faces are coloured by height × temperature),
   // built under the roads
   const roads = data ? await fetchRoadSurface(tile, data, pads) : undefined;
-  // and with the same covers (only where the terrain worker builds them: z14 with roads)
-  const cover = data && roads ? buildGroundCover(tile, grid, data, roads) : undefined;
+  // and with the same covers (where the terrain worker builds them: z14 with OSM, roads or not)
+  const cover = data && tile.z === DETAIL_Z ? buildGroundCover(tile, grid, data, roads) : undefined;
   const tin = buildSurfaceTin(tile, grid, lattice, {
     borders,
     coast: data ? coastlineWays(data.lines) : undefined,

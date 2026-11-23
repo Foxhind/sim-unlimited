@@ -364,3 +364,15 @@ export function townOverpassJson(): string {
     ],
   });
 }
+
+/** a park alone, the raw Overpass reply for TILE (the workers' cached OSM) */
+export function parkOverpassJson(): string {
+  const ll = (x: number, y: number) => { const p = gridLatLon(TILE, x, y, GRID); return { lon: p.lon, lat: p.lat }; };
+  const ring = [[20, 20], [44, 20], [44, 44], [20, 44]];
+  return JSON.stringify({
+    elements: [
+      ...ring.map(([x, y], k) => ({ type: 'node', id: 10 + k, ...ll(x, y) })),
+      { type: 'way', id: 101, nodes: [10, 11, 12, 13, 10], tags: { leisure: 'park' } },
+    ],
+  });
+}

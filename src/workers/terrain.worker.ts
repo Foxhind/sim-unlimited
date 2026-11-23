@@ -9,6 +9,7 @@ import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
 import { applyPads, loadPads, type Pad } from '../world/aerodrome';
 import { fetchRoadSurface, type RoadSurface, type SurfaceTin } from '../world/surface-tin';
+import { DETAIL_Z } from '../world/chunks';
 import { buildGroundCover, type GroundCover } from '../world/ground-cover';
 import { clipTileData } from '../world/clip';
 import { tinLocator } from '../world/terrain-tin';
@@ -93,8 +94,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
         coast = coastlineWays(data.lines);
         // the roads with their heights (z14): the surface is built under them
         roads = await fetchRoadSurface(tile, data, pads);
-        if (roads) {
-          // z14 with its OSM: every ground cover in the surface, the faces coloured by their cover
+        if (tile.z === DETAIL_Z) {
+          // z14 with its OSM, roads or not: every ground cover in the surface, the faces coloured by their cover
           const raw = data;
           cover = buildGroundCover(tile, grid, raw, roads);
           glow = (tin) => glowLevels(buildingCoverage(tin, tile, clipTileData(raw, tile).buildings, tinLocator(tin, tile)));

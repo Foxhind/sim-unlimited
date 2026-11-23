@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_AREA_STYLES, type AreaStyles } from '../src/world/area-styles';
-import { bordersOf, GRID, lattice, TILE, townOverpassJson } from './roads-helpers';
+import { bordersOf, GRID, lattice, TILE, townOverpassJson, parkOverpassJson } from './roads-helpers';
 
 const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
 const store = new Map<string, unknown>();
@@ -79,5 +79,15 @@ describe('the terrain worker with the covers', () => {
     getCachedMesh.mockClear();
     await ask({ areaStyles: DEFAULT_AREA_STYLES });
     expect(getCachedMesh).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds the covers for a z14 tile whose OSM has a park and no roads: a park-coloured face', async () => {
+    osmJson = parkOverpassJson();
+    const plain = await ask({});
+    expect(plain.nearCount).toBeDefined();
+    // the park's filter reaches the faces, so the cover was built
+    const styled = await ask({ areaStyles: GREEN });
+    const a = new Uint32Array(plain.ramps), b = new Uint32Array(styled.ramps);
+    expect(b.some((v, i) => v !== a[i])).toBe(true);
   });
 });
