@@ -6,7 +6,8 @@ import { blend, type BlendMode, type RGB } from '../engine/palette';
  * blended with the kind's colour in the kind's mode, `strength` 0..1 of the way from the imagery.
  * Area style editor (areas.html) tunes them; the game uses DEFAULT_AREA_STYLES.
  */
-export type AreaKind = 'scrub' | 'beach' | 'rock' | 'cliff' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland';
+export type AreaKind = 'scrub' | 'beach' | 'rock' | 'cliff' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland' |
+  'grass' | 'meadow' | 'cemetery' | 'quarry' | 'construction' | 'residential' | 'commercial' | 'industrial';
 
 export interface AreaFilter {
   colour: RGB;
@@ -30,6 +31,14 @@ export const AREA_KINDS: ReadonlyArray<{ kind: AreaKind; name: string; tags: str
   { kind: 'beach', name: 'Пляж', tags: 'natural=beach' },
   { kind: 'rock', name: 'Скалы и осыпи', tags: 'natural=bare_rock, scree' },
   { kind: 'cliff', name: 'Обрыв (полоса под линией)', tags: 'natural=cliff' },
+  { kind: 'grass', name: 'Газон', tags: 'landuse=grass, village_green, recreation_ground' },
+  { kind: 'meadow', name: 'Луг, степь, пустошь', tags: 'landuse=meadow, natural=grassland, heath' },
+  { kind: 'cemetery', name: 'Кладбище', tags: 'landuse=cemetery, amenity=grave_yard' },
+  { kind: 'quarry', name: 'Карьер, свалка', tags: 'landuse=quarry, landfill' },
+  { kind: 'construction', name: 'Стройка, пустырь', tags: 'landuse=construction, brownfield' },
+  { kind: 'residential', name: 'Жилая зона', tags: 'landuse=residential' },
+  { kind: 'commercial', name: 'Торговая зона', tags: 'landuse=commercial, retail' },
+  { kind: 'industrial', name: 'Промзона', tags: 'landuse=industrial' },
 ];
 
 /** the game's filters (tuned in areas.html) */
@@ -48,6 +57,16 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   rock: { colour: [150, 138, 122], mode: 'soft-light', strength: 1 },
   // a cliff's face must stand out of the wooded slope round it: pale limestone over the imagery (first guess)
   cliff: { colour: [176, 170, 158], mode: 'normal', strength: 0.75 },
+  // land zones (first guesses, not yet tuned in areas.html). Without imagery the climate colours the
+  // ground alike in town and out of it: a town zone pulls it to its own pale tone, a scar to bare earth
+  grass: { colour: [104, 192, 80], mode: 'soft-light', strength: 0.8 },
+  meadow: { colour: [168, 172, 96], mode: 'soft-light', strength: 0.6 },
+  cemetery: { colour: [72, 96, 64], mode: 'normal', strength: 0.45 },
+  quarry: { colour: [214, 206, 190], mode: 'normal', strength: 0.85 },
+  construction: { colour: [176, 148, 112], mode: 'normal', strength: 0.7 },
+  residential: { colour: [184, 174, 156], mode: 'normal', strength: 0.5 },
+  commercial: { colour: [182, 166, 160], mode: 'normal', strength: 0.55 },
+  industrial: { colour: [164, 164, 162], mode: 'normal', strength: 0.6 },
 };
 
 const sameFilter = (a: AreaFilter, b: AreaFilter): boolean =>

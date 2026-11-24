@@ -18,13 +18,13 @@ import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
-import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
-export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area';
+export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone';
 
 /** seniority of the covers: the lower lies over the higher where they overlap */
 export const COVER_RANK: Record<CoverKind, number> = {
-  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11,
+  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11, zone: 12,
 };
 
 export interface CoverShape {
@@ -93,7 +93,8 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
     case 'water': return RAMP.WATER;
     case 'pitch':
     case 'pool':
-    case 'area': {
+    case 'area':
+    case 'zone': {
       const style = classifyArea(tags, styles);
       if (!style) return RAMP.GRASS;
       const ramp = shape.kind === 'pitch' && isLitPitch(shape.source) ? withGlow(style.ramp, PITCH_GLOW) : style.ramp;
@@ -407,7 +408,10 @@ function areaKind(tags: Record<string, string>, style: AreaStyle): CoverKind {
   const n = tags.natural;
   if (n === 'scrub' || n === 'beach' || n === 'bare_rock' || n === 'scree' || tags.landuse === 'farmland') return 'area';
   if (tags.leisure === 'swimming_pool') return 'pool';
-  return tags.leisure === 'pitch' ? 'pitch' : 'area';
+  if (tags.leisure === 'pitch') return 'pitch';
+  // a town's zone: the ground under its parks, pitches, pools and car parks, whatever order they came in
+  const zone = landZone(tags);
+  return zone && TOWN_ZONES.has(zone) ? 'zone' : 'area';
 }
 
 /**

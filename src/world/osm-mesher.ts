@@ -1002,7 +1002,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const shape = cover.shapes[si], wet = shape.kind === 'water';
       const out = wet ? water : main, part = partOf(out);
       // an area with a filter: the imagery of the face under each piece through it, as the terrain colours its faces (coverRamp)
-      const filter = shape.kind === 'pitch' || shape.kind === 'area' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
+      const filter = shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
       const ramp = coverRamp(shape, styles, undefined);
       const over: LeftOut = (fc, _lifts, f) => fc === si || (fc >= 0 && fc < si) || (wet ? onBank(f) : isSeaFace(tin, f));
       const t = shape.tris;

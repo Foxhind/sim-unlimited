@@ -1,5 +1,5 @@
-// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools
-export const SCHEMA_VERSION = 71;
+// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones
+export const SCHEMA_VERSION = 72;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';

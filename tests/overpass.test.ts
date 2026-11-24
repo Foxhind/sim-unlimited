@@ -55,6 +55,27 @@ describe('overpassQuery', () => {
     expect(overpassQuery(TILE, 'full')).toContain('way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];');
     expect(overpassQuery(TILE, 'large')).not.toContain('orchard');
   });
+
+  it('fetches the land zones near, ways and multipolygons; a town’s and its quarries far too', () => {
+    const full = overpassQuery(TILE, 'full'), large = overpassQuery(TILE, 'large');
+    for (const v of ['residential', 'commercial', 'retail', 'industrial', 'cemetery', 'quarry', 'landfill', 'construction', 'brownfield', 'grass', 'meadow']) {
+      expect(full).toMatch(new RegExp(`way\\["landuse"~"[^"]*\\b${v}\\b`));
+      expect(full).toMatch(new RegExp(`relation\\["landuse"~"[^"]*\\b${v}\\b`));
+    }
+    expect(full).toContain('way["natural"~"^(grassland|heath)$"]');
+    expect(full).toContain('way["amenity"="grave_yard"]');
+    for (const v of ['residential', 'industrial', 'quarry']) expect(large).toMatch(new RegExp(`way\\["landuse"~"[^"]*\\b${v}\\b`));
+    expect(large).not.toContain('cemetery');
+    expect(large).not.toContain('meadow');
+  });
+
+  it('a closed grave yard is an area', () => {
+    const d = parseOverpass({ elements: [
+      ...[[0, 0], [0, 1e-3], [1e-3, 1e-3], [1e-3, 0]].map(([lat, lon], i) => ({ type: 'node' as const, id: i + 1, lat, lon })),
+      { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { amenity: 'grave_yard' } },
+    ] });
+    expect(d.areas.map((a) => a.tags.amenity)).toEqual(['grave_yard']);
+  });
 });
 
 describe('what a near tile sees round itself', () => {

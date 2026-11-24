@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildGroundCover, COVER_RANK, coverRamp, type CoverShape } from '../src/world/ground-cover';
-import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
-import { colourOf } from '../src/engine/palette';
+import { DEFAULT_AREA_STYLES, filterColour } from '../src/world/area-styles';
+import { colourOf, snowy } from '../src/engine/palette';
 import { isOpenPool, POOL_RGB } from '../src/world/way-styles';
 import { overpassQuery } from '../src/world/overpass';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileCenter, tileLattice } from '../src/world/geodesy';
@@ -330,7 +330,7 @@ describe('ground cover', () => {
   });
   it('ranks the covers as the plan does', () => {
     expect(Object.entries(COVER_RANK).sort((a, b) => a[1] - b[1]).map(([k]) => k)).toEqual([
-      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area',
+      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area', 'zone',
     ]);
   });
   it('an open pool lies over the garden it is in, in its own turquoise; an indoor one is no cover', () => {
@@ -348,6 +348,27 @@ describe('ground cover', () => {
     // a covered pool is still drawn
     expect(isOpenPool({ leisure: 'swimming_pool', covered: 'yes' })).toBe(true);
     expect(overpassQuery(TILE, 'full')).toContain('way["leisure"~"park|pitch|golf_course|swimming_pool"];');
+  });
+  it('a town’s zone lies under the park and the pool in it, whichever came first; open land is an area', () => {
+    const town: OsmArea = { ...park(square(20, 20, 16)), tags: { landuse: 'residential' } };
+    const green: OsmArea = { ...park(square(20, 20, 6)), tags: { leisure: 'park' } };
+    const pool: OsmArea = { ...park(square(30, 30, 8 * M)), tags: { leisure: 'swimming_pool' } };
+    for (const areas of [[town, green, pool], [pool, green, town]]) {
+      const c = buildGroundCover(TILE, GRID, data([], areas));
+      expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area', 'zone']);
+      expect(c.shapes[2].source).toBe(town);
+      expect(c.shapes[c.locate(20, 20)].source).toBe(green);
+      expect(c.shapes[c.locate(30, 30)].source).toBe(pool);
+      expect(c.shapes[c.locate(10, 10)].source).toBe(town);
+      // the town's ground: the climate's colour under it pulled to the zone's own
+      expect(coverRamp(c.shapes[2], DEFAULT_AREA_STYLES, [122, 126, 70])).toBe(snowy(colourOf(filterColour([122, 126, 70], DEFAULT_AREA_STYLES.residential))));
+    }
+    for (const tags of [{ landuse: 'meadow' }, { natural: 'grassland' }, { landuse: 'cemetery' }, { amenity: 'grave_yard' }, { landuse: 'quarry' }] as Record<string, string>[]) {
+      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['area']);
+    }
+    for (const tags of [{ landuse: 'industrial' }, { landuse: 'retail' }] as Record<string, string>[]) {
+      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['zone']);
+    }
   });
 });
 

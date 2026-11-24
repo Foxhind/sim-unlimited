@@ -59,6 +59,9 @@ public class SimProfile implements Profile {
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
   static final Pattern ORCHARD = Pattern.compile("^(orchard|vineyard)$");
   static final Pattern PIER = Pattern.compile("^(pier|breakwater|groyne)$");
+  /** overpass.ts LAND_ZONES, and the open land's natural ones (way-styles landZone) */
+  static final Pattern LAND_ZONE = Pattern.compile("^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$");
+  static final Pattern NATURAL_ZONE = Pattern.compile("^(grassland|heath)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -95,7 +98,15 @@ public class SimProfile implements Profile {
   static boolean isAreaTags(SourceFeature f) {
     if ("no".equals(s(f, "area")) || "coastline".equals(s(f, "natural")) || "cliff".equals(s(f, "natural"))) return false;
     for (String k : AREA_KEYS) if (f.hasTag(k)) return true;
-    return isCarPark(f) || find(PIER, s(f, "man_made"));
+    return isCarPark(f) || isGraveYard(f) || find(PIER, s(f, "man_made"));
+  }
+
+  static boolean isGraveYard(SourceFeature f) {
+    return "grave_yard".equals(s(f, "amenity"));
+  }
+
+  static boolean isLandZone(SourceFeature f) {
+    return find(LAND_ZONE, s(f, "landuse")) || find(NATURAL_ZONE, s(f, "natural"));
   }
 
   static boolean isCarPark(SourceFeature f) {
@@ -110,6 +121,7 @@ public class SimProfile implements Profile {
       find(AEROWAY, s(f, "aeroway")) || "aerodrome".equals(s(f, "aeroway")) ||
       find(NATURAL_WAY, s(f, "natural")) || "coastline".equals(s(f, "natural")) || "cliff".equals(s(f, "natural")) ||
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
+      isLandZone(f) || isGraveYard(f) ||
       find(WATERWAY, s(f, "waterway")) ||
       find(LEISURE, s(f, "leisure")) || "marina".equals(s(f, "leisure")) ||
       find(PIER, s(f, "man_made")) ||
@@ -123,6 +135,7 @@ public class SimProfile implements Profile {
       "aerodrome".equals(s(f, "aeroway")) ||
       "water".equals(s(f, "natural")) || "wood".equals(s(f, "natural")) ||
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
+      isLandZone(f) ||
       isCarPark(f);
   }
 

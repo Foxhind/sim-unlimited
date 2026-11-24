@@ -40,10 +40,14 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
 // bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
-// orchards for their rows of trees and a tint, vineyards for a tint; other landuse is not fetched.
+// orchards for their rows of trees and a tint, vineyards for a tint; of other landuse the zones below.
+// Land zones tint the ground the climate colours alike in town and out of it (way-styles landZone);
+// a town's own and its quarries far too, so a town stands out of the land round it from afar.
 // Cliff lines give bands of bare rock (cliffs.ts), summits their height to the relief (peaks.ts).
 // Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
 // Power lines stand their pylons or poles at their vertices and hang their conductors (power-mesher.ts).
+const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
+const TOWN_LAND_ZONES = '^(residential|commercial|retail|industrial|quarry)$';
 const FULL_FILTER = `
   way["building"]; relation["building"]["type"="multipolygon"];
   way["building:part"]; relation["building:part"]["type"="multipolygon"];
@@ -58,6 +62,8 @@ const FULL_FILTER = `
   way["natural"="coastline"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
   way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];
+  way["landuse"~"${LAND_ZONES}"]; relation["landuse"~"${LAND_ZONES}"];
+  way["natural"~"^(grassland|heath)$"]; relation["natural"~"^(grassland|heath)$"]; way["amenity"="grave_yard"];
   way["leisure"~"park|pitch|golf_course|swimming_pool"];
   way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
@@ -74,6 +80,7 @@ const LARGE_FILTER = `
   node["natural"="peak"];
   way["natural"="water"]; relation["natural"="water"];
   way["landuse"="farmland"]; relation["landuse"="farmland"];
+  way["landuse"~"${TOWN_LAND_ZONES}"]; relation["landuse"~"${TOWN_LAND_ZONES}"];
   way["waterway"="river"];
   way["aeroway"~"runway|aerodrome"]; relation["aeroway"="aerodrome"];
   way["highway"~"motorway|trunk"];
@@ -135,7 +142,7 @@ function isAreaTags(tags: Record<string, string>): boolean {
   // so is a cliff round a plateau: the low side on its right (cliffs.ts)
   if (tags.natural === 'coastline' || tags.natural === 'cliff') return false;
   // a closed pier or breakwater is its outline (pier-mesher.ts)
-  return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking' || isPierTags(tags);
+  return AREA_KEYS.some((k) => tags[k] !== undefined) || tags.amenity === 'parking' || tags.amenity === 'grave_yard' || isPierTags(tags);
 }
 
 function isPierTags(tags: Record<string, string>): boolean {

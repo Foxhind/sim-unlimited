@@ -117,8 +117,45 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   if (leisure === 'golf_course') return ground(RAMP.GRASS, 0.6, 'golf');
   if (tags.building) return { ramp: RAMP.BRICK, bias: 0.7, water: false };
   if (natural === 'wetland') return ground(RAMP.GRASS, 0.5, 'wetland');
+  const zone = landZone(tags);
+  if (zone) return ground(ZONE_RAMP[zone], ZONE_BIAS[zone], zone);
   return undefined;
 }
+
+/**
+ * Land zones (landuse and the like): the ground of a town, of its outskirts and of open land, where
+ * no other area says more. Without imagery the terrain is coloured by height and climate alone, the
+ * town as the fields round it; a zone tints it. The town's own (residential, commercial,
+ * industrial) lie under everything else (ground-cover 'zone', ZONE_BIAS).
+ */
+export type LandZone = 'grass' | 'meadow' | 'cemetery' | 'quarry' | 'construction' | 'residential' | 'commercial' | 'industrial';
+
+export function landZone(tags: Record<string, string>): LandZone | undefined {
+  const lu = tags.landuse, n = tags.natural;
+  if (lu === 'grass' || lu === 'village_green' || lu === 'recreation_ground') return 'grass';
+  if (lu === 'meadow' || n === 'grassland' || n === 'heath') return 'meadow';
+  if (lu === 'cemetery' || tags.amenity === 'grave_yard') return 'cemetery';
+  if (lu === 'quarry' || lu === 'landfill') return 'quarry';
+  if (lu === 'construction' || lu === 'brownfield') return 'construction';
+  if (lu === 'residential') return 'residential';
+  if (lu === 'commercial' || lu === 'retail') return 'commercial';
+  if (lu === 'industrial') return 'industrial';
+  return undefined;
+}
+
+/** the zones that are a town's ground: under every other area and cover */
+export const TOWN_ZONES: ReadonlySet<LandZone> = new Set(['residential', 'commercial', 'industrial']);
+
+/** a zone's material without imagery */
+const ZONE_RAMP: Record<LandZone, number> = {
+  grass: RAMP.GRASS, meadow: RAMP.FIELD, cemetery: RAMP.GRASS, quarry: RAMP.ROCK, construction: RAMP.SAND,
+  residential: RAMP.CONCRETE, commercial: RAMP.CONCRETE, industrial: RAMP.CONCRETE,
+};
+/** on the drape: open land as the fields, a town's zone under every other area (wetland 0.5, water 0.3 stay apart by kind) */
+const ZONE_BIAS: Record<LandZone, number> = {
+  grass: 0.6, meadow: 0.55, cemetery: 0.6, quarry: 0.6, construction: 0.6,
+  residential: 0.4, commercial: 0.42, industrial: 0.42,
+};
 
 export interface LineStyle {
   ramp: number;

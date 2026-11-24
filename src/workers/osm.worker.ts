@@ -27,8 +27,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools
-export const OSM_MESH_SCHEMA = 89;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover)
+export const OSM_MESH_SCHEMA = 90;
 
 export interface OsmRequest {
   type: 'osm';

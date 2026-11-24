@@ -50,6 +50,29 @@ describe('area styles', () => {
     expect(isDefaultAreaStyles({ ...DEFAULT_AREA_STYLES, park: { ...DEFAULT_AREA_STYLES.park, mode: 'multiply' } })).toBe(false);
   });
 
+  it('land zones are filtered ground of their own kinds, the town’s under the other areas on the drape', () => {
+    const cases: [Record<string, string>, string][] = [
+      [{ landuse: 'residential' }, 'residential'], [{ landuse: 'retail' }, 'commercial'], [{ landuse: 'commercial' }, 'commercial'],
+      [{ landuse: 'industrial' }, 'industrial'], [{ landuse: 'cemetery' }, 'cemetery'], [{ amenity: 'grave_yard' }, 'cemetery'],
+      [{ landuse: 'quarry' }, 'quarry'], [{ landuse: 'landfill' }, 'quarry'], [{ landuse: 'construction' }, 'construction'],
+      [{ landuse: 'brownfield' }, 'construction'], [{ landuse: 'grass' }, 'grass'], [{ landuse: 'village_green' }, 'grass'],
+      [{ landuse: 'meadow' }, 'meadow'], [{ natural: 'grassland' }, 'meadow'], [{ natural: 'heath' }, 'meadow'],
+    ];
+    for (const [tags, kind] of cases) {
+      const style = classifyArea(tags, DEFAULT_AREA_STYLES);
+      expect(style?.water, JSON.stringify(tags)).toBe(false);
+      expect(style?.filter, JSON.stringify(tags)).toBe(DEFAULT_AREA_STYLES[kind as keyof typeof DEFAULT_AREA_STYLES]);
+      expect(AREA_KINDS.some((k) => k.kind === kind)).toBe(true);
+    }
+    const bias = (tags: Record<string, string>) => classifyArea(tags, DEFAULT_AREA_STYLES)!.bias;
+    for (const other of [{ leisure: 'park' }, { landuse: 'farmland' }, { natural: 'scrub' }, { leisure: 'swimming_pool' }, { natural: 'wetland' }] as Record<string, string>[]) {
+      expect(bias({ landuse: 'residential' })).toBeLessThan(bias(other));
+      expect(bias({ landuse: 'industrial' })).toBeLessThan(bias(other));
+    }
+    // a building is no zone, nor is landuse the zones leave out
+    expect(classifyArea({ landuse: 'military' }, DEFAULT_AREA_STYLES)).toBeUndefined();
+  });
+
   it('orchards and vineyards are filtered ground of their own kinds', () => {
     for (const [landuse, kind] of [['orchard', 'orchard'], ['vineyard', 'vineyard']] as const) {
       const style = classifyArea({ landuse }, DEFAULT_AREA_STYLES);
