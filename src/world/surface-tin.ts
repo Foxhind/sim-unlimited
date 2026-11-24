@@ -106,7 +106,7 @@ interface Unit {
   shapes: number[];
   /** the way it is drawn along when it is left out: a ribbon kind's source or a bed's way */
   way?: OsmLine;
-  /** its place: COVER_RANK, roadPriority, tieBreak of its senior shape (ground-cover.ts), then that shape's index */
+  /** its place: budgetRank, roadPriority, tieBreak of its senior shape (ground-cover.ts), then that shape's index */
   rank: number;
   prio: number;
   tie: number;
@@ -294,7 +294,7 @@ function coverUnits(
     let u = bySource.get(s.source);
     if (!u) {
       const road = s.kind === 'carriageway' || s.kind === 'shoulder';
-      u = { lines: [], count: 0, shapes: [], rank: COVER_RANK[s.kind], prio: s.prio, tie: road ? tieBreak((s.source as OsmLine).points[0]) : 0, first: si };
+      u = { lines: [], count: 0, shapes: [], rank: budgetRank(s.kind), prio: s.prio, tie: road ? tieBreak((s.source as OsmLine).points[0]) : 0, first: si };
       bySource.set(s.source, u);
       units.push(u);
     }
@@ -334,7 +334,7 @@ function coverUnits(
     }
     const road = !!line.tags.highway;
     const u: Unit = {
-      lines: b.edges, count: 0, shapes: [], way: line, rank: COVER_RANK[road ? 'carriageway' : 'water'],
+      lines: b.edges, count: 0, shapes: [], way: line, rank: budgetRank(road ? 'carriageway' : 'water'),
       prio: road ? roadPriority(line.tags, classifyLine(line.tags)?.width ?? 0) : 0, tie: road ? tieBreak(line.points[0]) : 0, first: cover.shapes.length + i,
     };
     bySource.set(line, u);
@@ -412,7 +412,14 @@ function distinctPoints(lines: ReadonlyArray<ReadonlyArray<Pt>>): number {
   return seen.size;
 }
 
-/** the senior unit first: by rank, priority, tie and first shape (a bed alone after every shape) */
+/**
+ * A unit's rank in the budget: its cover's (COVER_RANK), but the water's before the paths'. A path
+ * left out lies over the ground as a ribbon, as before; a water left out leaves the ground under it
+ * the DEM's, its water drawn over that tilted, and a bridge's deck over a bank (14/9517/6398, where
+ * every river and canal went). Where they overlap the path still lies over the water.
+ */
+const budgetRank = (k: CoverKind): number => (k === 'water' ? COVER_RANK.path - 0.5 : COVER_RANK[k]);
+/** the senior unit first: by rank (budgetRank), priority, tie and first shape (a bed alone after every shape) */
 const byPlace = (a: Unit, b: Unit): number => a.rank - b.rank || b.prio - a.prio || a.tie - b.tie || a.first - b.first;
 
 /**

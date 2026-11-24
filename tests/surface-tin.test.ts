@@ -548,3 +548,24 @@ it('a bridge over a canal at the border with a road along the canal’s bank: th
     expect(cracks(east)).toBe(0);
   }
 });
+
+it('drops the paths before the water: a river under a dense town keeps its water, its paths go as ribbons', () => {
+  // 14/9517/6398: the budget left out every water (rivers, canals, natural=water), ranked after the
+  // paths; the ground under a river's bridges was then the DEM's, 0–3.7 m, its water drawn over it
+  const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
+  const river = road({ waterway: 'river', width: '15' }, [[2.3, 31.7], [61.6, 33.4]]);
+  const paths = Array.from({ length: 24 }, (_, i) => road({ highway: 'footway' }, Array.from({ length: 12 }, (_, k): [number, number] => [3.1 + i * 2.5 + (k % 2) * 0.7, 4.2 + k * 4.9])));
+  const d = data([river, ...paths]);
+  const cover = buildGroundCover(TILE, GRID, d, undefined);
+  const water = cover.shapes.flatMap((s, si) => (s.kind === 'water' ? [si] : []));
+  expect(water.length).toBeGreaterThan(0);
+  const bare = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief) }).vx.length;
+  let partly = 0;
+  for (let max = bare + 50; max < bare + 3000; max += 150) {
+    const tin = buildSurfaceTin(TILE, GRID, lattice(relief), { borders: bordersOf(relief), cover, maxSurfaceVerts: max });
+    const loosePaths = paths.filter((p) => tin.loose?.has(p)).length;
+    if (loosePaths > 0 && loosePaths < paths.length) partly++;
+    if (loosePaths < paths.length) expect(water.filter((si) => tin.looseShapes?.includes(si))).toEqual([]);
+  }
+  expect(partly).toBeGreaterThan(0);
+});
