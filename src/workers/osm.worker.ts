@@ -45,6 +45,8 @@ export interface OsmRequest {
   grade?: ColourGrade;
   /** filters of the areas over the imagery (area style editor); not the defaults: the mesh is neither read from nor written to the cache */
   areaStyles?: AreaStyles;
+  /** trees in a wood or forest × the game's (relief inspector, props-mesher FOREST); not 1: the mesh is neither read from nor written to the cache */
+  treeDensity?: number;
 }
 
 export interface OsmMeshResponse {
@@ -164,7 +166,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const { id, tile, detail } = e.data;
   const grade = e.data.grade ?? NEUTRAL_GRADE;
   const areaStyles = e.data.areaStyles;
-  const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles));
+  const treeDensity = e.data.treeDensity ?? 1;
+  const useCache = isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles)) && treeDensity === 1;
   // draped on the terrain TIN: a cached mesh is only valid for the terrain version it was built on,
   // and near ('full': on the surface built under its roads and covers) for the raw OSM it was built
   // from, by its download time (`raw`), as the terrain worker's mesh is: a raw fetched anew by
@@ -314,7 +317,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const dotData = buildingDots(own, tile, drape);
     // no far window dots: the detailed tiles draw their lit facades at any distance at night
     const night = buildingNightLights(own, tile, drape, 0);
-    const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
+    const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp, treeDensity });
     applyGlow(mesh.vertices, mesh.ramps, tile, locate, levels);
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
     applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);

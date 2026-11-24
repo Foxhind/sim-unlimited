@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, FOREST, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -116,6 +116,27 @@ describe('buildProps trees (Q36)', () => {
       expect(t[5]).toBeGreaterThanOrEqual(prevType); // sorted by type: one draw per type
       prevType = t[5];
     }
+  });
+
+  it('plants a forest at FOREST\'s density, scaled by treeDensity; orchards keep their rows', () => {
+    const forest: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
+    const count = (density?: number) =>
+      buildProps({ tile: TILE, detail: 'full', data: forest, sampleHeight: flat, treeDensity: density }).trees.length / TREE_STRIDE;
+    // a 0.86 km² forest: one tree to M2_PER_TREE, under the cap
+    const base = count();
+    expect(base).toBeGreaterThan(1500);
+    expect(base).toBeLessThan(FOREST.MAX_TREES);
+    expect(count(1)).toBe(base);
+    expect(Math.abs(count(0.5) - base / 2)).toBeLessThanOrEqual(1);
+    expect(Math.abs(count(2) - base * 2)).toBeLessThanOrEqual(1);
+    expect(count(0)).toBe(0);
+    // the cap scales with the density: four times as dense is not clipped back to the game's cap
+    expect(Math.abs(count(4) - base * 4)).toBeLessThanOrEqual(2);
+    expect(count(4)).toBeGreaterThan(FOREST.MAX_TREES);
+    const orchard: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'orchard' } }] };
+    const rows = (density?: number) =>
+      buildProps({ tile: TILE, detail: 'full', data: orchard, sampleHeight: flat, treeDensity: density }).trees.length;
+    expect(rows(3)).toBe(rows());
   });
 
   it('mixes types in a forest and keeps them to the climate', () => {

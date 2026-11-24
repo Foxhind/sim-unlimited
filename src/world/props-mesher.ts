@@ -12,7 +12,17 @@ export interface PropsOptions {
   sampleHeight: HeightSampler;
   /** foliage ramp at a lon/lat (the land colour under the tree); default RAMP.FOREST */
   treeRamp?: (lon: number, lat: number) => number;
+  /** trees in a wood or forest × FOREST's (relief inspector; the game: 1) */
+  treeDensity?: number;
 }
+
+/** trees of an OSM wood or forest (landuse=forest, natural=wood) */
+export const FOREST = {
+  /** one tree to this much of its area, m² */
+  M2_PER_TREE: 450,
+  /** at most this many trees in one area's piece of a tile */
+  MAX_TREES: 2500,
+} as const;
 
 export interface PropsData {
   /** per tree: x, y, z, height, colour payload, type, colour flags, yaw (TREE_STRIDE, treeColour), sorted by type */
@@ -488,7 +498,8 @@ export function buildProps(opts: PropsOptions): PropsData {
     if (area.tags.landuse !== 'forest' && area.tags.natural !== 'wood') continue;
     const outer = area.rings[0];
     if (!outer || outer.length < 3) continue;
-    const count = Math.min(2500, Math.round(ringAreaM2(outer, cosLat) / 450));
+    const density = Math.max(0, opts.treeDensity ?? 1);
+    const count = Math.round(Math.min(FOREST.MAX_TREES, ringAreaM2(outer, cosLat) / FOREST.M2_PER_TREE) * density);
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const [lon, lat] of outer) {
       minX = Math.min(minX, lon); maxX = Math.max(maxX, lon);

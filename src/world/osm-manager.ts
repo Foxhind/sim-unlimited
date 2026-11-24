@@ -187,6 +187,8 @@ export class OsmManager {
   grade: ColourGrade = NEUTRAL_GRADE;
   /** filters of the areas for tiles built from now on (area style editor; invalidate() to rebuild); undefined: the game's */
   areaStyles: AreaStyles | undefined = undefined;
+  /** trees in a wood or forest × the game's, for tiles built from now on (relief inspector; invalidate() to rebuild) */
+  treeDensity = 1;
   /** the layers drawn (relief inspector); the game draws them all */
   layers: OsmLayers = { ...ALL_OSM_LAYERS };
   /** the structure kinds drawn, a bit per kind (structure-kinds STRUCTURE); the game draws them all */
@@ -338,7 +340,7 @@ export class OsmManager {
     const id = slot.nextId++;
     return new Promise((resolve, reject) => {
       slot.waiting.set(id, { resolve, reject });
-      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full', grade: this.grade, areaStyles: this.areaStyles });
+      slot.worker.postMessage({ type: 'osm', id, tile: chunk.tile, detail: 'full', grade: this.grade, areaStyles: this.areaStyles, treeDensity: this.treeDensity });
     });
   }
 

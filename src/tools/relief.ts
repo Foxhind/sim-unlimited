@@ -619,9 +619,14 @@ interface Display {
   layers: OsmLayers;
   /** structure kinds hidden, a bit per kind (structure-kinds STRUCTURE): kinds added later show */
   hiddenStructures: number;
+  /** trees in a wood or forest × the game's (props-mesher FOREST) */
+  treeDensity: number;
 }
 
-const DEFAULT_DISPLAY: Display = { wire: 'off', wireColor: '#4fc3d9', wireFill: '#101318', layers: { ...ALL_OSM_LAYERS }, hiddenStructures: 0 };
+const TREE_DENSITY_MAX = 8;
+const DEFAULT_DISPLAY: Display = { wire: 'off', wireColor: '#4fc3d9', wireFill: '#101318', layers: { ...ALL_OSM_LAYERS }, hiddenStructures: 0, treeDensity: 1 };
+const treeDensityOf = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(TREE_DENSITY_MAX, v)) : 1;
 
 function loadDisplay(): Display {
   try {
@@ -635,6 +640,7 @@ function loadDisplay(): Display {
       wireFill: hex(d?.wireFill, DEFAULT_DISPLAY.wireFill),
       layers,
       hiddenStructures: Number.isInteger(d?.hiddenStructures) ? d!.hiddenStructures! & ALL_STRUCTURES : 0,
+      treeDensity: treeDensityOf(d?.treeDensity),
     };
   } catch {
     return { ...DEFAULT_DISPLAY, layers: { ...ALL_OSM_LAYERS } };
@@ -649,6 +655,7 @@ function initDisplay(): void {
   const wire = $<HTMLSelectElement>('wire');
   const wireColor = $<HTMLInputElement>('wireColor');
   const wireFill = $<HTMLInputElement>('wireFill');
+  const treeDensity = $<HTMLInputElement>('treeDensity');
   const layerBoxes = [...document.querySelectorAll<HTMLInputElement>('input[data-layer]')];
   const all = $<HTMLInputElement>('structAll');
   const list = $('structures');
@@ -659,6 +666,8 @@ function initDisplay(): void {
   wire.value = d.wire;
   wireColor.value = d.wireColor;
   wireFill.value = d.wireFill;
+  treeDensity.value = String(d.treeDensity);
+  osm.treeDensity = d.treeDensity;
   for (const b of layerBoxes) b.checked = d.layers[b.dataset.layer as keyof OsmLayers];
   for (const b of kindBoxes) b.checked = (d.hiddenStructures & (1 << +b.dataset.kind!)) === 0;
 
@@ -676,7 +685,7 @@ function initDisplay(): void {
     all.checked = mask !== 0;
     all.indeterminate = mask !== 0 && mask !== ALL_STRUCTURES;
     try {
-      const out: Display = { wire: mode, wireColor: wireColor.value, wireFill: wireFill.value, layers, hiddenStructures: ALL_STRUCTURES & ~mask };
+      const out: Display = { wire: mode, wireColor: wireColor.value, wireFill: wireFill.value, layers, hiddenStructures: ALL_STRUCTURES & ~mask, treeDensity: osm.treeDensity };
       localStorage.setItem(DISPLAY_STORAGE, JSON.stringify(out));
     } catch {
       // storage unavailable: the choice lasts for this page only
@@ -684,6 +693,15 @@ function initDisplay(): void {
   };
   all.addEventListener('change', () => {
     for (const b of kindBoxes) b.checked = all.checked;
+    apply();
+  });
+  // the forest's trees are planted with the OSM meshes: a new density rebuilds them
+  treeDensity.addEventListener('change', () => {
+    const v = treeDensityOf(parseFloat(treeDensity.value));
+    treeDensity.value = String(v);
+    if (v === osm.treeDensity) return;
+    osm.treeDensity = v;
+    osm.invalidate();
     apply();
   });
   for (const el of [wire, wireColor, wireFill, ...layerBoxes, ...kindBoxes]) {
