@@ -347,9 +347,10 @@ describe('buildTerrainMesh (sea, bare ground, skirts, no cover)', () => {
       for (const b of new Uint8Array(a.buffer, a.byteOffset, a.byteLength)) h = Math.imul(h ^ b, 0x01000193) >>> 0;
       return h;
     };
-    // digests of the output of the code before Task 4 on this input
+    // digests of the output of the code before Task 4 on this input, but for its sea: the relief
+    // put no node in it since (69 water faces tilted up to 8.24 m before)
     expect([m.vertexCount, fnv(m.vertices), fnv(m.ramps), fnv(m.morph!)]).toEqual(GOLDEN_NO_COVER);
   });
 });
 
-const GOLDEN_NO_COVER = [16479, 809495927, 1521313045, 3738157660];
+const GOLDEN_NO_COVER = [16221, 1676192644, 1493702197, 3474015068];

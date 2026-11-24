@@ -543,11 +543,15 @@ export const MAX_REFINE_VERTS = 60;
 const RELIEF_ROUNDS = 3;
 export const MAX_RELIEF_POINTS = 2500;
 
-/** signed TIN − lattice error at every lattice node (water clamped to 0 on both sides) */
-function latticeError(t: { vx: number[]; vy: number[]; vh: number[]; tris: Tri[] }, heights: Float32Array, grid: number): Float64Array {
+/**
+ * signed TIN − lattice error at every lattice node (water clamped to 0 on both sides); none under
+ * a face of `sea` (seaFaces): its water is at 0 m whatever the lattice has there
+ */
+function latticeError(t: { vx: number[]; vy: number[]; vh: number[]; tris: Tri[] }, heights: Float32Array, grid: number, sea?: Uint8Array): Float64Array {
   const side = grid + 1;
   const err = new Float64Array(side * side);
-  for (const tr of t.tris) {
+  for (const [ti, tr] of t.tris.entries()) {
+    if (sea?.[ti]) continue;
     const ax = t.vx[tr.a], ay = t.vy[tr.a], bx = t.vx[tr.b], by = t.vy[tr.b], cx = t.vx[tr.c], cy = t.vy[tr.c];
     const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
     if (d === 0) continue;
@@ -1363,16 +1367,25 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   /** lattice nodes added as vertices (TinOptions.reliefTol) */
   const reliefPts: Pt[] = [];
   let extraPoints = opts.extraPoints ?? [];
-  /** the final heights (TinOptions.reshape), and the border kept to what both neighbours draw */
-  const reshapeHeights = (r: { vx: number[]; vy: number[]; vh: number[]; coastEdges: Set<number>; shared: Set<number> }, reshape: (x: number, y: number, h: number) => number) => {
+  /**
+   * the final heights (TinOptions.reshape), and the border kept to what both neighbours draw. The
+   * sea's vertices (of a face of `sea`) keep their 0 m; a shore line's vertex between two faces of
+   * land is reshaped like any (a road over the DEM's shoreline along a river's mouth kept its
+   * vertices on it at 0 m, 3 m under the road, 14/9517/6398), but on the border, where the
+   * neighbour keeps it too
+   */
+  const reshapeHeights = (r: { vx: number[]; vy: number[]; vh: number[]; tris: Tri[]; coastEdges: Set<number>; shared: Set<number> }, reshape: (x: number, y: number, h: number) => number, sea: Uint8Array) => {
     const { vx, vy, vh } = r;
     const fixed = new Uint8Array(vx.length);
+    const onBorder = (k: number) => vx[k] === 0 || vx[k] === grid || vy[k] === 0 || vy[k] === grid;
     for (const key of r.coastEdges) {
-      fixed[Math.floor(key / 1048576)] = 1;
-      fixed[key % 1048576] = 1;
+      for (const k of [Math.floor(key / 1048576), key % 1048576]) if (onBorder(k)) fixed[k] = 1;
+    }
+    for (const [ti, t] of r.tris.entries()) {
+      if (sea[ti]) fixed[t.a] = fixed[t.b] = fixed[t.c] = 1;
     }
     for (let k = 0; k < vx.length; k++) {
-      if (fixed[k] || vh[k] <= 0 || padAt({ x: vx[k], y: vy[k] }) !== undefined) {
+      if (fixed[k] || (vh[k] <= 0 && onBorder(k)) || padAt({ x: vx[k], y: vy[k] }) !== undefined) {
         fixed[k] = 1;
         continue;
       }
@@ -1456,11 +1469,13 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   }
 
   // The detailed tiles' relief to reliefTol: the nodes the belts miss by more, as vertices at their
-  // own height, a few rounds (each changes the faces round it)
+  // own height, a few rounds (each changes the faces round it). None in the sea: a node the DEM
+  // blurs past the coastline (5 m and more on its sea side, so left as land) lies in a region of
+  // sea by its area, and at its own height it tilted the water faces round it (14/9516/6398)
   if (opts.reliefTol !== undefined) {
     const inRelief = new Set<number>();
     for (let round = 0; round < RELIEF_ROUNDS && reliefPts.length < MAX_RELIEF_POINTS; round++) {
-      const err = latticeError(res, heights, grid);
+      const err = latticeError(res, heights, grid, seaFaces(res.vx, res.vy, res.tris, res.coastEdges, heights, grid, seaAt));
       const worst: number[] = [];
       for (let j = 1; j < grid; j++) for (let i = 1; i < grid; i++) {
         const k = j * side + i;
@@ -1512,10 +1527,21 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
       fixedLines = planned.filter((l) => l.length >= 2);
     }
   }
-  if (reshape) reshapeHeights(res, reshape);
+  // sea or land by the faces and the lattice, not by the heights: the same before the reshape as after
+  const sea = seaFaces(res.vx, res.vy, res.tris, res.coastEdges, heights, grid, seaAt);
+  if (reshape) reshapeHeights(res, reshape, sea);
 
   const { vx, vy, vh, tris, constraints, missing, borderVerts } = res;
-  const sea = seaFaces(vx, vy, tris, res.coastEdges, heights, grid, seaAt);
+  // the sea is water at 0 m: a vertex inside it (a node a region's vote turned sea once it was in,
+  // a road's edge past the coastline) is put down to it. Its faces were tilted water, and the
+  // ground round it is not: every vertex a land face shares with the sea is on the coastline, at
+  // 0 m already. The border's stay, as the neighbour draws them.
+  for (const [ti, t] of tris.entries()) {
+    if (!sea[ti]) continue;
+    for (const k of [t.a, t.b, t.c]) {
+      if (vh[k] > 0 && vx[k] !== 0 && vx[k] !== grid && vy[k] !== 0 && vy[k] !== grid) vh[k] = 0;
+    }
+  }
   if (opts.debug) {
     Object.assign(opts.debug, {
       step, eps, raw: lines, constraints, missing, borderVerts, refined: added, colourFlips: lastColourFlips,

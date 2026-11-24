@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coastSeaTest, coastlineWays, joinLines } from '../src/world/coast';
+import { coastSeaTest, coastlineWays, joinLines, toLatticeLine } from '../src/world/coast';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { parseFilter } from '../src/world/osm-api';
 import { osmFilter, parseOverpass, type OverpassJson } from '../src/world/overpass';
@@ -142,6 +142,32 @@ describe('TIN with the OSM coastline', () => {
     const tin = buildTerrainTin(TILE, GRID, sea, { coast: [] });
     tin.tris.forEach((_, i) => expect(isSeaFace(tin, i)).toBe(true));
     expect(Math.max(...tin.vh)).toBeLessThanOrEqual(0);
+  });
+
+  it('a z14 relief true to 5 m puts no land height in the sea: a shore the DEM blurs past the coastline stays flat water', () => {
+    // 14/9516/6398: the DEM falls from 9 m at the coastline to the sea over three cells, so the
+    // nodes just off it, on the sea side, stand at 5–8 m; the pocket between the coastline and the
+    // DEM's own shore is sea by its area, and its nodes, added as relief, tilted its water faces
+    const shore = (i: number) => {
+      const line = toLatticeLine(TILE, GRID, coast[0]);
+      for (let k = 1; k < line.length; k++) {
+        const a = line[k - 1], q = line[k];
+        if ((a.x - i) * (q.x - i) <= 0 && a.x !== q.x) return a.y + ((q.y - a.y) * (i - a.x)) / (q.x - a.x);
+      }
+      return GRID / 2;
+    };
+    const blurred = Float32Array.from({ length: side * side }, (_, k) => {
+      const i = k % side, d = Math.floor(k / side) - shore(i);
+      return d <= 0 ? 9 + 6 * Math.min(-d, 4) : Math.max(0, 9 * (1 - d / 3));
+    });
+    const tin = buildTerrainTin(TILE, GRID, blurred, { coast, reliefTol: 5 });
+    let sea = 0;
+    tin.tris.forEach((t, i) => {
+      if (!isSeaFace(tin, i)) return;
+      sea++;
+      for (const k of [t.a, t.b, t.c]) expect(tin.vh[k]).toBeLessThanOrEqual(0);
+    });
+    expect(sea).toBeGreaterThan(0);
   });
 
   it('two coastline ways meeting at a node still separate sea from land', () => {

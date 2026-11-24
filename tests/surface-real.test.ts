@@ -229,6 +229,49 @@ describe('real dense tiles in the surface budget', () => {
   });
 });
 
+describe('a real shore the DEM blurs past the coastline', () => {
+  it('Fethiye 14/9516/6398 (its ways within 400 m of 36.62237, 29.10385): the sea flat at 0 m, a road\'s edge past the coastline too', async () => {
+    // the DEM has 5–13 m on the coastline's sea side here: the nodes there, the roads' edges and the
+    // vertices on their rows tilted the water faces up to them, in a sawtooth along the shore
+    const { tin } = await surfaceOf('surface-14-9516-6398-shore');
+    const tilted: string[] = [];
+    let sea = 0;
+    tin.tris.forEach((t, f) => {
+      if (!tin.sea?.[f]) return;
+      sea++;
+      for (const v of [t.a, t.b, t.c]) if (tin.vh[v] > 0) tilted.push(`${tin.vx[v].toFixed(3)},${tin.vy[v].toFixed(3)} ${tin.vh[v].toFixed(2)}`);
+    });
+    expect(sea).toBeGreaterThan(500);
+    expect(tilted).toEqual([]);
+  });
+});
+
+describe('a real river mouth: the roads over the DEM\'s shoreline', () => {
+  it('Fethiye 14/9517/6398 (its ways within 250 m of the bridges at 36.62525, 29.11589): every vertex of a road\'s cover on its bed at the road\'s height, but in the sea', async () => {
+    // the shoreline of the DEM (its 0.5 m line, at 0 m) runs along the river to its mouth, under
+    // the ends of the bridges there; a road's vertices on it stayed at 0 m, 3 m under the road
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6398-mouth');
+    const pull = roadPullOf(fx.tile, fx.grid, roads!, true), g = fx.grid;
+    const wet = new Uint8Array(tin.vx.length);
+    tin.tris.forEach((t, f) => { if (tin.sea?.[f]) wet[t.a] = wet[t.b] = wet[t.c] = 1; });
+    const off: string[] = [];
+    let checked = 0;
+    tin.tris.forEach((t, f) => {
+      const own = tin.cover![f];
+      if (own < 0 || !['carriageway', 'shoulder'].includes(cover.shapes[own].kind)) return;
+      for (const v of [t.a, t.b, t.c]) {
+        const x = tin.vx[v], y = tin.vy[v];
+        if (wet[v] || x === 0 || y === 0 || x === g || y === g || pull.weight(x, y) < 1) continue;
+        checked++;
+        const want = pull.surface(x, y, 0, () => true);
+        if (Math.abs(tin.vh[v] - want) > 0.05) off.push(`${x.toFixed(3)},${y.toFixed(3)} ${tin.vh[v].toFixed(2)} not ${want.toFixed(2)}`);
+      }
+    });
+    expect(checked).toBeGreaterThan(1000);
+    expect(off).toEqual([]);
+  });
+});
+
 /** the heights of the mesh's triangles over (x, z) (tile-centre metres), on none of their sides */
 function surfacesOver(m: { vertices: Float32Array; vertexCount: number }, x: number, z: number): number[] {
   const v = m.vertices, out: number[] = [];
