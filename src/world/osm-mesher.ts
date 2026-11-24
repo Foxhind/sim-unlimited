@@ -594,11 +594,19 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /** lattice units per metre: Mercator is conformal, so the same both ways inside the tile */
   const latticePerMetre = tin ? tin.grid / tileSizeMeters(tile) : 0;
 
-  /** bridges over what they cross and the approaches to them: near, on the TIN (road-levels.ts) */
-  const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
+  /** the drawn ground at a point (tile-centre metres), NaN off the tile (RoadLevelOptions.ground) */
+  const groundOnTile = (x: number, z: number): number => {
+    const ll = enuToLatLon(center, x, -z, 0), [lx, ly] = toLattice([ll.lon, ll.lat]);
+    return lx >= 0 && lx <= tin!.grid && ly >= 0 && ly <= tin!.grid ? Math.max(sampleHeight(ll.lon, ll.lat), 0) : NaN;
+  };
+  /** bridges over what they cross and the approaches to them: near, on the TIN (road-levels.ts); a bridge without a height of its own a straight deck over the drawn ground */
+  const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat), { ground: groundOnTile }) : undefined;
   const levels = straightDecks(plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels);
-  /** with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts) */
-  const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels, opts.roads && bridgeDecks(tile, tin!.grid, opts.roads, ([lon, lat]) => enu(lon, lat))) : undefined;
+  /**
+   * with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts:
+   * from the levels without the ground, which the cover is cut before)
+   */
+  const coverLift = cover && plainLevels ? coverLifted(opts.roads, buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)), opts.roads && bridgeDecks(tile, tin!.grid, opts.roads, ([lon, lat]) => enu(lon, lat))) : undefined;
   /** with the cover: the ends of the ways where a lifted run ends, as the cover has them (ground-cover liftedJoints) */
   const coverJoints = coverLift ? liftedJoints(opts.data.lines, enu, toLattice, coverLift) : undefined;
   /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */
@@ -1082,13 +1090,16 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       segs = p.segs;
     }
     const ends = coverJoints!(line, look.road ? net.roadEnds(line) : ROUND_ENDS), cum = cumulative(cl);
-    const out = look.rail ? roads : look.out, deck = levelDeck(line);
+    const out = look.rail ? roads : look.out;
     for (const [d0, d1] of runs) {
       const part = runPart(cl, cum, half, ends, d0, d1, len);
       if (part.c.length < 2) continue;
-      // under its floor a deck lies on the ground's faces as a dropped way's ribbon does (a road's, a path's and the water's are their own)
+      // under its floor a lifted way lies on the ground's faces as a dropped way's ribbon does (a
+      // road's, a path's and the water's are their own): a deck's end over its bank, and an approach
+      // whose cover the cover cut by the lifts without the ground (coverLift) where the levels with
+      // it lift it less (a bridge's clearance from the water, not from its banks)
       const low = partOf(out);
-      const floor = deck ? { clear: DECK_FLOOR_M, low: (si: number) => (si < 0 || !(JUNCTION_KINDS.has(cover!.shapes[si].kind) || cover!.shapes[si].kind === 'water') ? low : undefined) } : undefined;
+      const floor = { clear: DECK_FLOOR_M, low: (si: number) => (si < 0 || !(JUNCTION_KINDS.has(cover!.shapes[si].kind) || cover!.shapes[si].kind === 'water') ? low : undefined) };
       ribbon(part.c, part.half, look.ramp, 0, out, segs?.slice(part.first), part.ends, lift, onJunction, floor);
       onGround(part.c, part.half, look.bias, out, low);
     }

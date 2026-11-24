@@ -13,7 +13,9 @@
  * own heights, from those: the clearance between the two surfaces at a crossing), never from the
  * relief, and of nothing further than LIFT_REACH_M along the roads. So every tile that sees the roads
  * LIFT_REACH_M round it (overpass.ts ROAD_REACH_M) gets the same lift at the same point, and the
- * ribbons meet at the tile borders.
+ * ribbons meet at the tile borders. But with the drawn ground (RoadLevelOptions.ground) a bridge
+ * without a height of its own, wholly on the tile, takes its clearance from what it crosses: its
+ * deck is heights, not a lift over banks higher than the water.
  */
 import { classifyLine, isTunnel, roadLayer } from './osm-mesher';
 import type { LonLat, OsmArea, OsmLine } from './osm-types';
@@ -80,10 +82,16 @@ interface Way {
   path: boolean;
   /** the network its lift runs along: roads, railways or paths */
   net: string;
-  /** what the way asks for: at `d` metres from its start, `req` metres of lift */
-  asks: { d: number; req: number }[];
+  /**
+   * what the way asks for: at `d` metres from its start, `req` metres of lift; over what it crosses
+   * at `at` (its crossing's middle), or over the lowest ground of the asks of one stretch over a water
+   * area (`over`, the stretch's number)
+   */
+  asks: { d: number; req: number; at?: number; over?: number }[];
   /** the graph's nodes along the way, in order */
   stops: { d: number; node: number }[];
+  /** a bridge's deck of heights (RoadLevelOptions.ground): metres along it and the deck's height there */
+  deck?: { d: number[]; h: number[] };
 }
 
 /** something a bridge may cross: one segment of it */
@@ -166,7 +174,21 @@ export interface RoadLevelOptions {
    * either height is not a number, for the whole clearance as without it.
    */
   height?: (line: OsmLine, d: number) => number;
+  /**
+   * The drawn ground at a point (metres on the plane, as `toXZ`), NaN where it is not known (off the
+   * tile). Given it, a bridge without a height of its own (`height` not a number on it) takes what
+   * it asks as heights, its clearance over the ground where it asks (the water, the road under it),
+   * and holds, levels and falls between and past them as the lifts do (HOLD_GAP_M, LIFT_REACH_M,
+   * the grade), over the ground nowhere less than on it: over a river between banks 2–3 m up its
+   * clearance stood on the banks, a footway's deck 6–7 m up beside the street's at 4 m
+   * (14/9517/6398). Its approaches fall from its lift at its ends. A bridge with a point of it off
+   * the tile lifts as without it.
+   */
+  ground?: (x: number, z: number) => number;
 }
+
+/** a deck of heights (RoadLevelOptions.ground) is sampled along its bridge this often, m */
+const DECK_STEP_M = 2;
 
 /** `toXZ`: lon, lat → metres on one plane (the mesher's `enu`) */
 export function buildRoadLevels(
@@ -244,9 +266,10 @@ export function buildRoadLevels(
 
   for (const w of bridges) {
     const total = w.cum[w.cum.length - 1];
-    const ask = (d: number, req: number): void => {
-      if (req > 0 && Number.isFinite(d)) w.asks.push({ d: Math.max(0, Math.min(total, d)), req });
+    const ask = (d: number, req: number, at?: number, over?: number): void => {
+      if (req > 0 && Number.isFinite(d)) w.asks.push({ d: Math.max(0, Math.min(total, d)), req, ...(at === undefined ? {} : { at: Math.max(0, Math.min(total, at)) }), ...(over === undefined ? {} : { over }) });
     };
+    let stretches = 0;
     // on no layer (or layer 0): at least MIN_BRIDGE_LIFT_M all along it
     const layer = w.line.tags.layer;
     if (layer === undefined || Number(layer) === 0) {
@@ -282,8 +305,8 @@ export function buildRoadLevels(
           }
           // held over the whole width of what is crossed
           ask(d, req);
-          ask(d - u.half, req);
-          ask(d + u.half, req);
+          ask(d - u.half, req, d);
+          ask(d + u.half, req, d);
         }
       }
       for (const a of water) {
@@ -301,13 +324,90 @@ export function buildRoadLevels(
           if (t1 - t0 < 1e-9) continue;
           const tm = (t0 + t1) / 2;
           if (!inRings(a.rings, p[0] + (q[0] - p[0]) * tm, p[1] + (q[1] - p[1]) * tm)) continue;
-          const n = Math.max(1, Math.ceil(((t1 - t0) * len) / HOLD_STEP_M));
-          for (let s = 0; s <= n; s++) ask(w.cum[i] + (t0 + ((t1 - t0) * s) / n) * len, WATER_CLEAR_M);
+          const n = Math.max(1, Math.ceil(((t1 - t0) * len) / HOLD_STEP_M)), over = stretches++;
+          for (let s = 0; s <= n; s++) ask(w.cum[i] + (t0 + ((t1 - t0) * s) / n) * len, WATER_CLEAR_M, undefined, over);
         }
       }
     }
   }
-  if (!bridges.some((w) => w.asks.length)) return NONE;
+  // --- with the drawn ground: each bridge without a height of its own a straight deck ---
+  /** the point `d` metres along way w */
+  const pointAt = (w: Way, d: number): XZ => {
+    let i = 0;
+    while (i + 2 < w.cum.length && w.cum[i + 1] < d) i++;
+    const len = w.cum[i + 1] - w.cum[i], t = len > 0 ? Math.max(0, Math.min(1, (d - w.cum[i]) / len)) : 0;
+    return [w.p[i][0] + (w.p[i + 1][0] - w.p[i][0]) * t, w.p[i][1] + (w.p[i + 1][1] - w.p[i][1]) * t];
+  };
+  const groundOf = (w: Way, d: number): number => opts.ground!(...pointAt(w, d));
+  /** the grade a lift of `req` falls at (as the passes below take it) */
+  const gradeOf = (req: number): number => Math.max(LIFT_GRADE, (Math.ceil(req / LEVEL_M - 1e-9) * LEVEL_M) / LIFT_REACH_M);
+  if (opts.ground) {
+    for (const w of bridges) {
+      if (!w.asks.length || Number.isFinite(opts.height?.(w.line, 0) ?? NaN)) continue;
+      const total = w.cum[w.cum.length - 1];
+      // each ask as a height: its clearance over what it crosses (the ground at the crossing's middle,
+      // not on a bank its width reaches; over a water area, its lowest ground under the bridge: the
+      // area's outline may lie past the water's edge the relief has)
+      const water = new Map<number, number>();
+      for (const a of w.asks) if (a.over !== undefined) water.set(a.over, Math.min(water.get(a.over) ?? Infinity, groundOf(w, a.d)));
+      const needs = w.asks.map((a) => ({ d: a.d, h: (a.over !== undefined ? water.get(a.over)! : groundOf(w, a.at ?? a.d)) + a.req })).sort((a, b) => a.d - b.d);
+      // and nowhere under the line from the ground at one end to the ground at the other: between banks
+      // higher than its clearance it runs straight from one to the other
+      const g0 = groundOf(w, 0), g1 = groundOf(w, total);
+      if (needs.some((a) => !Number.isFinite(a.h)) || !Number.isFinite(g0) || !Number.isFinite(g1)) continue;
+      // asks at most HOLD_GAP_M apart hold the deck between them: each such run its upper hull
+      const runs: { d: number[]; h: number[] }[] = [];
+      let prev = -Infinity;
+      for (const a of needs) {
+        if (a.d - prev > HOLD_GAP_M || !runs.length) runs.push({ d: [], h: [] });
+        prev = a.d;
+        const { d, h } = runs[runs.length - 1];
+        if (d.length && a.d - d[d.length - 1] < 1e-6) { h[h.length - 1] = Math.max(h[h.length - 1], a.h); continue; }
+        while (d.length >= 2 && (h[h.length - 1] - h[h.length - 2]) * (a.d - d[d.length - 2]) <= (a.h - h[h.length - 2]) * (d[d.length - 1] - d[d.length - 2])) {
+          d.pop();
+          h.pop();
+        }
+        d.push(a.d);
+        h.push(a.h);
+      }
+      /**
+       * the deck's height d metres along it: a run's hull over it; past a run's end level to the
+       * bridge's end if that leaves room for the fall after it within the reach (as `hold`: a short
+       * bridge is level, its approaches climb), else the fall from there
+       */
+      const deckAt = (x: number): number => {
+        let best = -Infinity;
+        for (const r of runs) {
+          const n = r.d.length;
+          if (x >= r.d[0] && x <= r.d[n - 1]) {
+            let i = 0;
+            while (i + 2 < n && r.d[i + 1] < x) i++;
+            const t = n > 1 && r.d[i + 1] > r.d[i] ? (x - r.d[i]) / (r.d[i + 1] - r.d[i]) : 0;
+            best = Math.max(best, n > 1 ? r.h[i] + (r.h[i + 1] - r.h[i]) * t : r.h[0]);
+            continue;
+          }
+          const e = x < r.d[0] ? 0 : n - 1, req = r.h[e] - groundOf(w, r.d[e]), g = gradeOf(req);
+          const end = e ? total : 0, level = req >= LIFT_EPS_M && Math.abs(end - r.d[e]) <= LIFT_REACH_M - req / g;
+          best = Math.max(best, level ? r.h[e] : r.h[e] - g * Math.abs(x - r.d[e]));
+        }
+        return best;
+      };
+      const n = Math.max(1, Math.ceil(total / DECK_STEP_M));
+      const d: number[] = [], h: number[] = [];
+      let known = true;
+      for (let k = 0; k <= n; k++) {
+        const x = (total * k) / n, g = groundOf(w, x);
+        known &&= Number.isFinite(g);
+        d.push(x);
+        h.push(Math.max(g, deckAt(x), g0 + ((g1 - g0) * x) / (total || 1)));
+      }
+      if (!known) continue;
+      w.deck = { d, h };
+      // its approaches fall from its lift at its ends
+      w.asks = [0, n].flatMap((k) => (h[k] - groundOf(w, d[k]) >= LIFT_EPS_M ? [{ d: d[k], req: h[k] - groundOf(w, d[k]) }] : []));
+    }
+  }
+  if (!bridges.some((w) => w.asks.length || w.deck)) return NONE;
 
   // --- the graph: the ways' points (shared by their coordinates) and the points that ask ---
   const nodeOf = new Map<string, number>();
@@ -339,7 +439,9 @@ export function buildRoadLevels(
       if (a.node === b.node) continue;
       adj[a.node].push([b.node, b.d - a.d]);
       adj[b.node].push([a.node, b.d - a.d]);
-      if (w.bridge) {
+      // a deck of heights holds itself: its ends' lifts differ by its banks, and holding the one over
+      // the other's bank lifted that end by the difference
+      if (w.bridge && !w.deck) {
         bridgeAdj[a.node].push([b.node, b.d - a.d]);
         bridgeAdj[b.node].push([a.node, b.d - a.d]);
       }
@@ -400,7 +502,7 @@ export function buildRoadLevels(
   const byGrade = new Map<number, [number, number][]>();
   for (const [n, req] of asked) {
     // in steps of LEVEL_M, the steeper: a held height between two levels falls no further than the higher
-    const g = Math.max(LIFT_GRADE, (Math.ceil(req / LEVEL_M - 1e-9) * LEVEL_M) / LIFT_REACH_M);
+    const g = gradeOf(req);
     let list = byGrade.get(g);
     if (!list) byGrade.set(g, list = []);
     list.push([req, n]);
@@ -454,6 +556,14 @@ export function buildRoadLevels(
     for (const { g, val } of passes) lift = Math.max(lift, val[s[lo].node] - g * t, val[s[hi].node] - g * rest);
     // a held stretch of a bridge: straight between its ends
     if (t + rest > 0 && held.has(edgeKey(s[lo].node, s[hi].node))) lift = Math.max(lift, (nodeLift[s[lo].node] * rest + nodeLift[s[hi].node] * t) / (t + rest));
+    // a deck of heights: its height over the ground here, nothing else
+    if (w.deck) {
+      const dd = w.deck.d, hh = w.deck.h;
+      let i = 0;
+      while (i + 2 < dd.length && dd[i + 1] < d) i++;
+      const f = dd.length > 1 && dd[i + 1] > dd[i] ? Math.max(0, Math.min(1, (d - dd[i]) / (dd[i + 1] - dd[i]))) : 0;
+      lift = (dd.length > 1 ? hh[i] + (hh[i + 1] - hh[i]) * f : hh[0]) - groundOf(w, d);
+    }
     return lift < LIFT_EPS_M ? 0 : lift;
   };
   const maxOf = new Map<Way, number>();
@@ -462,6 +572,7 @@ export function buildRoadLevels(
     if (m === undefined) {
       m = 0;
       for (const s of w.stops) m = Math.max(m, liftOf(w, s.d));
+      if (w.deck) for (const d of w.deck.d) m = Math.max(m, liftOf(w, d));
       maxOf.set(w, m);
     }
     return m;

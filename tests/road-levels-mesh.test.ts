@@ -3,11 +3,11 @@ import { RAMP, withGlow } from '../src/engine/palette';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh, classifyLine } from '../src/world/osm-mesher';
 import type { LonLat, OsmLine, OsmTileData } from '../src/world/osm-types';
-import { LEVEL_M, LIFT_GRADE } from '../src/world/road-levels';
+import { LEVEL_M, LIFT_GRADE, WATER_CLEAR_M } from '../src/world/road-levels';
 import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import { buildGroundCover } from '../src/world/ground-cover';
 import { buildSurfaceTin } from '../src/world/surface-tin';
-import { GRID as COVER_GRID, osmMeshOf, road, seeded, TILE as COVER_TILE } from './roads-helpers';
+import { GRID as COVER_GRID, M, osmMeshOf, road, seeded, TILE as COVER_TILE } from './roads-helpers';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 const GRID = 16;
@@ -435,6 +435,38 @@ describe('lifted roads in the mesh', () => {
     for (const x of [-18, -9, 0, 9, 18]) expect(top(x)).toBeCloseTo(a + ((b - a) * (x + 27)) / 54, 1);
     // over the river the deck clears the water by its lift at least
     expect(top(0) - tinSampler(tin, TILE)(...at(0, 0))).toBeGreaterThan(4);
+  });
+
+  it('a path\'s bridge over a river clears the water by its clearance from the water, not from its banks: at the street\'s level', () => {
+    // 14/9517/6398: four bridges side by side over the river's mouth, the street's and the
+    // pedestrian way's (heights of their own) 3.6–4 m up, the footway's and the cycleway's 6–7 m:
+    // their lift over the river (WATER_CLEAR_M) stood on the banks 2–3 m over the water
+    // the banks 3.5 m over the water (the river 2.5 m deep under its DEM)
+    const x0 = 32 / M, relief = (x: number) => 100 + Math.min(1, Math.abs(x - x0) / 14);
+    const river = road({ waterway: 'river', width: '15' }, [[32, 2], [32, 62]]);
+    const span = 25 * M;
+    const foot = road({ highway: 'footway', bridge: 'yes', layer: '1' }, [[32 - span, 30], [32 + span, 30]]);
+    const west = road({ highway: 'footway' }, [[32 - 80 * M, 30], [32 - span, 30]]), east = road({ highway: 'footway' }, [[32 + span, 30], [32 + 80 * M, 30]]);
+    const { opts, cover } = osmMeshOf({ lines: [river, foot, west, east], areas: [], points: [] }, relief);
+    const m = buildOsmMesh({ ...opts, cover });
+    const [cx, cz] = coverEnu(32, 30), [wx] = coverEnu(32 - span, 30), [ex] = coverEnu(32 + span, 30);
+    const water = Math.min(...surfacesOver(m.water, cx, cz).concat(opts.sampleHeight(...((): [number, number] => { const ll = enuToLatLon(tileCenter(COVER_TILE), cx, -cz, 0); return [ll.lon, ll.lat]; })())));
+    const top = (x: number) => Math.max(...surfacesOver(m.roads, x, cz));
+    // the deck: its clearance over the water and no more (and the ribbon's bias), level from bank to bank
+    expect(top(cx) - water).toBeGreaterThanOrEqual(WATER_CLEAR_M);
+    expect(top(cx) - water).toBeLessThan(WATER_CLEAR_M + 2);
+    expect(Math.abs(top(wx + 1) - top(ex - 1))).toBeLessThan(0.3);
+    // the approaches' cover was cut as far as the lifts without the ground reach (ground-cover.ts):
+    // where they lift less, nothing of them lies in its face's plane but on a depth level
+    const ground = (x: number, z: number) => { const ll = enuToLatLon(tileCenter(COVER_TILE), x, -z, 0); return opts.sampleHeight(ll.lon, ll.lat); };
+    let flat = 0;
+    for (let t = 0; t + 2 < m.roads.vertexCount; t += 3) {
+      if ([0, 1, 2].every((k) => {
+        const i = t + k, y = m.roads.vertices[i * 6 + 1] - ground(m.roads.vertices[i * 6], m.roads.vertices[i * 6 + 2]);
+        return !(m.roadDepthLevels[i] > 0) && y > -0.01 && y < 0.05;
+      })) flat++;
+    }
+    expect(flat).toBe(0);
   });
 
   it('the lift keeps the ribbon the colour of the road', () => {
