@@ -8,6 +8,7 @@ import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
 import { insertAt } from '../world/bridge-mesher';
 import { buildPiers } from '../world/pier-mesher';
+import { buildRuins } from '../world/ruin-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { buildPower } from '../world/power-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
@@ -27,8 +28,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover)
-export const OSM_MESH_SCHEMA = 90;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls)
+export const OSM_MESH_SCHEMA = 91;
 
 export interface OsmRequest {
   type: 'osm';
@@ -250,9 +251,11 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const minarets = buildMinarets(minaretSites(clipped.points, own, known), tile, drape);
     // and the power lines' pylons and poles (power-mesher.ts), from the whole lines; their conductors are GL lines
     const power = buildPower(tile, data.lines, drape);
+    // and the ruins (ruin-mesher.ts): roofless walls, left out of the houses (building-mesher isRuin)
+    const ruins = buildRuins(tile, own, drape);
     const solid = {
-      vertices: concatF32(concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices), power.vertices),
-      ramps: concatU32(concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps), power.ramps),
+      vertices: concatF32(concatF32(concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices), power.vertices), ruins.vertices),
+      ramps: concatU32(concatU32(concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps), power.ramps), ruins.ramps),
     };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {

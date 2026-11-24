@@ -724,6 +724,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   };
 
   for (const b of buildings) {
+    // a ruin is its broken walls, no roof nor window (ruin-mesher.ts)
+    if (isRuin(b.tags)) continue;
     const tags = buildingTags(b);
     if (!b.rings.length || !b.rings[0].length) continue;
     const outerLL = b.rings[0];
@@ -1295,6 +1297,15 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
   return new Float32Array(out);
 }
 
+/**
+ * A ruin (building=ruins, or a building tagged historic=ruins or ruins=*: Kayaköy's hundreds of
+ * roofless stone houses are building=yes + historic=ruins): its broken walls only (ruin-mesher.ts),
+ * dark at night
+ */
+export function isRuin(tags: Record<string, string>): boolean {
+  return tags.building === 'ruins' || tags['building:part'] === 'ruins' || tags.historic === 'ruins' || (tags.ruins !== undefined && tags.ruins !== 'no');
+}
+
 /** hospitals and supermarkets: lit all night (FACADE_ALL_NIGHT) */
 export function isAllNight(tags: Record<string, string>): boolean {
   const b = tags['building:part'] || tags.building;
@@ -1313,7 +1324,7 @@ const UNLIT_MAN_MADE = new Set([
   'chimney', 'tower', 'water_tower', 'silo', 'storage_tank', 'gasometer', 'kiln', 'bunker_silo', 'mast', 'reservoir_covered',
 ]);
 export function isLitBuilding(tags: Record<string, string>): boolean {
-  return !UNLIT_TYPES.has(tags['building:part'] || tags.building || 'yes') && !UNLIT_MAN_MADE.has(tags.man_made);
+  return !isRuin(tags) && !UNLIT_TYPES.has(tags['building:part'] || tags.building || 'yes') && !UNLIT_MAN_MADE.has(tags.man_made);
 }
 
 /** taller than this (top above ground), a building carries red obstruction lights on its roof */

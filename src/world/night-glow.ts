@@ -1,6 +1,7 @@
 import { GLOW_LEVELS, rampGlowLevel, withGlow } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, tileSizeMeters, type Tile } from './geodesy';
 import type { OsmBuilding } from './osm-types';
+import { isRuin } from './building-mesher';
 import type { TerrainTin } from './terrain-tin';
 import { setTreeColour, treeColour, TREE_STRIDE } from './props-mesher';
 
@@ -28,7 +29,8 @@ export function buildingCoverage(tin: TerrainTin, tile: Tile, buildings: OsmBuil
   const center = tileCenter(tile);
   const built = new Float64Array(tin.tris.length);
   for (const b of buildings) {
-    if (!b.tags.building) continue;
+    // a ruin village is dark
+    if (!b.tags.building || isRuin(b.tags)) continue;
     const outer = b.rings[0];
     if (!outer || outer.length < 3) continue;
     let area = ringArea(outer, center);
