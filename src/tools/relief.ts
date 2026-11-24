@@ -13,7 +13,8 @@ import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../
 import { farOsmTiles } from '../world/far-osm';
 import { FarOsmManager } from '../world/far-osm-manager';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type LatLon, type Tile } from '../world/geodesy';
-import { HOUSE_RADIUS_M, OsmManager } from '../world/osm-manager';
+import { ALL_OSM_LAYERS, HOUSE_RADIUS_M, OsmManager, type OsmLayers } from '../world/osm-manager';
+import { ALL_STRUCTURES, STRUCTURE_KINDS, STRUCTURE_LABELS, type StructureKind } from '../world/structure-kinds';
 import { FOG_CLEAR } from '../world/precipitation';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
 import { moonPosition, sunPosition } from '../world/sun';
@@ -44,6 +45,8 @@ const EDGE_NAMES = ['север', 'юг', 'запад', 'восток'];
 /** tile outline by zoom, coarse to fine */
 /** the colour correction is kept between visits (this browser only) */
 const GRADE_STORAGE = 'relief.landsatGrade';
+/** the drawing mode and the layers shown are kept between visits too */
+const DISPLAY_STORAGE = 'relief.display';
 const ZOOM_COLOURS = ['#7d8794', '#7d8794', '#8f7fd6', '#5b8def', '#4fc3d9', '#5fd38d', '#f0b54a'];
 
 interface State {
@@ -589,6 +592,86 @@ async function dropCache(tiles?: Tile[]): Promise<void> {
   }
 }
 
+interface Display {
+  wire: 'off' | 'object' | 'mono';
+  wireColor: string;
+  wireFill: string;
+  layers: OsmLayers;
+  /** structure kinds hidden, a bit per kind (structure-kinds STRUCTURE): kinds added later show */
+  hiddenStructures: number;
+}
+
+const DEFAULT_DISPLAY: Display = { wire: 'off', wireColor: '#4fc3d9', wireFill: '#101318', layers: { ...ALL_OSM_LAYERS }, hiddenStructures: 0 };
+
+function loadDisplay(): Display {
+  try {
+    const d = JSON.parse(localStorage.getItem(DISPLAY_STORAGE) ?? 'null') as Partial<Display> | null;
+    const hex = (v: unknown, dflt: string) => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v) ? v : dflt);
+    const layers = { ...ALL_OSM_LAYERS };
+    for (const k of Object.keys(layers) as Array<keyof OsmLayers>) if (typeof d?.layers?.[k] === 'boolean') layers[k] = d.layers[k];
+    return {
+      wire: d?.wire === 'object' || d?.wire === 'mono' ? d.wire : 'off',
+      wireColor: hex(d?.wireColor, DEFAULT_DISPLAY.wireColor),
+      wireFill: hex(d?.wireFill, DEFAULT_DISPLAY.wireFill),
+      layers,
+      hiddenStructures: Number.isInteger(d?.hiddenStructures) ? d!.hiddenStructures! & ALL_STRUCTURES : 0,
+    };
+  } catch {
+    return { ...DEFAULT_DISPLAY, layers: { ...ALL_OSM_LAYERS } };
+  }
+}
+
+const rgb01 = (hex: string): [number, number, number] => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255) as [number, number, number];
+
+/** the wireframe mode and the OSM layers: the controls, the renderer and the OSM manager kept in step */
+function initDisplay(): void {
+  const d = loadDisplay();
+  const wire = $<HTMLSelectElement>('wire');
+  const wireColor = $<HTMLInputElement>('wireColor');
+  const wireFill = $<HTMLInputElement>('wireFill');
+  const layerBoxes = [...document.querySelectorAll<HTMLInputElement>('input[data-layer]')];
+  const all = $<HTMLInputElement>('structAll');
+  const list = $('structures');
+  list.innerHTML = Array.from({ length: STRUCTURE_KINDS }, (_, k) =>
+    `<label><input type="checkbox" data-kind="${k}" /> ${STRUCTURE_LABELS[k as StructureKind]}</label>`).join('');
+  const kindBoxes = [...list.querySelectorAll<HTMLInputElement>('input[data-kind]')];
+
+  wire.value = d.wire;
+  wireColor.value = d.wireColor;
+  wireFill.value = d.wireFill;
+  for (const b of layerBoxes) b.checked = d.layers[b.dataset.layer as keyof OsmLayers];
+  for (const b of kindBoxes) b.checked = (d.hiddenStructures & (1 << +b.dataset.kind!)) === 0;
+
+  const apply = () => {
+    const mode = wire.value as Display['wire'];
+    wireColor.disabled = mode !== 'mono';
+    wireFill.disabled = mode === 'off';
+    renderer.wire = mode === 'off' ? undefined : { mode, color: rgb01(wireColor.value), fill: rgb01(wireFill.value) };
+    const layers = { ...ALL_OSM_LAYERS };
+    for (const b of layerBoxes) layers[b.dataset.layer as keyof OsmLayers] = b.checked;
+    osm.layers = layers;
+    let mask = 0;
+    for (const b of kindBoxes) if (b.checked) mask |= 1 << +b.dataset.kind!;
+    osm.structures = mask;
+    all.checked = mask !== 0;
+    all.indeterminate = mask !== 0 && mask !== ALL_STRUCTURES;
+    try {
+      const out: Display = { wire: mode, wireColor: wireColor.value, wireFill: wireFill.value, layers, hiddenStructures: ALL_STRUCTURES & ~mask };
+      localStorage.setItem(DISPLAY_STORAGE, JSON.stringify(out));
+    } catch {
+      // storage unavailable: the choice lasts for this page only
+    }
+  };
+  all.addEventListener('change', () => {
+    for (const b of kindBoxes) b.checked = all.checked;
+    apply();
+  });
+  for (const el of [wire, wireColor, wireFill, ...layerBoxes, ...kindBoxes]) {
+    el.addEventListener(el === wireColor || el === wireFill ? 'input' : 'change', apply);
+  }
+  apply();
+}
+
 function loadGrade(): ColourGrade {
   try {
     const g = JSON.parse(localStorage.getItem(GRADE_STORAGE) ?? 'null') as Partial<ColourGrade> | null;
@@ -700,6 +783,7 @@ function openTileInspector(t: Tile): void {
 }
 
 function init(): void {
+  initDisplay();
   const sel = $<HTMLSelectElement>('preset');
   sel.innerHTML = '<option value="">— пресеты —</option>' + PRESETS.map((p, k) => `<option value="${k}">${p[0]}</option>`).join('');
   sel.onchange = () => {

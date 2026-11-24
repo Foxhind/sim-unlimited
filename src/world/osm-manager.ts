@@ -9,6 +9,7 @@ import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
 import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
+import { ALL_STRUCTURES, shownRanges, STRUCTURE } from './structure-kinds';
 
 /** pitch markings toward the eye: metres, plus per metre of distance (renderer.drawLights pull) */
 const PITCH_LINE_PULL = [0.05, 0.0004] as const;
@@ -73,6 +74,10 @@ interface OsmChunk {
   bcore?: Mesh;
   /** greenhouse glass: drawn blended with the sun's glints after everything else of the near tiles */
   gmesh?: Mesh;
+  /** the structure kind of each building vertex (structure-kinds KindRuns pairs) */
+  bKinds?: Uint32Array;
+  /** bmesh and bcore cut to the shown structure kinds, for the mask they were cut for */
+  bParts?: { mask: number; near: Mesh[]; far: Mesh[] };
   dots?: PropSet;
   /** one set per tree type present */
   trees?: TreeSet[];
@@ -111,6 +116,7 @@ interface MeshPayload {
   bCore: number;
   gVertices: ArrayBuffer;
   gRamps: ArrayBuffer;
+  bKinds: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -145,6 +151,22 @@ export function lampSize(pointSize: number): number {
   return Math.max(2, pointSize * 0.67);
 }
 
+/** what of a tile's OSM is drawn (relief inspector); the buildings and structures by kind: OsmManager.structures */
+export interface OsmLayers {
+  /** the drape: areas, ground covers, points */
+  areas: boolean;
+  water: boolean;
+  /** road and railway ribbons, their far lines, pitch markings */
+  roads: boolean;
+  trees: boolean;
+  /** wall air conditioners and lamp posts */
+  props: boolean;
+  /** night lights: street lamps, windows' far dots, roof and mast beacons, point lights */
+  lights: boolean;
+}
+
+export const ALL_OSM_LAYERS: Readonly<OsmLayers> = { areas: true, water: true, roads: true, trees: true, props: true, lights: true };
+
 export function farLightSize(pointSize: number): number {
   return Math.max(1, Math.round(pointSize / 3));
 }
@@ -165,6 +187,10 @@ export class OsmManager {
   grade: ColourGrade = NEUTRAL_GRADE;
   /** filters of the areas for tiles built from now on (area style editor; invalidate() to rebuild); undefined: the game's */
   areaStyles: AreaStyles | undefined = undefined;
+  /** the layers drawn (relief inspector); the game draws them all */
+  layers: OsmLayers = { ...ALL_OSM_LAYERS };
+  /** the structure kinds drawn, a bit per kind (structure-kinds STRUCTURE); the game draws them all */
+  structures = ALL_STRUCTURES;
   private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
@@ -192,7 +218,7 @@ export class OsmManager {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
             levels: buf(msg.levels), rLevels: buf(msg.rLevels), wLevels: buf(msg.wLevels),
-            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, dots: buf(msg.dots),
+            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, bKinds: buf(msg.bKinds), dots: buf(msg.dots),
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
@@ -397,6 +423,8 @@ export class OsmManager {
     chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
     chunk.gmesh = this.worldMesh(chunk, data.gVertices, data.gRamps);
     chunk.bcore = chunk.bmesh && { vao: chunk.bmesh.vao, vertexCount: Math.min(data.bCore, chunk.bmesh.vertexCount) };
+    chunk.bKinds = new Uint32Array(data.bKinds);
+    chunk.bParts = undefined;
     chunk.dots = this.points(chunk, data.dots);
     chunk.lights = this.points(chunk, data.lights);
     chunk.roofLights = this.points(chunk, data.roofLights);
@@ -472,10 +500,34 @@ export class OsmManager {
     chunk.buffers = [];
     chunk.vaos = [];
     chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
+    chunk.bKinds = chunk.bParts = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
+  }
+
+  /** a structure kind is drawn */
+  private shows(kind: number): boolean {
+    return (this.structures & (1 << kind)) !== 0;
+  }
+
+  /** a tile's buildings (near: with their small parts; far: the core) cut to the shown structure kinds */
+  private houseParts(c: OsmChunk, near: boolean): Mesh[] {
+    const mesh = near ? c.bmesh : c.bcore;
+    if (!mesh) return [];
+    if (this.structures === ALL_STRUCTURES) return [mesh];
+    if (c.bParts?.mask !== this.structures) {
+      const cut = (m: Mesh | undefined): Mesh[] =>
+        m ? shownRanges(c.bKinds ?? [], m.vertexCount, this.structures).map(([first, vertexCount]) => ({ vao: m.vao, first, vertexCount })) : [];
+      c.bParts = { mask: this.structures, near: cut(c.bmesh), far: cut(c.bcore) };
+    }
+    return near ? c.bParts.near : c.bParts.far;
+  }
+
+  /** a prop type (props-mesher: tree types, then INSTANCE) is drawn */
+  private showsProp(type: number): boolean {
+    return type === INSTANCE.AC || type === INSTANCE.LAMP ? this.layers.props : this.layers.trees;
   }
 
   draw(
@@ -491,34 +543,39 @@ export class OsmManager {
     /** some windows of the near facades are lit though it is day (a thunderstorm's gloom) */
     dayWindows = false,
   ): void {
+    const L = this.layers;
+    const lights = lightsOn && L.lights;
+    const buildingsOn = this.shows(STRUCTURE.BUILDING);
+    const mastsOn = this.shows(STRUCTURE.MAST);
     for (const c of this.renderList) {
+      if (!L.areas) break;
       renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       renderer.speckle = false;
     }
     // water over every tile's drape; nothing overlaps it any more (the ground leaves it out), so it writes depth
     for (const c of this.renderList) {
-      if (c.wmesh) renderer.drawWorld(c.wmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      if (c.wmesh && L.water) renderer.drawWorld(c.wmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
     }
     for (const c of this.renderList) {
       const dx = camPos[0] - c.centerEnu[0];
       const dz = camPos[2] - c.centerEnu[2];
       const slant = slantTo(c, camPos);
       if (slant < HOUSE_RADIUS_M) {
-        if (c.rmesh) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+        if (c.rmesh && L.roads) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         // pitch markings: 1 px white paint, pulled a hair toward the eye off the pitch under them
-        if (c.pitchLines) renderer.drawLights(c.pitchLines.vao, c.pitchLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, PITCH_LINE_PULL);
-        const houses = slant - c.radius * 0.71 < BUILDING_DETAIL_M ? c.bmesh : c.bcore;
-        if (houses) {
+        if (c.pitchLines && L.roads) renderer.drawLights(c.pitchLines.vao, c.pitchLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, PITCH_LINE_PULL);
+        const houses = this.houseParts(c, slant - c.radius * 0.71 < BUILDING_DETAIL_M);
+        if (houses.length) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
           renderer.windows = lightsOn || dayWindows ? 'lit' : 'glass';
-          renderer.drawWorld(houses, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          for (const h of houses) renderer.drawWorld(h, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
           renderer.windows = 'off';
         }
-        if (c.lamps && lightsOn) {
+        if (c.lamps && lights) {
           renderer.drawLights(c.lamps.vao, c.lamps.count, c.offset, view, proj, camPos, lampSize(pointSize), true);
         }
-        if (c.roofLights && lightsOn) {
+        if (c.roofLights && lights && buildingsOn) {
           renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
       } else {
@@ -526,31 +583,30 @@ export class OsmManager {
         // same lit facades as near (the windows shader keeps sub-pixel panes, the walls hide what is
         // behind them), so no border shows between near and far at night
         if (lightsOn) {
-          if (c.bcore) {
-            renderer.windows = 'lit';
-            renderer.drawWorld(c.bcore, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
-            renderer.windows = 'off';
-          }
-          if (c.roofLights) renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
-        } else if (c.dots) {
+          renderer.windows = 'lit';
+          for (const h of this.houseParts(c, false)) renderer.drawWorld(h, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.windows = 'off';
+          if (c.roofLights && lights && buildingsOn) renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
+        } else if (c.dots && buildingsOn) {
           renderer.drawLights(c.dots.vao, c.dots.count, c.offset, view, proj, camPos, farLightSize(pointSize), true, 'points', true);
         }
         // far roads: 1 px asphalt lines on the terrain by day; at night only the street-lit ones, as a
         // dotted line of their lamps: the same lamps, the same size as near
         if (lightsOn) {
-          if (c.lamps) renderer.drawLights(c.lamps.vao, c.lamps.count, c.offset, view, proj, camPos, lampSize(pointSize), true);
-        } else if (c.roadLines) {
+          if (c.lamps && lights && L.roads) renderer.drawLights(c.lamps.vao, c.lamps.count, c.offset, view, proj, camPos, lampSize(pointSize), true);
+        } else if (c.roadLines && L.roads) {
           renderer.drawLights(c.roadLines.vao, c.roadLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }
-        if (c.mastLines) {
+        // far lines: the masts' and the minarets'
+        if (c.mastLines && (mastsOn || this.shows(STRUCTURE.MINARET))) {
           renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }
       }
-      if (c.beacons && lightsOn) {
+      if (c.beacons && lights && mastsOn) {
         renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
       }
       // the lighthouses' lights: those lit at this moment of their periods, larger than a beacon
-      if (c.flashes && c.flashData && lightsOn) {
+      if (c.flashes && c.flashData && lights && this.shows(STRUCTURE.LIGHTHOUSE)) {
         const lit = litFlashes(c.flashData, performance.now() / 1000, this.flashScratch(c.flashData.length / FLASH_STRIDE));
         if (lit > 0) {
           const gl = this.gl;
@@ -560,16 +616,17 @@ export class OsmManager {
         }
       }
       // power line conductors: thin, near and middle distance only (far they are less than a pixel)
-      if (c.wires && slant - c.radius * 0.71 < WIRE_RADIUS_M) {
+      // (and the lifts' ropes)
+      if (c.wires && slant - c.radius * 0.71 < WIRE_RADIUS_M && (this.shows(STRUCTURE.POWER) || this.shows(STRUCTURE.LIFT))) {
         renderer.drawLights(c.wires.vao, c.wires.count, c.offset, view, proj, camPos, 1, true, 'lines');
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
         for (const t of c.trees) {
-          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity)) continue;
+          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
           renderer.drawTrees(t.vao, t.count, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         }
       }
-      if (c.lights && lightsOn) {
+      if (c.lights && lights) {
         renderer.drawLights(c.lights.vao, c.lights.count, c.offset, view, proj, camPos, pointSize, true);
       }
     }
@@ -578,7 +635,7 @@ export class OsmManager {
     renderer.opacity = GREENHOUSE.OPACITY;
     renderer.gloss = 1;
     for (const c of this.renderList) {
-      if (!c.gmesh) continue;
+      if (!c.gmesh || !buildingsOn) continue;
       const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
       if (slant < HOUSE_RADIUS_M) renderer.drawWorld(c.gmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
     }
@@ -597,12 +654,11 @@ export class OsmManager {
     for (const c of this.shownList) {
       vec3.set(at, c.centerEnu[0], renderer.shadowGround[1], c.centerEnu[2]);
       if (!renderer.shadowSees(at, c.radius * 0.71 + SHADOW_RELIEF_M)) continue;
-      const houses = c.bcore ?? c.bmesh;
-      if (houses) renderer.shadowMesh(houses, c.offset);
+      for (const h of this.houseParts(c, !c.bcore)) renderer.shadowMesh(h, c.offset);
       if (!trees || !c.trees) continue;
       const slant = slantTo(c, camPos) - c.radius * 0.71;
       for (const t of c.trees) {
-        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity)) continue;
+        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
         renderer.shadowTrees(t.vao, t.count, t.first, t.vertexCount, c.offset);
       }
     }

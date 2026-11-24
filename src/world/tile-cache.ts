@@ -34,6 +34,8 @@ export interface CachedMesh {
   /** OSM tiles: see-through faces (greenhouse glass), drawn blended */
   gVertices?: ArrayBuffer;
   gRamps?: ArrayBuffer;
+  /** structure kinds of the building vertices (structure-kinds KindRuns pairs) */
+  bKinds?: ArrayBuffer;
   dots?: ArrayBuffer;
   /** OSM tiles, night: roof obstruction lights (near), building night dots (far), mast lines (far), mast beacons */
   roofLights?: ArrayBuffer;
@@ -59,11 +61,11 @@ export interface CachedMesh {
   flashes?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes';
+type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
     (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
-    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
+    (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.bKinds?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
     (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.rAttrs?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0) + (m.pitchLines?.byteLength ?? 0) +
     (m.wVertices?.byteLength ?? 0) + (m.wRamps?.byteLength ?? 0) +

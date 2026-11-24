@@ -28,10 +28,11 @@ import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsa
 import { climateFaceColor } from '../world/climate-colour';
 import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
+import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes)
-export const OSM_MESH_SCHEMA = 93;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds)
+export const OSM_MESH_SCHEMA = 94;
 
 export interface OsmRequest {
   type: 'osm';
@@ -66,6 +67,8 @@ export interface OsmMeshResponse {
   /** see-through faces: greenhouse glass (building-mesher BuildingMeshData.glass), drawn blended */
   gVertices: ArrayBuffer;
   gRamps: ArrayBuffer;
+  /** the structure kind of each building vertex: Uint32 pairs (first vertex, kind), structure-kinds KindRuns */
+  bKinds: ArrayBuffer;
   dots: ArrayBuffer;
   trees: ArrayBuffer;
   lights: ArrayBuffer;
@@ -170,7 +173,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
-      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
+      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.bKinds, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires, res.flashes,
     ]);
@@ -189,6 +192,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
         bCore: cached.bCore ?? (cached.bRamps?.byteLength ?? 0) / 4,
         gVertices: cached.gVertices ?? empty(), gRamps: cached.gRamps ?? empty(),
+        bKinds: cached.bKinds ?? empty(),
         dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
@@ -261,9 +265,14 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const lifts = buildAerialways(tile, data.lines, data.points, drape);
     // and the lighthouses and the sea's lights (lighthouse-mesher.ts): their towers, their lights flashing at night
     const lighthouses = buildLighthouses(tile, data.points, drape);
+    // each part of the solids with its structure kind (structure-kinds), in this order
+    const parts = [
+      [mesh.bridges, STRUCTURE.BRIDGE], [piers, STRUCTURE.PIER], [minarets, STRUCTURE.MINARET], [power, STRUCTURE.POWER],
+      [ruins, STRUCTURE.RUINS], [lifts, STRUCTURE.LIFT], [lighthouses, STRUCTURE.LIGHTHOUSE],
+    ] as const;
     const solid = {
-      vertices: [mesh.bridges.vertices, piers.vertices, minarets.vertices, power.vertices, ruins.vertices, lifts.vertices, lighthouses.vertices].reduce(concatF32),
-      ramps: [mesh.bridges.ramps, piers.ramps, minarets.ramps, power.ramps, ruins.ramps, lifts.ramps, lighthouses.ramps].reduce(concatU32),
+      vertices: parts.map(([p]) => p.vertices).reduce(concatF32),
+      ramps: parts.map(([p]) => p.ramps).reduce(concatU32),
     };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {
@@ -272,6 +281,24 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       // masts and bridges have no windows
       windows: concatF32(insertAt(houses.windows, new Float32Array(decks * WINDOW_ATTR_FLOATS), core * WINDOW_ATTR_FLOATS), new Float32Array(masts.ramps.length * WINDOW_ATTR_FLOATS)),
     };
+    // the same order: the houses' core, the solids, the houses' small parts, the masts
+    const kinds = new KindRuns();
+    for (let i = 0; i < houses.kinds.length; i += 2) {
+      const first = houses.kinds[i];
+      if (first >= core) break;
+      kinds.mark(first, houses.kinds[i + 1]);
+    }
+    let at = core;
+    for (const [p, kind] of parts) {
+      kinds.mark(at, kind);
+      at += p.ramps.length;
+    }
+    for (let i = 0; i < houses.kinds.length; i += 2) {
+      const first = houses.kinds[i], end = i + 2 < houses.kinds.length ? houses.kinds[i + 2] : houses.vertexCount;
+      // a run that starts in the core and goes on into the small parts is cut at the core's end
+      if (end > core) kinds.mark(Math.max(first, core) + decks, houses.kinds[i + 1]);
+    }
+    kinds.mark(houses.vertexCount + decks, STRUCTURE.MAST);
     const dotData = buildingDots(own, tile, drape);
     // no far window dots: the detailed tiles draw their lit facades at any distance at night
     const night = buildingNightLights(own, tile, drape, 0);
@@ -289,6 +316,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
       levels: mesh.depthLevels.slice().buffer, rLevels: mesh.roadDepthLevels.slice().buffer, wLevels: mesh.waterDepthLevels.slice().buffer,
       bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
+      bKinds: new Uint32Array(kinds.pairs).buffer,
       // the masts come after the houses: small parts too
       bCore: core + decks,
       gVertices: houses.glass.vertices.slice().buffer, gRamps: houses.glass.ramps.slice().buffer,

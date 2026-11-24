@@ -1031,6 +1031,8 @@ flat out vec3 vWinEdge;
 // what the facade paints in its own colours (WORLD_FS windowAt: the signs)
 flat out vec3 vRef;
 uniform highp int uWindows;
+// the vertex's corner of its triangle (meshes are triangle lists): WORLD_FS draws the edges from it (renderer.wire)
+out vec3 vBary;
 ${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 // how far a point of depth level aDepthLevel is pulled toward the eye, metres (DEPTH_PULL, depthPull)
 float depthPullM(vec3 wp, vec3 n) {
@@ -1040,6 +1042,8 @@ float depthPullM(vec3 wp, vec3 n) {
   return aDepthLevel * unit / max(abs(dot(n, e / max(length(e), 1e-6))), ${DEPTH_PULL.SIN_MIN.toFixed(3)});
 }
 void main() {
+  int corner = gl_VertexID % 3;
+  vBary = vec3(corner == 0, corner == 1, corner == 2);
   vWinUV = aWinUV;
   vWinEdge = aWinEdge;
   vec3 wp = toWorld(aPos);
@@ -1109,6 +1113,13 @@ uniform float uClear;
 uniform vec4 uGloss;
 // 1: rare lighter dots on the ground (renderer.speckle: terrain and OSM areas)
 uniform int uSpeckle;
+// wireframe (renderer.wire): 0 off; 1 edges in the face's colour, 2 in uWireColor; the faces filled
+// with uWireFill (hidden edges stay hidden); uWireWidth: the edge's width in target pixels (one CSS pixel)
+uniform int uWire;
+uniform vec3 uWireColor;
+uniform vec3 uWireFill;
+uniform float uWireWidth;
+in vec3 vBary;
 // the water surface's inputs (WATER_GLSL), shared with WORLD_VS
 uniform vec3 uCamPos;
 // the eye (EYE_GLSL)
@@ -1131,6 +1142,7 @@ void main() {
   vec2 fw = fwidth(wxz);
   vec4 jac = vec4(dFdx(wxz), dFdy(wxz));
   vec2 winFw = fwidth(vWinUV);
+  vec3 baryFw = fwidth(vBary);
   // the face's normal from the ray's derivatives (faces are flat), toward the eye; for the windows
   vec3 faceN = cross(dFdx(vRay), dFdy(vRay));
   vec3 eye = toEye(uCamPos + vRay);
@@ -1185,6 +1197,13 @@ void main() {
     c = min(c + uGloss.rgb * g, vec3(1.0));
     alpha = mix(alpha, 1.0, g);
   }
+  if (uWire > 0) {
+    // an edge is drawn by both faces that share it: half its width on each side
+    float half_ = 0.5 * uWireWidth;
+    vec3 e = smoothstep(baryFw * (half_ - 0.5), baryFw * (half_ + 0.5), vBary);
+    float edge = 1.0 - min(min(e.x, e.y), e.z);
+    c = mix(uWireFill, uWire == 1 ? vColor : uWireColor, edge);
+  }
   oColor = vec4(c, alpha);
 }
 `;
@@ -1219,8 +1238,11 @@ out vec3 vRay;
 out vec2 vWinUV;
 flat out vec3 vWinEdge;
 flat out vec3 vRef;
+out vec3 vBary;
 ${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
 void main() {
+  int corner = gl_VertexID % 3;
+  vBary = vec3(corner == 0, corner == 1, corner == 2);
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
   vRef = vec3(0.0);

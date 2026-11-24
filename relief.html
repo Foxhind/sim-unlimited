@@ -20,6 +20,9 @@
       .row > * { flex: 1; min-width: 0; }
       input[type=number], input[type=date], input[type=time], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); padding: 3px 5px; font: inherit; width: 100%; }
       input[type=date], input[type=time] { color-scheme: dark; }
+      input[type=color] { background: var(--bg); border: 1px solid var(--line); padding: 1px 2px; height: 22px; width: 100%; }
+      input[type=color]:disabled { opacity: .4; }
+      .sub { margin-left: 18px; }
       input[type=range] { width: 100%; margin: 2px 0; accent-color: var(--accent); }
       input:disabled { color: var(--dim); }
       button { background: #222833; color: var(--text); border: 1px solid var(--line); padding: 4px 6px; font: inherit; cursor: pointer; }
@@ -69,6 +72,11 @@
       <div class="row"><button data-turn="-15">↺ −15°</button><button data-turn="15">↻ +15°</button></div>
       <div class="row"><span>превышение ×</span><input id="exag" type="number" min="1" max="20" step="1" /></div>
       <div class="row"><button id="topDown">Сверху, на север</button></div>
+      <div class="row"><span>отрисовка</span><select id="wire" title="непрозрачный wireframe: рёбра треугольников поверх граней, залитых одним цветом; задние рёбра скрыты">
+        <option value="off">с освещением</option><option value="object">wireframe, цвета объектов</option><option value="mono">wireframe, один цвет</option>
+      </select></div>
+      <div class="row"><span>цвет рёбер</span><input id="wireColor" type="color" value="#4fc3d9" title="для режима «один цвет»" /></div>
+      <div class="row"><span>цвет заливки</span><input id="wireFill" type="color" value="#101318" /></div>
 
       <h2>Свободный полёт</h2>
       <div class="row"><button id="fly">Свободный полёт</button></div>
@@ -76,6 +84,16 @@
 
       <h2>Слои</h2>
       <label><input type="checkbox" id="osm" checked /> OSM: дороги, здания, деревья</label>
+      <div class="sub">
+        <label><input type="checkbox" data-layer="areas" checked /> площадные объекты и покрытия</label>
+        <label><input type="checkbox" data-layer="water" checked /> вода</label>
+        <label><input type="checkbox" data-layer="roads" checked /> дороги и ж/д</label>
+        <label><input type="checkbox" data-layer="trees" checked /> деревья</label>
+        <label><input type="checkbox" data-layer="props" checked /> кондиционеры и фонарные столбы</label>
+        <label><input type="checkbox" data-layer="lights" checked /> ночные огни</label>
+        <label><input type="checkbox" id="structAll" checked /> здания и конструкции</label>
+        <div id="structures" class="sub"></div>
+      </div>
       <div class="row"><span>ночные огни</span><select id="night" title="как в симуляторе: огни зажигаются, когда солнце ниже 2°">
         <option value="auto">по солнцу (ниже 2°)</option><option value="on">всегда</option><option value="off">никогда</option>
       </select></div>

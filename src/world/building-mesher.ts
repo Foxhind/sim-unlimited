@@ -6,6 +6,7 @@ import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
 import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
+import { KindRuns, structureKind } from './structure-kinds';
 
 /** floats per vertex of BuildingMeshData.windows */
 export const WINDOW_ATTR_FLOATS = 5;
@@ -23,6 +24,8 @@ export interface BuildingMeshData extends TerrainMeshData {
    * doors), which come after: what a far LOD draws (osm-manager BUILDING_DETAIL_M)
    */
   coreVertexCount: number;
+  /** the structure kind of each vertex (structure-kinds KindRuns pairs: first vertex, kind) */
+  kinds: Uint32Array;
   /** air-conditioner units on the walls: instances of INSTANCE.AC (props-mesher TREE_STRIDE), drawn with the trees */
   acs: Float32Array;
   /** see-through faces (greenhouse walls and roofs, GREENHOUSE): pos+normal with face colours, drawn blended */
@@ -696,6 +699,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   let ramps = core.ramps;
   let win = core.win;
   const acs: number[] = [];
+  const coreKinds = new KindRuns();
+  const smallKinds = new KindRuns();
   const detail = <T>(make: () => T): T => {
     ({ verts, ramps, win } = small);
     try { return make(); } finally { ({ verts, ramps, win } = core); }
@@ -727,6 +732,9 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     // a ruin is its broken walls, no roof nor window (ruin-mesher.ts)
     if (isRuin(b.tags)) continue;
     const tags = buildingTags(b);
+    const kind = structureKind(tags);
+    coreKinds.mark(core.ramps.length, kind);
+    smallKinds.mark(small.ramps.length, kind);
     if (!b.rings.length || !b.rings[0].length) continue;
     const outerLL = b.rings[0];
     const rawOuter = dedupe(outerLL.map(toXZ));
@@ -1194,6 +1202,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     ramps: join(new Uint32Array(vertexCount), core.ramps, small.ramps),
     vertexCount,
     coreVertexCount,
+    kinds: (() => { coreKinds.append(smallKinds.pairs, coreVertexCount); return new Uint32Array(coreKinds.pairs); })(),
     windows: join(new Float32Array(core.win.length + small.win.length), core.win, small.win),
     acs: new Float32Array(acs),
     glass: { vertices: new Float32Array(glass.verts), ramps: new Uint32Array(glass.ramps), vertexCount: glass.ramps.length },

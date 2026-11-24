@@ -9,6 +9,18 @@ import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
   vertexCount: number;
+  /** the first vertex drawn (0 when absent): a run of a shared VAO */
+  first?: number;
+}
+
+/** wireframe of the world's faces (renderer.wire): edges over faces filled in one colour */
+export interface Wireframe {
+  /** edges in each face's own colour, or all in `color` */
+  mode: 'object' | 'mono';
+  /** the edges in 'mono', RGB 0..1 as the face colours (what WORLD_FS writes) */
+  color: [number, number, number];
+  /** the faces' fill, RGB 0..1 */
+  fill: [number, number, number];
 }
 
 export class Renderer {
@@ -132,6 +144,8 @@ export class Renderer {
   speckle = false;
   /** what drawWorld draws next has no water, dots, road marks or windows (clouds): a lighter shader */
   bare = false;
+  /** the world's faces and trees as an opaque wireframe (relief inspector); undefined: shaded as usual */
+  wire?: Wireframe;
   /** the device pixel ratio the canvas was last sized for (resize) */
   private dpr = 1;
   /** the share of windows lit at night now (palette.ts litShare by the local hour) */
@@ -224,7 +238,7 @@ export class Renderer {
 
     const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
       const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
@@ -235,7 +249,7 @@ export class Renderer {
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -397,7 +411,7 @@ export class Renderer {
     setPlacement(gl, this.shadowU.uOffset, offset);
     gl.uniform1i(this.shadowU.uCoarse, coarse);
     gl.bindVertexArray(mesh.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
   }
 
   /** Sun shadows, step 2: instanced trees, as drawTrees draws them. */
@@ -416,6 +430,18 @@ export class Renderer {
     gl.bindVertexArray(null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.shadowsOn = true;
+  }
+
+  /** the wireframe uniforms of a world or tree draw (WORLD_FS uWire) */
+  private setWire(u: Uniforms): void {
+    const gl = this.gl;
+    const w = this.wire;
+    gl.uniform1i(u.uWire, w ? (w.mode === 'object' ? 1 : 2) : 0);
+    if (!w) return;
+    gl.uniform3fv(u.uWireColor, w.color);
+    gl.uniform3fv(u.uWireFill, w.fill);
+    // one CSS pixel, in the target's pixels (twice as many with the supersampled world)
+    gl.uniform1f(u.uWireWidth, this.dpr * (this.msaa ? 2 : 1));
   }
 
   /** the shadow uniforms of a world or tree draw (SHADOW_RECEIVE_VS / _FS) */
@@ -734,8 +760,9 @@ export class Renderer {
     gl.uniform1i(u.uSpeckle, this.speckle ? 1 : 0);
     // light sources and glints are not shaded
     this.setShadow(u, !this.selfLit && !this.additive);
+    this.setWire(u);
     gl.bindVertexArray(mesh.vao);
-    gl.drawArrays(gl.TRIANGLES, 0, mesh.vertexCount);
+    gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
     if (blend) gl.disable(gl.BLEND);
     if (!depthWrite || blend) gl.depthMask(true);
   }
@@ -774,6 +801,7 @@ export class Renderer {
     this.setRim(this.treeU, this.rimTreeWeight);
     gl.uniform1i(this.treeU.uTwoSided, 1);
     this.setShadow(this.treeU, true);
+    this.setWire(this.treeU);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
@@ -1040,6 +1068,7 @@ interface ClipControl {
 }
 
 /** the glitter path's uniforms (shaders.ts GLITTER_GLSL), set with the light */
+const WIRE_UNIFORMS = ['uWire', 'uWireColor', 'uWireFill', 'uWireWidth'];
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime', 'uDotPx'];
 /** the light on faces (shaders.ts SUNLIGHT_GLSL) */
 const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow'];
