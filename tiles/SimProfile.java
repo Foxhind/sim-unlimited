@@ -78,7 +78,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
@@ -137,7 +137,7 @@ public class SimProfile implements Profile {
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
       isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb") || find(WALL, s(f, "barrier")) ||
-      "dam".equals(s(f, "waterway")) || "weir".equals(s(f, "waterway"));
+      "dam".equals(s(f, "waterway")) || "weir".equals(s(f, "waterway")) || "tree_row".equals(s(f, "natural"));
   }
 
   static boolean relationWanted(SourceFeature f) {
@@ -157,7 +157,7 @@ public class SimProfile implements Profile {
 
   static boolean nodeWanted(SourceFeature f) {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
-      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb");
+      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb") || "tree".equals(s(f, "natural"));
   }
 
   /** overpass.ts: lighthouses, beacons and the charted lights */

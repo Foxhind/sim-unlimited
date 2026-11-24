@@ -339,6 +339,27 @@ function pickType(w: number[], r: number): number {
 }
 
 /**
+ * Single trees (natural=tree, a point) and tree rows (natural=tree_row, a line: an avenue, a
+ * windbreak): one at the point, one every ROW_SPACING_M along the row. A tree of its tagged height
+ * (within HEIGHT_M), else its type's; its type by its genus or species where it names one
+ * (GENUS), else by the climate and its leaf type as a wood's. Each hashed from its place: the same
+ * in every tile, drawn by the tile it stands in.
+ */
+export const LONE_TREE = {
+  ROW_SPACING_M: 8,
+  HEIGHT_M: [2, 40] as [number, number],
+  GENUS: { phoenix: TREE.PALM, washingtonia: TREE.PALM, cupressus: TREE.CYPRESS, pinus: TREE.PINE, picea: TREE.SPRUCE, abies: TREE.SPRUCE } as Record<string, number>,
+} as const;
+
+/** a single tree's or a row's type: by its genus (genus, species or taxon), else from `w` by `r` */
+export function loneTreeType(tags: Record<string, string>, w: number[], r: number): number {
+  const name = (tags.genus ?? tags.species ?? tags.taxon ?? tags['species:en'] ?? '').toLowerCase();
+  for (const [g, t] of Object.entries(LONE_TREE.GENUS)) if (name.startsWith(g)) return t;
+  if (/palm/.test(name)) return TREE.PALM;
+  return pickType(w, r);
+}
+
+/**
  * Orchards (landuse=orchard): from the air an orchard is its rows. Olives and citrus of the
  * Mediterranean stand about 5 m apart in rows about 6 m apart, low and round-crowned.
  */
@@ -554,6 +575,36 @@ export function buildProps(opts: PropsOptions): PropsData {
   // orchards from their whole outlines (plantOrchard keeps the trees inside the tile)
   for (const area of data.areas) {
     if (area.tags.landuse === 'orchard') plantOrchard(area, tile, sampleHeight, enu, opts.treeRamp, byType);
+  }
+  // single trees and tree rows, from the whole rows (each tree kept by the tile it stands in)
+  const inTile = (lon: number, lat: number) => lon >= b.west && lon < b.east && lat > b.south && lat <= b.north;
+  const plantOne = (lon: number, lat: number, tags: Record<string, string>): void => {
+    if (!inTile(lon, lat)) return;
+    const y = sampleHeight(lon, lat);
+    if (y <= 0) return;
+    const [x, z] = enu(lon, lat);
+    const hi = Math.round(lon * 1e6), hj = Math.round(lat * 1e6);
+    const type = loneTreeType(tags, treeWeights(climateLatitude(lat, y), tags), hash2(hi, hj, 1));
+    const tagged = parseFloat(tags.height);
+    const [h0, h1] = TREE_HEIGHT[type];
+    const h = Number.isFinite(tagged) ? Math.max(LONE_TREE.HEIGHT_M[0], Math.min(LONE_TREE.HEIGHT_M[1], tagged)) : h0 + hash2(hi, hj, 2) * (h1 - h0);
+    pushInstance(byType[type], x, y, z, h, snowy(opts.treeRamp?.(lon, lat) ?? RAMP.FOREST), type, yawAt(x, z));
+  };
+  for (const p of data.points) if (p.tags.natural === 'tree') plantOne(p.at[0], p.at[1], p.tags);
+  for (const l of data.lines) {
+    if (l.tags.natural !== 'tree_row' || l.points.length < 2) continue;
+    // a tree at the row's start and every ROW_SPACING_M along it (the spacing carried round its bends)
+    let next = 0, start = 0;
+    for (let i = 0; i + 1 < l.points.length; i++) {
+      const [alon, alat] = l.points[i], [blon, blat] = l.points[i + 1];
+      const [ax, az] = enu(alon, alat), [bx, bz] = enu(blon, blat);
+      const len = Math.hypot(bx - ax, bz - az);
+      for (; next <= start + len + 1e-6; next += LONE_TREE.ROW_SPACING_M) {
+        const t = len > 0 ? (next - start) / len : 0;
+        plantOne(alon + (blon - alon) * t, alat + (blat - alat) * t, l.tags);
+      }
+      start += len;
+    }
   }
 
   const lights: number[] = [];

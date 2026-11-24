@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, FOREST, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_THIN, TREE_VERTEX_FLOATS, treeColour, treeKeep, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, FOREST, INSTANCE, LONE_TREE, loneTreeType, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_THIN, TREE_VERTEX_FLOATS, treeColour, treeKeep, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -330,6 +330,45 @@ describe('orchards (landuse=orchard)', () => {
     for (const [, , , type] of trees(props(orchard(plot(60, 40), { trees: 'palm_trees' })).trees)) expect(type).toBe(TREE.PALM);
     const vineyard: OsmTileData = { ...empty, areas: [{ rings: [plot(60, 40)], tags: { landuse: 'vineyard' } }] };
     expect(props(vineyard).trees.length).toBe(0);
+  });
+});
+
+describe('single trees and tree rows', () => {
+  const center = tileCenter(TILE);
+  const M = 111320, cos = Math.cos((center.lat * Math.PI) / 180);
+  const at = (x: number, y: number): [number, number] => [center.lon + x / (M * cos), center.lat + y / M];
+  const trees = (t: Float32Array) => {
+    const out: { x: number; z: number; h: number; type: number }[] = [];
+    for (let i = 0; i < t.length; i += TREE_STRIDE) out.push({ x: t[i], z: t[i + 2], h: t[i + 3], type: t[i + 5] });
+    return out;
+  };
+
+  it('a tree at its point, of its tagged height, its type by its genus', () => {
+    const t = trees(props({ ...empty, points: [{ at: at(10, 20), tags: { natural: 'tree', genus: 'Phoenix', height: '9' } }] }).trees);
+    expect(t).toHaveLength(1);
+    expect(t[0].type).toBe(TREE.PALM);
+    expect(t[0].h).toBe(9);
+    expect(t[0].x).toBeCloseTo(10, 0);
+    expect(t[0].z).toBeCloseTo(-20, 0);
+    expect(loneTreeType({ species: 'Cupressus sempervirens' }, [1, 0, 0, 0, 0], 0.5)).toBe(TREE.CYPRESS);
+    expect(loneTreeType({ species: 'Pinus brutia' }, [1, 0, 0, 0, 0], 0.5)).toBe(TREE.PINE);
+    // no genus: by the weights
+    expect(loneTreeType({}, [0, 1, 0, 0, 0], 0.5)).toBe(TREE.BROADLEAF);
+  });
+
+  it('a row: a tree every ROW_SPACING_M along it, round its bend, the same tree each time', () => {
+    const row = { ...empty, lines: [{ points: [at(0, 0), at(40, 0), at(40, 22)], tags: { natural: 'tree_row' } }] };
+    const t = trees(props(row).trees);
+    // 62 m: trees at 0, 8 … 56
+    expect(t).toHaveLength(Math.floor(62 / LONE_TREE.ROW_SPACING_M) + 1);
+    const again = trees(props(row).trees);
+    expect(again).toEqual(t);
+  });
+
+  it('a tree is drawn by the tile it stands in only', () => {
+    const b = tileBounds(TILE);
+    const outside = { ...empty, points: [{ at: [b.east + 0.001, center.lat] as [number, number], tags: { natural: 'tree' } }] };
+    expect(props(outside).trees.length).toBe(0);
   });
 });
 

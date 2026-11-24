@@ -53,6 +53,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Tombs: rock-cut fronts, Lycian sarcophagi and pillar tombs (tomb-mesher.ts); an outline at its middle.
 // Walls: garden, retaining and town walls as solid bands along their lines (wall-mesher.ts); fences are not fetched.
 // Dams and weirs mapped as lines: an embankment, a sill (dam-mesher.ts).
+// Single trees and tree rows: props-mesher plants them as the woods' trees.
 const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
 const TOWN_LAND_ZONES = '^(residential|commercial|retail|industrial|quarry)$';
 const FULL_FILTER = `
@@ -82,6 +83,7 @@ const FULL_FILTER = `
   node["tomb"]; way["tomb"];
   way["barrier"~"^(wall|retaining_wall|city_wall)$"];
   way["waterway"~"^(dam|weir)$"];
+  node["natural"="tree"]; way["natural"="tree_row"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
@@ -168,7 +170,7 @@ function isPierTags(tags: Record<string, string>): boolean {
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
     tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags) || tags.power === 'line' || tags.power === 'minor_line' || tags.aerialway !== undefined ||
-    tags.barrier === 'wall' || tags.barrier === 'retaining_wall' || tags.barrier === 'city_wall';
+    tags.barrier === 'wall' || tags.barrier === 'retaining_wall' || tags.barrier === 'city_wall' || tags.natural === 'tree_row';
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {
@@ -214,7 +216,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined || el.tags['seamark:type'] !== undefined || el.tags.tomb !== undefined)) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined || el.tags['seamark:type'] !== undefined || el.tags.tomb !== undefined || el.tags.natural === 'tree')) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);
