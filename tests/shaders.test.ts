@@ -97,7 +97,9 @@ describe('base ground (horizon without tiles)', () => {
     expect(WORLD_VS).toContain('wp.y -= (d * d) / (2.0 * 6371000.0);');
     expect(SKY_FS).toContain('max(1.0 - dir.y * dir.y, 0.0) / 6371000.0');
     expect(SKY_FS).toContain('shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), tempC)');
-    expect(SKY_FS).toContain('fog = floor(fog * 12.0) / 12.0;');
+    // the haze is smooth, as over the world's faces (no 12 steps: a face's haze would jump as the eye moves)
+    expect(SKY_FS).toContain('float fog = fogAt(dir * t, uCamPos.y);');
+    expect(SKY_FS).not.toContain('floor(fog');
   });
 
   it('a ray hits the ground below the true horizon only (dip = sqrt(2h/R))', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { constrainedDelaunay, contourLevels, delaunay, extractIsolines, simplifyOpen, simplifyRing } from '../src/world/contours';
+import { scatterWithEdges } from './cdt-fixture';
 
 function lattice(n: number, fn: (i: number, j: number) => number): Float32Array {
   const h = new Float32Array((n + 1) * (n + 1));
@@ -99,17 +100,10 @@ describe('delaunay', () => {
 });
 
 describe('constrainedDelaunay at scale', () => {
-  const rnd = (seed: number) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-  it('triangulates 8000 points with 2000 fixed edges within 150 ms', () => {
-    const r = rnd(7), pts = Array.from({ length: 8000 }, () => ({ x: r() * 64, y: r() * 64 }));
-    // fixed edges: short non-crossing segments between consecutive points of 2000 disjoint pairs
-    const sorted = pts.map((p, i) => ({ p, i })).sort((a, b) => a.p.x - b.p.x || a.p.y - b.p.y);
-    const cons: [number, number][] = [];
-    for (let k = 0; k + 1 < sorted.length && cons.length < 2000; k += 4) cons.push([sorted[k].i, sorted[k + 1].i]);
-    constrainedDelaunay(pts, cons); // warm-up
-    const t = performance.now();
+  // its time budget (150 ms) is in perf.test.ts, which runs on its own
+  it('triangulates 8000 points with 2000 fixed edges, every one kept', () => {
+    const { pts, cons } = scatterWithEdges();
     const { tris, missing } = constrainedDelaunay(pts, cons);
-    expect(performance.now() - t).toBeLessThan(150);
     expect(missing).toBe(0);
     const has = new Set(tris.flatMap((f) => [[f.a, f.b], [f.b, f.c], [f.c, f.a]].map(([u, v]) => (u < v ? `${u},${v}` : `${v},${u}`))));
     for (const [u, v] of cons) expect(has.has(u < v ? `${u},${v}` : `${v},${u}`)).toBe(true);

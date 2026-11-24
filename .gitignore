@@ -9,3 +9,4 @@ tiles/data/
 pnpm-lock.yaml
 pnpm-workspace.yaml
 skills-lock.json
+.superpowers/

@@ -10,7 +10,7 @@ describe('rim light', () => {
   it('in the game: by day and at sunset, the values chosen in the rim lab', () => {
     expect(DEFAULT_RIM).toMatchObject({
       on: true, lowSunOnly: false, backPow: 2, steps: 5, sunColour: 0.35, strength: 2, edgePow: 2, sideBias: 0,
-      terrain: 0, objects: 0, trees: 1, aircraft: 1, outline: 1.5, outlineCss: 3, outlineGap: 0.34,
+      terrain: 0, objects: 0, trees: 0, aircraft: 1, outline: 1.5, outlineCss: 3, outlineGap: 0.34,
     });
     for (const el of [2, 45]) {
       expect(at(el).shape[0]).toBe(DEFAULT_RIM.strength);
@@ -68,8 +68,8 @@ describe('rim light', () => {
     expect(WORLD_POST_FS).toContain('exp2(d * LOG_FAR) - 1.0');
   });
 
-  it('leaves self-lit faces (exhaust flame, aircraft lights) without the silhouette rim', () => {
-    expect(WORLD_FS).toContain('float alpha = 1.0 - uSelfLit;');
+  it('leaves self-lit faces (exhaust flame, aircraft lights) and all but buildings and aircraft without the silhouette rim', () => {
+    expect(WORLD_FS).toContain('float alpha = uOutlined * (1.0 - uSelfLit);');
     expect(WORLD_FS).toContain('if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;');
     expect(WORLD_FS).toContain('oColor = vec4(c, alpha);');
     expect(WORLD_POST_FS).toContain('if (uOutline.x > 0.0 && t.a > 0.5) return max(t.rgb, min(t.rgb + outline(q), 1.0));');

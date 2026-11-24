@@ -7,6 +7,8 @@ import { buildGroundCover } from '../src/world/ground-cover';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildRoadNet } from '../src/world/road-net';
 import { buildSurfaceTin } from '../src/world/surface-tin';
+import { constrainedDelaunay } from '../src/world/contours';
+import { scatterWithEdges } from './cdt-fixture';
 import { bordersOf, demOf, GRID, lattice, randomTown, TILE as Z14_TILE, townFixture } from './roads-helpers';
 
 // §10: tile generation in a worker < 200 ms for a dense city centre (mesher part only, no network/PNG decode).
@@ -81,5 +83,15 @@ describe('one-layer ground budgets', () => {
 
   it('the surface with the covers of an ordinary tile in < 120 ms', () => {
     expect(surfaceMedian('ordinary tile surface', townFixture())).toBeLessThan(120);
+  });
+});
+
+describe('constrainedDelaunay budget', () => {
+  it('triangulates 8000 points with 2000 fixed edges within 150 ms', () => {
+    const { pts, cons } = scatterWithEdges();
+    constrainedDelaunay(pts, cons); // warm-up
+    const t = performance.now();
+    constrainedDelaunay(pts, cons);
+    expect(performance.now() - t).toBeLessThan(150);
   });
 });

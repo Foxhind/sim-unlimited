@@ -1,5 +1,7 @@
+/// <reference types="vitest/config" />
 import fs from 'node:fs';
 import path from 'node:path';
+import { configDefaults } from 'vitest/config';
 import { defineConfig, type Plugin } from 'vite';
 
 // Q34: dev stub of our own report endpoint — logs batches, no third parties.
@@ -79,5 +81,11 @@ export default defineConfig({
     target: 'es2022',
     // the simulator and the tools it links to (relief → inspector, both → the simulator)
     rollupOptions: { input: { main: 'index.html', relief: 'relief.html', inspector: 'inspector.html' } },
+  },
+  test: {
+    // local agent worktrees hold copies of the tests
+    exclude: [...configDefaults.exclude, '.claude/**'],
+    // the tests on real tiles (tests/fixtures) mesh a whole dense tile: seconds each, more with every core busy
+    testTimeout: 30_000,
   },
 });
