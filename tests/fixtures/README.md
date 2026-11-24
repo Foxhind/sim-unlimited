@@ -3,3 +3,5 @@
 `surface-14-9516-6398-shore.json` and `surface-14-9517-6398-mouth.json` (Fethiye's shore and the river mouth east of it): the same, but only the ways and areas within 400 m and 250 m of a point (each file's `source` names it), every coastline kept.
 
 Their raw DEM (`roadDem`) was taken again on 2026-11-24 at the samples of the network with the urban paths (footways, cycleways, steps: `isUrbanPath`), the rest of each file as it was.
+
+`surface-14-9514-6399-hills.json` (the hills west of Fethiye): the same, with no ways (its coastlines only), for its relief.

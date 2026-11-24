@@ -751,12 +751,13 @@ describe('roads and water as the terrain’s own faces', () => {
     const tin = buildSurfaceTin(COVER_TILE, COVER_GRID, lattice(rolling), { borders: bordersOf(rolling), roads: withCover.roads });
     const opts = { ...withCover, tin, sampleHeight: tinSampler(tin, COVER_TILE) };
     // digests of the output of the code before Task 6 (0d4c7b7) on this input, but for its footway:
-    // a way of the network since (the urban paths by the roads' rules), its ground pulled to its bed
+    // a way of the network since (the urban paths by the roads' rules), its ground pulled to its bed;
+    // and for its relief: the z14 isolines every 25 m, to 0.1 cell, not inscribed (Z14_RELIEF)
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  5472, 3144877107, 1878073586, 17994, 1484268268, 576216011, 48094427, 2799, 3337963081, 838544295, 546, 3310701280, 1187553749,
-  2995623402, 3743679959, 1604464319, 280040517,
+  4683, 1734076934, 3150742314, 16878, 1950768596, 3518737285, 546182072, 2685, 4088249153, 243433191, 546, 3764287735, 1187553749,
+  30309056, 1348067417, 2209773314, 55511874,
 ];

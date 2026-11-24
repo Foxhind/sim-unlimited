@@ -119,10 +119,29 @@ interface Unit {
  * through it in trenches 10–16 m deep (14/9515/6394, where the belts left four vertices)
  */
 export const Z14_RELIEF_TOL_M = 5;
+/**
+ * A detailed (z14) tile's isolines: every 25 m, simplified to a tenth of a cell (3 m), not moved
+ * uphill (TinOptions.inscribed), and never simplified looser for the budget (thicker belts instead).
+ * With the 150 m belts, simplified to a cell and more and moved uphill, an isoline lay 20 m under the
+ * ground beside the relief's nodes at their own height: needles a metre wide and hundreds of metres
+ * long down every slope (14/9514/6399, 14/9516/6398); and those nodes, 2000 on a hill tile, stood on
+ * the lattice, its squares read in the faces. Now the isolines carry the relief: under 300 nodes there.
+ */
+export const Z14_BELT_STEP_M = 25;
+export const Z14_EPS_CELLS = 0.1;
+/** a z14 tile's isoline vertex budget (the surface's: MAX_SURFACE_VERTS) */
+export const Z14_RELIEF_VERTS = 20000;
+/** the relief options of a detailed (z14) tile */
+export const Z14_RELIEF: Readonly<TinOptions> = {
+  borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, step: Z14_BELT_STEP_M, eps: Z14_EPS_CELLS, epsMax: Z14_EPS_CELLS,
+  inscribed: false, maxVerts: Z14_RELIEF_VERTS,
+};
 
 export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array, opts: SurfaceOptions = {}): SurfaceTin {
   const { roads, cover, maxSurfaceVerts = MAX_SURFACE_VERTS, stats, ...given } = opts;
-  const tinOpts: TinOptions = tile.z === ROADS_Z ? { borderTol: Z14_RELIEF_TOL_M, reliefTol: Z14_RELIEF_TOL_M, ...given } : given;
+  // the options given override the z14 relief's, but those left undefined (a mesher passing on its own)
+  const set = Object.fromEntries(Object.entries(given).filter(([, v]) => v !== undefined)) as TinOptions;
+  const tinOpts: TinOptions = tile.z === ROADS_Z ? { ...Z14_RELIEF, ...set } : given;
   const pull = roads && roads.net.ways.length ? roadPullOf(tile, grid, roads, !!cover) : undefined;
   if (!pull && !cover) return buildTerrainTin(tile, grid, heights, tinOpts);
   // where the covers' edges cross the tile border, whether kept or not: the neighbour has them too

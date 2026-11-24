@@ -229,6 +229,33 @@ describe('real dense tiles in the surface budget', () => {
   });
 });
 
+describe('the z14 relief of real hills', () => {
+  it('Fethiye 14/9514/6399 (no ways): no scar, no lattice of nodes', async () => {
+    // isolines simplified to a cell and more and moved uphill (inscribed) lay 20 m under the ground
+    // beside the relief's nodes at their own height: needles a metre wide and hundreds of metres
+    // long down the slopes; and the nodes, 2000 of them, on the lattice: its squares read
+    const { tin, fx } = await surfaceOf('surface-14-9514-6399-hills');
+    const g = fx.grid, cell = tileSizeMeters(fx.tile) / g, { vx, vy, vh } = tin;
+    const onBorder = (k: number) => vx[k] === 0 || vy[k] === 0 || vx[k] === g || vy[k] === g;
+    const scars: string[] = [];
+    for (const t of tin.tris) {
+      const p = [t.a, t.b, t.c];
+      if (p.some(onBorder)) continue;
+      const longest = Math.max(...[0, 1, 2].map((k) => Math.hypot(vx[p[k]] - vx[p[(k + 1) % 3]], vy[p[k]] - vy[p[(k + 1) % 3]]))) * cell;
+      const area = (Math.abs((vx[t.b] - vx[t.a]) * (vy[t.c] - vy[t.a]) - (vx[t.c] - vx[t.a]) * (vy[t.b] - vy[t.a])) / 2) * cell * cell;
+      const width = (2 * area) / longest, rise = Math.max(...p.map((k) => vh[k])) - Math.min(...p.map((k) => vh[k]));
+      // a scar: a node of the lattice (the relief's, at its own height) in a needle with an isoline's
+      // vertices; not a cliff out of the sea (a vertex of the coastline, at 0 m)
+      const node = p.some((k) => Number.isInteger(vx[k]) && Number.isInteger(vy[k])) && p.every((k) => vh[k] > 0);
+      if (node && longest > 60 && width < 3 && rise > 2 * Math.max(width, 1)) scars.push(`${p.map((k) => `${vx[k].toFixed(2)},${vy[k].toFixed(2)}@${vh[k].toFixed(1)}`).join(" ")} ${longest.toFixed(0)} m by ${width.toFixed(2)} m, ${rise.toFixed(1)} m up`);
+    }
+    expect(scars).toEqual([]);
+    let nodes = 0;
+    for (let k = 0; k < vx.length; k++) if (!onBorder(k) && Number.isInteger(vx[k]) && Number.isInteger(vy[k])) nodes++;
+    expect(nodes).toBeLessThan(600);
+  });
+});
+
 describe('a real shore the DEM blurs past the coastline', () => {
   it('Fethiye 14/9516/6398 (its ways within 400 m of 36.62237, 29.10385): the sea flat at 0 m, a road\'s edge past the coastline too', async () => {
     // the DEM has 5–13 m on the coastline's sea side here: the nodes there, the roads' edges and the
@@ -239,7 +266,9 @@ describe('a real shore the DEM blurs past the coastline', () => {
     tin.tris.forEach((t, f) => {
       if (!tin.sea?.[f]) return;
       sea++;
-      for (const v of [t.a, t.b, t.c]) if (tin.vh[v] > 0) tilted.push(`${tin.vx[v].toFixed(3)},${tin.vy[v].toFixed(3)} ${tin.vh[v].toFixed(2)}`);
+      // the border's vertices stay as the neighbour draws them (the DEM's profile there, terrain-tin)
+      const g = tin.grid, onBorder = (v: number) => tin.vx[v] === 0 || tin.vy[v] === 0 || tin.vx[v] === g || tin.vy[v] === g;
+      for (const v of [t.a, t.b, t.c]) if (tin.vh[v] > 0 && !onBorder(v)) tilted.push(`${tin.vx[v].toFixed(3)},${tin.vy[v].toFixed(3)} ${tin.vh[v].toFixed(2)}`);
     });
     expect(sea).toBeGreaterThan(500);
     expect(tilted).toEqual([]);

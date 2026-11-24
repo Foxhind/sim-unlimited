@@ -93,6 +93,8 @@ export interface TinOptions {
   /** contour vertex budget (default MAX_VERTS): over it the isolines are simplified harder, then the belts thickened */
   maxVerts?: number;
   eps?: number;
+  /** the loosest the budget simplifies the isolines to, lattice cells (default EPS_MAX): past it the belts are thickened */
+  epsMax?: number;
   /** shared edge profiles (see TileBorders); without them the lattice edge nodes are used */
   borders?: TileBorders;
   /** vertical tolerance of the simplified tile border, metres (default BORDER_TOL_M) */
@@ -1161,7 +1163,7 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
     }
     const kept = chains.reduce((s, c) => s + c.keep.reduce((t, v) => t + v, 0), 0);
     if (kept <= (opts.maxVerts ?? MAX_VERTS) || attempt >= 24) break;
-    if (eps * 1.5 <= EPS_MAX) eps *= 1.5;
+    if (eps * 1.5 <= (opts.epsMax ?? EPS_MAX)) eps *= 1.5;
     else {
       step *= 1.5;
       eps = eps0;
