@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -555,6 +555,13 @@ const ROOF_GREY: RGB[] = [[168, 168, 168], [144, 144, 144], [128, 128, 132]];
 const ROOF_DARK_GREY: RGB[] = [[96, 96, 98], [80, 80, 84], [64, 64, 68]];
 // terracotta as weathered tiles look from the air (aerial panorama of Fethiye: 171, 122, 103 lit)
 const ROOF_ORANGE: RGB[] = [[164, 104, 82], [150, 94, 74], [178, 118, 92]];
+/**
+ * In a warm climate (a mean year at sea level of WARM_ROOF_C and up: the Mediterranean and warmer)
+ * an untagged roof is terracotta or pale concrete, never the dark slate and felt of the north:
+ * flat roofs whitewashed or bare concrete under solar water heaters, as over Fethiye.
+ */
+export const WARM_ROOFS = { MIN_C: 15, ORANGE_LOW_RISE: 0.6 } as const;
+const ROOF_PALE: RGB[] = [[204, 202, 196], [186, 184, 178], [166, 164, 160]];
 
 /** deterministic 0..1 seed of a building from its first footprint vertex (stable when a tile is rebuilt) */
 export function buildingSeed(ring: LonLat[] | undefined): number {
@@ -576,9 +583,10 @@ function greyRamp(c: RGB): number {
 /**
  * Roof colour from OSM (roof:colour, then roof:material) — OSM wins over every default. Without either:
  * pseudo-random but deterministic by seed: grey or dark grey, and for low-rise pitched roofs also orange
- * (an untagged flat roof is always grey).
+ * (an untagged flat roof is always grey). At `latDeg` in a warm climate (WARM_ROOFS): terracotta for
+ * more of the low-rise pitched roofs, pale concrete for the rest.
  */
-export function roofRamp(tags: Record<string, string>, seed = 0.5): number {
+export function roofRamp(tags: Record<string, string>, seed = 0.5, latDeg?: number): number {
   const tagged = taggedRamp(tags, ['roof:colour', 'roof:color'], 'roof:material');
   if (tagged !== undefined) return tagged;
   if (isGlasshouse(tags)) return rgbRamp([...GREENHOUSE.GLASS]);
@@ -586,8 +594,12 @@ export function roofRamp(tags: Record<string, string>, seed = 0.5): number {
   const h = computeHeights(tags);
   const lowRise = !flat && h.wall + h.roof <= LOW_RISE_MAX_M && tags.building !== 'industrial' && tags.building !== 'warehouse';
   const pick = (list: RGB[], t: number) => list[Math.min(list.length - 1, Math.floor(t * list.length))];
-  const [orange, grey] = lowRise ? [0.45, 0.8] : [0, 0.5];
   const t = (seed * 7919) % 1; // second, decorrelated draw for the shade inside the group
+  if (latDeg !== undefined && climateTemperature(latDeg, 0) >= WARM_ROOFS.MIN_C) {
+    if (lowRise && seed < WARM_ROOFS.ORANGE_LOW_RISE) return rgbRamp(pick(ROOF_ORANGE, t));
+    return greyRamp(pick(ROOF_PALE, t));
+  }
+  const [orange, grey] = lowRise ? [0.45, 0.8] : [0, 0.5];
   if (seed < orange) return rgbRamp(pick(ROOF_ORANGE, t));
   return greyRamp(pick(seed < grey ? ROOF_GREY : ROOF_DARK_GREY, t));
 }
@@ -759,7 +771,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const wallBase = base + h.min;
     const wallTop = wallBase + h.wall;
     const wRamp = wallRamp(tags, buildingSeed(outerLL));
-    const rRamp = roofRamp(tags, buildingSeed(outerLL));
+    const rRamp = roofRamp(tags, buildingSeed(outerLL), outerLL[0][1]);
     const isCanopy = tags.building === 'roof';
     const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
@@ -1313,7 +1325,7 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     const y = buildingFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
     out.push(e, y, -n, pointValue(wallRamp(b.tags, buildingSeed(ring))));
-    out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring))));
+    out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring), lat)));
   }
   return new Float32Array(out);
 }

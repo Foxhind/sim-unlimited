@@ -50,7 +50,7 @@ const GLOW_RINGS = 4;
  * the sky on the side away from the sun (SKY_FS): how far it goes toward ANTISUN_TINT (a darker,
  * bluer copy of the band, the Earth's shadow) by day and at dusk, and in how many steps
  */
-const ANTISUN_DAY = 0.25;
+const ANTISUN_DAY = 0.12;
 const ANTISUN_DUSK = 1.0;
 const ANTISUN_STEPS = 4;
 const ANTISUN_TINT = 'vec3(0.42, 0.48, 0.72)';
@@ -115,6 +115,8 @@ const AUREOLE = {
   /** how much of the aureole the haze in front of the ground takes (hazeAt) */
   HAZE: 0.5,
 } as const;
+/** how much of the sky near the horizon water mirrors at a grazing look (waterSurface; Fresnel, stepped) */
+const WATER_SKY_MIRROR = 0.3;
 /** how far the dusk haze is lifted from the sky's colour toward white (hazeAt) */
 const HAZE_LIFT = 0.3;
 /** Earth radius of the curvature drop in the world shaders (wp.y -= d^2 / 2R) and the base ground */
@@ -572,7 +574,8 @@ vec2 waterSlope(vec2 p, float fp) {
   }
   return g;
 }
-vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c) {
+// sky: the sky's colour at the horizon along the look (hazeAt: the aureole toward the sun), which the water mirrors
+vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c, vec3 sky) {
   vec2 fw = abs(jac.xy) + abs(jac.zw);
   if (uGlitter.y <= 0.0 || d.y >= 0.0) return c;
   float fog = fogAt(d * dist, uCamPos.y);
@@ -587,10 +590,10 @@ vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c) {
   float dusk = uGlitter.x * clamp((uGlitterSun.y + 0.12) / 0.1, 0.0, 1.0);
 
   // the sky mirrored by the flat surface: at dusk its bands (the synthwave gradient), by day the
-  // haze in 3 steps
+  // sky near the horizon in 3 steps, pale toward the sun
   float fres = pow(1.0 - clamp(-d.y, 0.0, 1.0), 4.0);
   float fq = floor(fres * 3.0 + 0.5) / 3.0;
-  c = mix(c, uHaze, fq * 0.3 * near);
+  c = mix(c, sky, fq * ${WATER_SKY_MIRROR.toFixed(2)} * near);
   if (dusk > 0.0) {
     float h = pow(1.0 - clamp(-d.y, 0.0, 1.0), 1.6) * ${SKY_BANDS}.0;
     vec3 sky = lutColor(${MAT.SKY * 16}u + uint(min(floor(h), ${SKY_BANDS - 1}.0)));
@@ -1263,7 +1266,7 @@ void main() {
 #ifndef NO_WATER
   if (vWater > 0.5) {
     float dist = length(vRay);
-    c = waterSurface(gWinD, wxz, jac, dist, c);
+    c = waterSurface(gWinD, wxz, jac, dist, c, vHaze);
     // the haze over it, per pixel (WORLD_VS leaves it out of open water's face colour)
     c = hazeMix(c, vHaze, fogAt(vRay, uCamPos.y));
   }
@@ -1668,7 +1671,7 @@ void main() {
       // the base ground's climate: at the camera's latitude, at the ground's height
       float tempC = climateTemp(vec3(uCamPos.x, uCamPos.y - uGroundH, uCamPos.z));
       oColor = vec4(shadeColour(uGroundRamp, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), tempC), 1.0);
-      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u && !frozenWater(uGroundRamp, tempC)) oColor.rgb = waterSurface(dir, seaXZ, seaJac, t, oColor.rgb);
+      if (uGroundRamp == ${MATERIAL_FLAG | MAT.SEA}u && !frozenWater(uGroundRamp, tempC)) oColor.rgb = waterSurface(dir, seaXZ, seaJac, t, oColor.rgb, hazeAt(dir));
       return;
     }
   }

@@ -70,9 +70,11 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   quarry: { colour: [214, 206, 190], mode: 'normal', strength: 0.85 },
   construction: { colour: [176, 148, 112], mode: 'normal', strength: 0.7 },
   // a town from the air: grey roofs and streets, white walls, terracotta and trees, which average to
-  // a near-neutral grey (aerial panorama of Fethiye: 113, 115, 108), whatever the climate colour under it
-  residential: { colour: [142, 137, 134], mode: 'normal', strength: 0.8 },
-  commercial: { colour: [150, 146, 142], mode: 'normal', strength: 0.8 },
+  // a rosy grey (aerial panoramas of Fethiye: 125, 125, 124 in the afternoon, 139, 126, 129 in the
+  // morning), whatever the climate colour under it. It stands for the houses where OSM has none
+  // and beyond the distance houses are drawn to, so it is the roofs' mean, not bare ground
+  residential: { colour: [144, 137, 136], mode: 'normal', strength: 0.85 },
+  commercial: { colour: [152, 142, 140], mode: 'normal', strength: 0.85 },
   industrial: { colour: [156, 156, 154], mode: 'normal', strength: 0.8 },
 };
 

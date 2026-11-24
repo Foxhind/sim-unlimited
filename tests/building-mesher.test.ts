@@ -413,6 +413,26 @@ describe('colors', () => {
     expect(roofRamp({ 'roof:shape': 'flat', 'roof:material': 'copper' })).toBe(colour(96, 160, 140));
   });
 
+  it('in a warm climate an untagged roof is terracotta or pale concrete, never dark; OSM still wins', () => {
+    const low = { building: 'house', height: '6', 'roof:shape': 'gabled' };
+    const flat = { building: 'apartments', height: '15' };
+    const lum = (ramp: number) => { const [r, g, b] = rgbOf(ramp); return 0.299 * r + 0.587 * g + 0.114 * b; };
+    const terracotta = (ramp: number) => { const [r, g, b] = rgbOf(ramp); return r > g + 40 && g > b; };
+    let orange = 0;
+    for (let i = 0; i < 200; i++) {
+      const seed = i / 200;
+      const fethiye = roofRamp(low, seed, 36.6);
+      if (terracotta(fethiye)) orange++;
+      else expect(lum(fethiye)).toBeGreaterThan(150);
+      expect(terracotta(roofRamp(flat, seed, 36.6))).toBe(false);
+      expect(lum(roofRamp(flat, seed, 36.6))).toBeGreaterThan(150);
+      // a cool climate keeps the old mix, as does no latitude at all
+      expect(roofRamp(low, seed, 55.7)).toBe(roofRamp(low, seed));
+    }
+    expect(orange / 200).toBeGreaterThan(0.5);
+    expect(roofRamp({ ...low, 'roof:colour': '#404040' }, 0.1, 36.6)).toBe(colour(0x40, 0x40, 0x40));
+  });
+
   it('picks an untagged roof deterministically: grey/dark grey, orange only on low-rise pitched roofs', () => {
     const tall = { building: 'apartments', height: '40', 'roof:shape': 'gabled' };
     const low = { building: 'house', height: '6', 'roof:shape': 'gabled' };

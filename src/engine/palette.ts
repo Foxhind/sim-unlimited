@@ -204,7 +204,7 @@ interface MaterialRamp {
 const MATERIALS: MaterialRamp[] = [
   { dark: [20, 44, 18], light: [82, 120, 58] }, // grass
   { dark: [8, 22, 16], light: [46, 66, 52] }, // forest: the dark blue-green of pine as it looks from the air
-  { dark: [10, 32, 44], light: [48, 106, 122] }, // water: a sea blue with some green in it, as coastal water from the air
+  { dark: [4, 26, 44], light: [22, 90, 122] }, // water: the deep blue of the sea from the air (Fethiye bay on a clear morning: 30,97,121 to 42,119,151)
   { dark: [56, 56, 56], light: [172, 172, 172] }, // concrete
   { dark: [72, 28, 16], light: [168, 92, 56] }, // brick
   { dark: [30, 30, 32], light: [128, 126, 122] }, // asphalt: sunlit roads from the air are a mid grey
@@ -325,15 +325,16 @@ const DAY: PaletteParams = {
  * between and the aureole round the sun do the rest (shaders.ts AIR_HAZE, AUREOLE).
  */
 const SUNNY_DAY: PaletteParams = {
-  zenith: [72, 138, 200],
-  skyMid: [78, 150, 205],
-  skyLow: [156, 190, 212],
-  // the haze: far ranges and fully hazed ground, a grey-blue darker than the sky just above them
-  horizon: [132, 164, 186],
+  zenith: [66, 146, 214],
+  skyMid: [78, 172, 232],
+  skyLow: [172, 222, 242],
+  // the haze: far ranges, far sea and fully hazed ground, a sky blue darker than the sky just above
+  // them (a clear morning over Fethiye: 104,180,232 over the far sea; the afternoon's ranges greyer)
+  horizon: [126, 184, 224],
   sunGlow: DAYLIGHT_GLOW,
   glow: 0,
-  // from the air water takes the blue of the sky above it
-  waterSky: 0.35,
+  // from the air water takes a little of the blue of the sky above it
+  waterSky: 0.2,
   aureole: 1,
   lightMul: 1.0,
   tint: [1.0, 0.99, 0.96],

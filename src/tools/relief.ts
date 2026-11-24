@@ -11,6 +11,7 @@ import { Renderer } from '../engine/renderer';
 import { DEPTH_FAR, REVERSED_NEAR } from '../engine/shaders';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
 import { CLOUD_RGB } from '../world/clouds';
+import { hazeDensity } from '../world/haze';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { farOsmTiles } from '../world/far-osm';
 import { FarOsmManager } from '../world/far-osm-manager';
@@ -1013,8 +1014,9 @@ function init(): void {
 
 /**
  * A view given in the page's query, to set beside a photograph taken from the same place:
- * ?fly=lat,lon,alt,heading,pitch starts free flight there (degrees; metres above sea level), and
- * ?at=<ISO instant> puts the sun and the moon where they stood at that moment.
+ * ?fly=lat,lon,alt,heading,pitch starts free flight there (degrees; metres above sea level),
+ * ?at=<ISO instant> puts the sun and the moon where they stood at that moment, and ?aod=<optical
+ * depth> sets the haze to that day's aerosol (haze.ts; without it the game's default).
  */
 function startFromQuery(): void {
   const q = new URLSearchParams(location.search);
@@ -1029,6 +1031,8 @@ function startFromQuery(): void {
   }
   const at = new Date(q.get('at') ?? '');
   if (!Number.isNaN(at.getTime())) Object.assign(state, solarClock(at, state.centre.lon), { byTime: true });
+  const aod = parseFloat(q.get('aod') ?? '');
+  if (Number.isFinite(aod)) renderer.hazeDensity = hazeDensity({ aod });
 }
 
 init();
