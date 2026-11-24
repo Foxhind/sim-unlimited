@@ -6,7 +6,7 @@ import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorl
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
 import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
-import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
+import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
 import { ALL_STRUCTURES, shownRanges, STRUCTURE } from './structure-kinds';
@@ -175,6 +175,17 @@ export function farLightSize(pointSize: number): number {
  * OSM of the detailed z14 tiles (Q32, M2). The terrain manager decides which tiles are detailed
  * and shows one only when its OSM here is ready; this draws the OSM of exactly the shown ones.
  */
+/**
+ * How many of a tile's instances of one type to draw: of the trees the first share kept at the
+ * tile's nearest point to the eye (props-mesher TREE_THIN: no tree of the tile is kept past it, the
+ * shader thins the rest by each one's own distance); every other prop.
+ */
+function thinned(t: TreeSet, c: { centerEnu: vec3; radius: number }, camPos: vec3): number {
+  if (t.type >= TREE_TYPES) return t.count;
+  const near = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2]) - c.radius * 0.71;
+  return Math.ceil(t.count * treeKeep(near));
+}
+
 export class OsmManager {
   readonly chunks = new Map<string, OsmChunk>();
   renderList: OsmChunk[] = [];
@@ -625,7 +636,8 @@ export class OsmManager {
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
         for (const t of c.trees) {
           if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
-          renderer.drawTrees(t.vao, t.count, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          const n = thinned(t, c, camPos);
+          renderer.drawTrees(t.vao, n, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, t.type >= TREE_TYPES ? 0 : t.count);
         }
       }
       if (c.lights && lights) {
@@ -661,7 +673,8 @@ export class OsmManager {
       const slant = slantTo(c, camPos) - c.radius * 0.71;
       for (const t of c.trees) {
         if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
-        renderer.shadowTrees(t.vao, t.count, t.first, t.vertexCount, c.offset);
+        const n = thinned(t, c, camPos);
+        renderer.shadowTrees(t.vao, n, t.first, t.vertexCount, c.offset, t.type >= TREE_TYPES ? 0 : t.count);
       }
     }
   }

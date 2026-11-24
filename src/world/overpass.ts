@@ -41,7 +41,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 }
 
 // Land cover comes from Landsat (terrain colours): of OSM areas only farmland, water, beach, scrub,
-// bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched only to plant trees,
+// bare rock, parks, car parks and airfield surfaces are filled; wood/forest is fetched to plant trees and shade their floor,
 // orchards for their rows of trees and a tint, vineyards for a tint; of other landuse the zones below.
 // Land zones tint the ground the climate colours alike in town and out of it (way-styles landZone);
 // a town's own and its quarries far too, so a town stands out of the land round it from afar.

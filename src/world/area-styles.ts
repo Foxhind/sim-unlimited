@@ -6,7 +6,7 @@ import { blend, type BlendMode, type RGB } from '../engine/palette';
  * blended with the kind's colour in the kind's mode, `strength` 0..1 of the way from the imagery.
  * Area style editor (areas.html) tunes them; the game uses DEFAULT_AREA_STYLES.
  */
-export type AreaKind = 'scrub' | 'beach' | 'rock' | 'cliff' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland' |
+export type AreaKind = 'forest' | 'scrub' | 'beach' | 'rock' | 'cliff' | 'farmland' | 'orchard' | 'vineyard' | 'pitch' | 'park' | 'garden' | 'golf' | 'wetland' |
   'grass' | 'meadow' | 'cemetery' | 'quarry' | 'construction' | 'residential' | 'commercial' | 'industrial';
 
 export interface AreaFilter {
@@ -26,6 +26,7 @@ export const AREA_KINDS: ReadonlyArray<{ kind: AreaKind; name: string; tags: str
   { kind: 'farmland', name: 'Пашня', tags: 'landuse=farmland' },
   { kind: 'orchard', name: 'Фруктовый сад', tags: 'landuse=orchard' },
   { kind: 'vineyard', name: 'Виноградник', tags: 'landuse=vineyard' },
+  { kind: 'forest', name: 'Лес (земля под кронами)', tags: 'landuse=forest, natural=wood' },
   { kind: 'scrub', name: 'Кустарник', tags: 'natural=scrub' },
   { kind: 'wetland', name: 'Болото', tags: 'natural=wetland' },
   { kind: 'beach', name: 'Пляж', tags: 'natural=beach' },
@@ -52,6 +53,9 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   // first guesses, not yet tuned in areas.html: the trees carry an orchard, the filter only tints the soil
   orchard: { colour: [150, 130, 90], mode: 'soft-light', strength: 0.6 },
   vineyard: { colour: [170, 150, 100], mode: 'soft-light', strength: 0.8 },
+  // the floor of a wood, seen between its crowns: their shaded side (palette CANOPY, darker), so the
+  // trees read as one canopy and not as dots on a meadow (first guess, not yet tuned in areas.html)
+  forest: { colour: [34, 48, 40], mode: 'normal', strength: 0.75 },
   scrub: { colour: [104, 192, 80], mode: 'color-burn', strength: 0.2 },
   wetland: { colour: [88, 144, 112], mode: 'soft-light', strength: 1 },
   beach: { colour: [179, 164, 122], mode: 'normal', strength: 0.74 },

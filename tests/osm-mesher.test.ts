@@ -128,15 +128,15 @@ describe('buildOsmMesh', () => {
     for (let i = 0; i < m.vertexCount; i++) expect(m.ramps[i]).toBe(snowy(RAMP.FOREST));
   });
 
-  it('skips wood/forest (trees only) and landuse with no zone; draws the land zones', () => {
+  it('skips landuse with no zone; draws the land zones and the floor of a wood', () => {
     const count = (tags: Record<string, string>) => {
       const data: OsmTileData = { areas: [{ rings: [squareRing()], tags }], lines: [], points: [], buildings: [] };
       return buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount;
     };
-    for (const tags of [{ natural: 'wood' }, { landuse: 'forest' }, { landuse: 'military' }, { landuse: 'farmyard' }] as Record<string, string>[]) {
+    for (const tags of [{ landuse: 'military' }, { landuse: 'farmyard' }] as Record<string, string>[]) {
       expect(count(tags), JSON.stringify(tags)).toBe(0);
     }
-    for (const tags of [{ landuse: 'residential' }, { landuse: 'commercial' }, { landuse: 'meadow' }, { landuse: 'grass' }] as Record<string, string>[]) {
+    for (const tags of [{ natural: 'wood' }, { landuse: 'forest' }, { landuse: 'residential' }, { landuse: 'commercial' }, { landuse: 'meadow' }, { landuse: 'grass' }] as Record<string, string>[]) {
       expect(count(tags), JSON.stringify(tags)).toBeGreaterThan(0);
     }
   });

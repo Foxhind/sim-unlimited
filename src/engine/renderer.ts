@@ -255,7 +255,7 @@ export class Renderer {
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uThinCount', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -340,7 +340,7 @@ export class Renderer {
     this.shadowProg = createProgram(gl, depthed(SHADOW_VS), depthed(SHADOW_FS));
     this.shadowU = uniformMap(gl, this.shadowProg, ['uShadowMat', 'uOffset', 'uCamPos', 'uCoarse']);
     this.shadowTreeProg = createProgram(gl, depthed(SHADOW_TREE_VS), depthed(SHADOW_FS));
-    this.shadowTreeU = uniformMap(gl, this.shadowTreeProg, ['uShadowMat', 'uOffset', 'uCamPos']);
+    this.shadowTreeU = uniformMap(gl, this.shadowTreeProg, ['uShadowMat', 'uOffset', 'uCamPos', 'uThinCount']);
     for (const { prog, u } of [...Object.values(this.world), { prog: this.treeProg, u: this.treeU }]) {
       gl.useProgram(prog);
       gl.uniform1i(u.uShadowMap, SHADOW_UNIT);
@@ -421,10 +421,11 @@ export class Renderer {
   }
 
   /** Sun shadows, step 2: instanced trees, as drawTrees draws them. */
-  shadowTrees(vao: WebGLVertexArrayObject, count: number, first: number, vertexCount: number, offset: vec3 | vec4): void {
+  shadowTrees(vao: WebGLVertexArrayObject, count: number, first: number, vertexCount: number, offset: vec3 | vec4, thinCount = 0): void {
     const gl = this.gl;
     gl.useProgram(this.shadowTreeProg);
     setPlacement(gl, this.shadowTreeU.uOffset, offset);
+    gl.uniform1f(this.shadowTreeU.uThinCount, thinCount);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
   }
@@ -790,11 +791,14 @@ export class Renderer {
     sunDir: vec3,
     fogStart: number,
     fogEnd: number,
+    /** the instances of the whole run, of which `count` are the first: far trees thinned (TREE_THIN); 0: all drawn as they are */
+    thinCount = 0,
   ): void {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
     gl.useProgram(this.treeProg);
+    gl.uniform1f(this.treeU.uThinCount, thinCount);
     gl.uniform1f(this.treeU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.treeU.uView, false, view);
     gl.uniformMatrix4fv(this.treeU.uProj, false, proj);

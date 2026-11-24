@@ -97,7 +97,8 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   if (tags.amenity === 'parking' && isOpenCarPark(tags)) return { ramp: withGlow(RAMP.ASPHALT, UNLIT_ROAD_GLOW), bias: CAR_PARK_BIAS, water: false };
   // an open-air pool: a turquoise patch of its own, not the sea's colour (none under a roof or on one)
   if (leisure === 'swimming_pool') return isOpenPool(tags) ? { ramp: colourOf(POOL_RGB), bias: POOL_BIAS, water: false } : undefined;
-  // no fill for wood/forest (trees only, props-mesher) or landuse other than farmland: Landsat colours the terrain
+  // a wood's floor under its trees (props-mesher plants them): the shade between the crowns
+  if (natural === 'wood' || landuse === 'forest') return ground(RAMP.FOREST, 0.6, 'forest');
   if (natural === 'scrub') return ground(RAMP.FOREST, 0.6, 'scrub');
   if (natural === 'beach') return ground(RAMP.SAND, 0.6, 'beach');
   // a cliff's band (cliffs.ts) before the bare rock it is tagged as

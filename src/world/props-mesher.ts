@@ -66,6 +66,36 @@ const LIGHT_CENTER = rampIndex(RAMP.EMISSIVE, 10);
 const LIGHT_THRESHOLD = rampIndex(RAMP.HUD_GREEN, 13);
 const LIGHT_TAXI = LIGHT.TAXI_BLUE;
 
+/**
+ * Far trees are thinned: beyond NEAR_M a falling share of a tile's trees is drawn, down to KEEP at
+ * FAR_M, and those left are widened by 1 / sqrt(share) (their height by its square root), so the
+ * canopy covers the same ground with fewer of them. A tree's rank is its place in its type's run of
+ * the instances (shuffled: any first part of a run is an even sample of the tile's trees); it is
+ * drawn where the share at its distance exceeds its rank, growing over the last GROW of the share
+ * (no popping). The shader does it per tree (shaders TREE_THIN_GLSL), the tile drawing only the
+ * first share of each run at its nearest point (treeKeep).
+ */
+export const TREE_THIN = { NEAR_M: 500, FAR_M: 2000, KEEP: 0.25, GROW: 0.2 } as const;
+/** the share of the trees drawn `d` metres from the eye */
+export function treeKeep(d: number): number {
+  const t = Math.max(0, Math.min(1, (d - TREE_THIN.NEAR_M) / (TREE_THIN.FAR_M - TREE_THIN.NEAR_M)));
+  return 1 + (TREE_THIN.KEEP - 1) * t;
+}
+
+/** shuffles the instances (TREE_STRIDE floats each) in place, the same way for the same seed */
+function shuffleInstances(inst: number[], seed: number): void {
+  const rng = mulberry32(seed);
+  for (let i = inst.length / TREE_STRIDE - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    for (let k = 0; k < TREE_STRIDE; k++) {
+      const a = i * TREE_STRIDE + k, b = j * TREE_STRIDE + k;
+      const v = inst[a];
+      inst[a] = inst[b];
+      inst[b] = v;
+    }
+  }
+}
+
 /** tree silhouettes; the instance's type field picks one */
 export const TREE = { SPRUCE: 0, BROADLEAF: 1, PINE: 2, CYPRESS: 3, PALM: 4 } as const;
 export const TREE_TYPES = 5;
@@ -588,6 +618,10 @@ export function buildProps(opts: PropsOptions): PropsData {
       }
     }
   }
+
+  // each type's trees in a random order, whatever wood or orchard they stand in: the far tiles draw
+  // the first part of each run (TREE_THIN)
+  byType.forEach((inst, type) => shuffleInstances(inst, (tile.z * 2654435761) ^ (tile.x * 40503) ^ (tile.y * 69069) ^ type));
 
   // yachts at the marinas' pontoons, from the whole pontoons (their sterns in the tile)
   const yachts = mooredYachts(marinaPontoons(data), tile, sampleHeight, enu).flat();

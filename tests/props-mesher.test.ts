@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { LIGHT, RAMP, rampIndex, snowy } from '../src/engine/palette';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
 import { buildOsmMesh } from '../src/world/osm-mesher';
-import { buildProps, climateLatitude, FOREST, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeColour, treeWeights } from '../src/world/props-mesher';
+import { buildProps, climateLatitude, FOREST, INSTANCE, MARINA, ORCHARD, TREE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_THIN, TREE_VERTEX_FLOATS, treeColour, treeKeep, treeWeights } from '../src/world/props-mesher';
 import type { OsmTileData } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -164,10 +164,45 @@ describe('buildProps trees (Q36)', () => {
     expect(wet.trees.length).toBe(0);
   });
 
-  it('plants trees in forest whose fill the drape no longer draws', () => {
+  it('plants trees in a forest over its shaded floor', () => {
     const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
     expect(props(data).trees.length).toBeGreaterThan(0);
-    expect(buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount).toBe(0);
+    expect(buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: flat }).vertexCount).toBeGreaterThan(0);
+  });
+
+  it('keeps every tree near, a falling share farther, TREE_THIN.KEEP from FAR_M on', () => {
+    expect(treeKeep(0)).toBe(1);
+    expect(treeKeep(TREE_THIN.NEAR_M)).toBe(1);
+    expect(treeKeep((TREE_THIN.NEAR_M + TREE_THIN.FAR_M) / 2)).toBeCloseTo((1 + TREE_THIN.KEEP) / 2, 6);
+    expect(treeKeep(TREE_THIN.FAR_M)).toBeCloseTo(TREE_THIN.KEEP, 6);
+    expect(treeKeep(50000)).toBeCloseTo(TREE_THIN.KEEP, 6);
+  });
+
+  it('the first quarter of a type\u2019s trees is spread over every wood of the tile (far tiles draw only it)', () => {
+    // two woods, west and east of the tile's middle: planted one after the other
+    const b = tileBounds(TILE);
+    const mid = (b.west + b.east) / 2, w = (b.east - b.west) * 0.3, s = b.south + (b.north - b.south) * 0.2, n = b.north - (b.north - b.south) * 0.2;
+    const wood = (x0: number, x1: number): [number, number][] => [[x0, s], [x1, s], [x1, n], [x0, n], [x0, s]];
+    const tags = { landuse: 'forest', leaf_type: 'needleleaved' };
+    const data: OsmTileData = { ...empty, areas: [{ rings: [wood(mid - w, mid - w / 3)], tags }, { rings: [wood(mid + w / 3, mid + w)], tags }] };
+    const t = props(data).trees;
+    for (let start = 0; start < t.length;) {
+      let end = start;
+      while (end < t.length && t[end + 5] === t[start + 5]) end += TREE_STRIDE;
+      const total = (end - start) / TREE_STRIDE, first = Math.ceil(total * TREE_THIN.KEEP);
+      if (total >= 200) {
+        let west = 0;
+        for (let i = 0; i < first; i++) if (t[start + i * TREE_STRIDE] < 0) west++;
+        expect(west / first).toBeGreaterThan(0.35);
+        expect(west / first).toBeLessThan(0.65);
+      }
+      start = end;
+    }
+  });
+
+  it('plants the same trees in the same order every time', () => {
+    const data: OsmTileData = { ...empty, areas: [{ rings: [squareRing()], tags: { landuse: 'forest' } }] };
+    expect(Array.from(props(data).trees)).toEqual(Array.from(props(data).trees));
   });
 
   it('foliage takes the ramp given for the ground under each tree', () => {

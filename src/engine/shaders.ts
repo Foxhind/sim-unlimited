@@ -5,6 +5,7 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
+import { TREE_THIN } from '../world/props-mesher';
 import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
@@ -1049,6 +1050,23 @@ void main() {
   gl_Position = shadowClip(wp);
 }
 `;
+/**
+ * Thinning of the far trees (props-mesher TREE_THIN): the scale of this instance, x across and y
+ * up; x 0: not drawn. uThinCount: the instances of the whole run (0: not thinned, as the lamp
+ * posts and the yachts drawn with the trees).
+ */
+const TREE_THIN_GLSL = `
+uniform float uThinCount;
+vec2 treeThin(vec3 at) {
+  if (uThinCount <= 0.0) return vec2(1.0);
+  float keep = mix(1.0, ${TREE_THIN.KEEP.toFixed(3)}, clamp((length(at - uCamPos) - ${TREE_THIN.NEAR_M.toFixed(1)}) / ${(TREE_THIN.FAR_M - TREE_THIN.NEAR_M).toFixed(1)}, 0.0, 1.0));
+  float rank = (float(gl_InstanceID) + 0.5) / uThinCount;
+  float grow = clamp((keep - rank) / (${TREE_THIN.GROW.toFixed(3)} * keep), 0.0, 1.0);
+  float wide = inversesqrt(keep);
+  return vec2(wide, sqrt(wide)) * grow;
+}
+`;
+
 /** a caster in the shadow map: instanced trees (TREE_VS) */
 export const SHADOW_TREE_VS = `#version 300 es
 precision highp float;
@@ -1058,10 +1076,15 @@ layout(location=4) in vec2 aInstSR;
 layout(location=6) in float aInstYaw;
 uniform vec4 uOffset;
 uniform vec3 uCamPos;
-${PLACE_VS}${SHADOW_CLIP_GLSL}
+${PLACE_VS}${SHADOW_CLIP_GLSL}${TREE_THIN_GLSL}
 void main() {
+  vec2 thin = treeThin(toWorld(aInstPos));
+  if (thin.x <= 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
   float cy = cos(aInstYaw), sy = sin(aInstYaw);
-  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z);
+  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z) * thin.xyx;
   vec3 wp = toWorld(lp * aInstSR.x + aInstPos);
   vec2 r = wp.xz - uCamPos.xz;
   wp.y -= dot(r, r) / (2.0 * 6371000.0);
@@ -1329,16 +1352,23 @@ out vec2 vWinUV;
 flat out vec3 vWinEdge;
 flat out vec3 vRef;
 out vec3 vBary;
-${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}
+${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}${TREE_THIN_GLSL}
 void main() {
+  // a far tree thinned out (TREE_THIN): off the screen, before any of the lighting
+  vec2 thin = treeThin(toWorld(aInstPos));
+  if (thin.x <= 0.0) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    return;
+  }
   int corner = gl_VertexID % 3;
   vBary = vec3(corner == 0, corner == 1, corner == 2);
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
   vRef = vec3(0.0);
   float cy = cos(aInstYaw), sy = sin(aInstYaw);
-  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z);
-  vec3 ln = vec3(cy * aNormal.x - sy * aNormal.z, aNormal.y, sy * aNormal.x + cy * aNormal.z);
+  vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z) * thin.xyx;
+  // widened more than raised: the normal by the inverse
+  vec3 ln = vec3(cy * aNormal.x - sy * aNormal.z, aNormal.y, sy * aNormal.x + cy * aNormal.z) / thin.xyx;
   vec3 wp = toWorld(lp * aInstSR.x + aInstPos);
   vWater = 0.0;
   vRay = vec3(0.0, 1.0, 0.0);
