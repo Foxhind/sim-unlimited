@@ -9,6 +9,7 @@ import { buildProps } from '../world/props-mesher';
 import { insertAt } from '../world/bridge-mesher';
 import { buildPiers } from '../world/pier-mesher';
 import { buildRuins } from '../world/ruin-mesher';
+import { buildAerialways } from '../world/aerialway-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { buildPower } from '../world/power-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
@@ -28,8 +29,8 @@ import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls)
-export const OSM_MESH_SCHEMA = 91;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts
+export const OSM_MESH_SCHEMA = 92;
 
 export interface OsmRequest {
   type: 'osm';
@@ -253,9 +254,11 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const power = buildPower(tile, data.lines, drape);
     // and the ruins (ruin-mesher.ts): roofless walls, left out of the houses (building-mesher isRuin)
     const ruins = buildRuins(tile, own, drape);
+    // and the cable cars and chair lifts (aerialway-mesher.ts) from the whole lines: their ropes with the conductors
+    const lifts = buildAerialways(tile, data.lines, data.points, drape);
     const solid = {
-      vertices: concatF32(concatF32(concatF32(concatF32(mesh.bridges.vertices, piers.vertices), minarets.vertices), power.vertices), ruins.vertices),
-      ramps: concatU32(concatU32(concatU32(concatU32(mesh.bridges.ramps, piers.ramps), minarets.ramps), power.ramps), ruins.ramps),
+      vertices: [mesh.bridges.vertices, piers.vertices, minarets.vertices, power.vertices, ruins.vertices, lifts.vertices].reduce(concatF32),
+      ramps: [mesh.bridges.ramps, piers.ramps, minarets.ramps, power.ramps, ruins.ramps, lifts.ramps].reduce(concatU32),
     };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
     const bmesh = {
@@ -294,7 +297,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       roadLines: mesh.roadLines.slice().buffer,
       pitchLines: mesh.pitchLines.slice().buffer,
       lamps: mesh.lamps.slice().buffer,
-      wires: power.wires.slice().buffer,
+      wires: concatF32(power.wires, lifts.ropes).slice().buffer,
     };
     // under the raw it was built from (just fetched, or kept)
     if (useCache) await putCachedMesh({ key: keyOf(await rawNow()), ts: Date.now(), ...out });

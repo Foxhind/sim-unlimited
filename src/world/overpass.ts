@@ -46,6 +46,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Cliff lines give bands of bare rock (cliffs.ts), summits their height to the relief (peaks.ts).
 // Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
 // Power lines stand their pylons or poles at their vertices and hang their conductors (power-mesher.ts).
+// Cable cars and chair lifts: their pylons and stations by the nodes, ropes and cabins (aerialway-mesher.ts).
 const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
 const TOWN_LAND_ZONES = '^(residential|commercial|retail|industrial|quarry)$';
 const FULL_FILTER = `
@@ -70,6 +71,7 @@ const FULL_FILTER = `
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];
   node["man_made"="tower"]["tower:type"="minaret"]; way["man_made"="tower"]["tower:type"="minaret"];
   way["power"~"^(line|minor_line)$"];
+  way["aerialway"~"^(gondola|cable_car|chair_lift|mixed_lift)$"]; node["aerialway"~"^(pylon|station)$"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
@@ -151,7 +153,7 @@ function isPierTags(tags: Record<string, string>): boolean {
 
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
-    tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags) || tags.power === 'line' || tags.power === 'minor_line';
+    tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags) || tags.power === 'line' || tags.power === 'minor_line' || tags.aerialway !== undefined;
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {
@@ -197,7 +199,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina')) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined)) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);

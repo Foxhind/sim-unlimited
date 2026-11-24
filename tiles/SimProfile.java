@@ -62,6 +62,9 @@ public class SimProfile implements Profile {
   /** overpass.ts LAND_ZONES, and the open land's natural ones (way-styles landZone) */
   static final Pattern LAND_ZONE = Pattern.compile("^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$");
   static final Pattern NATURAL_ZONE = Pattern.compile("^(grassland|heath)$");
+  /** overpass.ts: the lifts aerialway-mesher draws, and their pylons and stations */
+  static final Pattern LIFT = Pattern.compile("^(gondola|cable_car|chair_lift|mixed_lift)$");
+  static final Pattern LIFT_NODE = Pattern.compile("^(pylon|station)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -72,7 +75,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway");
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -126,6 +129,7 @@ public class SimProfile implements Profile {
       find(LEISURE, s(f, "leisure")) || "marina".equals(s(f, "leisure")) ||
       find(PIER, s(f, "man_made")) ||
       "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
+      find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
       isMast(f);
   }
@@ -147,7 +151,7 @@ public class SimProfile implements Profile {
 
   static boolean nodeWanted(SourceFeature f) {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
-      "marina".equals(s(f, "leisure"));
+      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway"));
   }
 
   static Map<String, Object> keptTags(SourceFeature f) {
