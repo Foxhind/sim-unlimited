@@ -15,16 +15,16 @@ import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-style
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
-import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
+import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
-import { BALLAST_RAMP, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
-export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone';
+export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone' | 'belt';
 
 /** seniority of the covers: the lower lies over the higher where they overlap */
 export const COVER_RANK: Record<CoverKind, number> = {
-  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11, zone: 12,
+  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11, zone: 12, belt: 13,
 };
 
 export interface CoverShape {
@@ -100,8 +100,20 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
       const ramp = shape.kind === 'pitch' && isLitPitch(shape.source) ? withGlow(style.ramp, PITCH_GLOW) : style.ramp;
       return style.filter && imagery ? withGlow(snowy(colourOf(filterColour(imagery, style.filter))), rampGlowLevel(ramp)) : ramp;
     }
+    case 'belt': {
+      // the ground's own colour halfway to the area's; without imagery the area's ramp (terrain-mesher keeps the ground's)
+      const style = classifyArea(tags, styles), filter = beltFilter(tags, styles);
+      const ramp = style?.ramp ?? RAMP.GRASS;
+      return filter && imagery ? withGlow(snowy(colourOf(filterColour(imagery, filter))), rampGlowLevel(ramp)) : ramp;
+    }
   }
 }
+
+/**
+ * An area's transition belt reaches this far out of it, metres: a ribbon this wide each side of its
+ * rings, whose inner half the area itself covers (it is senior)
+ */
+export const BELT_M = 20;
 
 /** lift is probed along a way at least this often, metres */
 const LIFT_PROBE_M = 10;
@@ -418,8 +430,9 @@ function areaKind(tags: Record<string, string>, style: AreaStyle): CoverKind {
  * The ground covers of `tile` on its lattice of `grid` cells a side, from the whole ways, areas and
  * points round it; `roads` (the tile's roads with their heights) decide which stretches are lifted
  * as the mesh lifts them (coverLifted). Whatever lies wholly outside the tile gives no shape.
+ * `belts` false leaves the areas' transition belts out.
  */
-export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, roads?: RoadSurface): GroundCover {
+export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, roads?: RoadSurface, belts = true): GroundCover {
   const center = tileCenter(tile);
   /** ENU metres (x east, z south) about the tile's centre, as the OSM mesh has them */
   const enu = (lon: number, lat: number): P2 => {
@@ -595,9 +608,21 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
         const tris = new Float64Array(idx.length * 2);
         idx.forEach((v, k) => { tris[2 * k] = coords[2 * v]; tris[2 * k + 1] = coords[2 * v + 1]; });
         add(areaKind(area.tags, style), area, 0, tris, kept.map((r) => [...r, r[0]]));
+        if (belts && beltFilter(area.tags, DEFAULT_AREA_STYLES)) buildBelt(area, kept);
       }
     }
     if (area.tags.leisure === 'pitch') buildPitchPaint(area);
+  };
+
+  /**
+   * An area's transition belt (BELT_M): the band along its rings (ringBand), one shape for them
+   * all. It is the junior of every cover: it shows only on the bare ground round the area (or in
+   * its holes), the area covering its inner half (and the surface its edge there: GroundCover.outside).
+   */
+  const buildBelt = (area: OsmArea, rings: P2[][]): void => {
+    const r = BELT_M * latticePerMetre;
+    const g = ringBand(rings, r, capSides(BELT_M, CAP_TOL_M), [-r, -r, grid + r, grid + r]);
+    if (g.tris.length) add('belt', area, 0, flat(g.tris), g.outline);
   };
 
   /**

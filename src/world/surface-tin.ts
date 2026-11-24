@@ -309,12 +309,19 @@ function coverUnits(
   /** each covered way's bank (cut to the tile): its lines once it is picked */
   const shores = new Map<Unit, Pt[][]>();
   const bySource = new Map<object, Unit>();
+  /** an area's transition belt is a unit of its own (after every area's: the first the budget drops) */
+  const belts = new Map<object, object>();
   cover.shapes.forEach((s, si) => {
-    let u = bySource.get(s.source);
+    let key: object = s.source;
+    if (s.kind === 'belt') {
+      if (!belts.has(s.source)) belts.set(s.source, {});
+      key = belts.get(s.source)!;
+    }
+    let u = bySource.get(key);
     if (!u) {
       const road = s.kind === 'carriageway' || s.kind === 'shoulder';
       u = { lines: [], count: 0, shapes: [], rank: budgetRank(s.kind), prio: s.prio, tie: road ? tieBreak((s.source as OsmLine).points[0]) : 0, first: si };
-      bySource.set(s.source, u);
+      bySource.set(key, u);
       units.push(u);
     }
     u.shapes.push(si);

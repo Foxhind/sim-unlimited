@@ -238,6 +238,124 @@ export function ribbonGeom(c: P2[], half: number | number[], ends: RibbonEnds, l
   return { tris, triSeg, outline, cuts, cutAt };
 }
 
+/**
+ * The band within `r` (lattice units) of closed rings `rings` (their last point not repeated), as
+ * the union of a rectangle along each side and a `sides`-gon round each vertex: its triangles (the
+ * pieces', overlapping) and its edge, the parts of the pieces' edges no other piece holds — so the
+ * edge is the triangles' own boundary however short the sides and sharp the turns (a ribbon's mitred
+ * inner side is not, where its sides fold over). Only the pieces reaching box [x0, y0, x1, y1] are
+ * kept: the others hold nothing in it.
+ */
+export function ringBand(rings: ReadonlyArray<ReadonlyArray<P2>>, r: number, sides: number, box: [number, number, number, number]): { tris: P2[]; outline: P2[][] } {
+  /** the pieces: convex polygons, counter-clockwise */
+  const pieces: P2[][] = [];
+  const reaches = (pts: P2[]) => {
+    let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+    for (const [x, y] of pts) { a = Math.min(a, x); b = Math.min(b, y); c = Math.max(c, x); d = Math.max(d, y); }
+    return c >= box[0] && a <= box[2] && d >= box[1] && b <= box[3];
+  };
+  for (const ring of rings) {
+    const n = ring.length;
+    const discs = ring.map((a) => {
+      const disc: P2[] = [];
+      for (let k = 0; k < sides; k++) { const t = (k / sides) * 2 * Math.PI; disc.push([a[0] + Math.cos(t) * r, a[1] + Math.sin(t) * r]); }
+      return disc;
+    });
+    // a side's rectangle with the discs at both its ends: its ends, across the ring, lie in them
+    const kept = discs.map(reaches);
+    for (let i = 0; i < n; i++) {
+      const a = ring[i], b = ring[(i + 1) % n], v = sub(b, a), l = Math.hypot(v[0], v[1]);
+      if (l < 1e-12) continue;
+      const nx = (-v[1] / l) * r, ny = (v[0] / l) * r;
+      const rect: P2[] = [[a[0] - nx, a[1] - ny], [b[0] - nx, b[1] - ny], [b[0] + nx, b[1] + ny], [a[0] + nx, a[1] + ny]];
+      if (!reaches(rect)) continue;
+      pieces.push(rect);
+      kept[i] = kept[(i + 1) % n] = true;
+    }
+    discs.forEach((d, i) => { if (kept[i]) pieces.push(d); });
+  }
+  const tris: P2[] = [];
+  for (const p of pieces) for (let k = 1; k < p.length - 1; k++) tris.push(p[0], p[k], p[k + 1]);
+  const np = pieces.length;
+  // each piece's box, and its edges as half-planes nx·x + ny·y <= c (inside: left of the edge, counter-clockwise)
+  const boxes = new Float64Array(np * 4), planes: Float64Array[] = [];
+  pieces.forEach((p, i) => {
+    let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+    const h = new Float64Array(p.length * 3);
+    p.forEach(([x, y], k) => {
+      a = Math.min(a, x); b = Math.min(b, y); c = Math.max(c, x); d = Math.max(d, y);
+      const [qx, qy] = p[(k + 1) % p.length], ex = qx - x, ey = qy - y, l = Math.hypot(ex, ey) || 1;
+      // left of the edge: −ey·(px − x) + ex·(py − y) > 0, i.e. ey·px − ex·py < ey·x − ex·y
+      h[3 * k] = ey / l; h[3 * k + 1] = -ex / l; h[3 * k + 2] = (ey * x - ex * y) / l;
+    });
+    boxes.set([a, b, c, d], 4 * i);
+    planes.push(h);
+  });
+  // the pieces by the cells (2r a side) their boxes overlap
+  const cell = 2 * r || 1, grid = new Map<number, number[]>();
+  const key = (gx: number, gy: number) => gx * 1048576 + gy;
+  for (let i = 0; i < np; i++) {
+    for (let gx = Math.floor(boxes[4 * i] / cell); gx <= Math.floor(boxes[4 * i + 2] / cell); gx++) for (let gy = Math.floor(boxes[4 * i + 1] / cell); gy <= Math.floor(boxes[4 * i + 3] / cell); gy++) {
+      const l = grid.get(key(gx, gy));
+      if (l) l.push(i); else grid.set(key(gx, gy), [i]);
+    }
+  }
+  /** the stretch (t0, t1) of p→q strictly inside convex piece `j` (EPS in), or undefined */
+  const EPS = 1e-9;
+  const inside = (j: number, px: number, py: number, dx: number, dy: number): [number, number] | undefined => {
+    const h = planes[j];
+    let t0 = 0, t1 = 1;
+    for (let k = 0; k < h.length; k += 3) {
+      // margin inside at p, and its change along p→q
+      const f0 = h[k + 2] - h[k] * px - h[k + 1] * py, df = -(h[k] * dx + h[k + 1] * dy);
+      if (Math.abs(df) < 1e-15) { if (f0 <= EPS) return undefined; continue; }
+      const t = (EPS - f0) / df;
+      if (df > 0) { if (t > t0) t0 = t; } else if (t < t1) t1 = t;
+      if (t0 >= t1) return undefined;
+    }
+    return [t0, t1];
+  };
+  const outline: P2[][] = [];
+  const near: number[] = [], seen = new Int32Array(np).fill(-1);
+  const cut: [number, number][] = [];
+  pieces.forEach((poly, pi) => {
+    near.length = 0;
+    for (let gx = Math.floor(boxes[4 * pi] / cell); gx <= Math.floor(boxes[4 * pi + 2] / cell); gx++) for (let gy = Math.floor(boxes[4 * pi + 1] / cell); gy <= Math.floor(boxes[4 * pi + 3] / cell); gy++) {
+      for (const j of grid.get(key(gx, gy)) ?? []) if (j !== pi && seen[j] !== pi) { seen[j] = pi; near.push(j); }
+    }
+    let line: P2[] = [];
+    const flush = () => { if (line.length > 1) outline.push(line); line = []; };
+    for (let k = 0; k < poly.length; k++) {
+      const p = poly[k], q = poly[(k + 1) % poly.length], dx = q[0] - p[0], dy = q[1] - p[1];
+      const lo = Math.min(p[0], q[0]), hi = Math.max(p[0], q[0]), lo2 = Math.min(p[1], q[1]), hi2 = Math.max(p[1], q[1]);
+      // the stretches of the edge other pieces hold, merged
+      cut.length = 0;
+      for (const j of near) {
+        if (boxes[4 * j + 2] < lo || boxes[4 * j] > hi || boxes[4 * j + 3] < lo2 || boxes[4 * j + 1] > hi2) continue;
+        const s = inside(j, p[0], p[1], dx, dy);
+        if (s) cut.push(s);
+      }
+      cut.sort((x, y) => x[0] - y[0]);
+      const at = (t: number): P2 => [p[0] + dx * t, p[1] + dy * t];
+      let t = 0;
+      const keep = (t0: number, t1: number) => {
+        if (t1 - t0 <= 1e-12) return;
+        if (!line.length || t0 > 0) { flush(); line.push(at(t0)); }
+        line.push(t1 === 1 ? q : at(t1));
+      };
+      for (const [c0, c1] of cut) {
+        if (c1 <= t) continue;
+        if (c0 > t) keep(t, c0);
+        t = Math.max(t, c1);
+      }
+      if (t < 1) keep(t, 1);
+      else flush();
+    }
+    flush();
+  });
+  return { tris, outline };
+}
+
 /** where roads meet: how their ribbons end, shift onto a fork and stop their paint */
 export interface LineNetwork {
   /**

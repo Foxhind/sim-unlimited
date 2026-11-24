@@ -329,7 +329,8 @@ it('drops the parks before the roads when over the budget, and cracks nowhere', 
   const { tin, cover } = coverSurface(denseTown(2500));
   expect(tin.vx.length).toBeLessThanOrEqual(MAX_SURFACE_VERTS);
   expect(tin.loose?.size ?? 0).toBe(0);
-  expect(droppedKinds(tin, cover)).toEqual(['area']);
+  // the parks and their belts (the belts first)
+  expect(droppedKinds(tin, cover)).toEqual(['area', 'belt']);
   expect(cracks(tin)).toBe(0);
 });
 
@@ -416,7 +417,8 @@ it('lays a dropped road over the cover under it: the park it crosses, the bare g
   const parkArea = areaOf({ leisure: 'park' }, polygon(30.2, 21.4, 8.1, 9, 0.2));
   const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
   const net = buildRoadNet([street, lane]), roads = { net, z: solveRoadHeights(net, demOf(net, relief)) };
-  const cover = buildGroundCover(TILE, GRID, { lines: [street], areas: [parkArea], points: [] }, roads);
+  // the park without its belt: the faces under a dropped road are the park's or the bare ground's
+  const cover = buildGroundCover(TILE, GRID, { lines: [street], areas: [parkArea], points: [] }, roads, false);
   const park = cover.shapes.findIndex((s) => s.kind === 'area');
   const ofStreet = (s: number) => s >= 0 && cover.shapes[s].source === street;
   // a budget below the relief's own vertices: every edge left out

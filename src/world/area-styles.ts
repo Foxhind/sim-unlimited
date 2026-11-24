@@ -84,6 +84,15 @@ export function isDefaultAreaStyles(s: AreaStyles): boolean {
   return AREA_KINDS.every(({ kind }) => sameFilter(s[kind], DEFAULT_AREA_STYLES[kind]));
 }
 
+/**
+ * The filter of an area's transition belt (ground-cover 'belt'): half its strength, so the belt's
+ * colour lies halfway between the ground's own and the area's — blend is linear in strength in
+ * every mode
+ */
+export function halfFilter(f: AreaFilter): AreaFilter {
+  return { ...f, strength: f.strength / 2 };
+}
+
 /** an area piece's colour: the imagery colour under it through the kind's filter */
 export function filterColour(base: RGB, f: AreaFilter): RGB {
   return blend(base, f.colour, f.mode, f.strength);

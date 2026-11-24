@@ -660,7 +660,7 @@ describe('roads and water as the terrain’s own faces', () => {
   });
 
   it('still draws a road the budget dropped as a ribbon, lying on the ground’s faces, lifted by nothing', () => {
-    const { opts, tin, cover } = osmMeshOf(looseTown(), rolling, 0);
+    const { opts, tin, cover } = osmMeshOf(looseTown(), rolling, 0, false);
     for (const l of looseTown().lines) expect([...tin.loose!].some((d) => d.tags.name === l.tags.name)).toBe(true);
     const m = buildOsmMesh({ ...opts, cover }), ribbon = buildOsmMesh(opts);
     // the ribbons of today, piece for piece, but on the faces: not LINE_BIAS and more over them (of
@@ -690,11 +690,11 @@ describe('roads and water as the terrain’s own faces', () => {
   });
 
   it('orders the dropped ways’ ribbons by depth levels, as their heights did: shoulder under carriageway, junior under senior', () => {
-    const { opts, cover } = osmMeshOf(looseTown(), rolling, 0);
+    const { opts, cover } = osmMeshOf(looseTown(), rolling, 0, false);
     const m = buildOsmMesh({ ...opts, cover });
     expect(m.roadDepthLevels.length).toBe(m.roads.vertexCount);
     expect(m.depthLevels.length).toBe(m.vertexCount);
-    const { tin } = osmMeshOf(looseTown(), rolling, 0);
+    const { tin } = osmMeshOf(looseTown(), rolling, 0, false);
     const locate = tinLocator(tin, COVER_TILE), c = tileCenter(COVER_TILE);
     /** per TIN face, the lowest and the highest level of a mesh's triangles of one colour on it (by their centres) */
     const levelsOf = (mesh: { vertices: Float32Array; ramps: Uint32Array }, levels: Float32Array, ramp: number, but = false): Map<number, [number, number]> => {

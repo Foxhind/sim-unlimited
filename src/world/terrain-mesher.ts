@@ -218,7 +218,9 @@ export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
       const causeway = kind === 'carriageway' || kind === 'ballast' || kind === 'runway';
       group = causeway ? ROAD : kind === 'water' ? WATER : GROUND;
       // the sea stays the sea, but for a road across it
-      if (!isSeaFace(tin, ti) || causeway) ramp = coverRamp(opts.cover.shapes[shape], styles, imageryOf(t));
+      // a belt keeps the ground's own colour on a face without imagery (nothing to go halfway from)
+      const imagery = imageryOf(t);
+      if ((!isSeaFace(tin, ti) || causeway) && (kind !== 'belt' || imagery)) ramp = coverRamp(opts.cover.shapes[shape], styles, imagery);
     }
     if (levels) ramp = withGlow(ramp, Math.max(rampGlowLevel(ramp), levels[ti]));
     const info = { n: [ax, ay, az] as [number, number, number], ramp, group };

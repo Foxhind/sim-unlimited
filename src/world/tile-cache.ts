@@ -1,5 +1,5 @@
-// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow); 74: summits pull the ground up within PEAK.REACH_M; 75: terrain, zone and roof colours matched to an aerial panorama (climate-colour, area-styles, building-mesher)
-export const SCHEMA_VERSION = 76;
+// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow); 74: summits pull the ground up within PEAK.REACH_M; 75: terrain, zone and roof colours matched to an aerial panorama (climate-colour, area-styles, building-mesher); 76: shaded forest floor; 77: transition belts round the land areas (ground-cover 'belt')
+export const SCHEMA_VERSION = 77;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';

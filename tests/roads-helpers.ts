@@ -305,9 +305,9 @@ export function townMesh(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoi
  * the options without the cover (the mesh of today), the cover and the surface TIN under both;
  * `faceColor` a flat imagery colour on every face
  */
-export function osmMeshOf(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, fn: (xm: number, ym: number) => number, maxSurfaceVerts?: number): { opts: OsmMeshOptions; tin: SurfaceTin; cover: GroundCover } {
+export function osmMeshOf(d: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] }, fn: (xm: number, ym: number) => number, maxSurfaceVerts?: number, belts = true): { opts: OsmMeshOptions; tin: SurfaceTin; cover: GroundCover } {
   const net = buildRoadNet(d.lines), roads = roadSurfaceOf(TILE, d, net, demOf(net, fn));
-  const cover = buildGroundCover(TILE, GRID, d, roads);
+  const cover = buildGroundCover(TILE, GRID, d, roads, belts);
   const tin = buildSurfaceTin(TILE, GRID, lattice(fn), { borders: bordersOf(fn), roads, cover, maxSurfaceVerts });
   const opts: OsmMeshOptions = {
     tile: TILE, detail: 'full', data: { ...d, buildings: [] }, sampleHeight: tinSampler(tin, TILE), tin, roads, faceColor: () => colourOf([90, 140, 60]),

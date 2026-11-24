@@ -4,7 +4,7 @@
  * biases and glows the ground cover is drawn with
  */
 import { colour, colourOf, RAMP, ROAD_MARK, snowy, withGlow, type RGB } from '../engine/palette';
-import type { AreaFilter, AreaKind, AreaStyles } from './area-styles';
+import { halfFilter, type AreaFilter, type AreaKind, type AreaStyles } from './area-styles';
 import { CLIFF_TAG } from './cliffs';
 import type { LonLat } from './osm-types';
 import { pitchSurface } from './pitch-markings';
@@ -121,6 +121,16 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   const zone = landZone(tags);
   if (zone) return ground(ZONE_RAMP[zone], ZONE_BIAS[zone], zone);
   return undefined;
+}
+
+/**
+ * The filter of an area's transition belt, or undefined for none: the land areas drawn through a
+ * filter (classifyArea), but a cliff's band (a strip under a line, not a patch of ground)
+ */
+export function beltFilter(tags: Record<string, string>, styles: AreaStyles): AreaFilter | undefined {
+  if (tags[CLIFF_TAG] === 'yes') return undefined;
+  const f = classifyArea(tags, styles)?.filter;
+  return f && halfFilter(f);
 }
 
 /**

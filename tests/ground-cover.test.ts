@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildGroundCover, COVER_RANK, coverRamp, type CoverShape } from '../src/world/ground-cover';
-import { DEFAULT_AREA_STYLES, filterColour } from '../src/world/area-styles';
+import { BELT_M, buildGroundCover, COVER_RANK, coverRamp, type CoverShape } from '../src/world/ground-cover';
+import { DEFAULT_AREA_STYLES, filterColour, halfFilter } from '../src/world/area-styles';
 import { colourOf, snowy } from '../src/engine/palette';
 import { isOpenPool, POOL_RGB } from '../src/world/way-styles';
 import { overpassQuery } from '../src/world/overpass';
@@ -10,11 +10,12 @@ import { buildTerrainTin, tinSampler } from '../src/world/terrain-tin';
 import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M } from '../src/world/road-levels';
 import { capSides } from '../src/world/ribbon-shapes';
+import { CLIFF_TAG } from '../src/world/cliffs';
 import { buildRoadNet } from '../src/world/road-net';
 import { bridgeDecks } from '../src/world/road-pull';
 import { roadSurfaceOf } from '../src/world/surface-tin';
 import { solveRoadHeights } from '../src/world/road-heights';
-import { classifyLine } from '../src/world/way-styles';
+import { classifyArea, classifyLine } from '../src/world/way-styles';
 import { ROAD_TAPER_M } from '../src/engine/palette';
 import {
   data, demOf, edgeOffsetAtFork, forkFixture, GRID, M, metresOf, park, parkWithHole, pointOnLiftedApproach, pond, rail, railOverRoad, road,
@@ -74,7 +75,7 @@ const shoelace = (r: [number, number][]): number => {
 describe('ground cover', () => {
   it('orders the shapes senior first', () => {
     const c = buildGroundCover(TILE, GRID, data([rail([[4, 32], [60, 32]]), road({ highway: 'primary' }, [[32, 4], [32, 60]])], [park(square(20, 20, 10))]));
-    expect(c.shapes.map((s) => s.kind)).toEqual(['ballast', 'carriageway', 'shoulder', 'railZone', 'area']);
+    expect(c.shapes.map((s) => s.kind)).toEqual(['ballast', 'carriageway', 'shoulder', 'railZone', 'area', 'belt']);
   });
   it('runs the rails over the road at a level crossing', () => {
     const c = buildGroundCover(TILE, GRID, data([rail([[4, 32], [60, 32]]), road({ highway: 'primary' }, [[32, 4], [32, 60]])]));
@@ -115,7 +116,7 @@ describe('ground cover', () => {
 
   it('leaves the hole of a park out of the park’s own triangles', () => {
     const c = buildGroundCover(TILE, GRID, data([], [parkWithHole()]));
-    expect(c.shapes.map((s) => s.kind)).toEqual(['area']);
+    expect(c.shapes.map((s) => s.kind)).toEqual(['area', 'belt']);
     expect(c.locate(32, 32)).toBe(-1);
     expect(c.locate(32, 40)).toBe(0);
     expect(triArea(c.shapes[0])).toBeCloseTo(24 * 24 - 11 * 11, 6);
@@ -214,7 +215,7 @@ describe('ground cover', () => {
     const ll = gridLatLon(TILE, 20, 32, GRID);
     const pad: OsmPoint = { at: [ll.lon, ll.lat], tags: { aeroway: 'helipad' } };
     const c = buildGroundCover(TILE, GRID, data([], [pitch], [pad]));
-    expect(c.shapes.map((s) => s.kind)).toEqual(['aeroArea', 'pitchPaint', 'pitch']);
+    expect(c.shapes.map((s) => s.kind)).toEqual(['aeroArea', 'pitchPaint', 'pitch', 'belt']);
     expect(triArea(c.shapes[0])).toBeCloseTo(256 * M * M, 4);
     const paint = c.shapes[1];
     expect(paint.source).toBe(pitch);
@@ -330,7 +331,7 @@ describe('ground cover', () => {
   });
   it('ranks the covers as the plan does', () => {
     expect(Object.entries(COVER_RANK).sort((a, b) => a[1] - b[1]).map(([k]) => k)).toEqual([
-      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area', 'zone',
+      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area', 'zone', 'belt',
     ]);
   });
   it('an open pool lies over the garden it is in, in its own turquoise; an indoor one is no cover', () => {
@@ -338,7 +339,7 @@ describe('ground cover', () => {
     // a pool about 22 × 22 m in it
     const pool: OsmArea = { ...park(square(22, 22, 11 * M)), tags: { leisure: 'swimming_pool' } };
     const c = buildGroundCover(TILE, GRID, data([], [garden, pool]));
-    expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area']);
+    expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area', 'belt']);
     expect(c.locate(22, 22)).toBe(0);
     expect(c.locate(15, 15)).toBe(1);
     expect(coverRamp(c.shapes[0], DEFAULT_AREA_STYLES, [90, 120, 60])).toBe(colourOf(POOL_RGB));
@@ -355,7 +356,7 @@ describe('ground cover', () => {
     const pool: OsmArea = { ...park(square(30, 30, 8 * M)), tags: { leisure: 'swimming_pool' } };
     for (const areas of [[town, green, pool], [pool, green, town]]) {
       const c = buildGroundCover(TILE, GRID, data([], areas));
-      expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area', 'zone']);
+      expect(c.shapes.map((s) => s.kind)).toEqual(['pool', 'area', 'zone', 'belt', 'belt']);
       expect(c.shapes[2].source).toBe(town);
       expect(c.shapes[c.locate(20, 20)].source).toBe(green);
       expect(c.shapes[c.locate(30, 30)].source).toBe(pool);
@@ -364,10 +365,10 @@ describe('ground cover', () => {
       expect(coverRamp(c.shapes[2], DEFAULT_AREA_STYLES, [122, 126, 70])).toBe(snowy(colourOf(filterColour([122, 126, 70], DEFAULT_AREA_STYLES.residential))));
     }
     for (const tags of [{ landuse: 'meadow' }, { natural: 'grassland' }, { landuse: 'cemetery' }, { amenity: 'grave_yard' }, { landuse: 'quarry' }] as Record<string, string>[]) {
-      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['area']);
+      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['area', 'belt']);
     }
     for (const tags of [{ landuse: 'industrial' }, { landuse: 'retail' }] as Record<string, string>[]) {
-      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['zone']);
+      expect(buildGroundCover(TILE, GRID, data([], [{ ...town, tags }])).shapes.map((s) => s.kind)).toEqual(['zone', 'belt']);
     }
   });
 });
@@ -446,5 +447,77 @@ describe('coverLifted', () => {
     const k = net.ways.findIndex((w) => w.line === approach);
     holed[net.ways[k].first] = NaN;
     expect(coverLifted({ net, z: holed }, levels)(approach, 1)).toBe(true);
+  });
+
+  describe('transition belts', () => {
+    /** a star: long and short spikes, its sides about as long as the belt is wide */
+    const star = (cx: number, cy: number): [number, number][] => Array.from({ length: 24 }, (_, k) => {
+      const a = (2 * Math.PI * k) / 24, r = (k % 2 ? 15 : 40 + 10 * (k % 4)) * M;
+      return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    });
+    const distToRing = (ring: [number, number][], [x, y]: [number, number]) => Math.min(...ring.map((a, i) => {
+      const b = ring[(i + 1) % ring.length], dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
+      const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / l2)) : 0;
+      return Math.hypot(x - a[0] - dx * u, y - a[1] - dy * u);
+    }));
+
+    it('lies BELT_M round an area, under it and under every other cover', () => {
+      // a road along the park's south side, 10 m off it
+      const c = buildGroundCover(TILE, GRID, data([road({ highway: 'primary' }, [[4, 24 + 10 * M], [60, 24 + 10 * M]])], [park(square(32, 20, 4))]));
+      const belt = c.shapes.findIndex((s) => s.kind === 'belt'), area = c.shapes.findIndex((s) => s.kind === 'area');
+      expect(belt).toBe(c.shapes.length - 1);
+      expect(c.locate(32, 20)).toBe(area);
+      // 10 m and 30 m north of the park's north side
+      expect(c.locate(32, 16 - 10 * M)).toBe(belt);
+      expect(c.locate(32, 16 - 30 * M)).toBe(-1);
+      // the road through its south belt is the road's
+      expect(c.shapes[c.locate(32, 24 + 10 * M)].kind).toBe('carriageway');
+    });
+
+    it('is drawn halfway from the ground’s own colour to the area’s', () => {
+      for (const tags of [{ leisure: 'park' }, { landuse: 'farmland' }, { landuse: 'residential' }, { natural: 'wood' }] as Record<string, string>[]) {
+        const c = buildGroundCover(TILE, GRID, data([], [{ ...park(square(32, 32, 4)), tags }]));
+        const belt = c.shapes.find((s) => s.kind === 'belt')!, own = c.shapes.find((s) => s.kind !== 'belt')!;
+        const ground: [number, number, number] = [122, 126, 70];
+        const mid = filterColour(ground, halfFilter(classifyArea(tags, DEFAULT_AREA_STYLES)!.filter!));
+        expect(coverRamp(belt, DEFAULT_AREA_STYLES, ground)).toBe(snowy(colourOf(mid)));
+        const full = filterColour(ground, classifyArea(tags, DEFAULT_AREA_STYLES)!.filter!);
+        for (let i = 0; i < 3; i++) expect(mid[i]).toBeCloseTo((ground[i] + full[i]) / 2, 6);
+        expect(coverRamp(own, DEFAULT_AREA_STYLES, ground)).toBe(snowy(colourOf(full)));
+      }
+    });
+
+    it('none round water, pools, car parks, aerodromes, buildings, a tarmac pitch or a cliff', () => {
+      for (const tags of [{ natural: 'water' }, { leisure: 'swimming_pool' }, { amenity: 'parking' }, { aeroway: 'apron' }, { building: 'yes' },
+        { leisure: 'pitch', surface: 'asphalt' }, { natural: 'bare_rock', [CLIFF_TAG]: 'yes' }] as Record<string, string>[]) {
+        const c = buildGroundCover(TILE, GRID, data([], [{ ...park(square(32, 32, 4)), tags }]));
+        expect(c.shapes.some((s) => s.kind === 'belt'), JSON.stringify(tags)).toBe(false);
+      }
+      // and none at all when asked
+      expect(buildGroundCover(TILE, GRID, data([], [park(square(32, 32, 4))]), undefined, false).shapes.map((s) => s.kind)).toEqual(['area']);
+    });
+
+    it('fills its hole too, and its edge is its triangles’ own boundary however spiky the area', () => {
+      const ring = star(30, 30), hole = square(30, 30, 8 * M);
+      const c = buildGroundCover(TILE, GRID, data([], [park(ring, hole)]));
+      const si = c.shapes.findIndex((s) => s.kind === 'belt'), belt = c.shapes[si], r = BELT_M * M;
+      // in the hole: the belt's
+      expect(c.locate(30, 30)).toBe(si);
+      // every point of its edge BELT_M from the rings (to its discs' chords) and outside the area
+      for (const l of belt.outline) for (const p of l) {
+        const d = Math.min(distToRing(ring, p), distToRing(hole, p));
+        expect(d).toBeGreaterThan(r * Math.cos(Math.PI / capSides(BELT_M, 0.05)) - 1e-6);
+        expect(d).toBeLessThan(r * Math.SQRT2 + 1e-6);
+        expect(c.locate(...p, (sj) => sj === si)).not.toBe(c.shapes.findIndex((s) => s.kind === 'area'));
+      }
+      // across the plane: in the belt's triangles (but the area's) exactly within BELT_M of the rings, to the discs' chords
+      const sag = r * (1 - Math.cos(Math.PI / capSides(BELT_M, 0.05)));
+      for (let x = 30 - 4; x <= 30 + 4; x += 0.0137) for (let y = 30 - 4; y <= 30 + 4; y += 0.0149) {
+        const d = Math.min(distToRing(ring, [x, y]), distToRing(hole, [x, y]));
+        if (Math.abs(d - r) <= sag + 1e-6) continue;
+        const at = c.locate(x, y, (sj) => c.shapes[sj].kind !== 'belt');
+        expect(at === si, `${x}, ${y}`).toBe(d < r);
+      }
+    });
   });
 });

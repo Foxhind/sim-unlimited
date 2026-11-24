@@ -21,7 +21,7 @@ import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { clipToBox, depthLevels, type LevelItem } from './depth-levels';
 import {
-  AEROWAY_LINE_BIAS, classifyArea, classifyLine, isBridge, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
+  AEROWAY_LINE_BIAS, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isTunnel, LIT_ROAD_GLOW, PITCH_GLOW, PITCH_LINE_BIAS, RAIL_ZONE_M,
   RAIL_ZONE_RAMP, ROAD_LAYER_STEP_M, ROAD_RANK_STEP_M, ROAD_TIE_M, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, UNLIT_ROAD_GLOW,
 } from './way-styles';
 export {
@@ -1002,7 +1002,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const shape = cover.shapes[si], wet = shape.kind === 'water';
       const out = wet ? water : main, part = partOf(out);
       // an area with a filter: the imagery of the face under each piece through it, as the terrain colours its faces (coverRamp)
-      const filter = shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
+      const filter = shape.kind === 'belt' ? beltFilter(shape.source.tags, styles)
+        : shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
       const ramp = coverRamp(shape, styles, undefined);
       const over: LeftOut = (fc, _lifts, f) => fc === si || (fc >= 0 && fc < si) || (wet ? onBank(f) : isSeaFace(tin, f));
       const t = shape.tris;

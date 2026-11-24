@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { colourOf, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, snowy, withGlow } from '../src/engine/palette';
-import { DEFAULT_AREA_STYLES } from '../src/world/area-styles';
+import { DEFAULT_AREA_STYLES, filterColour, halfFilter } from '../src/world/area-styles';
 import { buildGroundCover, coverRamp } from '../src/world/ground-cover';
 import { buildOsmMesh, LIT_PITCH_LINE_INDEX, PITCH_LINE_INDEX } from '../src/world/osm-mesher';
 import { buildTerrainTin } from '../src/world/terrain-tin';
-import { PITCH_GLOW } from '../src/world/way-styles';
+import { classifyArea, PITCH_GLOW } from '../src/world/way-styles';
 import { LIT_ROAD_GLOW, SHOULDER_RAMP } from '../src/world/way-styles';
 import { areaOf, data as osmData, GRID as GRID_TOWN, kindsInRange, lattice, M, rail, road, TILE as TOWN_TILE, townFixture, townMesh, vertexOfFace } from './roads-helpers';
 import { isSeaFace } from '../src/world/terrain-tin';
@@ -233,10 +233,10 @@ describe('coverRamp: the colours the ribbons and areas have today', () => {
     ['taxiway area', osmData([], [big(30, 30, { aeroway: 'taxiway' })]), ['aeroArea']],
     ['car park', osmData([], [big(30, 30, { amenity: 'parking' })]), ['carPark']],
     ['lake', osmData([], [big(30, 30, { natural: 'water' })]), ['water']],
-    ['park (filter)', osmData([], [big(30, 30, { leisure: 'park' })]), ['area']],
-    ['farmland (filter)', osmData([], [big(30, 30, { landuse: 'farmland' })]), ['area']],
-    ['lit grass pitch (filter)', osmData([], [pitch(105, 68, { sport: 'soccer' })]), ['pitch', 'pitchPaint']],
-    ['unlit grass pitch (filter)', osmData([], [pitch(20, 12, { sport: 'soccer' })]), ['pitch', 'pitchPaint']],
+    ['park (filter)', osmData([], [big(30, 30, { leisure: 'park' })]), ['area', 'belt']],
+    ['farmland (filter)', osmData([], [big(30, 30, { landuse: 'farmland' })]), ['area', 'belt']],
+    ['lit grass pitch (filter)', osmData([], [pitch(105, 68, { sport: 'soccer' })]), ['pitch', 'pitchPaint', 'belt']],
+    ['unlit grass pitch (filter)', osmData([], [pitch(20, 12, { sport: 'soccer' })]), ['pitch', 'pitchPaint', 'belt']],
     ['lit tarmac pitch', osmData([], [pitch(105, 68, { sport: 'tennis', surface: 'asphalt' })]), ['pitch', 'pitchPaint']],
     ['unlit tarmac pitch', osmData([], [pitch(20, 12, { sport: 'tennis', surface: 'asphalt' })]), ['pitch', 'pitchPaint']],
   ];
@@ -258,6 +258,10 @@ describe('coverRamp: the colours the ribbons and areas have today', () => {
           expect(m.pitchLines.length).toBeGreaterThan(0);
           expect(m.pitchLines[3]).toBe(lit ? LIT_PITCH_LINE_INDEX : PITCH_LINE_INDEX);
           expect(LIT_PITCH_LINE_INDEX).toBe(PITCH_GLOW * LUT_SIZE + rampIndex(RAMP.SNOW, 10));
+        } else if (shape.kind === 'belt') {
+          // new with the cover (the OSM mesh had none): the imagery halfway to the area's colour
+          const f = classifyArea(shape.source.tags, DEFAULT_AREA_STYLES)!.filter!;
+          expect(withGlow(ramp, 0)).toBe(snowy(colourOf(filterColour(imagery, halfFilter(f)))));
         } else expect(drawn, shape.kind).toContain(ramp);
       }
     });
