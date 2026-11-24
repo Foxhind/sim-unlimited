@@ -37,6 +37,19 @@ const DEFS: Record<Exclude<WeatherPreset, 'real'>, PresetDef> = {
 /** under a precipitation preset the dew point sits this far below the temperature: a cloud base 500 m up */
 const WET_SPREAD_C = 4;
 
+/**
+ * A cloud cover chosen by hand (?clouds= or a preset on the start screen) under this, %, brings no
+ * rain, snow or thunderstorm: the live weather's precipitation under a sky made mostly clear
+ */
+export const PRECIP_MIN_CLOUD_PCT = 50;
+
+/** the weather without its precipitation and thunderstorm when its cloud cover is under PRECIP_MIN_CLOUD_PCT */
+export function dryUnderThinCloud(w: Weather): Weather {
+  if (w.cloudPct >= PRECIP_MIN_CLOUD_PCT) return w;
+  if ((w.precipKind ?? 'none') === 'none' && !w.precipMmH && !w.thunder) return w;
+  return { ...w, precipKind: 'none', precipMmH: 0, thunder: false };
+}
+
 /** the weather with a preset applied; 'real' is the live weather as it is (undefined until it arrives) */
 export function applyPreset(w: Weather | undefined, preset: WeatherPreset, at: LatLon, nowMs: number): Weather | undefined {
   if (preset === 'real') return w;
@@ -46,7 +59,7 @@ export function applyPreset(w: Weather | undefined, preset: WeatherPreset, at: L
   const shift = tempC - base.tempC;
   const levels = base.levels ?? [];
   const wet = d.kind !== 'none';
-  return {
+  return dryUnderThinCloud({
     ...base,
     tempC,
     // the shift of the surface temperature fades with height, as a forced temperature's does (airConditions)
@@ -61,5 +74,5 @@ export function applyPreset(w: Weather | undefined, preset: WeatherPreset, at: L
     thunder: d.thunder,
     visibilityM: undefined,
     gustMs: d.gustOver === undefined ? base.gustMs : Math.max(base.gustMs, base.windMs + d.gustOver),
-  };
+  });
 }

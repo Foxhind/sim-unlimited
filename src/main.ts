@@ -27,7 +27,7 @@ import { timeForPreset } from './world/time-of-day';
 import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from './world/weather';
 import { CLOUD_RGB, cloudLayers, underDecks, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
-import { applyPreset, parsePreset, type WeatherPreset } from './world/weather-preset';
+import { applyPreset, dryUnderThinCloud, parsePreset, type WeatherPreset } from './world/weather-preset';
 import { hazeDensity } from './world/haze';
 import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM, STORM_DAY_LIT } from './world/precipitation';
 import { boltPath, Lightning } from './world/lightning';
@@ -198,6 +198,8 @@ function weatherInForce(): Weather | undefined {
         windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
         precipKind: w?.precipKind, precipMmH: w?.precipMmH, thunder: w?.thunder, visibilityM: w?.visibilityM, aod: w?.aod,
       };
+    // a cloud cover set by hand under PRECIP_MIN_CLOUD_PCT: no rain, snow or thunderstorm from the live weather
+    if (inForce && cloudsOverride !== undefined) inForce = dryUnderThinCloud(inForce);
   }
   return inForce;
 }

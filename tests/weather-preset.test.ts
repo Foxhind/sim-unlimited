@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { cloudLayers } from '../src/world/clouds';
 import type { Weather } from '../src/world/weather';
-import { applyPreset, parsePreset, WEATHER_PRESETS } from '../src/world/weather-preset';
+import { applyPreset, dryUnderThinCloud, parsePreset, PRECIP_MIN_CLOUD_PCT, WEATHER_PRESETS } from '../src/world/weather-preset';
 
 const AT = { lat: 47.26, lon: 11.34 };
 const LIVE: Weather = {
@@ -59,5 +59,28 @@ describe('weather presets', () => {
     expect(parsePreset('hail')).toBe('real');
     expect(parsePreset('')).toBe('real');
     expect(parsePreset(undefined)).toBe('real');
+  });
+});
+
+describe('no precipitation under a thin cloud cover set by hand', () => {
+  const wet: Weather = { ...LIVE, cloudPct: 40, precipKind: 'rain', precipMmH: 3, thunder: true };
+
+  it('under PRECIP_MIN_CLOUD_PCT: no rain, snow or thunderstorm, the rest as it was', () => {
+    const d = dryUnderThinCloud(wet);
+    expect(d).toMatchObject({ precipKind: 'none', precipMmH: 0, thunder: false, cloudPct: 40, windMs: wet.windMs, tempC: wet.tempC });
+  });
+
+  it('from PRECIP_MIN_CLOUD_PCT up the weather as it is, the same object', () => {
+    const at50 = { ...wet, cloudPct: PRECIP_MIN_CLOUD_PCT };
+    expect(dryUnderThinCloud(at50)).toBe(at50);
+    // a dry thin sky is returned as it is too
+    expect(dryUnderThinCloud(LIVE)).toBe(LIVE);
+  });
+
+  it('every start-screen preset keeps its precipitation only with clouds from PRECIP_MIN_CLOUD_PCT', () => {
+    for (const p of WEATHER_PRESETS) {
+      const w = applyPreset({ ...LIVE, precipKind: 'rain', precipMmH: 2 }, p, AT, 0)!;
+      if (p !== 'real' && w.cloudPct < PRECIP_MIN_CLOUD_PCT) expect(w.precipKind, p).toBe('none');
+    }
   });
 });
