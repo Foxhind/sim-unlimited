@@ -381,7 +381,9 @@ describe('line widths from OSM', () => {
     const sel = parseFilter(osmFilter('full'));
     const fetched = (v: string) => sel.some((s) => s.type === 'way' && s.clauses.some((c) => c.key === 'waterway' && c.re?.test(v)));
     for (const ww of ['river', 'riverbank', 'canal', 'stream', 'brook', 'ditch', 'drain']) expect(fetched(ww)).toBe(true);
-    expect(fetched('dam')).toBe(false);
+    // dams and weirs too, for their bodies (dam-mesher), not as water
+    expect(fetched('dam')).toBe(true);
+    expect(fetched('lock_gate')).toBe(false);
   });
 });
 
