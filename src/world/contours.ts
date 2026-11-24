@@ -334,6 +334,9 @@ class FlipSet {
  * cannot be inserted (it crosses another or passes through a point) is counted in `missing`.
  * Triangles are counter-clockwise. Deterministic.
  */
+/** a triangle whose height is under this fraction of its longest edge is a needle (constrainedDelaunay's flips make none) */
+const THIN = 1e-5;
+
 export function constrainedDelaunay(
   points: Pt[],
   constraints: ReadonlyArray<readonly [number, number]>,
@@ -369,6 +372,15 @@ export function constrainedDelaunay(
   const orient = (a: number, b: number, c: number) => (px[b] - px[a]) * (py[c] - py[a]) - (py[b] - py[a]) * (px[c] - px[a]);
   const span = spanOf(points);
   const tol = 1e-10 * span * span;
+  /**
+   * (nearly) zero area for its size: its height under THIN of its longest edge. The tolerance of the
+   * tile's span alone let a needle 1.7e-5 m high and 55 m long through (14/8710/5744): a vertex on
+   * the next face's edge, 2.5 cm off its height
+   */
+  const thin = (a: number, b: number, c: number) => {
+    const l2 = Math.max((px[b] - px[a]) ** 2 + (py[b] - py[a]) ** 2, (px[c] - px[b]) ** 2 + (py[c] - py[b]) ** 2, (px[a] - px[c]) ** 2 + (py[a] - py[c]) ** 2);
+    return Math.abs(orient(a, b, c)) <= THIN * l2;
+  };
   const prev = (e: number) => (e % 3 === 0 ? e + 2 : e - 1);
   const link = (e: number, o: number) => {
     he[e] = o;
@@ -395,7 +407,7 @@ export function constrainedDelaunay(
         const p = tri[e2], q = tri[o2];
         // Delaunator's triangles turn clockwise (y up): the quad a, p, b, q; the new triangles
         // (p, a, q) and (q, b, p) must turn the same way, with area
-        if (orient(p, a, q) >= -tol || orient(q, b, p) >= -tol) continue;
+        if (orient(p, a, q) >= -tol || orient(q, b, p) >= -tol || thin(p, a, q) || thin(q, b, p)) continue;
         // counter-clockwise, b→a has apex p and a→b apex q
         const want = b < a ? prefer(b, a, p, q) : prefer(a, b, q, p);
         if (!want) continue;
