@@ -9,7 +9,7 @@ let osmJson: string | undefined;
 let osmTs = 0;
 
 vi.mock('../src/world/tile-cache', () => ({
-  SCHEMA_VERSION: 67,
+  SCHEMA_VERSION: 68,
   getCachedMesh: async (key: string) => store.get(key),
   putCachedMesh: async (r: { key: string }) => void store.set(r.key, r),
   getOsmRaw: async () => (osmJson ? { key: 'raw', ts: osmTs, json: osmJson } : undefined),
@@ -123,7 +123,7 @@ describe('the OSM worker with the covers', () => {
     for (const k of ['levels', 'rLevels', 'wLevels']) expect(again.res[k].byteLength).toBe(res[k].byteLength);
   });
 
-  it('is cache schema 81', () => {
-    expect(OSM_MESH_SCHEMA).toBe(81);
+  it('is cache schema 82', () => {
+    expect(OSM_MESH_SCHEMA).toBe(82);
   });
 });
