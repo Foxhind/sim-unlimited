@@ -51,7 +51,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Cable cars and chair lifts: their pylons and stations by the nodes, ropes and cabins (aerialway-mesher.ts).
 // Lighthouses and the sea's charted lights: towers, posts and beacons, flashing at night (lighthouse-mesher.ts).
 // Tombs: rock-cut fronts, Lycian sarcophagi and pillar tombs (tomb-mesher.ts); an outline at its middle.
-// Walls: garden, retaining and town walls as solid bands along their lines (wall-mesher.ts); fences are not fetched.
+// Walls and fences: garden, retaining and town walls, fences, as solid bands along their lines (wall-mesher.ts).
 // Dams and weirs mapped as lines: an embankment, a sill (dam-mesher.ts).
 // Single trees and tree rows: props-mesher plants them as the woods' trees.
 const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
@@ -81,7 +81,7 @@ const FULL_FILTER = `
   way["aerialway"~"^(gondola|cable_car|chair_lift|mixed_lift)$"]; node["aerialway"~"^(pylon|station)$"];
   node["man_made"~"^(lighthouse|beacon)$"]; way["man_made"="lighthouse"]; node["seamark:type"~"^(light_major|light_minor|beacon_)"];
   node["tomb"]; way["tomb"];
-  way["barrier"~"^(wall|retaining_wall|city_wall)$"];
+  way["barrier"~"^(wall|retaining_wall|city_wall|fence)$"];
   way["waterway"~"^(dam|weir)$"];
   node["natural"="tree"]; way["natural"="tree_row"];
   node["entrance"];
@@ -170,7 +170,7 @@ function isPierTags(tags: Record<string, string>): boolean {
 function isLineTags(tags: Record<string, string>): boolean {
   return tags.highway !== undefined || tags.railway !== undefined || tags.waterway !== undefined || tags.aeroway !== undefined ||
     tags.natural === 'coastline' || tags.natural === 'cliff' || isPierTags(tags) || tags.power === 'line' || tags.power === 'minor_line' || tags.aerialway !== undefined ||
-    tags.barrier === 'wall' || tags.barrier === 'retaining_wall' || tags.barrier === 'city_wall' || tags.natural === 'tree_row';
+    tags.barrier === 'wall' || tags.barrier === 'retaining_wall' || tags.barrier === 'city_wall' || tags.barrier === 'fence' || tags.natural === 'tree_row';
 }
 
 function hasBuildingTags(tags: Record<string, string>): boolean {

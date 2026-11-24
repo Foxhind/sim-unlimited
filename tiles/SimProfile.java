@@ -67,7 +67,7 @@ public class SimProfile implements Profile {
   static final Pattern LIFT_NODE = Pattern.compile("^(pylon|station)$");
   static final Pattern SEA_LIGHT = Pattern.compile("^(lighthouse|beacon)$");
   /** overpass.ts: the walls wall-mesher stands */
-  static final Pattern WALL = Pattern.compile("^(wall|retaining_wall|city_wall)$");
+  static final Pattern WALL = Pattern.compile("^(wall|retaining_wall|city_wall|fence)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -78,7 +78,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};

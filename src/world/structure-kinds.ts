@@ -62,7 +62,7 @@ export const STRUCTURE_LABELS: Record<StructureKind, string> = {
   [STRUCTURE.LIFT]: 'канатные дороги и подъёмники',
   [STRUCTURE.LIGHTHOUSE]: 'маяки и огни',
   [STRUCTURE.TOMB]: 'гробницы (tomb=*)',
-  [STRUCTURE.WALL]: 'стены (wall, retaining_wall, city_wall)',
+  [STRUCTURE.WALL]: 'стены и заборы (wall, retaining_wall, city_wall, fence)',
   [STRUCTURE.STADIUM]: 'трибуны стадионов',
   [STRUCTURE.DAM]: 'плотины и водосливы',
 };

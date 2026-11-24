@@ -7,14 +7,17 @@ import type { HeightSampler } from './terrain-source';
 /**
  * Walls (barrier=wall | retaining_wall | city_wall): a garden's or a field's wall following the
  * ground; a retaining wall from the lower ground (on the right of the line, as OSM maps it) up to
- * the higher; a town's wall high and thick, crenellated (Gemiler island's Byzantine one). Each a
- * solid band along the line, its joints mitred; a piece drawn by the tile holding its middle.
- * Fences and hedges are left out: from the air they are under a pixel.
+ * the higher; a town's wall high and thick, crenellated (Gemiler island's Byzantine one). Fences
+ * (barrier=fence): a thin panel on the ground, coloured by its fence_type or material, its height
+ * within FENCE_MAX_M (a stone one is a dry-stone wall). Each a solid band along the line, its
+ * joints mitred; a piece drawn by the tile holding its middle. Hedges are left out.
  */
 export const WALL = {
   /** height, thickness by kind (`height` and `width` tags over them) */
-  HEIGHT_M: { wall: 1.8, retaining_wall: 1.5, city_wall: 6 } as Record<WallKind, number>,
-  THICK_M: { wall: 0.3, retaining_wall: 0.5, city_wall: 2.5 } as Record<WallKind, number>,
+  HEIGHT_M: { wall: 1.8, retaining_wall: 1.5, city_wall: 6, fence: 1.5 } as Record<WallKind, number>,
+  THICK_M: { wall: 0.3, retaining_wall: 0.5, city_wall: 2.5, fence: 0.06 } as Record<WallKind, number>,
+  /** a fence's tagged height kept within this (9.9 m on a Fethiye fence is a slip) */
+  FENCE_MAX_M: 4,
   /** a dry-stone wall: lower and thicker */
   DRY: { HEIGHT_M: 1.2, THICK_M: 0.6 },
   /** into the ground under it */
@@ -27,20 +30,27 @@ export const WALL = {
   MITER_LIMIT: 2,
   COLOURS: {
     concrete: [180, 178, 172], stone: [188, 178, 156], dry_stone: [176, 164, 140], brick: [164, 92, 72], wood: [140, 108, 80],
+    metal: [122, 126, 130], steel: [122, 126, 130], chain_link: [138, 142, 144], bars: [96, 98, 102], railing: [96, 98, 102],
+    wire: [138, 142, 144], mesh: [138, 142, 144], split_rail: [146, 112, 82], pole: [146, 112, 82], picket: [168, 136, 100],
   } as Record<string, RGB>,
+  /** a fence without a known fence_type or material: painted metal */
+  FENCE: [118, 122, 126] as RGB,
   STONE: [184, 174, 152] as RGB,
 } as const;
 
-export type WallKind = 'wall' | 'retaining_wall' | 'city_wall';
+export type WallKind = 'wall' | 'retaining_wall' | 'city_wall' | 'fence';
 
 export function wallKind(tags: Record<string, string>): WallKind | undefined {
   const b = tags.barrier;
-  return b === 'wall' || b === 'retaining_wall' || b === 'city_wall' ? b : undefined;
+  return b === 'wall' || b === 'retaining_wall' || b === 'city_wall' || b === 'fence' ? b : undefined;
 }
 
+/** a fence of stone (fence_type=stone, material=stone) stands as a dry-stone wall */
+const stoneFence = (tags: Record<string, string>): boolean => tags.barrier === 'fence' && (tags.fence_type === 'stone' || tags.material === 'stone');
+
 function wallColour(tags: Record<string, string>, kind: WallKind): RGB {
-  const m = (tags.material ?? tags.wall ?? '').toLowerCase();
-  return WALL.COLOURS[m] ?? (kind === 'wall' ? WALL.COLOURS.concrete : WALL.STONE);
+  const m = (kind === 'fence' ? tags.fence_type ?? tags.material ?? '' : tags.material ?? tags.wall ?? '').toLowerCase();
+  return WALL.COLOURS[m] ?? WALL.COLOURS[(tags.material ?? '').toLowerCase()] ?? (kind === 'fence' ? WALL.FENCE : kind === 'wall' ? WALL.COLOURS.concrete : WALL.STONE);
 }
 
 export interface WallData {
@@ -98,10 +108,11 @@ export function buildWalls(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
   for (const l of lines) {
     const kind = wallKind(l.tags);
     if (!kind || l.points.length < 2) continue;
-    const dry = (l.tags.wall ?? l.tags.material) === 'dry_stone';
-    const H = parseLength(l.tags.height) ?? (dry ? WALL.DRY.HEIGHT_M : WALL.HEIGHT_M[kind]);
+    const dry = (l.tags.wall ?? l.tags.material) === 'dry_stone' || stoneFence(l.tags);
+    const tagged = parseLength(l.tags.height);
+    const H = (kind === 'fence' && tagged !== undefined ? Math.min(WALL.FENCE_MAX_M, tagged) : tagged) ?? (dry ? WALL.DRY.HEIGHT_M : WALL.HEIGHT_M[kind]);
     const T = parseLength(l.tags.width) ?? (dry ? WALL.DRY.THICK_M : WALL.THICK_M[kind]);
-    const ramp = snowy(colourOf(wallColour(l.tags, kind)));
+    const ramp = snowy(colourOf(stoneFence(l.tags) ? WALL.COLOURS.dry_stone : wallColour(l.tags, kind)));
     const pts = l.points.map(toXZ);
     const n = pts.length;
     const closed = n > 3 && pts[0][0] === pts[n - 1][0] && pts[0][1] === pts[n - 1][1];

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
+import { colourOf, snowy } from '../src/engine/palette';
 import { buildWalls, WALL, wallKind } from '../src/world/wall-mesher';
 import type { LonLat, OsmLine } from '../src/world/osm-types';
 import { overpassQuery, parseOverpass } from '../src/world/overpass';
@@ -27,11 +28,12 @@ function windingAgrees(v: Float32Array): void {
 }
 
 describe('wallKind', () => {
-  it('walls, retaining walls, town walls; not fences or hedges', () => {
+  it('walls, retaining walls, town walls, fences; not hedges or gates', () => {
     expect(wallKind({ barrier: 'wall' })).toBe('wall');
     expect(wallKind({ barrier: 'retaining_wall' })).toBe('retaining_wall');
     expect(wallKind({ barrier: 'city_wall' })).toBe('city_wall');
-    for (const b of ['fence', 'hedge', 'gate']) expect(wallKind({ barrier: b })).toBeUndefined();
+    expect(wallKind({ barrier: 'fence' })).toBe('fence');
+    for (const b of ['hedge', 'gate']) expect(wallKind({ barrier: b })).toBeUndefined();
   });
 });
 
@@ -72,20 +74,34 @@ describe('buildWalls', () => {
     windingAgrees(m.vertices);
   });
 
-  it('a piece by the tile holding its middle only; nothing for a fence', () => {
+  it('a piece by the tile holding its middle only; nothing for a hedge', () => {
     const b = tileBounds(TILE);
     const across: OsmLine = { tags: { barrier: 'wall' }, points: [[b.east - 0.0002, c.lat], [b.east + 0.0001, c.lat]] };
     const here = buildWalls(TILE, [across], flat).ramps.length, east = buildWalls({ ...TILE, x: TILE.x + 1 }, [across], flat).ramps.length;
     expect(here === 0).not.toBe(east === 0);
-    expect(buildWalls(TILE, [{ tags: { barrier: 'fence' }, points: [at(0, 0), at(20, 0)] }], flat).ramps.length).toBe(0);
+    expect(buildWalls(TILE, [{ tags: { barrier: 'hedge' }, points: [at(0, 0), at(20, 0)] }], flat).ramps.length).toBe(0);
+  });
+
+  it('a fence: a thin panel FENCE height high, its tagged height within FENCE_MAX_M, coloured by its type; a stone one a dry-stone wall', () => {
+    const fence = (tags: Record<string, string>) => buildWalls(TILE, [{ tags: { barrier: 'fence', ...tags }, points: [at(0, 0), at(20, 0)] }], flat);
+    const plain = fence({});
+    expect(Math.max(...col(plain.vertices, 1))).toBeCloseTo(20 + WALL.HEIGHT_M.fence, 4);
+    expect(Math.max(...col(plain.vertices, 2).map(Math.abs))).toBeCloseTo(WALL.THICK_M.fence / 2, 3);
+    expect(plain.ramps[0]).toBe(snowy(colourOf(WALL.FENCE)));
+    expect(Math.max(...col(fence({ height: '9.9' }).vertices, 1))).toBeCloseTo(20 + WALL.FENCE_MAX_M, 4);
+    expect(fence({ fence_type: 'wood' }).ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.wood)));
+    expect(fence({ fence_type: 'chain_link' }).ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.chain_link)));
+    const stone = fence({ fence_type: 'stone' });
+    expect(Math.max(...col(stone.vertices, 1))).toBeCloseTo(20 + WALL.DRY.HEIGHT_M, 4);
+    expect(stone.ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.dry_stone)));
   });
 });
 
 describe('fetching the walls', () => {
-  it('walls, retaining and town walls, near; no fences', () => {
+  it('walls, retaining and town walls and fences, near; no hedges', () => {
     const q = overpassQuery(TILE, 'full');
-    expect(q).toContain('way["barrier"~"^(wall|retaining_wall|city_wall)$"];');
-    expect(q).not.toContain('fence');
+    expect(q).toContain('way["barrier"~"^(wall|retaining_wall|city_wall|fence)$"];');
+    expect(q).not.toContain('hedge');
     expect(overpassQuery(TILE, 'large')).not.toContain('barrier');
   });
 

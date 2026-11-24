@@ -139,7 +139,7 @@ describe('the OSM worker with the covers', () => {
     for (const k of ['levels', 'rLevels', 'wLevels']) expect(again.res[k].byteLength).toBe(res[k].byteLength);
   });
 
-  it('is cache schema 104', () => {
-    expect(OSM_MESH_SCHEMA).toBe(104);
+  it('is cache schema 105', () => {
+    expect(OSM_MESH_SCHEMA).toBe(105);
   });
 });

@@ -17,7 +17,7 @@ const API: OverpassJson = {
     way(101, [5, 6], { highway: 'corridor' }),
     way(102, [5, 6], { highway: 'primary_link', name: 'Link' }),
     way(103, [9, 10], { highway: 'proposed' }),
-    way(104, [1, 2, 3, 4, 1], { barrier: 'fence' }),
+    way(104, [1, 2, 3, 4, 1], { barrier: 'hedge' }),
     { type: 'relation', id: 200, members: [{ type: 'way', ref: 104, role: 'outer' }], tags: { type: 'multipolygon', landuse: 'farmland' } },
     { type: 'relation', id: 201, members: [{ type: 'way', ref: 103, role: 'outer' }], tags: { type: 'route', route: 'bus' } },
   ],
@@ -53,7 +53,7 @@ describe('filterOsmApi', () => {
   it('keeps tags only on matched elements; members and geometry nodes are bare', () => {
     const get = (k: string) => out.elements.find((e) => `${e.type[0]}${e.id}` === k)!;
     expect(get('w100').tags).toEqual({ building: 'yes' });
-    expect(get('w104').tags).toBeUndefined(); // fence, only an outer member of the grass multipolygon
+    expect(get('w104').tags).toBeUndefined(); // hedge, only an outer member of the grass multipolygon
     expect(get('n8').tags).toEqual({ aeroway: 'helipad' });
     expect(get('n1').tags).toBeUndefined();
   });
