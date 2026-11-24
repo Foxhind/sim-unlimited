@@ -419,6 +419,24 @@ describe('lifted roads in the mesh', () => {
     expect(counts.every((c) => c === 1), `${counts}`).toBe(true);
   });
 
+  it('a path\'s bridge over a valley is straight between its ends, not the valley\'s shape lifted', () => {
+    // 14/9517/6398: a footway's deck over a river was the drawn ground plus its lift, 6–7 m at the
+    // banks and 4 m over the water: a V across the river
+    const grid = 64, side = grid + 1, cell = tileSizeMeters(TILE) / grid;
+    const valley = Float32Array.from({ length: side * side }, (_, k) => GROUND + 0.2 * Math.abs((k % side) - grid / 2) * cell);
+    const tin = buildSurfaceTin(TILE, grid, valley);
+    const river: OsmLine = { tags: { waterway: 'river' }, points: [at(0, -400), at(0, 400)] };
+    // banks rising at 20 %, steeper than the lift falls from the river (LIFT_GRADE)
+    const foot: OsmLine = { tags: { highway: 'footway', bridge: 'yes', layer: '1' }, points: [at(-30, 0), at(30, 0)] };
+    const data: OsmTileData = { areas: [], points: [], buildings: [], lines: [river, foot] };
+    const m = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: tinSampler(tin, TILE), tin });
+    const top = (x: number) => Math.max(...surfacesOver(m.roads, x, 0));
+    const a = top(-27), b = top(27);
+    for (const x of [-18, -9, 0, 9, 18]) expect(top(x)).toBeCloseTo(a + ((b - a) * (x + 27)) / 54, 1);
+    // over the river the deck clears the water by its lift at least
+    expect(top(0) - tinSampler(tin, TILE)(...at(0, 0))).toBeGreaterThan(4);
+  });
+
   it('the lift keeps the ribbon the colour of the road', () => {
     const m = meshOf([bridge(), under]).roads;
     let asphalt = 0;
