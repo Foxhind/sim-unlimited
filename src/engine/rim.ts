@@ -23,15 +23,16 @@ export interface RimParams {
   /** only while the sun is low: scaled by the palette's sunset glow (0 by day and at night); else by day too */
   lowSunOnly: boolean;
   /**
-   * by silhouette (screen space, renderer post pass WORLD_POST_FS): a band `outlineCss` CSS pixels
+   * by silhouette (screen space, renderer post pass WORLD_POST_FS; buildings and aircraft only, renderer.outlined): a band `outlineCss` CSS pixels
    * wide (the renderer turns them into device pixels by the screen's density) along every edge that has sky or far ground behind it on the sun's side, `outline` its strength;
    * `outlineGap`: the jump in distance between neighbouring pixels that counts as an edge (0.2 = 20 %)
    */
   outline: number;
   outlineCss: number;
   outlineGap: number;
-  /** weight per kind of geometry (by faces only) */
+  /** weight per kind of geometry (by faces only); the silhouette band falls on buildings and aircraft alone */
   terrain: number;
+  /** OSM buildings (roads, water and areas take no rim) */
   objects: number;
   trees: number;
   aircraft: number;
@@ -51,7 +52,7 @@ export const DEFAULT_RIM: RimParams = {
   outlineGap: 0.34,
   terrain: 0,
   objects: 0,
-  trees: 1,
+  trees: 0,
   aircraft: 1,
 };
 

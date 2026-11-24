@@ -1025,7 +1025,9 @@ function frame(now: number): void {
   renderer.rimWeight = rim.aircraft;
   profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
+    renderer.outlined = true; // the silhouette rim: buildings and aircraft only
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
+    renderer.outlined = false;
   }
 
   if (particles.count > 0 && wetHere > 0 && !flashing) {

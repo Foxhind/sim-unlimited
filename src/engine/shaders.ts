@@ -1216,6 +1216,8 @@ uniform float uWinEmit;
 uniform float uLitShare;
 // 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
 uniform float uSelfLit;
+// 1: the silhouette rim pass may light this (renderer.outlined: buildings and aircraft); 0: alpha 0, no rim
+uniform float uOutlined;
 // brightness of a self-lit face × SDR white (> 1 on an XDR canvas, renderer.ts HDR_EMISSION)
 uniform float uEmit;
 // > 0: see-through (1 - renderer.opacity; 0, the default, in every other pass), the blend's source alpha
@@ -1278,7 +1280,7 @@ void main() {
     }
   }
 #endif
-  float alpha = 1.0 - uSelfLit;
+  float alpha = uOutlined * (1.0 - uSelfLit);
 #ifndef NO_ROADS
   // TRACK_EDGE, ROAD_EDGE: negative; a facade's edge length is positive
   if (vWinEdge.x < ${TRACK_EDGE + 0.5}) {
@@ -1508,7 +1510,7 @@ void main() {
     vec2 c = gl_PointCoord - 0.5;
     if (dot(c, c) > 0.25) discard;
   }
-  oColor = vec4(vColor, 1.0);
+  oColor = vec4(vColor, 0.0); // alpha 0: no silhouette rim on lights, dots and lines
 }
 `;
 
@@ -1829,7 +1831,7 @@ vec3 outline(ivec2 p) {
 }
 vec3 px(ivec2 q) {
   vec4 t = texelFetch(uWorldTex, q, 0);
-  // alpha 0: a self-lit face (WORLD_FS uSelfLit), no rim on it
+  // alpha 0: not a building or an aircraft (renderer.outlined), or a self-lit face (WORLD_FS uSelfLit): no rim on it
   // (the clamp to white keeps what an XDR light source already has above it)
   if (uOutline.x > 0.0 && t.a > 0.5) return max(t.rgb, min(t.rgb + outline(q), 1.0));
   return t.rgb;

@@ -108,10 +108,15 @@ export class Renderer {
   orthoFar = 0;
   /** rim light this frame (rim.ts rimFrame) */
   rim: RimFrame = NO_RIM;
-  /** weight of the rim light for what drawWorld draws next (rim.ts: terrain, objects, aircraft; 0: none) */
+  /** weight of the rim light for what drawWorld draws next (rim.ts: terrain, buildings (objects), aircraft; 0: none) */
   rimWeight = 1;
   /** weight of the rim light for trees (drawTrees) */
   rimTreeWeight = 1;
+  /**
+   * what drawWorld draws next takes the silhouette rim (WORLD_POST_FS): buildings and aircraft only;
+   * everything else (terrain, roads, water, areas, trees, clouds) is marked off with alpha 0
+   */
+  outlined = false;
   /**
    * what drawWorld draws next lights itself (the exhaust flame, aircraft lights): no rim light of
    * either kind (its pixels are marked with alpha 0 for the silhouette pass) and no two-sided flip
@@ -244,7 +249,7 @@ export class Renderer {
 
     const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uOutlined', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
       const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
@@ -255,7 +260,7 @@ export class Renderer {
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uThinCount', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uOutlined', 'uThinCount', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
@@ -749,6 +754,7 @@ export class Renderer {
     this.setRim(u, this.selfLit ? 0 : this.rimWeight);
     gl.uniform1i(u.uTwoSided, this.selfLit ? 0 : 1);
     gl.uniform1f(u.uSelfLit, this.selfLit ? 1 : 0);
+    gl.uniform1f(u.uOutlined, this.outlined ? 1 : 0);
     gl.uniform1f(u.uEmit, this.selfLit ? this.selfLitGain : 1);
     const blend = this.additive || this.opacity < 1;
     gl.uniform1f(u.uClear, this.additive ? 0 : 1 - this.opacity);
@@ -814,6 +820,7 @@ export class Renderer {
     this.setLight(this.treeU);
     this.setRim(this.treeU, this.rimTreeWeight);
     gl.uniform1i(this.treeU.uTwoSided, 1);
+    gl.uniform1f(this.treeU.uOutlined, 0);
     this.setShadow(this.treeU, true);
     this.setWire(this.treeU);
     gl.bindVertexArray(vao);

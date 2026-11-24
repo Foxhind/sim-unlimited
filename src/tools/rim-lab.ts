@@ -146,7 +146,7 @@ rimSlider('outlineGroup', 'сила', 'outline', 0, 4, 0.05);
 rimSlider('outlineGroup', 'ширина, CSS px', 'outlineCss', 0.5, 6, 0.5);
 rimSlider('outlineGroup', 'скачок глубины на краю', 'outlineGap', 0.02, 2, 0.02);
 rimSlider('weightGroup', 'рельеф', 'terrain', 0, 1.5, 0.05);
-rimSlider('weightGroup', 'здания, дороги, вода', 'objects', 0, 1.5, 0.05);
+rimSlider('weightGroup', 'здания', 'objects', 0, 1.5, 0.05);
 rimSlider('weightGroup', 'деревья', 'trees', 0, 1.5, 0.05);
 rimSlider('weightGroup', 'самолёт', 'aircraft', 0, 1.5, 0.05);
 

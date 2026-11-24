@@ -560,6 +560,10 @@ export class OsmManager {
     const lights = lightsOn && L.lights;
     const buildingsOn = this.shows(STRUCTURE.BUILDING);
     const mastsOn = this.shows(STRUCTURE.MAST);
+    // the rim light (rim.ts) on buildings only: the weight the caller set goes to the houses, the
+    // areas, water and roads take none, and only the houses take the silhouette band
+    const houseRim = renderer.rimWeight;
+    renderer.rimWeight = 0;
     for (const c of this.renderList) {
       if (!L.areas) break;
       renderer.speckle = true;
@@ -582,7 +586,11 @@ export class OsmManager {
         if (houses.length) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
           renderer.windows = lightsOn || dayWindows ? 'lit' : 'glass';
+          renderer.rimWeight = houseRim;
+          renderer.outlined = true;
           for (const h of houses) renderer.drawWorld(h, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.outlined = false;
+          renderer.rimWeight = 0;
           renderer.windows = 'off';
         }
         if (c.lamps && lights) {
@@ -597,7 +605,11 @@ export class OsmManager {
         // behind them), so no border shows between near and far at night
         if (lightsOn) {
           renderer.windows = 'lit';
+          renderer.rimWeight = houseRim;
+          renderer.outlined = true;
           for (const h of this.houseParts(c, false)) renderer.drawWorld(h, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.outlined = false;
+          renderer.rimWeight = 0;
           renderer.windows = 'off';
           if (c.roofLights && lights && buildingsOn) renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         } else if (c.dots && buildingsOn) {
@@ -655,6 +667,7 @@ export class OsmManager {
     }
     renderer.opacity = 1;
     renderer.gloss = 0;
+    renderer.rimWeight = houseRim;
   }
 
   /**
