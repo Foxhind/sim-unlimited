@@ -388,7 +388,7 @@ const MATERIAL_RGB: Record<string, RGB> = {
   brick: [156, 88, 64], concrete: [150, 150, 150], cement: [150, 150, 150], cement_block: [150, 150, 150],
   glass: [150, 190, 210], metal: [128, 132, 138], steel: [128, 132, 138], metal_sheet: [128, 132, 138],
   tin: [150, 154, 158], aluminium: [170, 174, 178], zinc: [140, 146, 152], copper: [96, 160, 140],
-  tile: [180, 92, 56], tiles: [180, 92, 56], roof_tiles: [180, 92, 56], clay: [180, 92, 56],
+  tile: [168, 104, 80], tiles: [168, 104, 80], roof_tiles: [168, 104, 80], clay: [168, 104, 80],
   slate: [72, 76, 84], stone: [150, 140, 125], sandstone: [190, 165, 120], limestone: [200, 190, 165],
   granite: [130, 126, 124], marble: [215, 212, 206],
   wood: [150, 110, 70], timber: [150, 110, 70], timber_framing: [200, 185, 150], log: [130, 92, 56],
@@ -553,7 +553,8 @@ const LOW_RISE_MAX_M = 12;
 // roof colours when OSM gives none: shares of the 0..1 seed
 const ROOF_GREY: RGB[] = [[168, 168, 168], [144, 144, 144], [128, 128, 132]];
 const ROOF_DARK_GREY: RGB[] = [[96, 96, 98], [80, 80, 84], [64, 64, 68]];
-const ROOF_ORANGE: RGB[] = [[184, 96, 56], [168, 84, 48], [196, 112, 64]];
+// terracotta as weathered tiles look from the air (aerial panorama of Fethiye: 171, 122, 103 lit)
+const ROOF_ORANGE: RGB[] = [[164, 104, 82], [150, 94, 74], [178, 118, 92]];
 
 /** deterministic 0..1 seed of a building from its first footprint vertex (stable when a tile is rebuilt) */
 export function buildingSeed(ring: LonLat[] | undefined): number {

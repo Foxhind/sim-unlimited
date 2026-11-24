@@ -5,7 +5,7 @@ import { Renderer, type BaseGround } from './engine/renderer';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, applySunColors, buildLUT, lightUniforms, seasonOf, litShare, solarHour, paletteAt, type LightUniforms, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, frameLighting, moonLightOn, seasonOf, litShare, solarHour, paletteAt, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -28,6 +28,7 @@ import { WEATHER_ATTRIBUTION, WeatherService, airConditions, type Weather } from
 import { CLOUD_RGB, cloudLayers, underDecks, type CloudInput } from './world/clouds';
 import { CloudField } from './world/cloud-field';
 import { applyPreset, parsePreset, type WeatherPreset } from './world/weather-preset';
+import { hazeDensity } from './world/haze';
 import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM, STORM_DAY_LIT } from './world/precipitation';
 import { boltPath, Lightning } from './world/lightning';
 import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
@@ -195,7 +196,7 @@ function weatherInForce(): Weather | undefined {
         at: w?.at ?? start.latLon, time: w?.time ?? Date.now(),
         // a forced wind replaces the whole column: the measured winds aloft no longer belong to it
         windFromDeg: windOverride.from, windMs: windOverride.ms, gustMs: windOverride.gust, levels: [],
-        precipKind: w?.precipKind, precipMmH: w?.precipMmH, thunder: w?.thunder, visibilityM: w?.visibilityM,
+        precipKind: w?.precipKind, precipMmH: w?.precipMmH, thunder: w?.thunder, visibilityM: w?.visibilityM, aod: w?.aod,
       };
   }
   return inForce;
@@ -278,26 +279,20 @@ function overcastSky(p: PaletteParams, under: number): PaletteParams {
     const y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     return [c[0] + (0.98 * y - c[0]) * under, c[1] + (0.99 * y - c[1]) * under, c[2] + (1.03 * y - c[2]) * under];
   };
-  return { ...p, zenith: grey(p.zenith), skyMid: grey(p.skyMid), skyLow: grey(p.skyLow), horizon: grey(p.horizon), sunGlow: grey(p.sunGlow), glow: p.glow * (1 - under) };
+  return { ...p, zenith: grey(p.zenith), skyMid: grey(p.skyMid), skyLow: grey(p.skyLow), horizon: grey(p.horizon), sunGlow: grey(p.sunGlow), glow: p.glow * (1 - under), aureole: p.aureole * (1 - under) };
 }
 /** a palette with its light and sky scaled by 1 + k (k < 0 darker) */
 function brighter(p: PaletteParams, k: number): PaletteParams {
   const m = (c: readonly [number, number, number]): [number, number, number] => [Math.min(255, c[0] * (1 + k)), Math.min(255, c[1] * (1 + k)), Math.min(255, c[2] * (1 + k))];
   return { ...p, lightMul: p.lightMul * (1 + k), zenith: m(p.zenith), skyMid: m(p.skyMid), skyLow: m(p.skyLow), horizon: m(p.horizon) };
 }
-/** the moon's light on faces: by its elevation and phase, once the sun no longer lights them */
-const moonLight = (): number =>
-  Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6)));
-/** light uniforms of a palette (frozen water is not drawn as water: no waves, glints or glitter) */
-function lightOf(p: PaletteParams): LightUniforms {
-  const l = lightUniforms(p, sunnyNow(), [(CLOUD_RGB >> 16) & 255, (CLOUD_RGB >> 8) & 255, CLOUD_RGB & 255]);
-  l.direct[1] = moonLight();
-  return l;
-}
+/** the LUT and light uniforms of a palette for the sun, the moon and the weather now (palette.ts frameLighting) */
+const lightingOf = (p: PaletteParams) => frameLighting(
+  p, sun.elevationDeg, sunnyNow(), [(CLOUD_RGB >> 16) & 255, (CLOUD_RGB >> 8) & 255, CLOUD_RGB & 255],
+  moonLightOn(sun.elevationDeg, moon.elevationDeg, moon.illumination),
+);
 let palette = dayPalette();
-let lut = buildLUT(palette);
-let light = lightOf(palette);
-applySunColors(lut, sun.elevationDeg);
+let { lut, light } = lightingOf(palette);
 const flashLut = new Uint8Array(LUT_ENTRIES * 4).fill(255);
 let lastSunUpdate = 0;
 /** stars and planets: J2000 → world directions this frame, and the planets refreshed with the light */
@@ -327,9 +322,7 @@ function updateLight(): void {
   }
   renderer.setSkyPoints(planetPoints(simTime, planetBuf), PLANETS_OFFSET);
   palette = dayPalette();
-  lut = buildLUT(palette);
-  light = lightOf(palette);
-  applySunColors(lut, sun.elevationDeg);
+  ({ lut, light } = lightingOf(palette));
 }
 
 function startLocation(fc: { location: string; customPoint: LatLon | null }): LatLon {
@@ -934,6 +927,8 @@ function frame(now: number): void {
     const target = FOG_CLEAR.end + (fogRange(seen).end - FOG_CLEAR.end) * wetHere;
     fogEndM += (target - fogEndM) * (1 - Math.exp(-dt / 2));
     fogStartM = (fogEndM * FOG_CLEAR.start) / FOG_CLEAR.end;
+    // and the haze in the air toward the weather's (haze.ts: its aerosol, a misty visibility)
+    renderer.hazeDensity += (hazeDensity(wx) - renderer.hazeDensity) * (1 - Math.exp(-dt / 2));
   }
   // the particles fall and drift with the wind while the camera flies through them
   const particles = precipParticles(falling, fallRate);
@@ -998,9 +993,7 @@ function frame(now: number): void {
   let framePalette = palette;
   if (skyFlash > 0 && !flashing) {
     framePalette = brighter(palette, (wetHere > 0.5 ? 0.9 : 0.4) * skyFlash);
-    frameLut = buildLUT(framePalette);
-    frameLight = lightOf(framePalette);
-    applySunColors(frameLut, sun.elevationDeg);
+    ({ lut: frameLut, light: frameLight } = lightingOf(framePalette));
   }
   applyFlameColors(frameLut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : frameLut, flashing ? FLASH_LIGHT : frameLight);

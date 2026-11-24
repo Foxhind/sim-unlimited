@@ -2,7 +2,8 @@
  * Live weather at the aircraft from Open-Meteo (https://open-meteo.com): free, no API key, CORS
  * enabled, data under CC BY 4.0. Only the current conditions are asked for: temperature and dew point
  * at 2 m, total cloud cover and the cover of each layer, wind at 10 m, precipitation, the WMO weather
- * code and the visibility. The clouds and the dew point shape the cloud layers (clouds.ts); rain,
+ * code and the visibility; and from its Air Quality API (CAMS) the aerosol optical depth, the haze
+ * in the air (haze.ts). The clouds and the dew point shape the cloud layers (clouds.ts); rain,
  * snow and thunderstorms come from the precipitation and the code (precipitation.ts, lightning.ts).
  * Snow and ice on the ground follow the climate, not the weather (palette.ts CLIMATE).
  */
@@ -12,6 +13,7 @@ import { stormTurbulence } from './precipitation';
 
 export const WEATHER_ATTRIBUTION = 'Weather: Open-Meteo.com';
 const ENDPOINT = 'https://api.open-meteo.com/v1/forecast';
+const AIR_QUALITY_ENDPOINT = 'https://air-quality-api.open-meteo.com/v1/air-quality';
 /** pressure levels asked for the air aloft: roughly 1.5, 3, 5.5, 9 and 12 km */
 export const WEATHER_LEVELS_HPA = [850, 700, 500, 300, 200];
 
@@ -78,8 +80,10 @@ export interface Weather {
   precipMmH?: number;
   /** a thunderstorm */
   thunder?: boolean;
-  /** horizontal visibility the service reports, m */
+  /** horizontal visibility the service reports, m (models cap it, often at 24.14 km, in clear air) */
   visibilityM?: number;
+  /** aerosol optical depth of the air column at 550 nm (CAMS), where the air quality service gave it */
+  aod?: number;
   /** where and when the data is for */
   at: LatLon;
   /** observation time, ms since epoch (UTC) */
@@ -100,6 +104,22 @@ export function weatherUrl(at: LatLon): string {
     timezone: 'GMT',
   });
   return `${ENDPOINT}?${q}`;
+}
+
+export function airQualityUrl(at: LatLon): string {
+  const q = new URLSearchParams({
+    latitude: at.lat.toFixed(3),
+    longitude: at.lon.toFixed(3),
+    current: 'aerosol_optical_depth',
+    timezone: 'GMT',
+  });
+  return `${AIR_QUALITY_ENDPOINT}?${q}`;
+}
+
+/** the aerosol optical depth of an Open-Meteo air quality response (undefined when missing) */
+export function parseAod(json: unknown): number | undefined {
+  const v = (json as { current?: Record<string, unknown> } | null)?.current?.aerosol_optical_depth;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
 }
 
 /** an Open-Meteo forecast response → Weather (undefined when the fields are missing) */
@@ -219,12 +239,17 @@ export class WeatherService {
     if (!stale && !moved) return;
     this.pending = true;
     const where = { lat: at.lat, lon: at.lon };
+    // the haze is a bonus: without the air quality service the weather stands as it is
+    const aod = this.fetchFn(airQualityUrl(where))
+      .then(async (res) => (res.ok ? parseAod(await res.json()) : undefined))
+      .catch(() => undefined);
     this.fetchFn(weatherUrl(where))
       .then(async (res) => {
         if (!res.ok) throw new Error(`open-meteo ${res.status}`);
         const w = parseWeather(await res.json(), where);
         if (!w) throw new Error('open-meteo: no current weather');
-        this.current = w;
+        const a = await aod;
+        this.current = a === undefined ? w : { ...w, aod: a };
         this.fetchedAt = nowMs;
         this.fetchedFor = where;
       })

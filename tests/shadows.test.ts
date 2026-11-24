@@ -10,7 +10,8 @@ describe('skylight in the shade', () => {
     expect(luma(h)).toBeCloseTo(1, 5);
     expect(h[2]).toBeGreaterThan(h[1]);
     expect(h[1]).toBeGreaterThan(h[0]);
-    expect(h[2] - h[0]).toBeGreaterThan(0.3);
+    // the clear sky is a cyan blue (palette.ts SUNNY_DAY): the shade is clearly bluer than the light, if less than under a violet-blue sky
+    expect(h[2] - h[0]).toBeGreaterThan(0.25);
   });
 
   it('turns to the cloud deck\'s plain grey under overcast', () => {
@@ -19,7 +20,7 @@ describe('skylight in the shade', () => {
     // and the light uniforms carry it, from the sunniness
     const sky = lightUniforms(paletteAt(45, 0), 0).sky;
     expect(Math.abs(sky[2] - sky[0])).toBeLessThan(0.03);
-    expect(lightUniforms(paletteAt(45, 1), 1).sky[2] - lightUniforms(paletteAt(45, 1), 1).sky[0]).toBeGreaterThan(0.3);
+    expect(lightUniforms(paletteAt(45, 1), 1).sky[2] - lightUniforms(paletteAt(45, 1), 1).sky[0]).toBeGreaterThan(0.25);
   });
 
   it('goes violet under the dusk sky', () => {

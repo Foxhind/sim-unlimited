@@ -47,7 +47,8 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   garden: { colour: [104, 192, 80], mode: 'soft-light', strength: 1 },
   golf: { colour: [104, 192, 80], mode: 'soft-light', strength: 1 },
   pitch: { colour: [50, 80, 42], mode: 'screen', strength: 0.44 },
-  farmland: { colour: [16, 16, 9], mode: 'screen', strength: 1 },
+  // fields in summer, as from the air over Fethiye in July: pale dry earth and stubble among the green (142, 138, 121)
+  farmland: { colour: [172, 158, 128], mode: 'normal', strength: 0.65 },
   // first guesses, not yet tuned in areas.html: the trees carry an orchard, the filter only tints the soil
   orchard: { colour: [150, 130, 90], mode: 'soft-light', strength: 0.6 },
   vineyard: { colour: [170, 150, 100], mode: 'soft-light', strength: 0.8 },
@@ -64,9 +65,11 @@ export const DEFAULT_AREA_STYLES: AreaStyles = {
   cemetery: { colour: [72, 96, 64], mode: 'normal', strength: 0.45 },
   quarry: { colour: [214, 206, 190], mode: 'normal', strength: 0.85 },
   construction: { colour: [176, 148, 112], mode: 'normal', strength: 0.7 },
-  residential: { colour: [184, 174, 156], mode: 'normal', strength: 0.5 },
-  commercial: { colour: [182, 166, 160], mode: 'normal', strength: 0.55 },
-  industrial: { colour: [164, 164, 162], mode: 'normal', strength: 0.6 },
+  // a town from the air: grey roofs and streets, white walls, terracotta and trees, which average to
+  // a near-neutral grey (aerial panorama of Fethiye: 113, 115, 108), whatever the climate colour under it
+  residential: { colour: [142, 137, 134], mode: 'normal', strength: 0.8 },
+  commercial: { colour: [150, 146, 142], mode: 'normal', strength: 0.8 },
+  industrial: { colour: [156, 156, 154], mode: 'normal', strength: 0.8 },
 };
 
 const sameFilter = (a: AreaFilter, b: AreaFilter): boolean =>

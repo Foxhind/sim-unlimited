@@ -38,8 +38,11 @@ export const CLIMATE_TABLE: ReadonlyArray<ReadonlyArray<RGB>> = [
   [[50, 70, 42], [56, 72, 46], [86, 88, 68], [120, 115, 105]],
   // 9 °C: temperate mixed forest and meadows → upland pasture → alpine
   [[76, 102, 50], [70, 92, 48], [94, 98, 66], [124, 118, 100]],
-  // 16 °C: warm temperate, dry grass and shrub → steppe → dry highland
-  [[122, 126, 70], [130, 120, 78], [138, 120, 88], [140, 125, 105]],
+  // 16 °C: warm temperate (Mediterranean): pale dry soil and grass among dark shrub in the lowland →
+  // dark pine and maquis on the hills → dry highland. Matched to an aerial panorama of a summer
+  // afternoon over Fethiye (near ground: vegetation 54,73,44, dry soil 172,137,109; the hills under
+  // pine, a dark blue-green: 46,62,48 from 0.6 km).
+  [[112, 108, 80], [48, 62, 52], [92, 94, 78], [136, 126, 108]],
   // ≥ 24 °C: tropics, lush lowland → montane forest → paramo
   [[58, 96, 40], [62, 96, 42], [90, 102, 58], [128, 116, 94]],
 ];

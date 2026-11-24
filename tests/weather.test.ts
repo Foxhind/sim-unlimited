@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { clockLine, weatherLines } from '../src/flight/hud';
 import {
-  cloudCode, compassPoint, parseWeather, precipitationOf, WEATHER_MAX_AGE_MS, WeatherService, weatherUrl, type Weather,
+  cloudCode, compassPoint, parseAod, parseWeather, precipitationOf, WEATHER_MAX_AGE_MS, WeatherService, weatherUrl, type Weather,
 } from '../src/world/weather';
 
 const AT = { lat: 55.75, lon: 37.62 };
@@ -70,13 +70,16 @@ describe('precipitation', () => {
 });
 
 describe('WeatherService', () => {
-  const okFetch = () => {
+  /** the forecast requests made (each goes with one to the air quality service) */
+  const okFetch = (aod: unknown = { current: { aerosol_optical_depth: 0.21 } }) => {
     const calls: string[] = [];
+    const air: string[] = [];
     const fn = (url: string) => {
-      calls.push(url);
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) });
+      const quality = url.startsWith('https://air-quality-api.');
+      (quality ? air : calls).push(url);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(quality ? aod : SAMPLE) });
     };
-    return { calls, fn };
+    return { calls, air, fn };
   };
   const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -98,10 +101,28 @@ describe('WeatherService', () => {
     expect(f.calls).toHaveLength(3);
   });
 
+  it('asks the air quality service for the haze with each forecast; the weather stands without it', async () => {
+    const f = okFetch();
+    const s = new WeatherService(f.fn);
+    s.update(AT, 0);
+    await flush();
+    expect(f.air).toHaveLength(1);
+    expect(f.air[0]).toContain('current=aerosol_optical_depth');
+    expect(s.current?.aod).toBe(0.21);
+    const none = new WeatherService((url) => url.startsWith('https://air-quality-api.')
+      ? Promise.reject(new Error('down'))
+      : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SAMPLE) }));
+    none.update(AT, 0);
+    await flush();
+    expect(none.current?.tempC).toBe(-16.4);
+    expect(none.current?.aod).toBeUndefined();
+    expect(parseAod({ current: { aerosol_optical_depth: null } })).toBeUndefined();
+  });
+
   it('keeps going after a failure, retrying a minute later', async () => {
     let n = 0;
-    const s = new WeatherService(() => {
-      n++;
+    const s = new WeatherService((url) => {
+      if (!url.startsWith('https://air-quality-api.')) n++;
       return Promise.resolve({ ok: false, status: 429, json: () => Promise.resolve({}) });
     });
     const warn = console.warn;

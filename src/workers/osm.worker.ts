@@ -21,7 +21,7 @@ import type { OsmDetail, OsmTileData } from '../world/osm-types';
 import { loadTileDem } from '../world/terrain-source';
 import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
-import { greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
+import { canopyColour, greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
 import { applyPeaks, groundPeaks, peaksOf } from '../world/peaks';
 import { DETAIL_Z, gridForZoom } from '../world/chunks';
@@ -231,7 +231,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       if (!r) return RAMP.FOREST;
       const t = tin.tris[r.tri];
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
-      return isMaterial(ramp) ? RAMP.FOREST : greenColour(ramp);
+      return isMaterial(ramp) ? RAMP.FOREST : canopyColour(greenColour(ramp));
     };
     const mesh = buildOsmMesh({ tile, detail, data, sampleHeight: drape, tin, buildings: false, faceColor: ls.faceColor, areaStyles, roads, cover });
     const clipped = clipTileData(data, tile);

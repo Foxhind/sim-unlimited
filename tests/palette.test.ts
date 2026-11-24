@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildLUT, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
+  buildLUT, canopyColour, colour, FLASH_LIGHT, glowParams, greenColour, isGreen, isMaterial, isWater, lightUniforms, LUT_ENTRIES, LUT_SIZE, LUT_TOTAL, MAT,
   material, OVERLAY_LUT_BASE, paletteAt, saturate, sunlight, sunniness, pointValue, RAMP, RAMP_STEPS, rampGlowLevel, rampIndex, rgbOf, shadeColour, snowy, SNOW_FLAG, withGlow,
 } from '../src/engine/palette';
 import { RESOLVE_FS } from '../src/engine/shaders';
@@ -127,9 +127,9 @@ describe('sunset sky', () => {
     }
   });
 
-  it('keeps the day and night skies as they were: a straight line from zenith to haze, no glow', () => {
+  it('keeps the cloudy day and night skies as they were: a straight line from zenith to haze, no glow', () => {
     for (const el of [45, -20]) {
-      const p = paletteAt(el, 1);
+      const p = paletteAt(el, 0);
       const lut = buildLUT(p);
       for (let s = 0; s < 9; s++) {
         const want = p.zenith.map((z, i) => Math.round(z + (p.horizon[i] - z) * (s / 15)));
@@ -162,30 +162,41 @@ describe('sunny weather', () => {
     expect(sunniness(undefined)).toBe(1);
   });
 
-  it('a sunny day: deeper blue sky, brighter warm light, livelier colours; a cloudy day as before', () => {
+  it('a sunny day as an aerial photograph has it: a lighter cyan-blue sky, a deep part up high, palest over the haze; plain white light, colours as they are, the aureole round the sun; a cloudy day as before', () => {
     const cloudy = paletteAt(45, 0), sunny = paletteAt(45, 1);
     expect(cloudy).toEqual(paletteAt(45));
     expect(cloudy.saturation).toBe(1);
-    expect(sunny.saturation).toBeGreaterThan(1.2);
-    expect(sunny.lightMul).toBeGreaterThan(cloudy.lightMul);
-    expect(sat(sunny.zenith)).toBeGreaterThan(sat(cloudy.zenith));
-    expect(lum(sunny.horizon)).toBeGreaterThan(lum(cloudy.horizon));
+    expect(sunny.saturation).toBe(1);
+    expect(sunny.lightMul).toBe(cloudy.lightMul);
+    // white light: no channel of the tint more than a few per cent off
+    for (const v of sunny.tint) expect(Math.abs(v - 1)).toBeLessThan(0.05);
+    // the sky: lighter and less violet than the cloudy day's deep blue, cyan (green well over red)
+    expect(lum(sunny.zenith)).toBeGreaterThan(lum(cloudy.zenith));
+    expect(sat(sunny.zenith)).toBeLessThan(sat(cloudy.zenith));
+    expect(sunny.zenith[1] - sunny.zenith[0]).toBeGreaterThan(50);
+    expect(lum(sunny.skyLow)).toBeGreaterThan(lum(sunny.skyMid));
+    expect(lum(sunny.horizon)).toBeLessThan(lum(sunny.skyLow));
+    // a strong aureole in clear weather, a faint one under cloud
+    expect(sunny.aureole).toBe(1);
+    expect(cloudy.aureole).toBeGreaterThan(0);
+    expect(cloudy.aureole).toBeLessThan(0.5);
+    expect(lightUniforms(sunny).aureole).toBe(1);
+    // the ground is shaded as under the cloudy day's light, only harder (lightUniforms)
     const grass = [70, 110, 60] as const;
     const a = shadeColour(grass, 9, cloudy), b = shadeColour(grass, 9, sunny);
-    expect(sat(b)).toBeGreaterThan(sat(a));
-    expect(lum(b)).toBeGreaterThan(lum(a));
-    // material ramps in the LUT get the same treatment
-    const l0 = buildLUT(cloudy), l1 = buildLUT(sunny);
-    expect(sat(entry(l1, rampIndex(RAMP.GRASS, 9)))).toBeGreaterThan(sat(entry(l0, rampIndex(RAMP.GRASS, 9))));
+    for (let i = 0; i < 3; i++) expect(Math.abs(a[i] - b[i])).toBeLessThan(10);
     expect(lightUniforms(sunny).saturation).toBe(sunny.saturation);
   });
 
   it('nights stay as they are, sunsets get only their daylight share', () => {
     expect(paletteAt(-30, 1)).toEqual(paletteAt(-30, 0));
     expect(paletteAt(-4, 1)).toEqual(paletteAt(-4, 0));
+    // the sunset's livelier colours give way to the day's plain ones as the sun climbs
     const s = paletteAt(3, 1).saturation;
-    expect(s).toBeGreaterThan(1);
-    expect(s).toBeLessThan(paletteAt(45, 1).saturation);
+    expect(s).toBeGreaterThan(paletteAt(45, 1).saturation);
+    expect(s).toBeLessThan(paletteAt(0, 1).saturation);
+    expect(paletteAt(3, 1).aureole).toBeLessThan(paletteAt(45, 1).aureole);
+    expect(paletteAt(-4, 1).aureole).toBe(0);
   });
 
   it('saturate keeps greys and the luminance, clamps to 0..255', () => {
@@ -392,5 +403,17 @@ describe('sunlight and skylight', () => {
     expect(day[2]).toBeGreaterThan(day[0]);
     expect(dusk[2]).toBeGreaterThan(dusk[1]);
     expect(dusk[0]).toBeGreaterThan(dusk[1] * 0.95); // violet: red holds against green
+  });
+});
+
+describe('tree canopy', () => {
+  it('is darker and cooler than the ground it grows on, as crowns are from the air', () => {
+    const lum = (c: readonly number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+    for (const ground of [[101, 113, 73], [90, 103, 66], [48, 62, 52]] as const) {
+      const c = rgbOf(canopyColour(colour(ground[0], ground[1], ground[2])));
+      expect(lum(c)).toBeLessThanOrEqual(lum(ground) + 0.5);
+      expect(c[2] - c[0]).toBeGreaterThanOrEqual(ground[2] - ground[0]);
+    }
+    expect(canopyColour(RAMP.FOREST)).toBe(RAMP.FOREST);
   });
 });

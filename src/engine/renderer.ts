@@ -4,7 +4,7 @@ import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
 import { hdrBlocker, hdrDisplayQuery, outputMode, type HdrBlocker, type HdrConditions, type OutputMode } from './output-mode';
-import { FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { AIR_HAZE, FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -154,6 +154,12 @@ export class Renderer {
   windowCellM: number = FAR_WINDOWS.CELL_M;
   /** the fog range (metres) the far window dots drawLights draws next run into the haze over; none by default */
   pointFog: readonly [number, number] = [1e9, 2e9];
+  /** the air's haze density at sea level, per metre (shaders.ts AIR_HAZE; 0: none) */
+  hazeDensity: number = AIR_HAZE.DEFAULT_DENSITY;
+  /** the haze this frame: none in an orthographic view, which has no single distance to the ground */
+  private hazeK(): number {
+    return this.orthoFar > 0 ? 0 : this.hazeDensity;
+  }
   /**
    * Experimental XDR output: the canvas drawing buffer is RGBA16F (WebGL drawingBufferStorage;
    * extended drawingBufferToneMapping where the browser has it), the world and post targets are
@@ -237,7 +243,7 @@ export class Renderer {
     gl.bindVertexArray(null);
 
     const worldNames = [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
@@ -248,22 +254,22 @@ export class Renderer {
     // trees have none of the surface effects
     this.treeProg = createProgram(gl, depthed(TREE_VS), depthed(WORLD_FS, WORLD_VARIANTS.bare));
     this.treeU = uniformMap(gl, this.treeProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uOrthoFar',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd', 'uHazeK',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
     this.skyU = uniformMap(gl, this.skyProg, [
       'uInvViewProj', 'uCamPos', 'uSunDir', 'uMoonDir', 'uLut', 'uLight', 'uHaze', 'uSat', 'uGlow', 'uOriginLat', 'uSeason',
-      'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uSunEmit', 'uMoonEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
+      'uGroundH', 'uGroundRamp', 'uFogStart', 'uFogEnd', 'uHazeK', 'uSunEmit', 'uMoonEmit', 'uDeckUp', 'uDeckDown', 'uDeckColour', ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS,
     ]);
     this.dsProg = createProgram(gl, FULLSCREEN_VS, depthed(WORLD_POST_FS));
     this.dsU = uniformMap(gl, this.dsProg, [
-      'uWorldTex', 'uDepthTex', 'uScale', 'uOutline', 'uRimSteps', 'uRimColor', 'uSunDir', 'uViewProj', 'uInvViewProj', 'uFogStart', 'uFogEnd',
+      'uWorldTex', 'uDepthTex', 'uScale', 'uOutline', 'uRimSteps', 'uRimColor', 'uSunDir', 'uViewProj', 'uInvViewProj', 'uFogStart', 'uFogEnd', 'uHazeK',
     ]);
     this.veilProg = createProgram(gl, FULLSCREEN_VS, VEIL_FS);
     this.veilU = uniformMap(gl, this.veilProg, ['uDensity', 'uColor', 'uScale']);
@@ -647,6 +653,7 @@ export class Renderer {
     gl.uniform1ui(this.skyU.uGroundRamp, ground.ramp >>> 0);
     gl.uniform1f(this.skyU.uFogStart, ground.fogStart);
     gl.uniform1f(this.skyU.uFogEnd, ground.fogEnd);
+    gl.uniform1f(this.skyU.uHazeK, this.hazeK());
     gl.uniform1f(this.skyU.uDeckUp, ground.deck?.up ?? 0);
     gl.uniform1f(this.skyU.uDeckDown, ground.deck?.down ?? 0);
     gl.uniform1ui(this.skyU.uDeckColour, (ground.deck?.colour ?? 0) >>> 0);
@@ -655,6 +662,7 @@ export class Renderer {
     gl.uniform1f(this.skyU.uSeason, this.season);
     this.setLight(this.skyU);
     gl.uniform1f(this.skyU.uSunGlow, this.light?.sunGlow ?? 0);
+    gl.uniform1f(this.skyU.uAureole, this.light?.aureole ?? 0);
     gl.uniform1f(this.skyU.uSunEmit, this.emission('sun'));
     // the moon as bright as the lit windows, far below the sun
     gl.uniform1f(this.skyU.uMoonEmit, this.emission('cityLights'));
@@ -732,6 +740,7 @@ export class Renderer {
     gl.uniform3fv(u.uSunDir, sunDir);
     gl.uniform1f(u.uFogStart, fogStart);
     gl.uniform1f(u.uFogEnd, fogEnd);
+    gl.uniform1f(u.uHazeK, this.hazeK());
     gl.uniform1i(u.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1f(u.uOriginLat, this.originLat);
     gl.uniform1f(u.uSeason, this.season);
@@ -794,6 +803,7 @@ export class Renderer {
     gl.uniform3fv(this.treeU.uSunDir, sunDir);
     gl.uniform1f(this.treeU.uFogStart, fogStart);
     gl.uniform1f(this.treeU.uFogEnd, fogEnd);
+    gl.uniform1f(this.treeU.uHazeK, this.hazeK());
     gl.uniform1i(this.treeU.uGlow, this.nightGlow ? 1 : 0);
     gl.uniform1f(this.treeU.uOriginLat, this.originLat);
     gl.uniform1f(this.treeU.uSeason, this.season);
@@ -834,6 +844,7 @@ export class Renderer {
     gl.uniform1f(this.pointsU.uCell, this.windowCellM);
     gl.uniform1f(this.pointsU.uFogStart, this.pointFog[0]);
     gl.uniform1f(this.pointsU.uFogEnd, this.pointFog[1]);
+    gl.uniform1f(this.pointsU.uHazeK, this.hazeK());
     gl.uniform2f(this.pointsU.uPull, pull[0], pull[1]);
     gl.uniform1f(this.pointsU.uOrthoFar, this.orthoFar);
     gl.uniformMatrix4fv(this.pointsU.uView, false, view);
@@ -933,6 +944,7 @@ export class Renderer {
       gl.uniformMatrix4fv(this.dsU.uInvViewProj, false, this.invViewProj);
       gl.uniform1f(this.dsU.uFogStart, this.fog[0]);
       gl.uniform1f(this.dsU.uFogEnd, this.fog[1]);
+      gl.uniform1f(this.dsU.uHazeK, this.hazeK());
       gl.bindVertexArray(this.triVao);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       // the depth texture is the world's attachment again next frame: no sampler may keep it bound
@@ -991,6 +1003,7 @@ export class Renderer {
       this.gl.uniform4fv(u.uDirect, this.light.direct);
       // the sunset glow turns the fog's haze toward the sky's colour (shaders.ts hazeAt)
       this.gl.uniform1f(u.uSunGlow, this.light.sunGlow);
+      this.gl.uniform1f(u.uAureole, this.light.aureole);
     }
     if (u.uGlitter === undefined) return;
     const g = this.light.glitter;
@@ -1071,7 +1084,7 @@ interface ClipControl {
 const WIRE_UNIFORMS = ['uWire', 'uWireColor', 'uWireFill', 'uWireWidth'];
 const GLITTER_UNIFORMS = ['uGlitter', 'uGlitterSun', 'uGlitterCore', 'uGlitterEdge', 'uTime', 'uDotPx'];
 /** the light on faces (shaders.ts SUNLIGHT_GLSL) */
-const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow'];
+const SUNLIGHT_UNIFORMS = ['uSun', 'uMoon', 'uSky', 'uDirect', 'uSunGlow', 'uAureole'];
 
 /** texture unit the LUT stays bound to */
 const LUT_UNIT = 5;

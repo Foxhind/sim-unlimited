@@ -78,7 +78,8 @@ describe('snow and ice by climate', () => {
       expect(vs).toMatch(/>> 24u\) & 7u/);
     }
     // frozen water is not drawn as water (no waves, glints, glitter)
-    expect(WORLD_VS).toContain('vWater = water && !frozenWater(aRamp, tempC) ? 1.0 : 0.0;');
+    expect(WORLD_VS).toContain('bool open = water && !frozenWater(aRamp, tempC);');
+    expect(WORLD_VS).toContain('vWater = open ? 1.0 : 0.0;');
   });
 
   it('the shader climate is the same formula as the terrain colours', () => {

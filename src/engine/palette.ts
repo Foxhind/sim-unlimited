@@ -202,18 +202,18 @@ interface MaterialRamp {
 }
 
 const MATERIALS: MaterialRamp[] = [
-  { dark: [16, 56, 16], light: [64, 148, 60] }, // grass
-  { dark: [8, 32, 12], light: [36, 92, 40] }, // forest
-  { dark: [8, 20, 48], light: [36, 84, 148] }, // water
+  { dark: [20, 44, 18], light: [82, 120, 58] }, // grass
+  { dark: [8, 22, 16], light: [46, 66, 52] }, // forest: the dark blue-green of pine as it looks from the air
+  { dark: [10, 32, 44], light: [48, 106, 122] }, // water: a sea blue with some green in it, as coastal water from the air
   { dark: [56, 56, 56], light: [172, 172, 172] }, // concrete
   { dark: [72, 28, 16], light: [168, 92, 56] }, // brick
-  { dark: [24, 24, 24], light: [92, 92, 92] }, // asphalt
+  { dark: [30, 30, 32], light: [128, 126, 122] }, // asphalt: sunlit roads from the air are a mid grey
   { dark: [104, 92, 40], light: [208, 188, 120] }, // sand
   { dark: [104, 116, 132], light: [244, 248, 252] }, // snow
   { dark: [48, 40, 32], light: [148, 132, 112] }, // rock
   { dark: [56, 60, 64], light: [188, 192, 196] }, // hull light
   { dark: [20, 24, 28], light: [88, 96, 104] }, // hull dark
-  { dark: [48, 84, 24], light: [140, 188, 80] }, // field
+  { dark: [52, 64, 28], light: [150, 160, 96] }, // field
 ];
 
 /** frozen inland water: light grey ice */
@@ -240,6 +240,11 @@ export interface PaletteParams {
   glow: number;
   /** how much water mirrors the sky instead of its own blue, 0..1 */
   waterSky: number;
+  /**
+   * the day's aureole round the sun, 0..1 (shaders.ts aureoleAt): the sky, and the haze toward the
+   * sun, paling to white with the light the haze scatters forward; none at dusk and at night
+   */
+  aureole: number;
   lightMul: number;
   tint: RGB;
   /** colour saturation of lit surfaces (1 = as they are), applied before the light */
@@ -252,9 +257,9 @@ export interface PaletteParams {
  * sunGlow is not drawn there (glow 0); it is the warm white of plain sunlight, which the rim light
  * (rim.ts) takes its colour from by day.
  */
-function plainSky(zenith: RGB, horizon: RGB): Pick<PaletteParams, 'zenith' | 'horizon' | 'skyMid' | 'skyLow' | 'sunGlow' | 'glow' | 'waterSky'> {
+function plainSky(zenith: RGB, horizon: RGB): Pick<PaletteParams, 'zenith' | 'horizon' | 'skyMid' | 'skyLow' | 'sunGlow' | 'glow' | 'waterSky' | 'aureole'> {
   const low = lerpRGB(zenith, horizon, 8 / 15);
-  return { zenith, horizon, skyMid: lerpRGB(zenith, horizon, 4 / 15), skyLow: low, sunGlow: DAYLIGHT_GLOW, glow: 0, waterSky: 0 };
+  return { zenith, horizon, skyMid: lerpRGB(zenith, horizon, 4 / 15), skyLow: low, sunGlow: DAYLIGHT_GLOW, glow: 0, waterSky: 0, aureole: 0 };
 }
 /** plain sunlight's colour (plainSky sunGlow) */
 const DAYLIGHT_GLOW: RGB = [255, 246, 224];
@@ -280,6 +285,7 @@ const DUSK: PaletteParams = {
   horizon: [160, 72, 120],
   glow: 1,
   waterSky: 0.75,
+  aureole: 0,
   lightMul: 0.58,
   tint: [1.0, 0.66, 0.74],
   saturation: 1.15,
@@ -298,26 +304,40 @@ const DAWN: PaletteParams = {
   horizon: [84, 120, 168],
   glow: 1,
   waterSky: 0.75,
+  aureole: 0,
   lightMul: 0.62,
   tint: [0.82, 0.92, 1.06],
   saturation: 1.1,
 };
-/** daylight under a cloudy sky: the plain, even light */
+/** daylight under a cloudy sky: the plain, even light; a faint bright patch round the sun */
 const DAY: PaletteParams = {
   ...plainSky([32, 72, 192], [168, 200, 232]),
+  aureole: 0.3,
   lightMul: 1.0,
   tint: [1, 1, 1],
   saturation: 1,
 };
 /**
- * daylight in good weather (sunniness 1): a deep blue zenith over a bright clear horizon, warm
- * brighter sunlight and livelier colours on the ground
+ * Daylight in good weather (sunniness 1), matched to an aerial panorama of a clear summer
+ * afternoon (Fethiye, 1 Jul 2023, sun 29° up, from 540 m): a cyan-blue sky, deepest some 30-50°
+ * up, palest just above the horizon, over a grey-blue haze a little darker than that, so the
+ * horizon stays a line; plain white sunlight and the ground's colours as they are — the air
+ * between and the aureole round the sun do the rest (shaders.ts AIR_HAZE, AUREOLE).
  */
 const SUNNY_DAY: PaletteParams = {
-  ...plainSky([16, 88, 232], [190, 222, 250]),
-  lightMul: 1.12,
-  tint: [1.0, 0.97, 0.88],
-  saturation: 1.4,
+  zenith: [72, 138, 200],
+  skyMid: [78, 150, 205],
+  skyLow: [156, 190, 212],
+  // the haze: far ranges and fully hazed ground, a grey-blue darker than the sky just above them
+  horizon: [132, 164, 186],
+  sunGlow: DAYLIGHT_GLOW,
+  glow: 0,
+  // from the air water takes the blue of the sky above it
+  waterSky: 0.35,
+  aureole: 1,
+  lightMul: 1.0,
+  tint: [1.0, 0.99, 0.96],
+  saturation: 1.0,
 };
 
 /** total cloud cover up to this is fully sunny weather, from SUNNY_OVERCAST_PCT on none */
@@ -411,6 +431,20 @@ export function greenColour(packed: number): number {
 }
 
 /**
+ * Tree canopy from the air: darker and cooler than the open ground it grows on — shade inside the
+ * crowns, and the blue-green of needles and leathery leaves. The aerial panorama of Fethiye has
+ * its crowns at 46,62,48 from 0.6 km, whatever the dry ground between them.
+ */
+export const CANOPY = { RGB: [46, 64, 52] as RGB, SHARE: 0.6 } as const;
+
+/** the canopy over a foliage face colour (greenColour): CANOPY.SHARE of the way to CANOPY.RGB; flags kept */
+export function canopyColour(packed: number): number {
+  if (isMaterial(packed)) return packed;
+  const c = lerpRGB(rgbOf(packed), CANOPY.RGB, CANOPY.SHARE);
+  return ((packed & ~PAYLOAD_MASK) | colourOf(c)) >>> 0;
+}
+
+/**
  * Shade of an RGB face colour at lighting step s (0..LIT_STEPS-1) before the time of day: the colour
  * is what the surface looks like under ordinary daylight, so it sits at ~3/4 of the lighting range;
  * full sun brightens it a little, the shadow side darkens it to about 40 %. The shader does the same.
@@ -437,6 +471,7 @@ function lerpParams(a: PaletteParams, b: PaletteParams, t: number): PaletteParam
     sunGlow: lerpRGB(a.sunGlow, b.sunGlow, t),
     glow: lerp(a.glow, b.glow, t),
     waterSky: lerp(a.waterSky, b.waterSky, t),
+    aureole: lerp(a.aureole, b.aureole, t),
     lightMul: lerp(a.lightMul, b.lightMul, t),
     tint: lerpRGB(a.tint, b.tint, t),
     saturation: lerp(a.saturation, b.saturation, t),
@@ -580,6 +615,8 @@ export interface LightUniforms {
   saturation: number;
   /** sky glow toward the sun, 0..1 (PaletteParams.glow, SKY_FS) */
   sunGlow: number;
+  /** the day's aureole round the sun, 0..1 (PaletteParams.aureole, shaders.ts aureoleAt) */
+  aureole: number;
   /**
    * the water surface (GLITTER_GLSL, WATER_GLSL): [0] the dusk look's strength 0..1 (the sky glow:
    * the glitter path, the mirrored sky bands, the neon grid), [1..3] rgb 0..1 of the glitter's core
@@ -643,7 +680,7 @@ export function lightUniforms(p: PaletteParams, sunny = 1, cloud: RGB = OVERCAST
   const hue = skylightHue(p, 1 - clear, cloud);
   const y = luma(hue);
   return {
-    levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, glitter: glitterOf(p),
+    levels, haze: Float32Array.from(p.horizon, (v) => v / 255), saturation: p.saturation, sunGlow: p.glow, aureole: p.aureole, glitter: glitterOf(p),
     sky: Float32Array.from([hue[0] / y, hue[1] / y, hue[2] / y, lerp(AMBIENT_OVERCAST, AMBIENT_CLEAR, clear)]),
     direct: Float32Array.from([0.5 + 0.5 * clear, 0, LIGHT_TINT, SUN_GAIN]),
   };
@@ -696,6 +733,7 @@ export const FLASH_LIGHT: LightUniforms = {
   haze: new Float32Array([1, 1, 1]),
   saturation: 1,
   sunGlow: 0,
+  aureole: 0,
   glitter: new Float32Array(8),
   sky: new Float32Array([1, 1, 1, 1]),
   direct: new Float32Array(4),
@@ -1005,6 +1043,28 @@ export function sunColour(sunElevationDeg: number): RGB {
 
 export function applySunColors(lut: Uint8Array, sunElevationDeg: number): void {
   writeEntry(lut, LIGHT.SUN, sunColour(sunElevationDeg));
+}
+
+/**
+ * The moon's light on faces, 0..1: by its elevation and phase, once the sun (fading out from +2° to
+ * −4°) no longer lights them (LightUniforms.direct y)
+ */
+export function moonLightOn(sunElevationDeg: number, moonElevationDeg: number, moonIllumination: number): number {
+  const sw = Math.max(0, Math.min(1, (sunElevationDeg + 4) / 6));
+  return Math.max(0, Math.min(1, moonElevationDeg / 10)) * moonIllumination * (1 - sw);
+}
+
+/**
+ * What a palette lights a frame with, as the simulator has it: the LUT with the sun disc's colour
+ * for the sun's elevation, and the light uniforms for the weather's sunniness, the clouds' colour
+ * and the moon's light (moonLightOn). Shared by the simulator and the relief inspector.
+ */
+export function frameLighting(p: PaletteParams, sunElevationDeg: number, sunny: number, cloud: RGB, moonLight: number): { lut: Uint8Array; light: LightUniforms } {
+  const lut = buildLUT(p);
+  applySunColors(lut, sunElevationDeg);
+  const light = lightUniforms(p, sunny, cloud);
+  light.direct[1] = moonLight;
+  return { lut, light };
 }
 
 /** LUT index of a material ramp (MAT id, or its face colour RAMP.*) at a step */

@@ -5,10 +5,12 @@
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { BASE_LAND, buildLUT, lightUniforms, litShare, paletteAt, seasonOf, snowy, solarHour, WINDOWS } from '../engine/palette';
+import { BASE_LAND, frameLighting, litShare, moonLightOn, paletteAt, seasonOf, snowy, solarHour, sunColour, WINDOWS } from '../engine/palette';
+import { rim, rimFrame } from '../engine/rim';
 import { Renderer } from '../engine/renderer';
 import { DEPTH_FAR, REVERSED_NEAR } from '../engine/shaders';
 import { parseMapLink, RELIEF_TILES_ACROSS } from '../ui/map-links';
+import { CLOUD_RGB } from '../world/clouds';
 import { ChunkManager, DETAIL_RADIUS_M, type CameraWorld, type Chunk } from '../world/chunks';
 import { farOsmTiles } from '../world/far-osm';
 import { FarOsmManager } from '../world/far-osm-manager';
@@ -23,6 +25,12 @@ import { solarClock, solarInstant } from '../world/time-of-day';
 import { cruiseSpeed, FLY_KEY_CODES, flyStep, look, noKeys, type FlyKeys } from './fly-camera';
 import { PRESETS, SOURCE } from './presets';
 
+/**
+ * The inspector has no weather: it is lit as the simulator lights a clear day (palette.ts
+ * sunniness 1, the 'clear' preset), so what it shows is what one flies over in good weather.
+ */
+const CLEAR_SUNNY = 1;
+const CLOUD: [number, number, number] = [(CLOUD_RGB >> 16) & 255, (CLOUD_RGB >> 8) & 255, CLOUD_RGB & 255];
 /** a sun set by hand has no moon with it */
 const NO_MOON = new Float32Array([0, -1, 0]);
 
@@ -129,8 +137,8 @@ const sunDir = vec3.create();
 const moonDir = vec3.create();
 const lightDir = vec3.create();
 const cam: CameraWorld = { pos: vec3.create(), latLon: state.centre, alt: state.camAlt, velocity: vec3.create() };
-let palette = paletteAt(state.sunEl);
-let lut = buildLUT(palette);
+let palette = paletteAt(state.sunEl, CLEAR_SUNNY);
+let { lut, light } = frameLighting(palette, state.sunEl, CLEAR_SUNNY, CLOUD, 0);
 /** what the light was last worked out for */
 let lightKey = '';
 let selected: Tile | null = null;
@@ -247,6 +255,7 @@ function updateLight(): void {
   if (key === lightKey) return;
   lightKey = key;
   let morning = false;
+  let moonLight = 0;
   if (state.byTime) {
     const t = sunInstant();
     const sun = sunPosition(t, state.centre), moon = moonPosition(t, state.centre);
@@ -257,7 +266,8 @@ function updateLight(): void {
     morning = sunPosition(new Date(t.getTime() + 60000), state.centre).elevationDeg > sun.elevationDeg;
     // as in the simulator: the faces' light leans from the sun to the moon as the sun goes down
     const sw = Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6));
-    const mw = Math.max(0, Math.min(1, moon.elevationDeg / 10)) * moon.illumination * (1 - sw);
+    const mw = moonLightOn(sun.elevationDeg, moon.elevationDeg, moon.illumination);
+    moonLight = mw;
     if (sw + mw < 1e-3) vec3.copy(lightDir, sunDir);
     else vec3.normalize(lightDir, vec3.scaleAndAdd(lightDir, vec3.scale(lightDir, sunDir, sw), moonDir, mw));
     renderer.season = seasonOf(t);
@@ -271,8 +281,8 @@ function updateLight(): void {
     renderer.season = 0;
     renderer.litShare = WINDOWS.LIT_SHARE;
   }
-  palette = paletteAt(state.sunEl, 0, morning);
-  lut = buildLUT(palette);
+  palette = paletteAt(state.sunEl, CLEAR_SUNNY, morning);
+  ({ lut, light } = frameLighting(palette, state.sunEl, CLEAR_SUNNY, CLOUD, moonLight));
 }
 
 let frames = 0;
@@ -316,8 +326,15 @@ function frame(now: number): void {
   renderer.nightGlow = night;
   // the lit windows' flicker and the water's glitter run on it
   renderer.time = now / 1000;
-  renderer.beginFrame(lut, lightUniforms(palette));
+  // as in the simulator: sun shadows (in free flight only: the renderer casts none in the plan view)
+  if (renderer.beginShadows(cam.pos, 0, view, sunDir)) {
+    chunks.drawShadows(renderer);
+    if (osmOn) osm.drawShadows(renderer, cam.pos);
+    renderer.endShadows();
+  }
+  renderer.beginFrame(lut, light);
   renderer.setSunMoon(sunDir, moonDir);
+  renderer.rim = rimFrame(rim, palette, sunColour(state.sunEl), state.sunEl);
   // in free flight the sky and the clear-weather fog of the simulator; from above no fog: the view
   // has no single distance to the ground
   const [fogStart, fogEnd] = fly.on ? [FOG_CLEAR.start, FOG_CLEAR.end] : [1e9, 2e9];
@@ -326,7 +343,10 @@ function frame(now: number): void {
       y: 0, ramp: snowy(BASE_LAND), fogStart, fogEnd,
     });
   }
+  renderer.rimWeight = rim.terrain;
   chunks.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, osmOn ? HOUSE_RADIUS_M : undefined);
+  renderer.rimWeight = rim.objects;
+  renderer.rimTreeWeight = rim.trees;
   if (osmOn) {
     osm.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, night, POINT_SIZE * dpr);
     farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr, fogStart, fogEnd);
@@ -961,6 +981,7 @@ function init(): void {
 
   document.addEventListener('paste', onPaste);
   initFly();
+  startFromQuery();
   window.addEventListener('hashchange', () => {
     Object.assign(state, parseHash());
     syncInputs();
@@ -970,6 +991,26 @@ function init(): void {
   if (!isNeutralGrade(grade)) setGrade(grade, 'восстановлена сохранённая коррекция');
   syncInputs();
   requestAnimationFrame(frame);
+}
+
+/**
+ * A view given in the page's query, to set beside a photograph taken from the same place:
+ * ?fly=lat,lon,alt,heading,pitch starts free flight there (degrees; metres above sea level), and
+ * ?at=<ISO instant> puts the sun and the moon where they stood at that moment.
+ */
+function startFromQuery(): void {
+  const q = new URLSearchParams(location.search);
+  const f = (q.get('fly') ?? '').split(',').map(Number);
+  if (f.length >= 3 && f.every(Number.isFinite) && Math.abs(f[0]) <= 85 && Math.abs(f[1]) <= 180) {
+    setFly(true);
+    const ll = { lat: f[0], lon: f[1] };
+    state.centre = fly.latLon = ll;
+    fly.alt = Math.max(1, Math.min(FLY_ALT_MAX_M, f[2]));
+    fly.yaw = (f[3] ?? 0) * D2R;
+    fly.pitch = Math.max(-89, Math.min(89, f[4] ?? 0)) * D2R;
+  }
+  const at = new Date(q.get('at') ?? '');
+  if (!Number.isNaN(at.getTime())) Object.assign(state, solarClock(at, state.centre.lon), { byTime: true });
 }
 
 init();
