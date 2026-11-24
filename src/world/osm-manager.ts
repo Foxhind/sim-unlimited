@@ -632,7 +632,10 @@ export class OsmManager {
       }
       // the lighthouses' lights: those lit at this moment of their periods, larger than a beacon
       if (c.flashes && c.flashData && lights && this.shows(STRUCTURE.LIGHTHOUSE)) {
-        const lit = litFlashes(c.flashData, performance.now() / 1000, this.flashScratch(c.flashData.length / FLASH_STRIDE));
+        // the eye in the tile's frame (WORLD_VS toWorld undone: the offset, then the frame's yaw)
+        const ex = camPos[0] - c.offset[0], ez = camPos[2] - c.offset[2], cy = Math.cos(c.offset[3]), sy = Math.sin(c.offset[3]);
+        const eye: [number, number] = [ex * cy + ez * sy, -ex * sy + ez * cy];
+        const lit = litFlashes(c.flashData, performance.now() / 1000, this.flashScratch(c.flashData.length / FLASH_STRIDE), eye);
         if (lit > 0) {
           const gl = this.gl;
           gl.bindBuffer(gl.ARRAY_BUFFER, c.flashes.buffer);

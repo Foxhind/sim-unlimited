@@ -43,14 +43,19 @@ export const LIGHTHOUSE = {
   VERY_QUICK: [0.5, 0.2] as [number, number],
   /** a flashing light's period without one on the chart */
   PERIOD_S: 5,
-  /** at most this many flashes in a period */
+  /** at most this many flashes in a period, and sectors of one light */
   MAX_FLASHES: 6,
+  MAX_SECTORS: 6,
 } as const;
 
 export type SiteKind = 'lighthouse' | 'post' | 'cardinal';
 
-/** per light: x, y, z, colour (pointValue), period s, flash count, then MAX_FLASHES × (start, end) s */
-export const FLASH_STRIDE = 6 + 2 * LIGHTHOUSE.MAX_FLASHES;
+/**
+ * per light: x, y, z, colour (LIGHT.SEA_*), period s, flash count, then MAX_FLASHES × (start, end) s,
+ * then its sector count and MAX_SECTORS × (start°, end°, colour)
+ */
+export const FLASH_STRIDE = 6 + 2 * LIGHTHOUSE.MAX_FLASHES + 1 + 3 * LIGHTHOUSE.MAX_SECTORS;
+const SECTOR_AT = 6 + 2 * LIGHTHOUSE.MAX_FLASHES;
 
 export interface SeamarkLight {
   /** its LUT light colour (LIGHT.SEA_*) */
@@ -60,6 +65,11 @@ export interface SeamarkLight {
   period: number;
   /** when it is lit within its period, seconds from the period's start */
   on: [number, number][];
+  /**
+   * a sectored light's sectors: its colour seen from bearings start…end (degrees true, clockwise,
+   * from seaward towards the light, as the chart gives them); dark from any other
+   */
+  sectors?: { start: number; end: number; colour: number }[];
 }
 
 const num = (v: string | undefined): number | undefined => {
@@ -102,14 +112,30 @@ export function flashTimes(character: string | undefined, period: number | undef
   return { period: P, on: Array.from({ length: n }, (_, k): [number, number] => [k * (f + gap), k * (f + gap) + f]) };
 }
 
-/** a point's charted light (the first of a sectored one's), or none */
+const colourOfName = (v: string | undefined): number => LIGHTHOUSE.COLOURS[(v ?? 'white').split(';')[0].trim()] ?? LIGHTHOUSE.COLOURS.white;
+
+/**
+ * A point's charted light, or none: its rhythm the first light's; a sectored one (seamark:light:N:*
+ * with sector_start and sector_end) with its sectors, each its own colour
+ */
 export function seamarkLight(tags: Record<string, string>): SeamarkLight | undefined {
   const key = tags['seamark:light:colour'] !== undefined || tags['seamark:light:character'] !== undefined ? 'seamark:light:' : tags['seamark:light:1:colour'] !== undefined ? 'seamark:light:1:' : undefined;
   if (!key) return undefined;
-  const colourName = (tags[key + 'colour'] ?? 'white').split(';')[0].trim();
-  const colour = LIGHTHOUSE.COLOURS[colourName] ?? LIGHTHOUSE.COLOURS.white;
+  const colour = colourOfName(tags[key + 'colour']);
   const { period, on } = flashTimes(tags[key + 'character'], num(tags[key + 'period']), tags[key + 'group'], tags[key + 'sequence']);
-  return { colour, height: num(tags[key + 'height']), period, on };
+  const sectors: { start: number; end: number; colour: number }[] = [];
+  for (let k = 1; k <= 9 && sectors.length < LIGHTHOUSE.MAX_SECTORS; k++) {
+    const p = `seamark:light:${k}:`, start = num(tags[p + 'sector_start']), end = num(tags[p + 'sector_end']);
+    if (start === undefined || end === undefined) continue;
+    sectors.push({ start: ((start % 360) + 360) % 360, end: ((end % 360) + 360) % 360, colour: colourOfName(tags[p + 'colour']) });
+  }
+  return { colour, height: num(tags[key + 'height']), period, on, ...(sectors.length ? { sectors } : {}) };
+}
+
+/** whether bearing `b` lies in the sector clockwise from `start` to `end` (degrees) */
+export function inSector(b: number, start: number, end: number): boolean {
+  const x = ((b % 360) + 360) % 360;
+  return start <= end ? x >= start && x < end : x >= start || x < end;
 }
 
 function isSite(tags: Record<string, string>): boolean {
@@ -233,20 +259,41 @@ export function buildLighthouses(tile: Tile, points: ReadonlyArray<OsmPoint>, sa
     row[4] = light.period;
     row[5] = light.on.length;
     light.on.forEach(([s, t], k) => { row[6 + 2 * k] = s; row[7 + 2 * k] = t; });
+    row[SECTOR_AT] = light.sectors?.length ?? 0;
+    light.sectors?.forEach((s, k) => { row[SECTOR_AT + 1 + 3 * k] = s.start; row[SECTOR_AT + 2 + 3 * k] = s.end; row[SECTOR_AT + 3 + 3 * k] = s.colour; });
     flashes.push(...row);
   }
   return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), flashes: new Float32Array(flashes) };
 }
 
-/** the lights of `flashes` lit at `seconds`: x, y, z, colour each (the points drawLights draws) */
-export function litFlashes(flashes: Float32Array, seconds: number, out: Float32Array): number {
+/**
+ * The lights of `flashes` lit at `seconds` as seen from `eye` (x, z in the tile's frame: x east,
+ * z south): x, y, z, colour each (the points drawLights draws). A sectored light in the colour of
+ * the sector the eye's bearing to it falls in, unseen from outside them; without `eye`, its first.
+ */
+export function litFlashes(flashes: Float32Array, seconds: number, out: Float32Array, eye?: [number, number]): number {
   let n = 0;
   for (let i = 0; i + FLASH_STRIDE <= flashes.length; i += FLASH_STRIDE) {
     const period = flashes[i + 4] || 1, t = ((seconds % period) + period) % period;
     let lit = false;
     for (let k = 0; k < flashes[i + 5]; k++) if (t >= flashes[i + 6 + 2 * k] && t < flashes[i + 7 + 2 * k]) lit = true;
     if (!lit) continue;
-    out.set([flashes[i], flashes[i + 1], flashes[i + 2], flashes[i + 3]], n * 4);
+    let colour = flashes[i + 3];
+    const sectors = flashes[i + SECTOR_AT];
+    if (sectors > 0 && eye) {
+      // the bearing from the eye to the light, degrees true (north is −z)
+      const b = (Math.atan2(flashes[i] - eye[0], -(flashes[i + 2] - eye[1])) * 180) / Math.PI;
+      let found = -1;
+      for (let k = 0; k < sectors && found < 0; k++) {
+        const at = i + SECTOR_AT + 1 + 3 * k;
+        if (inSector(b, flashes[at], flashes[at + 1])) found = flashes[at + 2];
+      }
+      if (found < 0) continue;
+      colour = found;
+    } else if (sectors > 0) {
+      colour = flashes[i + SECTOR_AT + 3];
+    }
+    out.set([flashes[i], flashes[i + 1], flashes[i + 2], colour], n * 4);
     n++;
   }
   return n;

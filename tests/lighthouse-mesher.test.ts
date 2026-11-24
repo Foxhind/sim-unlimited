@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LIGHT as LUT_LIGHT } from '../src/engine/palette';
 import { tileCenter, type Tile } from '../src/world/geodesy';
-import { buildLighthouses, FLASH_STRIDE, flashTimes, LIGHTHOUSE, lightSites, litFlashes, seamarkLight } from '../src/world/lighthouse-mesher';
+import { buildLighthouses, FLASH_STRIDE, flashTimes, inSector, LIGHTHOUSE, lightSites, litFlashes, seamarkLight } from '../src/world/lighthouse-mesher';
 import type { LonLat, OsmPoint } from '../src/world/osm-types';
 import { overpassQuery, parseOverpass } from '../src/world/overpass';
 
@@ -106,6 +106,46 @@ describe('litFlashes', () => {
     expect(out[1]).toBeCloseTo(32, 5);
     expect(litFlashes(m.flashes, 1, out)).toBe(0);
     expect(litFlashes(m.flashes, 5.2, out)).toBe(1);
+  });
+
+  it('a sectored light (Gemiler island): white or red by where it is seen from, dark between', () => {
+    // the chart's sectors, bearings from seaward towards the light: white 117°…16° (through north), red 16°…100°
+    const gemiler: OsmPoint = {
+      at: at(0, 0),
+      tags: {
+        'seamark:type': 'light_minor',
+        'seamark:light:1:character': 'Fl', 'seamark:light:1:colour': 'white', 'seamark:light:1:period': '4', 'seamark:light:1:sector_start': '117', 'seamark:light:1:sector_end': '16',
+        'seamark:light:2:character': 'Fl', 'seamark:light:2:colour': 'red', 'seamark:light:2:period': '4', 'seamark:light:2:sector_start': '16', 'seamark:light:2:sector_end': '100',
+      },
+    };
+    expect(seamarkLight(gemiler.tags)!.sectors).toEqual([
+      { start: 117, end: 16, colour: LUT_LIGHT.SEA_WHITE }, { start: 16, end: 100, colour: LUT_LIGHT.SEA_RED },
+    ]);
+    const m = buildLighthouses(TILE, [gemiler], () => 0);
+    const out = new Float32Array(4);
+    const seen = (bearingFromLight: number) => {
+      // an eye 1 km off on that bearing from the light (x east, z south); the light at the tile's frame origin
+      const r = (bearingFromLight * Math.PI) / 180;
+      const eye: [number, number] = [m.flashes[0] + 1000 * Math.sin(r), m.flashes[2] - 1000 * Math.cos(r)];
+      return litFlashes(m.flashes, 0.1, out, eye) ? out[3] : undefined;
+    };
+    // seen from the south the bearing to it is north (0°): the white sector; from the north-east (45°) 225°: white
+    expect(seen(180)).toBe(LUT_LIGHT.SEA_WHITE);
+    expect(seen(45)).toBe(LUT_LIGHT.SEA_WHITE);
+    // from the south-west (225°) the bearing to it is 45°: red
+    expect(seen(225)).toBe(LUT_LIGHT.SEA_RED);
+    // from 290° the bearing to it is 110°, between the sectors: dark
+    expect(seen(290)).toBeUndefined();
+    // no eye: its first sector's colour
+    expect(litFlashes(m.flashes, 0.1, out)).toBe(1);
+    expect(out[3]).toBe(LUT_LIGHT.SEA_WHITE);
+  });
+
+  it('inSector: clockwise, across north too', () => {
+    expect(inSector(50, 16, 100)).toBe(true);
+    expect(inSector(350, 117, 16)).toBe(true);
+    expect(inSector(-10, 117, 16)).toBe(true);
+    expect(inSector(110, 117, 16)).toBe(false);
   });
 });
 
