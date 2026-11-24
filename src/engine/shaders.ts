@@ -972,6 +972,8 @@ vec3 roadMarkAt(vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
 }
 `;
 
+/** sunLit's share of the sun below which a fragment is in shade, above which in full sun; between: the penumbra */
+const SHADOW_PENUMBRA_CUT = { SHADE: 0.3, LIT: 0.7 };
 /** the shadows fade out from this share of the shadow map's half-width to its edge */
 const SHADOW_FADE = 0.8;
 /**
@@ -1009,11 +1011,21 @@ void shadowCoord(vec3 wp, vec3 n) {
   vShadow = (uShadowMat * vec4(wp + n * uShadowNormal * (0.5 + slant), 1.0)).xyz * 0.5 + 0.5;
 }
 `;
-/** see SHADOW_RECEIVE_VS: 1 where the sun reaches the fragment, 0 in a cast shadow */
+/**
+ * See SHADOW_RECEIVE_VS. sunLit: the share of the sun that reaches the fragment, 0 in a cast
+ * shadow, 1 in full sun: four hardware 2×2 tests on a rotated grid uShadowSoft (shadow-map UV)
+ * round it, so the shadow's outline follows a smooth field, not the map's texel grid.
+ * sunShaded: the fragment's colour from it in three steps, like the palette's own: the shade
+ * (vShade), the penumbra band (uPenumbra: rgb its tint, a its place between shade and sun;
+ * uPenumbraSat its saturation) and the sun.
+ */
 const SHADOW_RECEIVE_FS = `
 uniform highp sampler2DShadow uShadowMap;
 uniform float uShadowOn;
 uniform float uShadowBias;
+uniform float uShadowSoft;
+uniform vec4 uPenumbra;
+uniform float uPenumbraSat;
 flat in vec3 vShade;
 in vec3 vShadow;
 const float SHADOW_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
@@ -1027,12 +1039,25 @@ float sunLit() {
 #else
   float ref = vShadow.z - uShadowBias;
 #endif
-  // hard edges, like the palette's own steps: the 2×2 filtered test cut at half
-  float lit = step(0.5, texture(uShadowMap, vec3(vShadow.xy, ref)));
   // the shadows fade out toward the map's edge in a dither, not along a line
   ivec2 q = ivec2(gl_FragCoord.xy) & 3;
-  if (smoothstep(${SHADOW_FADE.toFixed(2)}, 1.0, edge) > (SHADOW_BAYER[q.y * 4 + q.x] + 0.5) / 16.0) lit = 1.0;
-  return lit;
+  if (smoothstep(${SHADOW_FADE.toFixed(2)}, 1.0, edge) > (SHADOW_BAYER[q.y * 4 + q.x] + 0.5) / 16.0) return 1.0;
+  // a grid turned off the texels' axes (atan 1/3): no row of taps lines up with a row of texels
+  vec2 a = vec2(0.949, 0.316) * uShadowSoft, b = vec2(-a.y, a.x);
+  return 0.25 * (texture(uShadowMap, vec3(vShadow.xy + a, ref)) + texture(uShadowMap, vec3(vShadow.xy - a, ref))
+    + texture(uShadowMap, vec3(vShadow.xy + b, ref)) + texture(uShadowMap, vec3(vShadow.xy - b, ref)));
+}
+vec3 sunShaded() {
+  float f = sunLit();
+  if (f > ${SHADOW_PENUMBRA_CUT.LIT.toFixed(2)}) return vColor;
+  if (f < ${SHADOW_PENUMBRA_CUT.SHADE.toFixed(2)}) return vShade;
+  vec3 p = mix(vShade, vColor, uPenumbra.a);
+  // the tint as strong as the sun's own contrast here: none where the haze has taken both
+  float sun = dot(vColor, vec3(1.0)), shade = dot(vShade, vec3(1.0));
+  float k = clamp(2.0 * (sun - shade) / max(sun, 1e-3), 0.0, 1.0);
+  // painted, not measured: the band more saturated than either side, its hue pushed by the tint
+  vec3 sat = max(mix(vec3(dot(p, vec3(0.2126, 0.7152, 0.0722))), p, uPenumbraSat), 0.0);
+  return min(mix(p, sat * uPenumbra.rgb, k), 1.0);
 }
 `;
 /** a caster in the shadow map: the world's faces (terrain with its stitched edges, objects, clouds) */
@@ -1249,8 +1274,8 @@ out vec4 oColor;
 ${LOG_DEPTH_FS}${EYE_GLSL}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}
 void main() {
   writeLogDepth();
-  // in a cast shadow the face keeps only the sky's light (vShade)
-  vec3 c = sunLit() > 0.5 ? vColor : vShade;
+  // in a cast shadow the face keeps only the sky's light (vShade), at its edge the penumbra's
+  vec3 c = sunShaded();
   // the derivative is taken on every fragment: fwidth is undefined in non-uniform control flow
   vec2 wxz = uCamPos.xz + vRay.xz;
   vec2 fw = fwidth(wxz);

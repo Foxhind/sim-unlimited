@@ -466,6 +466,10 @@ export class Renderer {
     const texel = (2 * this.shadowR) / SHADOW_SIZE;
     gl.uniform1f(u.uShadowNormal, texel * SHADOW_NORMAL_TEXELS);
     gl.uniform1f(u.uShadowBias, SHADOW_BIAS_TEXELS * texel / (2 * SHADOW_DEPTH_M));
+    gl.uniform1f(u.uShadowSoft, Math.max(SHADOW_PENUMBRA.RADIUS_M, SHADOW_PENUMBRA.MIN_TEXELS * texel) / (2 * this.shadowR));
+    const [tr, tg, tb] = SHADOW_PENUMBRA.TINT;
+    gl.uniform4f(u.uPenumbra, tr, tg, tb, SHADOW_PENUMBRA.MIX);
+    gl.uniform1f(u.uPenumbraSat, SHADOW_PENUMBRA.SAT);
   }
 
   /** Q12: "MSAA" = 2x supersampled world pass, averaged 2×2 down to the screen. */
@@ -1102,7 +1106,7 @@ const LUT_UNIT = 5;
 /** texture unit the shadow map stays bound to */
 const SHADOW_UNIT = 6;
 /** the shadow receivers' uniforms (shaders.ts SHADOW_RECEIVE_VS / _FS) */
-const SHADOW_UNIFORMS = ['uShadowMat', 'uShadowOn', 'uShadowNormal', 'uShadowBias', 'uShadowMap'];
+const SHADOW_UNIFORMS = ['uShadowMat', 'uShadowOn', 'uShadowNormal', 'uShadowBias', 'uShadowMap', 'uShadowSoft', 'uPenumbra', 'uPenumbraSat'];
 /** shadow map texels a side */
 const SHADOW_SIZE = 2048;
 /**
@@ -1120,6 +1124,14 @@ const SHADOW_MIN_SUN_Y = 0.01;
 const SHADOW_NORMAL_TEXELS = 2;
 const SHADOW_BIAS_TEXELS = 2;
 const SHADOW_SLOPE = 4;
+/**
+ * The shadow's edge (SHADOW_RECEIVE_FS sunLit / sunShaded): its taps lie RADIUS_M round the
+ * fragment, at least MIN_TEXELS shadow texels (the outline off the texel grid at any height); the
+ * penumbra band between shade and sun takes MIX of the way from the shade to the sun, its
+ * saturation raised SAT times and its hue pushed toward an orange-leaning red-violet by TINT: a painted edge, the
+ * saturated fringe of anime backgrounds, not a measured one.
+ */
+const SHADOW_PENUMBRA = { RADIUS_M: 0.5, MIN_TEXELS: 1, MIX: 0.45, SAT: 1.6, TINT: [1.16, 0.85, 0.97] };
 /** the box's centre lies this share of its half-width ahead of the camera, where it looks */
 const SHADOW_AHEAD = 0.4;
 
