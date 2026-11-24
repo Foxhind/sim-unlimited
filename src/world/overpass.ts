@@ -47,6 +47,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
 // Power lines stand their pylons or poles at their vertices and hang their conductors (power-mesher.ts).
 // Cable cars and chair lifts: their pylons and stations by the nodes, ropes and cabins (aerialway-mesher.ts).
+// Lighthouses and the sea's charted lights: towers, posts and beacons, flashing at night (lighthouse-mesher.ts).
 const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
 const TOWN_LAND_ZONES = '^(residential|commercial|retail|industrial|quarry)$';
 const FULL_FILTER = `
@@ -72,6 +73,7 @@ const FULL_FILTER = `
   node["man_made"="tower"]["tower:type"="minaret"]; way["man_made"="tower"]["tower:type"="minaret"];
   way["power"~"^(line|minor_line)$"];
   way["aerialway"~"^(gondola|cable_car|chair_lift|mixed_lift)$"]; node["aerialway"~"^(pylon|station)$"];
+  node["man_made"~"^(lighthouse|beacon)$"]; way["man_made"="lighthouse"]; node["seamark:type"~"^(light_major|light_minor|beacon_)"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];
@@ -199,7 +201,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined)) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined || el.tags['seamark:type'] !== undefined)) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);
@@ -274,7 +276,9 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     // a mast mapped by its footprint (often the guyed giants, e.g. the 442 m Balashikha mast) stands at
     // its vertex mean; so does a minaret mapped so (minaret-mesher.ts)
     const minaret = tags.man_made === 'tower' && tags['tower:type'] === 'minaret';
-    if (!usedWays.has(w.id) && !hasBuildingTags(tags) && (isAntenna(tags) || minaret)) {
+    // and a lighthouse, building or not: its tower is lighthouse-mesher's
+    const lighthouse = tags.man_made === 'lighthouse';
+    if (!usedWays.has(w.id) && ((!hasBuildingTags(tags) && (isAntenna(tags) || minaret)) || lighthouse)) {
       const n = closed ? geom.length - 1 : geom.length;
       let lon = 0, lat = 0;
       for (let i = 0; i < n; i++) { lon += geom[i][0]; lat += geom[i][1]; }

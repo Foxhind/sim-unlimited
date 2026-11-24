@@ -65,6 +65,7 @@ public class SimProfile implements Profile {
   /** overpass.ts: the lifts aerialway-mesher draws, and their pylons and stations */
   static final Pattern LIFT = Pattern.compile("^(gondola|cable_car|chair_lift|mixed_lift)$");
   static final Pattern LIFT_NODE = Pattern.compile("^(pylon|station)$");
+  static final Pattern SEA_LIGHT = Pattern.compile("^(lighthouse|beacon)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -76,6 +77,8 @@ public class SimProfile implements Profile {
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
     "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway");
+  /** the charted lights' keys (lighthouse-mesher.ts) */
+  static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -131,7 +134,7 @@ public class SimProfile implements Profile {
       "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
-      isMast(f);
+      isMast(f) || "lighthouse".equals(s(f, "man_made"));
   }
 
   static boolean relationWanted(SourceFeature f) {
@@ -151,14 +154,21 @@ public class SimProfile implements Profile {
 
   static boolean nodeWanted(SourceFeature f) {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
-      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway"));
+      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f);
+  }
+
+  /** overpass.ts: lighthouses, beacons and the charted lights */
+  static boolean isSeaLight(SourceFeature f) {
+    String st = s(f, "seamark:type");
+    return find(SEA_LIGHT, s(f, "man_made")) || (st != null && (st.equals("light_major") || st.equals("light_minor") || st.startsWith("beacon_")));
   }
 
   static Map<String, Object> keptTags(SourceFeature f) {
     Map<String, Object> out = new TreeMap<>();
     for (var e : f.tags().entrySet()) {
       String k = e.getKey();
-      boolean keep = KEYS.contains(k);
+      boolean keep = KEYS.contains(k) || k.equals("seamark:type");
+      for (String p : SEAMARK_PREFIXES) keep |= k.startsWith(p);
       for (String p : KEY_PREFIXES) keep |= k.startsWith(p);
       if (keep && e.getValue() != null) out.put(k, e.getValue().toString());
     }

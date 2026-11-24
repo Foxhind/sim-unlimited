@@ -5,6 +5,7 @@ import { must } from '../engine/gl';
 import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
+import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
 import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_VERTEX_FLOATS } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
@@ -31,6 +32,8 @@ export const BUILDING_DETAIL_M = 1500;
  */
 /** power line conductors are drawn within this slant distance of a tile's nearest part, m */
 const WIRE_RADIUS_M = 4000;
+/** a lighthouse's flash drawn this much larger than a beacon */
+const FLASH_SIZE = 2;
 const PROP_DETAIL_M: Partial<Record<number, number>> ={ [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500 };
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
@@ -82,6 +85,9 @@ interface OsmChunk {
   mastLines?: PropSet;
   /** power line conductors: 1 px GL lines within WIRE_RADIUS_M */
   wires?: PropSet;
+  /** night: the lighthouses' lights (lighthouse-mesher FLASH_STRIDE), and the points of those lit now, written each frame */
+  flashData?: Float32Array;
+  flashes?: PropSet;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
@@ -113,6 +119,7 @@ interface MeshPayload {
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
   wires: ArrayBuffer;
+  flashes: ArrayBuffer;
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   rAttrs: ArrayBuffer;
@@ -189,7 +196,7 @@ export class OsmManager {
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
-            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires),
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires), flashes: buf(msg.flashes),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
@@ -356,6 +363,13 @@ export class OsmManager {
     return { vao, vertexCount: ramps.byteLength / 4 };
   }
 
+  /** the lit flashes of a chunk, written each frame (litFlashes) */
+  private flashOut = new Float32Array(0);
+  private flashScratch(lights: number): Float32Array {
+    if (this.flashOut.length < lights * 4) this.flashOut = new Float32Array(lights * 4);
+    return this.flashOut;
+  }
+
   /** x, y, z and a colour value per point (palette.ts pointValue: a LUT index, or an RGB colour) */
   private points(chunk: OsmChunk, data: ArrayBuffer): PropSet | undefined {
     if (data.byteLength === 0) return undefined;
@@ -390,6 +404,11 @@ export class OsmManager {
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
     chunk.wires = this.points(chunk, data.wires);
+    if (data.flashes.byteLength > 0) {
+      chunk.flashData = new Float32Array(data.flashes);
+      // room for every light at once; litFlashes writes the lit ones each frame
+      chunk.flashes = this.points(chunk, new ArrayBuffer((chunk.flashData.length / FLASH_STRIDE) * 16));
+    }
     chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels);
     chunk.roadLines = this.points(chunk, data.roadLines);
@@ -454,7 +473,7 @@ export class OsmManager {
     chunk.vaos = [];
     chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
-    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = undefined;
+    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
   }
@@ -529,6 +548,16 @@ export class OsmManager {
       }
       if (c.beacons && lightsOn) {
         renderer.drawLights(c.beacons.vao, c.beacons.count, c.offset, view, proj, camPos, pointSize, true);
+      }
+      // the lighthouses' lights: those lit at this moment of their periods, larger than a beacon
+      if (c.flashes && c.flashData && lightsOn) {
+        const lit = litFlashes(c.flashData, performance.now() / 1000, this.flashScratch(c.flashData.length / FLASH_STRIDE));
+        if (lit > 0) {
+          const gl = this.gl;
+          gl.bindBuffer(gl.ARRAY_BUFFER, c.flashes.buffer);
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.flashOut.subarray(0, lit * 4));
+          renderer.drawLights(c.flashes.vao, lit, c.offset, view, proj, camPos, pointSize * FLASH_SIZE, true);
+        }
       }
       // power line conductors: thin, near and middle distance only (far they are less than a pixel)
       if (c.wires && slant - c.radius * 0.71 < WIRE_RADIUS_M) {

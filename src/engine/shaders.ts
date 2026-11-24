@@ -1304,7 +1304,7 @@ void main() {
   // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR
   if (aIndex >= 0.0) {
     uint li = uint(aIndex);
-    if ((li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u) vColor = emitLight(vColor, uEmit);
+    if ((li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u || (li >= ${LIGHT.SEA_WHITE}u && li <= ${LIGHT.SEA_ORANGE}u)) vColor = emitLight(vColor, uEmit);
   }
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);

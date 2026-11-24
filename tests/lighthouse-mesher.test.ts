@@ -1,0 +1,128 @@
+import { describe, expect, it } from 'vitest';
+import { LIGHT as LUT_LIGHT } from '../src/engine/palette';
+import { tileCenter, type Tile } from '../src/world/geodesy';
+import { buildLighthouses, FLASH_STRIDE, flashTimes, LIGHTHOUSE, lightSites, litFlashes, seamarkLight } from '../src/world/lighthouse-mesher';
+import type { LonLat, OsmPoint } from '../src/world/osm-types';
+import { overpassQuery, parseOverpass } from '../src/world/overpass';
+
+const TILE: Tile = { z: 14, x: 9515, y: 6397 };
+const c = tileCenter(TILE);
+const KX = 111320 * Math.cos((c.lat * Math.PI) / 180), KY = 111320;
+const at = (x: number, y: number): LonLat => [c.lon + x / KX, c.lat + y / KY];
+
+/** Kızıl Adalar: the lighthouse node and its charted light 20 m apart */
+const TOWER: OsmPoint = { at: at(0, 0), tags: { man_made: 'lighthouse' } };
+const LIGHT: OsmPoint = {
+  at: at(12, 16),
+  tags: { 'seamark:type': 'light_major', 'seamark:light:character': 'Fl', 'seamark:light:colour': 'white', 'seamark:light:height': '32', 'seamark:light:period': '5', 'seamark:light:sequence': '0.5+(4.5)' },
+};
+
+describe('flashTimes', () => {
+  it('by the sequence: lit, dark in brackets', () => {
+    expect(flashTimes('Fl', 5, undefined, '0.5+(4.5)')).toEqual({ period: 5, on: [[0, 0.5]] });
+    expect(flashTimes('Fl', 5, '2', '0.3+(1)+0.3+(3.4)')).toEqual({ period: 5, on: [[0, 0.3], [1.3, 1.6]] });
+  });
+
+  it('by the character: fixed, flashing groups, quick, isophase, occulting', () => {
+    expect(flashTimes('F', undefined, undefined, undefined).on).toEqual([[0, 1]]);
+    const fl2 = flashTimes('Fl', 6, '2', undefined);
+    expect(fl2.on).toHaveLength(2);
+    expect(fl2.on[1][0]).toBeGreaterThan(fl2.on[0][1]);
+    expect(fl2.on[1][1]).toBeLessThanOrEqual(6);
+    expect(flashTimes('Q', undefined, undefined, undefined)).toEqual({ period: LIGHTHOUSE.QUICK[0], on: [[0, LIGHTHOUSE.QUICK[1]]] });
+    expect(flashTimes('VQ', 10, '6', undefined).on).toHaveLength(6);
+    expect(flashTimes('Iso', 3, undefined, undefined)).toEqual({ period: 3, on: [[0, 1.5]] });
+    expect(flashTimes('Oc', 4, undefined, undefined)).toEqual({ period: 4, on: [[0, 3]] });
+    expect(flashTimes('Fl', undefined, undefined, undefined).period).toBe(LIGHTHOUSE.PERIOD_S);
+  });
+});
+
+describe('seamarkLight', () => {
+  it('its colour, height and flashes; the first of a sectored light; none without a light', () => {
+    const l = seamarkLight(LIGHT.tags)!;
+    expect(l.colour).toBe(LIGHTHOUSE.COLOURS.white);
+    expect(l.height).toBe(32);
+    const sectored = seamarkLight({ 'seamark:light:1:colour': 'red', 'seamark:light:1:character': 'Fl', 'seamark:light:1:period': '4', 'seamark:light:2:colour': 'white' })!;
+    expect(sectored.colour).toBe(LIGHTHOUSE.COLOURS.red);
+    expect(sectored.period).toBe(4);
+    expect(seamarkLight({ man_made: 'lighthouse' })).toBeUndefined();
+  });
+});
+
+describe('lightSites', () => {
+  it('a lighthouse and its light a few metres apart are one site, at the tower', () => {
+    const sites = lightSites([LIGHT, TOWER, { at: at(500, 0), tags: { amenity: 'cafe' } }]);
+    expect(sites).toHaveLength(1);
+    expect(sites[0].at).toEqual(TOWER.at);
+    expect(sites[0].tags.man_made).toBe('lighthouse');
+    expect(sites[0].tags['seamark:light:period']).toBe('5');
+  });
+});
+
+describe('buildLighthouses', () => {
+  it('a tower up to its charted light, the light flashing on top of it', () => {
+    const m = buildLighthouses(TILE, [TOWER, LIGHT], () => 10);
+    expect(m.ramps.length).toBeGreaterThan(0);
+    expect(m.flashes.length).toBe(FLASH_STRIDE);
+    // the light at its charted 32 m over the sea, the tower's top under it
+    expect(m.flashes[1]).toBeCloseTo(32, 5);
+    expect(m.flashes[3]).toBe(LUT_LIGHT.SEA_WHITE);
+    let top = -Infinity;
+    for (let i = 1; i < m.vertices.length; i += 6) top = Math.max(top, m.vertices[i]);
+    expect(top).toBeGreaterThan(32);
+    expect(top).toBeCloseTo(32 + LIGHTHOUSE.LANTERN.H / 2 + LIGHTHOUSE.ROOF.H, 4);
+  });
+
+  it('the tower of its own height where the charted light is under the ground model', () => {
+    const m = buildLighthouses(TILE, [TOWER, LIGHT], () => 40);
+    expect(m.flashes[1]).toBeCloseTo(40 + LIGHTHOUSE.TOWER_M.lighthouse + LIGHTHOUSE.GALLERY.H + LIGHTHOUSE.LANTERN.H / 2, 5);
+  });
+
+  it('a harbour light’s post, a cardinal beacon’s pole; only the tile it stands in has it', () => {
+    const post: OsmPoint = { at: at(50, 0), tags: { 'seamark:type': 'light_minor', 'seamark:light:colour': 'green', 'seamark:light:character': 'Fl', 'seamark:light:period': '5' } };
+    const cardinal: OsmPoint = { at: at(-50, 0), tags: { 'seamark:type': 'beacon_cardinal', 'seamark:beacon_cardinal:colour': 'yellow;black', 'seamark:beacon_cardinal:height': '5', 'seamark:light:character': 'VQ', 'seamark:light:colour': 'white' } };
+    const m = buildLighthouses(TILE, [post, cardinal], () => 0);
+    expect(m.flashes.length).toBe(2 * FLASH_STRIDE);
+    expect(buildLighthouses({ ...TILE, x: TILE.x + 1 }, [post, cardinal], () => 0).ramps.length).toBe(0);
+  });
+
+  it('every face’s normal agrees with its winding', () => {
+    const v = buildLighthouses(TILE, [TOWER, LIGHT], () => 10).vertices;
+    for (let t = 0; t < v.length; t += 18) {
+      const a = [v[t], v[t + 1], v[t + 2]], b = [v[t + 6], v[t + 7], v[t + 8]], d = [v[t + 12], v[t + 13], v[t + 14]];
+      const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      if (Math.hypot(n[0], n[1], n[2]) < 1e-9) continue;
+      expect(n[0] * v[t + 3] + n[1] * v[t + 4] + n[2] * v[t + 5]).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('litFlashes', () => {
+  it('a light is drawn only while lit in its period', () => {
+    const m = buildLighthouses(TILE, [TOWER, LIGHT], () => 10);
+    const out = new Float32Array(4);
+    expect(litFlashes(m.flashes, 0.2, out)).toBe(1);
+    expect(out[1]).toBeCloseTo(32, 5);
+    expect(litFlashes(m.flashes, 1, out)).toBe(0);
+    expect(litFlashes(m.flashes, 5.2, out)).toBe(1);
+  });
+});
+
+describe('fetching the lights', () => {
+  it('lighthouses, beacons and the charted lights, near', () => {
+    const q = overpassQuery(TILE, 'full');
+    expect(q).toContain('node["man_made"~"^(lighthouse|beacon)$"]');
+    expect(q).toContain('node["seamark:type"~"^(light_major|light_minor|beacon_)"]');
+  });
+
+  it('a charted light is a point; a lighthouse mapped by its outline stands at its middle, not as a house', () => {
+    const d = parseOverpass({ elements: [
+      { type: 'node', id: 1, lat: 0, lon: 0, tags: { 'seamark:type': 'light_minor', 'seamark:light:colour': 'red' } },
+      { type: 'node', id: 2, lat: 0.001, lon: 0.001 }, { type: 'node', id: 3, lat: 0.001, lon: 0.0011 }, { type: 'node', id: 4, lat: 0.0011, lon: 0.0011 },
+      { type: 'way', id: 10, nodes: [2, 3, 4, 2], tags: { man_made: 'lighthouse', building: 'yes' } },
+    ] });
+    expect(d.points.map((p) => p.tags['seamark:type'] ?? p.tags.man_made).sort()).toEqual(['light_minor', 'lighthouse']);
+    expect(d.buildings).toHaveLength(0);
+  });
+});

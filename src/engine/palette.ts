@@ -31,6 +31,8 @@ export const MAT = {
   ICE: 18,
   /** a frozen sea: steel grey */
   SEA_ICE: 19,
+  /** no ramp: the sea's charted light colours (LIGHT.SEA_*), lighthouse-mesher */
+  SEA_LIGHT: 20,
 } as const;
 
 /**
@@ -815,6 +817,13 @@ export const LIGHT = {
   TAXI_BLUE: MAT.SKY * RAMP_STEPS + 9,
   /** street lighting: lamp heads and far lit roads at night (sodium orange); a free step of the HUD amber ramp (3, 11, 13 are used) */
   STREET: MAT.HUD_AMBER * RAMP_STEPS + 14,
+  /** the charted colours of lighthouses and the sea's lights (lighthouse-mesher), SEA_WHITE … SEA_ORANGE */
+  SEA_WHITE: MAT.SEA_LIGHT * RAMP_STEPS,
+  SEA_RED: MAT.SEA_LIGHT * RAMP_STEPS + 1,
+  SEA_GREEN: MAT.SEA_LIGHT * RAMP_STEPS + 2,
+  SEA_YELLOW: MAT.SEA_LIGHT * RAMP_STEPS + 3,
+  SEA_BLUE: MAT.SEA_LIGHT * RAMP_STEPS + 4,
+  SEA_ORANGE: MAT.SEA_LIGHT * RAMP_STEPS + 5,
 } as const;
 /**
  * Windows of the near buildings (building-mesher wall attributes, drawn in WORLD_FS): a slot every
@@ -974,6 +983,12 @@ const LIGHT_COLORS: [number, RGB][] = [
   [LIGHT.WINDOW_WHITE, [236, 240, 255]],
   [LIGHT.RED, [255, 24, 16]],
   [LIGHT.STREET, [255, 176, 80]],
+  [LIGHT.SEA_WHITE, [255, 250, 232]],
+  [LIGHT.SEA_RED, [255, 32, 24]],
+  [LIGHT.SEA_GREEN, [40, 255, 96]],
+  [LIGHT.SEA_YELLOW, [255, 214, 40]],
+  [LIGHT.SEA_BLUE, [64, 128, 255]],
+  [LIGHT.SEA_ORANGE, [255, 144, 32]],
 ];
 
 const SUN_DAY: RGB = [255, 255, 255];
