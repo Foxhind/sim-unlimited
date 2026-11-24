@@ -1413,11 +1413,21 @@ void main() {
   }
   // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
   vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
-  // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR
+  // the air between: in the fog's 12 steps, as the faces round them (wires, mast stays, far roads
+  // fade into the haze with the hill behind them)
+  float fog = floor(fogAt(rel, uCamPos.y) * 12.0) / 12.0;
+  // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR, and
+  // through half the haze, as self-lit faces do (shadeColour)
+  bool emits = false, shines = false;
   if (aIndex >= 0.0) {
     uint li = uint(aIndex);
-    if ((li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u || (li >= ${LIGHT.SEA_WHITE}u && li <= ${LIGHT.SEA_ORANGE}u)) vColor = emitLight(vColor, uEmit);
+    emits = (li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u || (li >= ${LIGHT.SEA_WHITE}u && li <= ${LIGHT.SEA_ORANGE}u);
+    // the runway's edge, centre and threshold lights are steps of the emissive and HUD ramps
+    uint ramp = li / 16u;
+    shines = emits || ramp == ${MAT.EMISSIVE}u || ramp == ${MAT.HUD_GREEN}u || ramp == ${MAT.HUD_AMBER}u;
   }
+  vColor = shines ? mix(vColor, uHaze, 0.5 * fog) : hazeMix(vColor, uHaze, fog);
+  if (emits) vColor = emitLight(vColor, uEmit);
   gl_Position = uProj * uView * vec4(wp, 1.0);
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);
@@ -1447,8 +1457,6 @@ void main() {
     // its colour (the WINDOW_LIGHT mix), above white on XDR like the near panes, dimmer the farther from the eye
     vec3 lc = windowLightColour(hCol, allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
     // half-way into the haze with the fog, in its 12 steps (WORLD_FS windowAt)
-    float fog = fogAt(rel, uCamPos.y);
-    fog = floor(fog * 12.0) / 12.0;
     vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
