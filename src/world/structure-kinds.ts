@@ -34,9 +34,11 @@ export const STRUCTURE = {
   LIGHTHOUSE: 13,
   /** tombs: rock-cut fronts, sarcophagi, pillar tombs (tomb-mesher) */
   TOMB: 14,
+  /** walls: barrier=wall, retaining_wall, city_wall (wall-mesher) */
+  WALL: 15,
 } as const;
 export type StructureKind = (typeof STRUCTURE)[keyof typeof STRUCTURE];
-export const STRUCTURE_KINDS = 15;
+export const STRUCTURE_KINDS = 16;
 /** every kind shown */
 export const ALL_STRUCTURES = (1 << STRUCTURE_KINDS) - 1;
 
@@ -56,6 +58,7 @@ export const STRUCTURE_LABELS: Record<StructureKind, string> = {
   [STRUCTURE.LIFT]: 'канатные дороги и подъёмники',
   [STRUCTURE.LIGHTHOUSE]: 'маяки и огни',
   [STRUCTURE.TOMB]: 'гробницы (tomb=*)',
+  [STRUCTURE.WALL]: 'стены (wall, retaining_wall, city_wall)',
 };
 
 const TOWERS = new Set(['tower', 'water_tower', 'cooling_tower', 'transformer_tower']);

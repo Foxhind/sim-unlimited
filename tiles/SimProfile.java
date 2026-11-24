@@ -66,6 +66,8 @@ public class SimProfile implements Profile {
   static final Pattern LIFT = Pattern.compile("^(gondola|cable_car|chair_lift|mixed_lift)$");
   static final Pattern LIFT_NODE = Pattern.compile("^(pylon|station)$");
   static final Pattern SEA_LIGHT = Pattern.compile("^(lighthouse|beacon)$");
+  /** overpass.ts: the walls wall-mesher stands */
+  static final Pattern WALL = Pattern.compile("^(wall|retaining_wall|city_wall)$");
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
@@ -76,7 +78,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
@@ -134,7 +136,7 @@ public class SimProfile implements Profile {
       "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
-      isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb");
+      isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb") || find(WALL, s(f, "barrier"));
   }
 
   static boolean relationWanted(SourceFeature f) {
