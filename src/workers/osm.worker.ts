@@ -23,7 +23,7 @@ import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
 import { greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, padSources } from '../world/aerodrome';
-import { applyPeaks, peaksOf } from '../world/peaks';
+import { applyPeaks, groundPeaks, peaksOf } from '../world/peaks';
 import { DETAIL_Z, gridForZoom } from '../world/chunks';
 import { buildGroundCover, type GroundCover } from '../world/ground-cover';
 import { isNeutralGrade, NEUTRAL_GRADE, type ColourGrade } from '../world/landsat-process';
@@ -215,7 +215,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const pads = detail === 'full' ? await loadPads(data) : [];
     applyPads(dem, tile, grid, pads);
     // mapped summits up to their height, as the terrain worker raises them (peaks.ts)
-    applyPeaks(dem, tile, grid, peaksOf(data.points));
+    applyPeaks(dem, tile, grid, await groundPeaks(peaksOf(data.points), tile.z));
     // the same face colours as the terrain mesh (height × temperature, climate-colour.ts)
     const ls = { faceColor: climateFaceColor(tile, grid, lattice) };
     // the same TIN as the terrain worker builds from the same OSM: coastline and roads included

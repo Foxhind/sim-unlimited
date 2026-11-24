@@ -86,7 +86,7 @@ describe('what a near tile sees round itself', () => {
     expect((b.south - r.south) * 111320).toBeCloseTo(ROAD_REACH_M, 0);
   });
 
-  it('roads, railways, waterways and water in the grown bbox; not for the far tiles', () => {
+  it('roads, railways, waterways, water and summits in the grown bbox; only the summits for the far tiles', () => {
     const r = roadReachBounds(tileBounds(TILE));
     const box = `(${r.south},${r.west},${r.north},${r.east})`;
     const full = overpassQuery(TILE, 'full');
@@ -94,7 +94,10 @@ describe('what a near tile sees round itself', () => {
     expect(REACH_SELECTORS.some((s) => s.includes('"waterway"'))).toBe(true);
     expect(REACH_SELECTORS.some((s) => s.includes('"natural"="water"'))).toBe(true);
     for (const s of REACH_SELECTORS) expect(full, s).toContain(`${s}${box};`);
-    expect(overpassQuery(TILE, 'large')).not.toContain(box);
+    expect(REACH_SELECTORS).toContain('node["natural"="peak"]');
+    const large = overpassQuery(TILE, 'large');
+    expect(large).toContain(`node["natural"="peak"]${box};`);
+    expect(large.split(box)).toHaveLength(2);
   });
 });
 

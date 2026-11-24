@@ -1,5 +1,5 @@
-// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow)
-export const SCHEMA_VERSION = 73;
+// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow); 74: summits pull the ground up within PEAK.REACH_M
+export const SCHEMA_VERSION = 74;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';

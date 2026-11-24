@@ -29,6 +29,8 @@ export const REACH_SELECTORS = [
   // the yachts of a pontoon past the border, and of a marina mapped there (props-mesher MARINA)
   'way["man_made"="pier"]',
   'node["leisure"="marina"]',
+  // a summit pulls the ground up to PEAK.REACH_M round it (peaks.ts): the nodes over the border too
+  'node["natural"="peak"]',
 ];
 
 /** a tile's bounds grown by ROAD_REACH_M */
@@ -117,6 +119,10 @@ export function overpassQuery(tile: Tile, detail: OsmDetail): string {
     filter += `  way["aeroway"="aerodrome"]${wide}; relation["aeroway"="aerodrome"]${wide};\n`;
     const r = roadReachBounds(b);
     for (const s of REACH_SELECTORS) filter += `  ${s}(${r.south},${r.west},${r.north},${r.east});\n`;
+  } else {
+    // the summits by the border, as a near tile has them (peaks.ts)
+    const r = roadReachBounds(b);
+    filter += `  node["natural"="peak"](${r.south},${r.west},${r.north},${r.east});\n`;
   }
   return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${filter});out body; >; out skel qt;`;
 }

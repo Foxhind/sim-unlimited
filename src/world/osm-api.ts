@@ -233,6 +233,12 @@ async function withRoadReach(tile: OverpassJson, b: TileBounds, fetchImpl: typeo
     const nodes = new Map<number, Element>();
     for (const el of raw) if (el.type === 'node') nodes.set(el.id, el);
     for (const el of raw) {
+      // a summit pulls up the ground over the border too (peaks.ts)
+      if (el.type === 'node' && el.tags?.natural === 'peak' && !seen.has(`node/${el.id}`)) {
+        seen.add(`node/${el.id}`);
+        elements.push(el);
+        continue;
+      }
       if (el.type !== 'way' || !matches(el, roads) || seen.has(`way/${el.id}`)) continue;
       seen.add(`way/${el.id}`);
       elements.push(el);
