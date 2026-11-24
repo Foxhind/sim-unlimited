@@ -77,11 +77,11 @@ export const AIR_HAZE = {
   SPECTRUM: [0.65, 1.0, 1.9],
 } as const;
 /**
- * fogAt(rel, camY): how far into the haze a point `rel` from the eye (at height camY) is, 0..1, before
- * the 12 steps: the fog (uFogStart → uFogEnd, linear) over the air's haze (AIR_HAZE).
+ * fogAt(rel, camY): how far into the haze a point `rel` from the eye (at height camY) is, 0..1 (smooth,
+ * no steps): the fog (uFogStart → uFogEnd, linear) over the air's haze (AIR_HAZE).
  */
 const FOG_GLSL = `uniform float uHazeK;
-// the haze over a colour: fog f (fogAt, its steps) is green's share; red takes less, blue more (AIR_HAZE.SPECTRUM)
+// the haze over a colour: fog f (fogAt) is green's share; red takes less, blue more (AIR_HAZE.SPECTRUM)
 vec3 hazeMix(vec3 c, vec3 haze, float f) {
   return mix(c, haze, 1.0 - pow(vec3(1.0 - clamp(f, 0.0, 1.0)), vec3(${AIR_HAZE.SPECTRUM.map((v) => v.toFixed(2)).join(', ')})));
 }
@@ -123,7 +123,7 @@ const EARTH_R = 6371000;
  * World colour (palette.ts): the world passes write RGB, not palette indices. A face colour is a
  * packed uint: an RGB colour, or (MATERIAL_FLAG) a material ramp looked up in the LUT; bits 24..26
  * the night glow level, SNOW_FLAG: snow can lie on the face.
- * Lighting stays stepped (12 lit steps, 4 fog steps toward the horizon haze) for both kinds: a
+ * Lighting stays stepped (12 lit steps; the haze toward the horizon smooth) for both kinds: a
  * material takes its ramp's LUT entry at the step, an RGB colour is shaded by the same law in place
  * (palette.ts shadeColour) with the light of its glow level (uLight) — any colour, no palette snap.
  * With uGlow on, a glowing face is shaded at least at step GLOW_STEP_BASE + level, in that level's
@@ -312,8 +312,8 @@ vec3 shadeColour(uint packedRamp, float litStep, float fog, vec3 tint, vec3 haze
     return mix(lutColor(fid * 16u + ${FLAME_STEP}u), haze, 0.5 * fog);
   uint lvl = uGlow == 1 ? (packedRamp >> ${GLOW_SHIFT}u) & ${GLOW_LEVEL_MASK}u : 0u;
   if (lvl > 0u) litStep = max(litStep, ${GLOW_STEP_BASE}.0 + float(lvl));
-  // the face as lit, then the air in front of it: the haze over it by the fog's share (its 12 steps),
-  // so a sunlit slope fades into the haze as much as a shaded one does
+  // the face as lit, then the air in front of it: the haze over it by the fog's share (smooth: in steps
+  // a face's haze would jump as the eye moves), so a sunlit slope fades into the haze as much as a shaded one does
   uint sl = uint(clamp(litStep + 0.5, 0.0, 11.0));
   float f = clamp(fog, 0.0, 1.0);
   vec3 k = lvl > 0u ? vec3(1.0) : mix(tint, vec3(1.0), f);
@@ -576,7 +576,6 @@ vec3 waterSurface(vec3 d, vec2 p, vec4 jac, float dist, vec3 c) {
   vec2 fw = abs(jac.xy) + abs(jac.zw);
   if (uGlitter.y <= 0.0 || d.y >= 0.0) return c;
   float fog = fogAt(d * dist, uCamPos.y);
-  fog = floor(fog * 12.0) / 12.0;
   float near = 1.0 - fog;
   if (near <= 0.0) return c;
   // metres per pixel along the ground here
@@ -1161,7 +1160,6 @@ void main() {
   if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = fogAt(rel, uCamPos.y);
-  fog = floor(fog * 12.0) / 12.0;
   float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
@@ -1266,8 +1264,8 @@ void main() {
   if (vWater > 0.5) {
     float dist = length(vRay);
     c = waterSurface(gWinD, wxz, jac, dist, c);
-    // the haze over it, per pixel, in the fog's 12 steps (WORLD_VS leaves it out of open water's face colour)
-    c = hazeMix(c, vHaze, floor(fogAt(vRay, uCamPos.y) * 12.0) / 12.0);
+    // the haze over it, per pixel (WORLD_VS leaves it out of open water's face colour)
+    c = hazeMix(c, vHaze, fogAt(vRay, uCamPos.y));
   }
 #endif
 #ifndef NO_SPECKLE
@@ -1285,14 +1283,12 @@ void main() {
   // TRACK_EDGE, ROAD_EDGE: negative; a facade's edge length is positive
   if (vWinEdge.x < ${TRACK_EDGE + 0.5}) {
     float fog = fogAt(vRay, uCamPos.y);
-    fog = floor(fog * 12.0) / 12.0;
     c = vWinEdge.x < ${ROAD_EDGE + 0.5} ? roadMarkAt(c, vWinUV, vWinEdge, winFw, fog) : trackAt(c, vWinUV, winFw, fog);
   }
 #endif
 #ifndef NO_WINDOWS
   if (uWindows > 0 && vWinEdge.y > 0.0) {
     float fog = fogAt(vRay, uCamPos.y);
-    fog = floor(fog * 12.0) / 12.0;
     // a lit window is a light source: alpha 0 keeps the silhouette rim pass off it
     if (windowAt(c, vWinUV, vWinEdge, winFw, fog)) alpha = 0.0;
   }
@@ -1383,7 +1379,6 @@ void main() {
   if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = fogAt(rel, uCamPos.y);
-  fog = floor(fog * 12.0) / 12.0;
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
   float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
@@ -1445,9 +1440,9 @@ void main() {
   }
   // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
   vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
-  // the air between: in the fog's 12 steps, as the faces round them (wires, mast stays, far roads
+  // the air between: as over the faces round them (wires, mast stays, far roads
   // fade into the haze with the hill behind them)
-  float fog = floor(fogAt(rel, uCamPos.y) * 12.0) / 12.0;
+  float fog = fogAt(rel, uCamPos.y);
   // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR, and
   // through half the haze, as self-lit faces do (shadeColour)
   bool emits = false, shines = false;
@@ -1488,7 +1483,7 @@ void main() {
     else gl_PointSize = clamp(cellPx, 1.0, ${FAR_WINDOWS.MAX_PX.toFixed(1)});
     // its colour (the WINDOW_LIGHT mix), above white on XDR like the near panes, dimmer the farther from the eye
     vec3 lc = windowLightColour(hCol, allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
-    // half-way into the haze with the fog, in its 12 steps (WORLD_FS windowAt)
+    // half-way into the haze with the fog (WORLD_FS windowAt)
     vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
@@ -1632,7 +1627,7 @@ void main() {
     float disc = dir.y * dir.y - 2.0 * ca * uDeckDown;
     if (disc >= 0.0) {
       float t = ca > 1e-12 ? (-dir.y - sqrt(disc)) / ca : uDeckDown / -dir.y;
-      float fog = floor(fogAt(dir * t, uCamPos.y) * 12.0) / 12.0;
+      float fog = fogAt(dir * t, uCamPos.y);
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uDeckDown);
       oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), 99.0), 1.0);
       return;
@@ -1644,7 +1639,7 @@ void main() {
     float fog = 1.0;
     if (disc >= 0.0) {
       float t = ca > 1e-12 ? (dir.y - sqrt(disc)) / ca : uDeckUp / dir.y;
-      fog = floor(fogAt(dir * t, uCamPos.y) * 12.0) / 12.0;
+      fog = fogAt(dir * t, uCamPos.y);
     }
     vec4 lit = sceneLight(vec3(0.0, -1.0, 0.0), uCamPos.y + uDeckUp);
     oColor = vec4(shadeColour(uDeckColour, lit.a * 11.0, fog, lit.rgb, hazeAt(dir), 99.0), 1.0);
@@ -1669,7 +1664,6 @@ void main() {
     if (disc >= 0.0) {
       float t = a > 1e-12 ? (-dir.y - sqrt(disc)) / a : uGroundH / -dir.y;
       float fog = fogAt(dir * t, uCamPos.y);
-      fog = floor(fog * 12.0) / 12.0;
       vec4 lit = sceneLight(vec3(0.0, 1.0, 0.0), uCamPos.y - uGroundH);
       // the base ground's climate: at the camera's latitude, at the ground's height
       float tempC = climateTemp(vec3(uCamPos.x, uCamPos.y - uGroundH, uCamPos.z));
