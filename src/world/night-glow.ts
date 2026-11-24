@@ -93,6 +93,26 @@ export function applyGlow(vertices: Float32Array, ramps: Uint32Array, tile: Tile
   }
 }
 
+/**
+ * The same for the buildings, a building as one: each run of `footprints` (building-mesher
+ * BuildingMeshData.footprints: first vertex, x, z) takes the level under its footprint's centroid,
+ * the triangle its area counts toward in buildingCoverage. Per face, the two triangles of one wall
+ * could stand over different terrain triangles and one half of the wall glow, the other not.
+ */
+export function applyGlowByRuns(ramps: Uint32Array, footprints: Float32Array, tile: Tile, locate: TriLocator, levels: Uint8Array): void {
+  const center = tileCenter(tile);
+  for (let r = 0; r + 2 < footprints.length; r += 3) {
+    const first = footprints[r];
+    const end = r + 5 < footprints.length ? footprints[r + 3] : ramps.length;
+    if (end <= first) continue;
+    const ll = enuToLatLon(center, footprints[r + 1], -footprints[r + 2], 0);
+    const hit = locate(ll.lon, ll.lat);
+    const lvl = hit ? levels[hit.tri] : 0;
+    if (lvl === 0) continue;
+    for (let v = first; v < end; v++) if (lvl > rampGlowLevel(ramps[v])) ramps[v] = withGlow(ramps[v], lvl);
+  }
+}
+
 /** the same for tree instances (props-mesher TREE_STRIDE): the level goes into their face colour */
 export function applyGlowToTrees(trees: Float32Array, tile: Tile, locate: TriLocator, levels: Uint8Array): void {
   const center = tileCenter(tile);

@@ -26,6 +26,12 @@ export interface BuildingMeshData extends TerrainMeshData {
   coreVertexCount: number;
   /** the structure kind of each vertex (structure-kinds KindRuns pairs: first vertex, kind) */
   kinds: Uint32Array;
+  /**
+   * which building each vertex belongs to, as triples (first vertex, x, z): from that vertex on, the
+   * faces are of the building whose footprint's area centroid is at x, z (tile-centre ENU, z south);
+   * the core's runs, then the small parts'. The night glow lights a building as one (night-glow applyGlowByRuns).
+   */
+  footprints: Float32Array;
   /** air-conditioner units on the walls: instances of INSTANCE.AC (props-mesher TREE_STRIDE), drawn with the trees */
   acs: Float32Array;
   /** see-through faces (greenhouse walls and roofs, GREENHOUSE): pos+normal with face colours, drawn blended */
@@ -701,6 +707,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const acs: number[] = [];
   const coreKinds = new KindRuns();
   const smallKinds = new KindRuns();
+  const coreFeet: number[] = [];
+  const smallFeet: number[] = [];
   const detail = <T>(make: () => T): T => {
     ({ verts, ramps, win } = small);
     try { return make(); } finally { ({ verts, ramps, win } = core); }
@@ -755,6 +763,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
     const centroid = areaCentroid(outer);
+    coreFeet.push(core.ramps.length, centroid[0], centroid[1]);
+    smallFeet.push(small.ramps.length, centroid[0], centroid[1]);
     // windows on the facades of buildings people live or work in, below the roof (not in gables)
     // between the plinth and (under a flat roof) the technical floor (FACADE_ZONES)
     const zoned = hasFacadeZones(tags);
@@ -1203,6 +1213,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     vertexCount,
     coreVertexCount,
     kinds: (() => { coreKinds.append(smallKinds.pairs, coreVertexCount); return new Uint32Array(coreKinds.pairs); })(),
+    footprints: new Float32Array([...coreFeet, ...smallFeet.map((v, i) => (i % 3 === 0 ? v + coreVertexCount : v))]),
     windows: join(new Float32Array(core.win.length + small.win.length), core.win, small.win),
     acs: new Float32Array(acs),
     glass: { vertices: new Float32Array(glass.verts), ramps: new Uint32Array(glass.ramps), vertexCount: glass.ramps.length },

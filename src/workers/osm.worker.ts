@@ -29,10 +29,10 @@ import { climateFaceColor } from '../world/climate-colour';
 import { coastlineWays } from '../world/coast';
 import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
-import { applyGlow, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
+import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds)
-export const OSM_MESH_SCHEMA = 94;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint
+export const OSM_MESH_SCHEMA = 95;
 
 export interface OsmRequest {
   type: 'osm';
@@ -275,6 +275,12 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       ramps: parts.map(([p]) => p.ramps).reduce(concatU32),
     };
     const core = houses.coreVertexCount, decks = solid.ramps.length;
+    // night glow: each terrain triangle lit by how densely it is built up, and everything on it too;
+    // a house as one, by its footprint (a wall split between two lit levels shows a diagonal seam)
+    const levels = glowLevels(buildingCoverage(tin, tile, own, locate));
+    applyGlowByRuns(houses.ramps, houses.footprints, tile, locate, levels);
+    applyGlow(solid.vertices, solid.ramps, tile, locate, levels);
+    applyGlow(masts.vertices, masts.ramps, tile, locate, levels);
     const bmesh = {
       vertices: concatF32(insertAt(houses.vertices, solid.vertices, core * 6), masts.vertices),
       ramps: concatU32(insertAt(houses.ramps, solid.ramps, core), masts.ramps),
@@ -303,12 +309,9 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // no far window dots: the detailed tiles draw their lit facades at any distance at night
     const night = buildingNightLights(own, tile, drape, 0);
     const props = buildProps({ tile, detail, data, sampleHeight: drape, treeRamp });
-    // night glow: each terrain triangle lit by how densely it is built up, and everything on it too
-    const levels = glowLevels(buildingCoverage(tin, tile, own, locate));
     applyGlow(mesh.vertices, mesh.ramps, tile, locate, levels);
     applyGlow(mesh.roads.vertices, mesh.roads.ramps, tile, locate, levels);
     applyGlow(mesh.water.vertices, mesh.water.ramps, tile, locate, levels);
-    applyGlow(bmesh.vertices, bmesh.ramps, tile, locate, levels);
     // sorted by type: trees, air conditioners, lamp posts, then the marinas' yachts (props-mesher INSTANCE)
     const instances = concatF32(concatF32(concatF32(props.trees, houses.acs), mesh.lampPosts), props.yachts);
     applyGlowToTrees(instances, tile, locate, levels);
