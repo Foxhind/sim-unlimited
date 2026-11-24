@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { buildRoadNet, isCarriageway, NET_STEP_M } from '../src/world/road-net';
+import { buildRoadNet, isCarriageway, isUrbanPath, NET_STEP_M } from '../src/world/road-net';
 import { M, road } from './roads-helpers';
 
 it('takes roads with a carriageway, not paths', () => {
@@ -8,6 +8,18 @@ it('takes roads with a carriageway, not paths', () => {
   expect(isCarriageway({ highway: 'track' })).toBe(true);
   for (const hw of ['footway', 'path', 'cycleway', 'steps', 'bridleway']) expect(isCarriageway({ highway: hw })).toBe(false);
   expect(isCarriageway({ railway: 'rail' })).toBe(false);
+});
+it('takes the urban paths by the roads\' rules, not the trails', () => {
+  // 14/9517/6398: a footway's and a cycleway's bridge over the river's mouth 6–7 m up beside the
+  // street's at 4 m, their lift over the drawn ground standing on the banks: with heights of their
+  // own from the network they are at the streets' level
+  for (const hw of ['footway', 'cycleway', 'steps']) expect(isUrbanPath({ highway: hw })).toBe(true);
+  for (const hw of ['path', 'bridleway', 'residential']) expect(isUrbanPath({ highway: hw })).toBe(false);
+  const lines = ['footway', 'cycleway', 'steps', 'path', 'bridleway'].map((hw, i) => road({ highway: hw }, [[4, 4 + 4 * i], [20, 4 + 4 * i]]));
+  const net = buildRoadNet(lines);
+  expect(net.ways.map((w) => w.line.tags.highway)).toEqual(['footway', 'cycleway', 'steps']);
+  // a footway's bed: its width, and the band and weight of the least road
+  expect([net.ways[0].half, net.ways[0].band, net.ways[0].weight]).toEqual([1, 25, 8]);
 });
 it('gives each class its bed, band and weight', () => {
   // a two-way motorway (one carriageway of a dual one is half as wide)

@@ -53,6 +53,17 @@ export interface RoadNet {
   next: Array<Array<[number, number]>>;
 }
 
+/**
+ * The urban paths: footways, cycleways and steps take the roads' rules (heights of their own from
+ * the network, a bed the ground is pulled to): a footway's bridge lifted over the drawn ground stood
+ * its clearance on the banks, 6–7 m up beside the street's at 4 m (14/9517/6398). A trail (path,
+ * bridleway) follows the relief, as before.
+ */
+const URBAN_PATHS = new Set(['footway', 'cycleway', 'steps']);
+export function isUrbanPath(tags: Record<string, string>): boolean {
+  return URBAN_PATHS.has(tags.highway ?? '') && tags.area !== 'yes';
+}
+
 /** a way the OSM layer draws as a road with a carriageway (not a path, railway or area) */
 export function isCarriageway(tags: Record<string, string>): boolean {
   if (!tags.highway) return false;
@@ -108,7 +119,7 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
   };
   for (const line of lines) {
     const water = isWaterWay(line.tags);
-    if ((!water && !isCarriageway(line.tags)) || !line.points.length) continue;
+    if ((!water && !isCarriageway(line.tags) && !isUrbanPath(line.tags)) || !line.points.length) continue;
     const way = ways.length;
     const first = samples.length;
     let d = 0;

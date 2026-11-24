@@ -667,7 +667,8 @@ describe('roads and water as the terrain’s own faces', () => {
         expect(a.vertices[i * 6 + 2]).toBe(b.vertices[i * 6 + 2]);
       }
       expect(maxOffTin(b, opts.sampleHeight)).toBeGreaterThan(0.9);
-      expect(maxOffTin(a, opts.sampleHeight)).toBeLessThan(1e-4);
+      // on the faces to float32's rounding of the positions (2^-12 m at ±2 km) on their slopes
+      expect(maxOffTin(a, opts.sampleHeight)).toBeLessThan(2e-4);
     }
     expect(Array.from(m.roadAttrs)).toEqual(Array.from(ribbon.roadAttrs));
     // and the park the budget dropped with them: the rest of the drape, on the faces, the same area as today's
@@ -749,12 +750,13 @@ describe('roads and water as the terrain’s own faces', () => {
     const { opts: withCover } = osmMeshOf(bridgedTown(), rolling);
     const tin = buildSurfaceTin(COVER_TILE, COVER_GRID, lattice(rolling), { borders: bordersOf(rolling), roads: withCover.roads });
     const opts = { ...withCover, tin, sampleHeight: tinSampler(tin, COVER_TILE) };
-    // digests of the output of the code before Task 6 (0d4c7b7) on this input
+    // digests of the output of the code before Task 6 (0d4c7b7) on this input, but for its footway:
+    // a way of the network since (the urban paths by the roads' rules), its ground pulled to its bed
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  5472, 3144877107, 1878073586, 17646, 2702523443, 2729080567, 1796636789, 2685, 3942426410, 243433191, 546, 3310701280, 1187553749,
-  1063991330, 3743679959, 1604464319, 280040517,
+  5472, 3144877107, 1878073586, 17994, 1484268268, 576216011, 48094427, 2799, 3337963081, 838544295, 546, 3310701280, 1187553749,
+  2995623402, 3743679959, 1604464319, 280040517,
 ];

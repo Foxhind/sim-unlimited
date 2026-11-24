@@ -270,6 +270,24 @@ describe('a real river mouth: the roads over the DEM\'s shoreline', () => {
     expect(checked).toBeGreaterThan(1000);
     expect(off).toEqual([]);
   });
+
+  it('Fethiye 14/9517/6398: the four bridges side by side over the river\'s mouth (a street, a pedestrian way, a cycleway, a footway) at one level, the footway\'s and the cycleway\'s by the roads\' rules', async () => {
+    // they stood 3.6–4 m (the street's and the pedestrian way's) and 6–7 m (the paths', lifted over
+    // the drawn ground: their clearance over the water stood on the banks)
+    const { tin, cover, roads, fx } = await surfaceOf('surface-14-9517-6398-mouth');
+    const c = tileCenter(fx.tile);
+    const m = buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: tinSampler(tin, fx.tile), tin, buildings: false, roads, cover, faceColor: () => 0 } as OsmMeshOptions).roads;
+    const decks = ['secondary', 'pedestrian', 'cycleway', 'footway'].map((hw) => {
+      const line = fx.data.lines.find((l) => l.tags.bridge === 'yes' && l.tags.highway === hw && Math.abs(l.points[0][1] - 36.6253) < 3e-4 && Math.abs(l.points[0][0] - 29.1158) < 3e-4)!;
+      const [a, b] = [line.points[0], line.points[line.points.length - 1]].map(([lon, lat]) => latLonToEnu(c, lat, lon, 0));
+      // a hair off its middle: on no side of a triangle
+      const hs = [0.37, 0.43, 0.57].flatMap((t) => surfacesOver(m, a[0] + (b[0] - a[0]) * t + 0.013, -(a[1] + (b[1] - a[1]) * t) + 0.017));
+      return Math.max(...hs);
+    });
+    expect(Math.max(...decks) - Math.min(...decks)).toBeLessThan(0.5);
+    // over the water at 0 m, at the streets' level
+    for (const h of decks) expect(h).toBeGreaterThan(3.3), expect(h).toBeLessThan(4.5);
+  });
 });
 
 /** the heights of the mesh's triangles over (x, z) (tile-centre metres), on none of their sides */

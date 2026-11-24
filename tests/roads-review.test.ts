@@ -13,10 +13,12 @@ import { bordersOf, demOf, GRID, lattice, M, metresOf, road, TILE } from './road
 
 const flatZ = (net: RoadNet, h = 500) => new Float64Array(net.samples.length).fill(h);
 
-it('lifts a railway bridge and a footbridge over a road as without the roads’ heights', () => {
+it('lifts a railway bridge over a road as without the roads’ heights, a footbridge by its own (the roads’ rules)', () => {
   const under = road({ highway: 'primary' }, [[32, 10], [32, 54]]);
   for (const br of [road({ railway: 'rail', bridge: 'yes' }, [[20, 32], [44, 32]]), road({ highway: 'footway', bridge: 'yes' }, [[20, 32], [44, 32]])]) {
-    const lines = [under, br], net = buildRoadNet(lines), roads = { net, z: flatZ(net) };
+    const lines = [under, br], net = buildRoadNet(lines);
+    // a footway is a way of the network: its lift is in its heights, as a street's (roadSurfaceOf)
+    const roads = br.tags.highway ? roadSurfaceOf(TILE, { lines, areas: [] }, net, demOf(net, () => 500)) : { net, z: flatZ(net) };
     const tin = buildSurfaceTin(TILE, GRID, lattice(() => 500), { roads });
     const data: OsmTileData = { areas: [], points: [], buildings: [], lines };
     const m = buildOsmMesh({ tile: TILE, detail: 'full', data, sampleHeight: tinSampler(tin, TILE), tin, roads });

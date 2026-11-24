@@ -348,9 +348,10 @@ describe('buildTerrainMesh (sea, bare ground, skirts, no cover)', () => {
       return h;
     };
     // digests of the output of the code before Task 4 on this input, but for its sea: the relief
-    // put no node in it since (69 water faces tilted up to 8.24 m before)
+    // put no node in it since (69 water faces tilted up to 8.24 m before); and for its footway, a
+    // way of the network since (the urban paths by the roads' rules), its ground pulled to its bed
     expect([m.vertexCount, fnv(m.vertices), fnv(m.ramps), fnv(m.morph!)]).toEqual(GOLDEN_NO_COVER);
   });
 });
 
-const GOLDEN_NO_COVER = [16221, 1676192644, 1493702197, 3474015068];
+const GOLDEN_NO_COVER = [17463, 2308721764, 3873271189, 3666039324];
