@@ -759,11 +759,12 @@ describe('roads and water as the terrain’s own faces', () => {
     // digests of the output of the code before Task 6 (0d4c7b7) on this input, but for its footway:
     // a way of the network since (the urban paths by the roads' rules), its ground pulled to its bed;
     // and for its relief: the z14 isolines every 25 m, to 0.1 cell, not inscribed (Z14_RELIEF)
+    // and for its bridge's slab and parapets, level across as its deck is (bridge-mesher DeckRun.level)
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  4683, 1734076934, 3150742314, 16878, 1950768596, 3518737285, 546182072, 2685, 4088249153, 243433191, 546, 3764287735, 1187553749,
+  4683, 1734076934, 3150742314, 16878, 1950768596, 3518737285, 546182072, 2685, 4088249153, 243433191, 546, 3628067213, 1187553749,
   30309056, 1348067417, 2209773314, 55511874,
 ];

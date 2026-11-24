@@ -82,6 +82,25 @@ describe('bridge bodies and embankments', () => {
     expect(Math.min(...p.filter((v) => v.z > 5.5).map((v) => v.y))).toBeCloseTo(98, 2);
   });
 
+  it('a level deck askew over a bank: its slab and parapets level across, as its ribbon, whatever the ground under each edge', () => {
+    // a footbridge over a canal's mouth (Fethiye, 36.6379 N 29.1210 E): one edge over the bank (3.4 m),
+    // the other over the water (0 m); its ribbon is level at the centre line's height
+    const r = run(106, true);
+    for (const s of r.stations) { s.groundL = 103.4; s.groundR = 100; }
+    r.level = true;
+    const p = points(buildDecks([r]));
+    for (const side of [-1, 1]) {
+      // the parapet's top and the slab's underside at the same height on both edges
+      const edge = p.filter((v) => near(Math.abs(v.z), 5) && Math.sign(v.z) === side);
+      expect(Math.max(...edge.map((v) => v.y))).toBeCloseTo(106 + PARAPET_M, 2);
+      expect(Math.min(...edge.filter((v) => v.y > GROUND + 1).map((v) => v.y))).toBeCloseTo(106 - SLAB_THICK_M, 2);
+    }
+    // not level, each edge follows its own ground (an embankment's road on a cross slope)
+    r.level = false;
+    const q = points(buildDecks([r])).filter((v) => near(Math.abs(v.z), 5));
+    expect(Math.max(...q.filter((v) => v.z < 0).map((v) => v.y))).toBeCloseTo(106 + 3.4 + PARAPET_M, 2);
+  });
+
   it('empty and degenerate input', () => {
     expect(buildDecks([]).ramps.length).toBe(0);
     const one = run(106, true);

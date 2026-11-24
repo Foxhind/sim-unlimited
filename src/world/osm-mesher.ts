@@ -1413,7 +1413,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
             };
           });
           const m = raw[raw.length >> 1].e, ll = enuToLatLon(center, m[0], -m[1], 0);
-          runs.push({ stations, bridge, earth: groundColourAt(ll.lon, ll.lat), blocked });
+          runs.push({ stations, bridge, earth: groundColourAt(ll.lon, ll.lat), blocked, level: levelDeck(w.line) });
         }
         cur = [];
       };

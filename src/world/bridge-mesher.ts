@@ -46,6 +46,12 @@ export interface DeckRun {
   earth: number;
   /** no pier stands here (the road under the bridge) */
   blocked?: (x: number, z: number) => boolean;
+  /**
+   * a deck level across (a way with a height of its own, a straight bridge: osm-mesher levelDeck):
+   * its ribbon is at the centre line's height edge to edge, and so are the slab and the parapets
+   * (else each edge lies as far over the ground under it as the centre line does)
+   */
+  level?: boolean;
 }
 
 type V3 = [number, number, number];
@@ -87,8 +93,8 @@ export function buildDecks(runs: DeckRun[]): { vertices: Float32Array; ramps: Ui
     if (st.length < 2) continue;
     /** a point `u` metres left of the centre line at station s, at height y */
     const at = (s: DeckStation, u: number, y: number): V3 => [s.x + s.nx * u, y, s.z + s.nz * u];
-    /** the deck's top at an edge: the ribbon lies as far over the ground there as on the centre line */
-    const edgeY = (s: DeckStation, side: 1 | -1): number => s.y - s.ground + (side === 1 ? s.groundL : s.groundR);
+    /** the deck's top at an edge: a level deck's at the centre line's, else as far over the ground there as on the centre line */
+    const edgeY = (s: DeckStation, side: 1 | -1): number => (run.level ? s.y : s.y - s.ground + (side === 1 ? s.groundL : s.groundR));
     const along = (a: DeckStation, b: DeckStation): V3 => {
       const l = Math.hypot(b.x - a.x, b.z - a.z) || 1;
       return [(b.x - a.x) / l, 0, (b.z - a.z) / l];
