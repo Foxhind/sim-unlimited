@@ -19,7 +19,7 @@ vi.mock('../src/world/terrain-source', async (orig) => ({
   },
 }));
 
-const { applyPads, buildPad, padDistance, padHeight, padSources, PAD_BLEND_M } = await import('../src/world/aerodrome');
+const { applyPads, buildPad, isPitchGround, padDistance, padHeight, padSources, PAD_BLEND_M, PITCH_PAD } = await import('../src/world/aerodrome');
 const { buildTerrainTin, tinSampler } = await import('../src/world/terrain-tin');
 
 const GRID = 48;
@@ -163,5 +163,48 @@ describe('aerodrome pads', () => {
     expect(onPad).toBeGreaterThan(0);
     // elsewhere the seam is still stitched
     expect(offPad).toBeGreaterThan(0);
+  });
+
+  it('a sports ground: a pad of its own, level within MAX_GRADE, its margin and blend narrow', async () => {
+    // a football pitch, 105 × 68 m, on the DEM's 1.3 % slope
+    const o = { lat: tileLat, lon: seamLon };
+    const ring: LonLat[] = [[-52, -34], [53, -34], [53, 34], [-52, 34], [-52, -34]].map(([e, nn]) => {
+      const p = enuToLatLon(o, e, nn, 0);
+      return [p.lon, p.lat];
+    });
+    const pitch: OsmArea = { rings: [ring], tags: { leisure: 'pitch', sport: 'soccer' } };
+    const srcs = padSources({ areas: [pitch], lines: [] });
+    expect(srcs).toHaveLength(1);
+    expect(srcs[0]).toMatchObject({ margin: PITCH_PAD.MARGIN_M, blend: PITCH_PAD.BLEND_M, maxGrade: PITCH_PAD.MAX_GRADE });
+    const pad = (await buildPad(srcs[0]))!;
+    expect(Math.hypot(pad.ge, pad.gn)).toBeCloseTo(PITCH_PAD.MAX_GRADE, 6);
+    expect(pad.blend).toBe(PITCH_PAD.BLEND_M);
+    // its flat territory: the outline and a few metres, not an aerodrome's 30
+    for (const [lon, lat] of ring) {
+      const [e, nn] = latLonToEnu(pad.origin, lat, lon, 0);
+      expect(padDistance(pad, e, nn)).toBeLessThan(-PITCH_PAD.MARGIN_M + 1.5);
+      expect(padDistance(pad, e, nn)).toBeGreaterThan(-PITCH_PAD.MARGIN_M - 1.5);
+    }
+    // a lattice far beyond its blend is left as it was
+    const t = lattice(A), before = t.heights.slice();
+    applyPads(t, A, GRID, [pad]);
+    let changed = 0, far = 0;
+    const side = GRID + 1, N = n * GRID;
+    for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+      const lon = ((A.x * GRID + i) / N) * 360 - 180, lat = mercatorYToLat((A.y * GRID + j) / N);
+      const [e, nn] = latLonToEnu(pad.origin, lat, lon, 0);
+      if (padDistance(pad, e, nn) > 60 + PITCH_PAD.BLEND_M) { far++; if (t.heights[j * side + i] !== before[j * side + i]) changed++; }
+    }
+    expect(far).toBeGreaterThan(0);
+    expect(changed).toBe(0);
+  });
+
+  it('a ground on a roof, indoors or in a building is no pad', () => {
+    expect(isPitchGround({ leisure: 'pitch' })).toBe(true);
+    expect(isPitchGround({ leisure: 'track' })).toBe(true);
+    expect(isPitchGround({ leisure: 'stadium' })).toBe(true);
+    for (const tags of [{ leisure: 'pitch', location: 'roof' }, { leisure: 'pitch', indoor: 'yes' }, { leisure: 'pitch', building: 'yes' }, { leisure: 'pitch', layer: '1' }, { leisure: 'park' }] as Record<string, string>[]) {
+      expect(isPitchGround(tags), JSON.stringify(tags)).toBe(false);
+    }
   });
 });

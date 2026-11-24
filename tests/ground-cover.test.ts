@@ -348,7 +348,7 @@ describe('ground cover', () => {
     expect(isOpenPool({ leisure: 'swimming_pool', location: 'roof' })).toBe(false);
     // a covered pool is still drawn
     expect(isOpenPool({ leisure: 'swimming_pool', covered: 'yes' })).toBe(true);
-    expect(overpassQuery(TILE, 'full')).toContain('way["leisure"~"park|pitch|golf_course|swimming_pool"];');
+    expect(overpassQuery(TILE, 'full')).toContain('way["leisure"~"park|pitch|golf_course|swimming_pool|track|stadium"];');
   });
   it('a town’s zone lies under the park and the pool in it, whichever came first; open land is an area', () => {
     const town: OsmArea = { ...park(square(20, 20, 16)), tags: { landuse: 'residential' } };

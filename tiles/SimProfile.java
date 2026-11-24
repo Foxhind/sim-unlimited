@@ -55,7 +55,7 @@ public class SimProfile implements Profile {
   static final Pattern AEROWAY = Pattern.compile("runway|taxiway|apron|helipad");
   static final Pattern NATURAL_WAY = Pattern.compile("water|wood|scrub|beach|bare_rock");
   static final Pattern WATERWAY = Pattern.compile("^(river|riverbank|canal|stream|brook|ditch|drain)$");
-  static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course|swimming_pool");
+  static final Pattern LEISURE = Pattern.compile("park|pitch|golf_course|swimming_pool|track|stadium");
   static final Pattern MAST = Pattern.compile("^(mast|antenna)$");
   static final Pattern ORCHARD = Pattern.compile("^(orchard|vineyard)$");
   static final Pattern PIER = Pattern.compile("^(pier|breakwater|groyne)$");

@@ -70,7 +70,7 @@ const FULL_FILTER = `
   way["landuse"~"^(orchard|vineyard)$"]; relation["landuse"~"^(orchard|vineyard)$"];
   way["landuse"~"${LAND_ZONES}"]; relation["landuse"~"${LAND_ZONES}"];
   way["natural"~"^(grassland|heath)$"]; relation["natural"~"^(grassland|heath)$"]; way["amenity"="grave_yard"];
-  way["leisure"~"park|pitch|golf_course|swimming_pool"];
+  way["leisure"~"park|pitch|golf_course|swimming_pool|track|stadium"]; relation["leisure"~"^(pitch|track|stadium)$"];
   way["amenity"="parking"]; relation["amenity"="parking"];
   node["man_made"~"^(mast|antenna)$"]; node["man_made"="tower"]["tower:type"="communication"];
   way["man_made"~"^(mast|antenna)$"]; way["man_made"="tower"]["tower:type"="communication"];

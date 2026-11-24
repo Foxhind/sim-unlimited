@@ -1,6 +1,7 @@
 /**
  * Aerodrome pads: the whole territory of an aerodrome lies on one plane (it may be tilted, it may
- * not be bent). The territory is the convex hull of the OSM aeroway=aerodrome outline, widened by
+ * not be bent). So does every sports ground (a pitch, a track, a stadium), on a pad of its own,
+ * nearly level and with a narrow margin and blend (PITCH_PAD). The territory is the convex hull of the OSM aeroway=aerodrome outline, widened by
  * PAD_MARGIN_M; a runway outside any aerodrome outline gets a pad of its own. The plane is a
  * least-squares fit to the DEM inside the hull, sampled at fixed lon/lat points on fixed-zoom DEM
  * tiles: it depends on the outline alone, so every tile the pad touches — and the mesh, the drape
@@ -25,6 +26,21 @@ export const PAD_BLEND_M = 250;
 export const PAD_MAX_GRADE = 0.025;
 /** aerodrome outlines larger than this across (military ranges, whole districts) get no pad */
 const PAD_MAX_SIZE_M = 15000;
+/**
+ * A sports ground's pad: its outline (leisure=pitch | track | stadium, an area) widened by MARGIN_M,
+ * blended into the relief over BLEND_M, no steeper than MAX_GRADE (a pitch is all but level); none
+ * for one on a roof or indoors, or larger than MAX_AREA_M2 (a racecourse's grounds)
+ */
+export const PITCH_PAD = { MARGIN_M: 3, BLEND_M: 25, MAX_GRADE: 0.01, MAX_AREA_M2: 200_000 } as const;
+const PITCH_LEISURE = new Set(['pitch', 'track', 'stadium']);
+
+/** a sports ground to put on a pad of its own: on the ground, an area */
+export function isPitchGround(tags: Record<string, string>): boolean {
+  if (!PITCH_LEISURE.has(tags.leisure ?? '') || tags.indoor === 'yes' || tags.building !== undefined) return false;
+  const loc = tags.location, layer = Number(tags.layer);
+  return loc !== 'roof' && loc !== 'rooftop' && loc !== 'indoor' && loc !== 'underground' && !(Number.isFinite(layer) && layer !== 0);
+}
+
 /** DEM zoom the plane is fitted on (~19 m pixels at the equator) */
 const FIT_ZOOM = 13;
 /** at most about this many DEM samples per pad */
@@ -42,12 +58,17 @@ export interface Pad {
   h0: number;
   ge: number;
   gn: number;
+  /** the relief blends into it over this width beyond its flat part (PITCH_PAD.BLEND_M); PAD_BLEND_M unless given */
+  blend?: number;
 }
 
-/** what a pad is made from: an outline (lon/lat) and a stable key */
+/** what a pad is made from: an outline (lon/lat) and a stable key; an aerodrome's sizes unless given */
 export interface PadSource {
   key: string;
   pts: LonLat[];
+  margin?: number;
+  blend?: number;
+  maxGrade?: number;
 }
 
 export function padHeightEnu(p: Pad, e: number, n: number): number {
@@ -167,6 +188,18 @@ export function padSources(data: { areas: ReadonlyArray<OsmArea>; lines: Readonl
     }
     out.push({ key: `r${sameKey(l.points)}`, pts });
   }
+  // every sports ground on a level pad of its own
+  for (const a of data.areas) {
+    if (!isPitchGround(a.tags)) continue;
+    const ring = a.rings[0];
+    if (!ring || ring.length < 4) continue;
+    const origin = { lon: ring[0][0], lat: ring[0][1] };
+    const xy = ring.map(([lon, lat]) => enu2(origin, lon, lat));
+    let area2 = 0;
+    for (let k = 0; k + 1 < xy.length; k++) area2 += xy[k][0] * xy[k + 1][1] - xy[k + 1][0] * xy[k][1];
+    if (Math.abs(area2) / 2 > PITCH_PAD.MAX_AREA_M2) continue;
+    out.push({ key: `p${sameKey(ring)}`, pts: ring, margin: PITCH_PAD.MARGIN_M, blend: PITCH_PAD.BLEND_M, maxGrade: PITCH_PAD.MAX_GRADE });
+  }
   return out;
 }
 
@@ -248,22 +281,23 @@ export async function buildPad(src: PadSource): Promise<Pad | null> {
     }
   }
   let [, ge, gn] = plane;
-  const grade = Math.hypot(ge, gn);
-  if (grade > PAD_MAX_GRADE) {
-    ge *= PAD_MAX_GRADE / grade;
-    gn *= PAD_MAX_GRADE / grade;
+  const grade = Math.hypot(ge, gn), maxGrade = src.maxGrade ?? PAD_MAX_GRADE;
+  if (grade > maxGrade) {
+    ge *= maxGrade / grade;
+    gn *= maxGrade / grade;
   }
   // with the grade capped the plane keeps the mean height over the samples
   let h0 = 0;
   for (let k = 0; k < H.length; k++) h0 += H[k] - ge * E[k] - gn * N[k];
   h0 /= H.length;
-  const hull = widenHull(core, PAD_MARGIN_M, HULL_TOL_M);
+  const margin = src.margin ?? PAD_MARGIN_M;
+  const hull = widenHull(core, margin, Math.min(HULL_TOL_M, margin));
   const ring: LonLat[] = hull.map(([e, n]) => {
     const p = enuToLatLon(origin, e, n, 0);
     return [p.lon, p.lat];
   });
   ring.push(ring[0]);
-  return { key: src.key, origin, hull, ring, h0, ge, gn };
+  return { key: src.key, origin, hull, ring, h0, ge, gn, blend: src.blend ?? PAD_BLEND_M };
 }
 
 /** pads by key: neighbouring tiles share an aerodrome, and the fit costs DEM reads */
@@ -302,8 +336,8 @@ function padNode(h: number, lon: number, lat: number, pads: ReadonlyArray<Pad>, 
   let bestW = 0, bestH = h;
   for (const p of pads) {
     const [e, n] = latLonToEnu(p.origin, lat, lon, 0);
-    const d = padDistance(p, e, n) - flatM;
-    const w = d <= 0 ? 1 : d >= PAD_BLEND_M ? 0 : smooth(1 - d / PAD_BLEND_M);
+    const d = padDistance(p, e, n) - flatM, blend = p.blend ?? PAD_BLEND_M;
+    const w = d <= 0 ? 1 : d >= blend ? 0 : smooth(1 - d / blend);
     if (w > bestW) {
       bestW = w;
       bestH = padHeightEnu(p, e, n);
