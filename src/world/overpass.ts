@@ -52,6 +52,7 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Lighthouses and the sea's charted lights: towers, posts and beacons, flashing at night (lighthouse-mesher.ts).
 // Tombs: rock-cut fronts, Lycian sarcophagi and pillar tombs (tomb-mesher.ts); an outline at its middle.
 // Walls: garden, retaining and town walls as solid bands along their lines (wall-mesher.ts); fences are not fetched.
+// Dams and weirs mapped as lines: an embankment, a sill (dam-mesher.ts).
 const LAND_ZONES = '^(residential|commercial|retail|industrial|cemetery|quarry|landfill|construction|brownfield|grass|meadow|village_green|recreation_ground)$';
 const TOWN_LAND_ZONES = '^(residential|commercial|retail|industrial|quarry)$';
 const FULL_FILTER = `
@@ -80,6 +81,7 @@ const FULL_FILTER = `
   node["man_made"~"^(lighthouse|beacon)$"]; way["man_made"="lighthouse"]; node["seamark:type"~"^(light_major|light_minor|beacon_)"];
   node["tomb"]; way["tomb"];
   way["barrier"~"^(wall|retaining_wall|city_wall)$"];
+  way["waterway"~"^(dam|weir)$"];
   node["entrance"];
   way["natural"="cliff"]; node["natural"="peak"];
   way["man_made"~"^(pier|breakwater|groyne)$"]; node["leisure"="marina"]; way["leisure"="marina"];

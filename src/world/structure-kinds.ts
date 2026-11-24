@@ -38,9 +38,11 @@ export const STRUCTURE = {
   WALL: 15,
   /** stadium stands (stadium-mesher) */
   STADIUM: 16,
+  /** dams and weirs (dam-mesher) */
+  DAM: 17,
 } as const;
 export type StructureKind = (typeof STRUCTURE)[keyof typeof STRUCTURE];
-export const STRUCTURE_KINDS = 17;
+export const STRUCTURE_KINDS = 18;
 /** every kind shown */
 export const ALL_STRUCTURES = (1 << STRUCTURE_KINDS) - 1;
 
@@ -62,6 +64,7 @@ export const STRUCTURE_LABELS: Record<StructureKind, string> = {
   [STRUCTURE.TOMB]: 'гробницы (tomb=*)',
   [STRUCTURE.WALL]: 'стены (wall, retaining_wall, city_wall)',
   [STRUCTURE.STADIUM]: 'трибуны стадионов',
+  [STRUCTURE.DAM]: 'плотины и водосливы',
 };
 
 const TOWERS = new Set(['tower', 'water_tower', 'cooling_tower', 'transformer_tower']);

@@ -136,7 +136,8 @@ public class SimProfile implements Profile {
       "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
-      isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb") || find(WALL, s(f, "barrier"));
+      isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb") || find(WALL, s(f, "barrier")) ||
+      "dam".equals(s(f, "waterway")) || "weir".equals(s(f, "waterway"));
   }
 
   static boolean relationWanted(SourceFeature f) {
