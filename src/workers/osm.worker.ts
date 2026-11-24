@@ -11,6 +11,7 @@ import { buildPiers } from '../world/pier-mesher';
 import { buildRuins } from '../world/ruin-mesher';
 import { buildAerialways } from '../world/aerialway-mesher';
 import { buildLighthouses } from '../world/lighthouse-mesher';
+import { buildTombs } from '../world/tomb-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { buildPower } from '../world/power-mesher';
 import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
@@ -31,8 +32,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across
-export const OSM_MESH_SCHEMA = 96;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs
+export const OSM_MESH_SCHEMA = 97;
 
 export interface OsmRequest {
   type: 'osm';
@@ -265,10 +266,12 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const lifts = buildAerialways(tile, data.lines, data.points, drape);
     // and the lighthouses and the sea's lights (lighthouse-mesher.ts): their towers, their lights flashing at night
     const lighthouses = buildLighthouses(tile, data.points, drape);
+    // and the tombs (tomb-mesher.ts): Lycia's rock-cut fronts, sarcophagi and pillar tombs
+    const tombs = buildTombs(tile, data.points, drape);
     // each part of the solids with its structure kind (structure-kinds), in this order
     const parts = [
       [mesh.bridges, STRUCTURE.BRIDGE], [piers, STRUCTURE.PIER], [minarets, STRUCTURE.MINARET], [power, STRUCTURE.POWER],
-      [ruins, STRUCTURE.RUINS], [lifts, STRUCTURE.LIFT], [lighthouses, STRUCTURE.LIGHTHOUSE],
+      [ruins, STRUCTURE.RUINS], [lifts, STRUCTURE.LIFT], [lighthouses, STRUCTURE.LIGHTHOUSE], [tombs, STRUCTURE.TOMB],
     ] as const;
     const solid = {
       vertices: parts.map(([p]) => p.vertices).reduce(concatF32),

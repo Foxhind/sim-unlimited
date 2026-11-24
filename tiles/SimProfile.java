@@ -76,7 +76,7 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
@@ -134,7 +134,7 @@ public class SimProfile implements Profile {
       "line".equals(s(f, "power")) || "minor_line".equals(s(f, "power")) ||
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
-      isMast(f) || "lighthouse".equals(s(f, "man_made"));
+      isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb");
   }
 
   static boolean relationWanted(SourceFeature f) {
@@ -154,7 +154,7 @@ public class SimProfile implements Profile {
 
   static boolean nodeWanted(SourceFeature f) {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
-      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f);
+      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb");
   }
 
   /** overpass.ts: lighthouses, beacons and the charted lights */
