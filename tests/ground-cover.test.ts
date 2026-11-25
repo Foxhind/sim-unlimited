@@ -331,7 +331,7 @@ describe('ground cover', () => {
   });
   it('ranks the covers as the plan does', () => {
     expect(Object.entries(COVER_RANK).sort((a, b) => a[1] - b[1]).map(([k]) => k)).toEqual([
-      'runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area', 'zone', 'belt',
+      'runway', 'ballast', 'zebra', 'carriageway', 'path', 'shoulder', 'water', 'railZone', 'aeroArea', 'carPark', 'pitchPaint', 'pitch', 'pool', 'area', 'zone', 'belt',
     ]);
   });
   it('an open pool lies over the garden it is in, in its own turquoise; an indoor one is no cover', () => {

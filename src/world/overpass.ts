@@ -33,6 +33,8 @@ export const REACH_SELECTORS = [
   'node["natural"="peak"]',
   // a junction's traffic lights stand at its approaches, maybe across the border (ground-cover signals)
   'node["highway"="traffic_signals"]',
+  // a road's pedestrian crossings (ground-cover zebras)
+  'node["highway"="crossing"]',
 ];
 
 /** a tile's bounds grown by ROAD_REACH_M */
@@ -218,7 +220,7 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   for (const el of json.elements) {
     if (el.type === 'node') {
       nodes.set(el.id, [el.lon, el.lat]);
-      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined || el.tags['seamark:type'] !== undefined || el.tags.tomb !== undefined || el.tags.natural === 'tree' || el.tags.highway === 'traffic_signals')) {
+      if (el.tags && (el.tags.aeroway !== undefined || el.tags.man_made !== undefined || el.tags.entrance !== undefined || el.tags.natural === 'peak' || el.tags.leisure === 'marina' || el.tags.aerialway !== undefined || el.tags['seamark:type'] !== undefined || el.tags.tomb !== undefined || el.tags.natural === 'tree' || el.tags.highway === 'traffic_signals' || el.tags.highway === 'crossing')) {
         points.push({ at: [el.lon, el.lat], tags: el.tags });
       }
     } else if (el.type === 'way') ways.set(el.id, el);

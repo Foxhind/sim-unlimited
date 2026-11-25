@@ -87,7 +87,9 @@ public class SimProfile implements Profile {
     "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type", "tower:construction",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
-    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type");
+    "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type",
+    // pedestrian crossings: their nodes and the crossing ways (ground-cover zebras)
+    "crossing", "footway", "cycleway");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
@@ -168,7 +170,7 @@ public class SimProfile implements Profile {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
       "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb") || "tree".equals(s(f, "natural")) ||
       // traffic lights at junctions (osm-mesher: a post at each approach's stop line)
-      "traffic_signals".equals(s(f, "highway"));
+      "traffic_signals".equals(s(f, "highway")) || "crossing".equals(s(f, "highway"));
   }
 
   /** overpass.ts: lighthouses, beacons and the charted lights */

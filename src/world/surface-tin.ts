@@ -456,7 +456,9 @@ function distinctPoints(lines: ReadonlyArray<ReadonlyArray<Pt>>): number {
 const isOverlay = (s: GroundCover['shapes'][number]): boolean => !!s.overlay;
 /** a junction's surface's place in the budget among the carriageways: a priority above a service road's, below a living street's */
 const JUNCTION_BUDGET_PRIO = 1.95;
-const budgetRank = (k: CoverKind): number => (k === 'water' ? COVER_RANK.path - 0.5 : COVER_RANK[k]);
+const budgetRank = (k: CoverKind): number => (k === 'water' ? 4.5 : k === 'path' ? PATH_BUDGET_RANK : COVER_RANK[k]);
+/** a path in the budget after the shoulders and the water, though it lies over a shoulder (COVER_RANK): a dense town's paths go before its rivers */
+const PATH_BUDGET_RANK = 5;
 /** the senior unit first: by rank (budgetRank), priority, tie and first shape (a bed alone after every shape) */
 const byPlace = (a: Unit, b: Unit): number => a.rank - b.rank || b.prio - a.prio || a.tie - b.tie || a.first - b.first;
 

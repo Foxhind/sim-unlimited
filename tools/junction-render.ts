@@ -37,6 +37,7 @@ const GRID = 64, W = 1100, H = 1000;
 const set = JSON.parse(fs.readFileSync('tests/fixtures/junctions.json', 'utf8')) as { name: string; at: [number, number]; span: number; tile: Tile; lines: OsmLine[] }[];
 
 const COL: Partial<Record<CoverKind, [number, number, number]>> = {
+  zebra: [236, 236, 230],
   carriageway: [74, 72, 70], shoulder: [128, 116, 92], path: [150, 138, 110], water: [60, 90, 130], ballast: [110, 100, 95],
   railZone: [80, 80, 60], runway: [74, 72, 70], aeroArea: [90, 90, 90], carPark: [85, 85, 85],
 };
@@ -98,6 +99,11 @@ for (const fx of set) {
     }
     const [x, y] = c.toLattice([ll.lon, ll.lat]);
     let si = c.cover.locate(x, y);
+    // a crossing's stripes over a carriageway
+    if (si >= 0 && c.cover.shapes[si].kind === 'carriageway') {
+      const z = c.cover.shapes.findIndex((sh) => sh.kind === 'zebra' && inTris(sh.tris, x, y));
+      if (z >= 0) si = z;
+    }
     // the overlays (a junction's shoulders) over the ground and the covers junior to them, not over water
     if (si < 0 || COVER_RANK[c.cover.shapes[si].kind] > COVER_RANK.shoulder) {
       const ov = c.cover.shapes.findIndex((sh) => sh.overlay && inTris(sh.tris, x, y));
@@ -106,7 +112,7 @@ for (const fx of set) {
     let col: [number, number, number] = [36, 52, 30];
     if (si >= 0) {
       const sh = c.cover.shapes[si];
-      col = COL[sh.kind] ?? [50, 66, 42];
+      col = sh.kind === 'zebra' && sh.paint !== undefined ? [(sh.paint >> 16) & 255, (sh.paint >> 8) & 255, sh.paint & 255] : COL[sh.kind] ?? [50, 66, 42];
       if (sh.attr) {
         const [ee, nn] = latLonToEnu(c.tc, ll.lat, ll.lon, 0);
         const a = sh.attr.segs[sh.attr.segAt(x, y)]({ x: ee, z: -nn });

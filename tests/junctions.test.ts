@@ -10,7 +10,7 @@ import { ROAD_EDGE_OFF, ROAD_MARK, SELF_LIT_FLAG } from '../src/engine/palette';
 import { buildOsmMesh } from '../src/world/osm-mesher';
 import { INSTANCE, SIGNAL_SHAPE, TREE_STRIDE } from '../src/world/props-mesher';
 import { latLonToEnu, tileCenter, tileLattice, type Tile } from '../src/world/geodesy';
-import { buildGroundCover, type GroundCover } from '../src/world/ground-cover';
+import { buildGroundCover, ZEBRA_WHITE, ZEBRA_YELLOW, type GroundCover } from '../src/world/ground-cover';
 import { junctionPieces, junctionShape, unionOutline, type JunctionArm } from '../src/world/junctions';
 import type { OsmLine, OsmPoint } from '../src/world/osm-types';
 import { lineNetwork, type P2 } from '../src/world/ribbon-shapes';
@@ -134,6 +134,36 @@ describe('junctions in the ground cover', () => {
       expect(mine.length).toBeGreaterThan(0);
       for (const [x, z] of mine) expect((x - p.x) * Math.cos(p.yaw) + (z - p.z) * Math.sin(p.yaw)).toBeCloseTo(SIGNAL_SHAPE.HEAD_FRONT + 0.01, 4);
     }
+  });
+  it('a crossing: yellow and white stripes across the carriageway, drawn over it; a footway over the shoulder to the kerb', () => {
+    // the road with the crossing's node on it
+    const street = road({ highway: 'secondary' }, [[8, 32], [24, 32], [56, 32]]);
+    const walk = road({ highway: 'footway', footway: 'crossing', crossing: 'marked' }, [[24, 20], [24, 32], [24, 44]]);
+    const cover = buildGroundCover(TILE, GRID, data([street, walk]));
+    const zebras = cover.shapes.filter((s) => s.kind === 'zebra');
+    expect(zebras.map((z) => z.paint).sort()).toEqual([ZEBRA_WHITE, ZEBRA_YELLOW].sort());
+    for (const z of zebras) expect(z.overlay).toBe(true);
+    // stripes apart across the carriageway (secondary, 11 m), 4 m along it: 11 of 0.5 m, 0.4 m between
+    const width = classifyLine(street.tags)!.width;
+    const stripes = zebras.flatMap((z) => Array.from({ length: z.tris.length / 12 }, (_, k) => {
+      const ys = [0, 1, 2, 3, 4, 5].map((v) => z.tris[12 * k + 2 * v + 1]), xs = [0, 1, 2, 3, 4, 5].map((v) => z.tris[12 * k + 2 * v]);
+      return { y0: Math.min(...ys) / M, y1: Math.max(...ys) / M, len: (Math.max(...xs) - Math.min(...xs)) / M };
+    })).sort((a, b) => a.y0 - b.y0);
+    expect(stripes).toHaveLength(11);
+    for (const st of stripes) {
+      expect(st.y1 - st.y0).toBeCloseTo(0.5, 3);
+      expect(st.len).toBeCloseTo(4, 3);
+    }
+    for (let k = 1; k < stripes.length; k++) expect(stripes[k].y0 - stripes[k - 1].y1).toBeCloseTo(0.4, 3);
+    expect(stripes.at(-1)!.y1 - stripes[0].y0).toBeLessThan(width);
+    // what holds the road under them is its carriageway (an overlay holds nothing)
+    expect(shapeAt(cover, 24, 32)?.kind).toBe('carriageway');
+    // the footway over the road's shoulder, up to its edge
+    const shoulder = classifyLine(street.tags)!.shoulder!;
+    expect(shapeAt(cover, 24, 32 + (width / 2 + shoulder / 2) * M)?.kind).toBe('path');
+    // an unmarked one: none
+    const plain = road({ highway: 'footway', footway: 'crossing', crossing: 'unmarked' }, [[24, 20], [24, 32], [24, 44]]);
+    expect(buildGroundCover(TILE, GRID, data([street, plain])).shapes.some((s) => s.kind === 'zebra')).toBe(false);
   });
   it('a driveway joining a road makes no junction (only roads of standing do)', () => {
     const drive = road({ highway: 'service' }, [[32, 32], [32, 50]]);

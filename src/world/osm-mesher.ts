@@ -1027,14 +1027,17 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const onBank = (f: number): boolean => (banks[f] ||= tin.bank?.(f) ? 1 : 2) === 1;
     for (const si of tin.looseShapes) {
       const shape = cover.shapes[si], wet = shape.kind === 'water';
-      // a junction's surface and its shoulders (an overlay) go with the roads, unpainted
-      const out = wet ? water : shape.junction ? roads : main, part = partOf(out);
+      // a junction's surface, its shoulders and a crossing's stripes (overlays) go with the roads, unpainted
+      const out = wet ? water : shape.junction || shape.kind === 'zebra' ? roads : main, part = partOf(out);
       // an area with a filter: the imagery of the face under each piece through it, as the terrain colours its faces (coverRamp)
       const filter = shape.kind === 'belt' ? beltFilter(shape.source.tags, styles)
         : shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
       const ramp = coverRamp(shape, styles, undefined);
       // an overlay (a junction's shoulders) on the ground and the areas, not on a road's cover, water or a bank
-      const over: LeftOut = shape.overlay
+      const over: LeftOut = shape.kind === 'zebra'
+        // a crossing's stripes on the carriageways' faces alone
+        ? (fc) => fc < 0 || cover.shapes[fc].kind !== 'carriageway'
+        : shape.overlay
         ? (fc, _lifts, f) => (fc >= 0 && (fc < si || OVERLAY_OFF.has(cover.shapes[fc].kind))) || onBank(f) || isSeaFace(tin, f)
         : (fc, _lifts, f) => fc === si || (fc >= 0 && fc < si) || (wet ? onBank(f) : isSeaFace(tin, f));
       const t = shape.tris;

@@ -10,7 +10,7 @@
  * where it meets a lifted one at a joint (liftedJoints).
  */
 import earcut from 'earcut';
-import { colourOf, RAMP, ROAD_EDGE_OFF, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
+import { colour, colourOf, RAMP, ROAD_EDGE_OFF, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-styles';
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
@@ -21,11 +21,14 @@ import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
 import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, isOnewayRoad, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
-export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone' | 'belt';
+export type CoverKind = 'runway' | 'ballast' | 'zebra' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone' | 'belt';
 
-/** seniority of the covers: the lower lies over the higher where they overlap */
+/**
+ * seniority of the covers: the lower lies over the higher where they overlap. A path over a road's
+ * shoulder (a footway reaches the kerb); a pedestrian crossing's paint (an overlay) over the carriageway.
+ */
 export const COVER_RANK: Record<CoverKind, number> = {
-  runway: 1, ballast: 2, carriageway: 3, shoulder: 4, path: 5, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11, zone: 12, belt: 13,
+  runway: 1, ballast: 2, zebra: 2.5, carriageway: 3, path: 3.5, shoulder: 4, water: 6, railZone: 7, aeroArea: 8, carPark: 9, pitchPaint: 9.5, pitch: 10, pool: 10.5, area: 11, zone: 12, belt: 13,
 };
 
 export interface CoverShape {
@@ -51,9 +54,12 @@ export interface CoverShape {
   junction?: object;
   /**
    * drawn over the surface's faces, never an edge of them nor what holds a point (locate passes it
-   * over): a junction's shoulders round its kerbs, which would take the vertex budget of whole roads
+   * over): a junction's shoulders round its kerbs, which would take the vertex budget of whole roads;
+   * a pedestrian crossing's stripes
    */
   overlay?: boolean;
+  /** a zebra's colour (its stripes are white or yellow) */
+  paint?: number;
 }
 
 export interface GroundCover {
@@ -102,6 +108,7 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
       return lit ? withGlow(ramp, LIT_ROAD_GLOW) : tags.highway ? withGlow(ramp, UNLIT_ROAD_GLOW) : ramp;
     }
     case 'ballast': return BALLAST_RAMP;
+    case 'zebra': return shape.paint ?? ZEBRA_WHITE;
     case 'railZone': return RAIL_ZONE_RAMP;
     case 'runway':
     case 'aeroArea': return RAMP.ASPHALT;
@@ -131,6 +138,14 @@ export function coverRamp(shape: CoverShape, styles: AreaStyles, imagery: RGB | 
  * rings, whose inner half the area itself covers (it is senior)
  */
 export const BELT_M = 20;
+
+/** a pedestrian crossing's stripes, white and yellow in turn (Russian GOST 52289 marking 1.14.1) */
+export const ZEBRA_WHITE = colour(236, 236, 230);
+export const ZEBRA_YELLOW = colour(236, 196, 44);
+/** a zebra's stripes: this wide across the road with this much asphalt between, this long along it, metres */
+const ZEBRA_STRIPE_M = 0.5;
+const ZEBRA_GAP_M = 0.4;
+const ZEBRA_LENGTH_M = 4;
 
 /** lift is probed along a way at least this often, metres */
 const LIFT_PROBE_M = 10;
@@ -1011,6 +1026,62 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     }
   };
 
+  /**
+   * The pedestrian crossings' zebras: at each node mapped as a crossing (highway=crossing) or where a
+   * crossing way (footway=crossing, cycleway=crossing) meets a carriageway on the ground, but an
+   * unmarked one, stripes across the whole carriageway of the senior road there, ZEBRA_STRIPE_M wide
+   * with ZEBRA_GAP_M of asphalt between, ZEBRA_LENGTH_M long along it, white and yellow in turn — two
+   * overlays (drawn over its faces)
+   */
+  function buildZebras(): void {
+    const unmarked = (tags: Record<string, string>) => ['no', 'unmarked', 'informal'].includes(tags.crossing ?? '');
+    const at = new Map<string, LonLat>();
+    for (const p of data.points) if (p.tags.highway === 'crossing' && !unmarked(p.tags)) at.set(nodeKey(p.at), p.at);
+    for (const l of data.lines) {
+      if (!(l.tags.footway === 'crossing' || l.tags.cycleway === 'crossing' || l.tags.highway === 'crossing') || unmarked(l.tags)) continue;
+      for (const p of l.points) at.set(nodeKey(p), p);
+    }
+    if (!at.size) return;
+    const white: P2[] = [], yellow: P2[] = [];
+    let lead: OsmLine | undefined, leadPrio = -Infinity;
+    for (const line of data.lines) {
+      const style = line.tags.highway ? classifyLine(line.tags) : undefined;
+      if (!style || style.path || isTunnel(line.tags) || roadLayer(line.tags) !== 0) continue;
+      const dAt = wayLength(line);
+      line.points.forEach((p, i) => {
+        if (!at.has(nodeKey(p)) || lifted(line, dAt[i])) return;
+        // the senior road at the node takes it
+        at.delete(nodeKey(p));
+        const pts = paintOf(line)?.c ?? drawnPts(line)?.map((q) => q.c);
+        if (!pts || pts.length < 2) return;
+        const node = toLattice(p);
+        let k = 0, best = Infinity;
+        for (let m = 0; m + 1 < pts.length; m++) { const d = toSegment(node, pts[m], pts[m + 1]); if (d < best) { best = d; k = m; } }
+        const dx = pts[k + 1][0] - pts[k][0], dy = pts[k + 1][1] - pts[k][1], l = Math.hypot(dx, dy) || 1;
+        const u: P2 = [dx / l, dy / l], n: P2 = [-u[1], u[0]];
+        // stripes apart, the asphalt between them, centred on the road: as many as fit
+        const w = style.width * latticePerMetre, sw = ZEBRA_STRIPE_M * latticePerMetre, gap = ZEBRA_GAP_M * latticePerMetre, hl = (ZEBRA_LENGTH_M / 2) * latticePerMetre;
+        const count = Math.max(1, Math.floor((w - gap) / (sw + gap)));
+        const first = -(count * sw + (count - 1) * gap) / 2;
+        for (let s2 = 0; s2 < count; s2++) {
+          const a = first + s2 * (sw + gap), b = a + sw;
+          const q = (o: number, t: number): P2 => [node[0] + n[0] * o + u[0] * t, node[1] + n[1] * o + u[1] * t];
+          (s2 % 2 ? yellow : white).push(q(a, -hl), q(b, -hl), q(b, hl), q(a, -hl), q(b, hl), q(a, hl));
+        }
+        const pr = roadPriority(line.tags, style.width);
+        if (pr > leadPrio) { leadPrio = pr; lead = line; }
+      });
+    }
+    if (!lead) return;
+    for (const [tris, paint] of [[white, ZEBRA_WHITE], [yellow, ZEBRA_YELLOW]] as const) {
+      if (!tris.length) continue;
+      const outline: P2[][] = [];
+      for (let k = 0; k < tris.length; k += 6) outline.push([tris[k], tris[k + 1], tris[k + 2], tris[k + 5], tris[k]]);
+      const d = add('zebra', lead, leadPrio, flat(tris), outline);
+      if (d) Object.assign(d.shape, { overlay: true, paint });
+    }
+  }
+
   const buildArea = (area: OsmArea): void => {
     const style = classifyArea(area.tags, DEFAULT_AREA_STYLES);
     if (style) {
@@ -1079,6 +1150,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
 
   for (const line of data.lines) buildLine(line);
   for (const j of junctions) buildJunction(j);
+  buildZebras();
   for (const area of data.areas) buildArea(area);
   for (const p of data.points) buildPoint(p);
 

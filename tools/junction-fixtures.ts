@@ -1,7 +1,7 @@
 /**
  * The junctions regression set (tests/fixtures/junctions.json): for each junction of
  * tests/fixtures/junction-set.json, the roads of its z14 tile within REACH_M of it, as the OSM
- * worker has the tile (the local PMTiles: tiles/build.sh), whole ways, and its traffic lights.
+ * worker has the tile (the local PMTiles: tiles/build.sh), whole ways, its traffic lights and crossings.
  *
  *   npx vite-node tools/junction-fixtures.ts -- tiles/data/out
  *
@@ -41,8 +41,8 @@ for (const j of set) {
   const data = parseOverpass(pmtilesToOverpass(await archive.tile(14, tile.x, tile.y), tile, { aerodromes: [], runways: [] }));
   const near = (l: OsmLine) => l.points.some(([plon, plat]) => { const [e, n] = latLonToEnu({ lat, lon }, plat, plon, 0); return Math.hypot(e, n) < REACH_M; });
   const lines = data.lines.filter((l) => (l.tags.highway || l.tags.railway) && near(l));
-  const points = data.points.filter((p) => p.tags.highway === 'traffic_signals' && near({ tags: {}, points: [p.at] }));
+  const points = data.points.filter((p) => (p.tags.highway === 'traffic_signals' || p.tags.highway === 'crossing') && near({ tags: {}, points: [p.at] }));
   out.push({ ...j, tile, lines, points });
-  console.log(j.name, lines.length, 'ways', points.length, 'traffic lights');
+  console.log(j.name, lines.length, 'ways', points.filter((p) => p.tags.highway === 'traffic_signals').length, 'traffic lights', points.filter((p) => p.tags.highway === 'crossing').length, 'crossings');
 }
 fs.writeFileSync('tests/fixtures/junctions.json', JSON.stringify(out));
