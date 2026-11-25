@@ -185,6 +185,11 @@ export interface Chunk {
   radius: number;
   lastUsed: number;
   lastAttempt: number;
+  /**
+   * a newer mesh is being built (rebuild): the old one stays drawn where the tile is already shown,
+   * so its family does not fall back to the coarse parent for the build
+   */
+  stale?: number;
 }
 
 /**
@@ -371,9 +376,11 @@ export class ChunkManager {
     // is ready only with its OSM. A tile shown whole hides any of its descendants shown too.
     const seen = new Set<string>();
     const list: Chunk[] = [];
+    // a tile being rebuilt keeps its place if it was drawn last frame; one not drawn yet waits for its new mesh
+    const drawnBefore = new Set(this.shownList.map((c) => c.key));
     const isReady = (t: Tile) => {
       const c = this.chunks.get(`${t.z}/${t.x}/${t.y}`);
-      return c?.status === 'ready' && (t.z !== DETAIL_Z || detailReady(c.key));
+      return c?.status === 'ready' && (!c.stale || drawnBefore.has(c.key)) && (t.z !== DETAIL_Z || detailReady(c.key));
     };
     for (const { tile: t, drawn } of shownTiles(leaves, isReady)) {
       const c = this.chunks.get(`${t.z}/${t.x}/${t.y}`)!;
@@ -491,15 +498,46 @@ export class ChunkManager {
     return near > 0;
   }
 
-  /** Q40: drop near chunks so they rebuild with runway flattening once OSM arrives. */
+  /** Q40: rebuild near chunks with runway flattening once OSM arrives (rebuild). */
   invalidateNear(center: LatLon, radiusM: number, minZ: number): void {
-    for (const [key, c] of this.chunks) {
+    for (const c of [...this.chunks.values()]) {
       if (c.tile.z < minZ) continue;
       if (horizontalDistance(center, tileCenter(c.tile)) > radiusM + tileSizeMeters(c.tile)) continue;
-      this.queue.cancel(key);
-      this.dispose(c);
-      this.chunks.delete(key);
+      this.rebuild(c.tile);
     }
+  }
+
+  /**
+   * Build one tile again (its OSM arrived: the ground under the roads, the shore, a runway's pad).
+   * A ready tile keeps its mesh until the new one is uploaded and stays drawn if it is drawn now
+   * (update: stale); dropping it instead let its coarse parent cover its whole family for the
+   * build, and the far tiles blinked as each sibling's OSM came in. A tile not ready yet is
+   * dropped and requested again, its build in flight perhaps made without that OSM.
+   */
+  rebuild(tile: Tile): void {
+    const key = `${tile.z}/${tile.x}/${tile.y}`;
+    const c = this.chunks.get(key);
+    if (!c) return;
+    if (c.status !== 'ready') {
+      this.invalidate(tile);
+      return;
+    }
+    const gen = (c.stale ?? 0) + 1;
+    c.stale = gen;
+    const qkey = `${key}#rebuild`;
+    this.queue.cancel(qkey);
+    void this.queue
+      .submit(qkey, 0, () => this.buildInWorker(c))
+      .then((data) => {
+        if (this.chunks.get(key) !== c || c.stale !== gen) return; // unloaded or rebuilt again meanwhile
+        this.dispose(c);
+        this.upload(c, data);
+        c.stale = undefined;
+      })
+      .catch(() => {
+        // failed (not superseded): dropped and requested again, as a tile whose build failed
+        if (this.chunks.get(key) === c && c.stale === gen) this.invalidate(tile);
+      });
   }
 
   /** Drop one tile (or all with no argument): it is requested again on the next update. */

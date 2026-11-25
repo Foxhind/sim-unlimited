@@ -365,7 +365,7 @@ osm.onTileReady = (tile, runways, coast, roads) => {
   // aerodrome pads flatten the terrain, the OSM coastline reshapes the shore and the ground is
   // built under the roads: rebuild with the OSM
   if (runways > 0) chunks.invalidateNear(tileCenter(tile), 2500, 12);
-  else if (coast || roads) chunks.invalidate(tile); // only this tile changes
+  else if (coast || roads) chunks.rebuild(tile); // only this tile changes
 };
 
 type SimState = 'menu' | 'loading' | 'flying' | 'paused' | 'crashed';
