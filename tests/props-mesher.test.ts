@@ -33,7 +33,7 @@ function props(data: OsmTileData, detail: 'full' | 'large' = 'full', sample = fl
 
 describe('tree geometry', () => {
   it('packs one unit-height silhouette per tree type (then the props), with unit normals', () => {
-    expect(TREE_MESHES.length).toBe(TREE_TYPES + 4);
+    expect(TREE_MESHES.length).toBe(TREE_TYPES + 5);
     let next = 0;
     for (const m of TREE_MESHES) {
       expect(m.first).toBe(next);

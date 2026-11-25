@@ -35,7 +35,7 @@ export const BUILDING_DETAIL_M = 1500;
 const WIRE_RADIUS_M = 4000;
 /** a lighthouse's flash drawn this much larger than a beacon */
 const FLASH_SIZE = 2;
-const PROP_DETAIL_M: Partial<Record<number, number>> ={ [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500 };
+const PROP_DETAIL_M: Partial<Record<number, number>> ={ [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500, [INSTANCE.SIGNAL]: 1000 };
 const UNLOAD_DELAY_MS = 15000;
 const RETRY_DELAY_MS = 5000;
 
@@ -540,7 +540,7 @@ export class OsmManager {
 
   /** a prop type (props-mesher: tree types, then INSTANCE) is drawn */
   private showsProp(type: number): boolean {
-    return type === INSTANCE.AC || type === INSTANCE.LAMP ? this.layers.props : this.layers.trees;
+    return type === INSTANCE.AC || type === INSTANCE.LAMP || type === INSTANCE.SIGNAL ? this.layers.props : this.layers.trees;
   }
 
   draw(

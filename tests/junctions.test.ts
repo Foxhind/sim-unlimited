@@ -6,14 +6,16 @@
  * crossings to dual carriageways, roundabouts and clusters of nodes
  */
 import { describe, expect, it } from 'vitest';
-import { ROAD_EDGE_OFF, ROAD_MARK } from '../src/engine/palette';
+import { ROAD_EDGE_OFF, ROAD_MARK, SELF_LIT_FLAG } from '../src/engine/palette';
+import { buildOsmMesh } from '../src/world/osm-mesher';
+import { INSTANCE, SIGNAL_SHAPE, TREE_STRIDE } from '../src/world/props-mesher';
 import { latLonToEnu, tileCenter, tileLattice, type Tile } from '../src/world/geodesy';
 import { buildGroundCover, type GroundCover } from '../src/world/ground-cover';
 import { junctionPieces, junctionShape, unionOutline, type JunctionArm } from '../src/world/junctions';
-import type { OsmLine } from '../src/world/osm-types';
+import type { OsmLine, OsmPoint } from '../src/world/osm-types';
 import { lineNetwork, type P2 } from '../src/world/ribbon-shapes';
 import { classifyLine, isTunnel, roadLayer } from '../src/world/way-styles';
-import { data, GRID, M, road, TILE } from './roads-helpers';
+import { data, GRID, M, osmMeshOf, road, TILE } from './roads-helpers';
 
 /** the cover's shape at a lattice point: its index and itself */
 const shapeAt = (c: GroundCover, x: number, y: number) => { const si = c.locate(x, y); return si < 0 ? undefined : c.shapes[si]; };
@@ -90,6 +92,49 @@ describe('junctions in the ground cover', () => {
     expect(codeAt(cover, TILE, 32, 32)).toBeUndefined();
     for (const sh of cover.shapes.filter((s) => s.junction)) for (const l of sh.outline) expect(closed(l)).toBe(true);
   });
+  it('traffic lights on the node: a post at each approach, by the kerb on the right of its traffic, the road through green', () => {
+    const street = road({ highway: 'tertiary' }, [[32, 32], [32, 56]]);
+    // a one-way street leaving north: no traffic comes in on it
+    const out = road({ highway: 'tertiary', oneway: 'yes' }, [[32, 32], [32, 8]]);
+    const signal = { at: ew.points[1], tags: { highway: 'traffic_signals' } };
+    const cover = buildGroundCover(TILE, GRID, data([ew, street, out], [], [signal]));
+    expect(cover.signals).toHaveLength(3);
+    const half = classifyLine(ew.tags)!.width / 2;
+    for (const s of cover.signals) {
+      // off the carriageway, by its approach (facing out along it, towards its traffic)
+      const along = (s.at[0] - 32) * s.facing[0] + (s.at[1] - 32) * s.facing[1];
+      // across > 0: to the right looking out of the junction on the map (the lattice's y runs south)
+      const across = (s.at[0] - 32) * s.facing[1] - (s.at[1] - 32) * s.facing[0];
+      expect(along).toBeGreaterThan(0);
+      // on the right of the traffic coming in (driving on the right): the right looking out, as on the map
+      expect(across).toBeGreaterThan(0);
+      if (s.facing[0] !== 0) expect(Math.abs(across) / M).toBeGreaterThan(half);
+    }
+    // the post of the approach from the east (its traffic driving west) stands north of the road
+    expect(cover.signals.find((s) => s.facing[0] > 0)!.at[1]).toBeLessThan(32);
+    // east and west the road through: green; the street from the south: red
+    expect(cover.signals.filter((s) => s.green).map((s) => Math.sign(s.facing[0])).sort()).toEqual([-1, 1]);
+    expect(cover.signals.filter((s) => !s.green).map((s) => Math.sign(s.facing[1]))).toEqual([1]);
+    // no light on the node: no posts
+    expect(buildGroundCover(TILE, GRID, data([ew, street, out])).signals).toHaveLength(0);
+  });
+  it('a traffic light’s post faces its traffic, its lit lens on the face of its head', () => {
+    const street = road({ highway: 'tertiary' }, [[32, 32], [32, 56]]);
+    const signal = { at: ew.points[1], tags: { highway: 'traffic_signals' } };
+    const { opts, cover } = osmMeshOf(data([ew, street], [], [signal]), () => 300);
+    const m = buildOsmMesh({ ...opts, cover });
+    const posts: { x: number; z: number; yaw: number }[] = [];
+    for (let i = 0; i < m.lampPosts.length; i += TREE_STRIDE) if (m.lampPosts[i + 5] === INSTANCE.SIGNAL) posts.push({ x: m.lampPosts[i], z: m.lampPosts[i + 2], yaw: m.lampPosts[i + 7] });
+    expect(posts).toHaveLength(3);
+    // the lenses: self-lit faces, each a little in front of a post's head along its yaw, none behind
+    const lit: [number, number][] = [];
+    for (let v = 0; v < m.vertexCount; v++) if ((m.ramps[v] & SELF_LIT_FLAG) !== 0) lit.push([m.vertices[v * 6], m.vertices[v * 6 + 2]]);
+    for (const p of posts) {
+      const mine = lit.filter(([x, z]) => Math.hypot(x - p.x, z - p.z) < 0.5);
+      expect(mine.length).toBeGreaterThan(0);
+      for (const [x, z] of mine) expect((x - p.x) * Math.cos(p.yaw) + (z - p.z) * Math.sin(p.yaw)).toBeCloseTo(SIGNAL_SHAPE.HEAD_FRONT + 0.01, 4);
+    }
+  });
   it('a driveway joining a road makes no junction (only roads of standing do)', () => {
     const drive = road({ highway: 'service' }, [[32, 32], [32, 50]]);
     const cover = buildGroundCover(TILE, GRID, data([ew, drive]));
@@ -97,13 +142,13 @@ describe('junctions in the ground cover', () => {
   });
 });
 
-interface Fixture { name: string; at: [number, number]; span: number; note: string; tile: Tile; lines: OsmLine[] }
+interface Fixture { name: string; at: [number, number]; span: number; note: string; tile: Tile; lines: OsmLine[]; points: OsmPoint[] }
 const fixtures = (await import('./fixtures/junctions.json')).default as unknown as Fixture[];
 
 describe('the regression set of real junctions (fixtures/junctions.json)', () => {
   for (const fx of fixtures) {
     it(`${fx.name} ${fx.at.join(',')}: ${fx.note}`, () => {
-      const cover = buildGroundCover(fx.tile, GRID, { lines: fx.lines, areas: [], points: [] }, undefined, false);
+      const cover = buildGroundCover(fx.tile, GRID, { lines: fx.lines, areas: [], points: fx.points }, undefined, false);
       const to = tileLattice(fx.tile, GRID), centre = to([fx.at[1], fx.at[0]]);
       const perM = GRID / (40075016.686 * Math.cos((fx.at[0] * Math.PI) / 180) / 2 ** 14);
       const junctions = cover.shapes.filter((s) => s.junction && s.kind === 'carriageway');
@@ -143,6 +188,13 @@ describe('the regression set of real junctions (fixtures/junctions.json)', () =>
         }
       }
       expect(holes, `${fx.name}: holes`).toEqual([]);
+      // a traffic light on a junction's node: posts at its approaches (the plain ones and the given ones
+      // have some; an interchange's may have none, its traffic coming in between its nodes), off the carriageways
+      if (['j01', 'j02', 'j04', 'j19', 'j20'].includes(fx.name)) expect(cover.signals.length, `${fx.name}: posts`).toBeGreaterThan(0);
+      for (const sig of cover.signals) {
+        if (sig.at[0] < 0 || sig.at[1] < 0 || sig.at[0] > GRID || sig.at[1] > GRID) continue;
+        expect(shapeAt(cover, sig.at[0], sig.at[1])?.kind, `${fx.name}: a post on the road`).not.toBe('carriageway');
+      }
     });
   }
 });

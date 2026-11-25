@@ -107,7 +107,7 @@ export const TREE_TYPES = 5;
  */
 export const TREE_STRIDE = 8;
 /** instanced props drawn with the trees, by their type (after the tree types) */
-export const INSTANCE = { AC: TREE_TYPES, LAMP: TREE_TYPES + 1, SAILBOAT: TREE_TYPES + 2, MOTORBOAT: TREE_TYPES + 3 } as const;
+export const INSTANCE = { AC: TREE_TYPES, LAMP: TREE_TYPES + 1, SAILBOAT: TREE_TYPES + 2, MOTORBOAT: TREE_TYPES + 3, SIGNAL: TREE_TYPES + 4 } as const;
 
 /** appends one instance (TREE_STRIDE floats) */
 export function pushInstance(out: number[], x: number, y: number, z: number, scale: number, packed: number, type: number, yaw: number): void {
@@ -188,6 +188,12 @@ class Shape {
 export const AC_SIZE = { DEPTH: 0.3, WIDTH: 0.8, HEIGHT: 0.55 } as const;
 /** a street lamp, m: pole at the origin, arm along +x at the top */
 export const LAMP_SHAPE = { HEIGHT: 8, ARM: 2, POLE_HALF: 0.12 } as const;
+/**
+ * A traffic light, m: a post at the origin, the signal head on its top facing +x (the traffic it
+ * stops): HEAD_BOTTOM to HEAD_TOP, its face HEAD_FRONT out along x, HEAD_HALF each side, a shallow
+ * box; its lenses LENS_HALF each way, red at RED_Y, green at GREEN_Y (osm-mesher placeSignals)
+ */
+export const SIGNAL_SHAPE = { POLE_HALF: 0.07, HEAD_BOTTOM: 2.4, HEAD_TOP: 3.4, HEAD_HALF: 0.17, HEAD_FRONT: 0.12, LENS_HALF: 0.12, RED_Y: 3.18, GREEN_Y: 2.62 } as const;
 
 const TRUNK = 1;
 const CROWN = 0;
@@ -261,6 +267,10 @@ const SHAPES: Shape[] = [
   // INSTANCE.SAILBOAT, INSTANCE.MOTORBOAT
   yacht(true),
   yacht(false),
+  // INSTANCE.SIGNAL: a post and the head on it
+  new Shape()
+    .box(-SIGNAL_SHAPE.POLE_HALF, 0, -SIGNAL_SHAPE.POLE_HALF, SIGNAL_SHAPE.POLE_HALF, SIGNAL_SHAPE.HEAD_BOTTOM, SIGNAL_SHAPE.POLE_HALF, CROWN)
+    .box(-SIGNAL_SHAPE.HEAD_FRONT, SIGNAL_SHAPE.HEAD_BOTTOM, -SIGNAL_SHAPE.HEAD_HALF, SIGNAL_SHAPE.HEAD_FRONT, SIGNAL_SHAPE.HEAD_TOP, SIGNAL_SHAPE.HEAD_HALF, CROWN),
 ];
 
 /** all silhouettes in one buffer (TREE_VERTEX_FLOATS per vertex) */

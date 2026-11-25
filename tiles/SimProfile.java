@@ -166,7 +166,9 @@ public class SimProfile implements Profile {
 
   static boolean nodeWanted(SourceFeature f) {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
-      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb") || "tree".equals(s(f, "natural"));
+      "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb") || "tree".equals(s(f, "natural")) ||
+      // traffic lights at junctions (osm-mesher: a post at each approach's stop line)
+      "traffic_signals".equals(s(f, "highway"));
   }
 
   /** overpass.ts: lighthouses, beacons and the charted lights */

@@ -1,11 +1,11 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LIGHT, selfLit, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
-import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
+import { INSTANCE, LAMP_SHAPE, pushInstance, SIGNAL_SHAPE } from './props-mesher';
 import { isLitPitch, pitchFrame } from './pitch-markings';
 export { PITCH_LIT_MIN_M2 } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
@@ -128,6 +128,9 @@ export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
   return 0;
 }
 const LAMP_RAMP = RAMP.HULL_DARK;
+/** a traffic light's lit lens (a light source) */
+const SIGNAL_RED_RGB = colour(255, 45, 30);
+const SIGNAL_GREEN_RGB = colour(40, 255, 130);
 
 export interface OsmMeshData extends TerrainMeshData {
   /** road ribbons (highway=*) with their shoulders and railway tracks, drawn only near like the buildings */
@@ -1566,6 +1569,38 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
 
   buildCoverFaces();
+
+  /**
+   * With the cover: the junctions' traffic lights in this tile (ground-cover signals), each a post
+   * on the ground facing its traffic, its lit lens on its head's face — red above, green below, a
+   * light source (self-lit) seen from the front only, as large as it is
+   */
+  const placeSignals = (): void => {
+    if (!cover || !tin) return;
+    const world = latticeToWorld(tile, tin.grid), g = tin.grid;
+    const L = SIGNAL_SHAPE;
+    for (const s of cover.signals) {
+      // the neighbour tile's post
+      if (s.at[0] < 0 || s.at[1] < 0 || s.at[0] >= g || s.at[1] >= g) continue;
+      const [x, z] = world(s.at[0], s.at[1]);
+      // the head faces along `facing`: the lattice's x east and y south, as x and z
+      const [fx, fz] = world(s.at[0] + s.facing[0] * 1e-3, s.at[1] + s.facing[1] * 1e-3), yaw = Math.atan2(fz - z, fx - x);
+      const ll = enuToLatLon(center, x, -z, 0), y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
+      pushInstance(lampPosts, x, y0, z, 1, LAMP_RAMP, INSTANCE.SIGNAL, yaw);
+      // the lens: a square on the face, a hair in front of it
+      const cx = Math.cos(yaw), cz = Math.sin(yaw), out = L.HEAD_FRONT + 0.01, h = L.LENS_HALF;
+      const y = y0 + (s.green ? L.GREEN_Y : L.RED_Y), px = x + cx * out, pz = z + cz * out;
+      const at = (side: number, up: number): Vtx => ({ x: px - cz * side * h, y: y + up * h, z: pz + cx * side * h });
+      const ramp = selfLit(s.green ? SIGNAL_GREEN_RGB : SIGNAL_RED_RGB);
+      const [a, b, c, d] = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
+      // both windings: whatever the side drawn
+      emitTri(a, b, c, ramp);
+      emitTri(a, c, d, ramp);
+      emitTri(a, c, b, ramp);
+      emitTri(a, d, c, ramp);
+    }
+  };
+  placeSignals();
   for (const area of data.areas) buildArea(area);
   if (tin) for (const area of opts.data.areas) if (area.tags.leisure === 'pitch') buildPitch(area);
   for (const line of data.lines) buildLine(line);

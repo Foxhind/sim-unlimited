@@ -19,7 +19,7 @@ import { junctionPieces, junctionShape, MAX_TRIM_M, trimCorners, unionOutline, t
 import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type RibbonGeom, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
-import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, isOnewayRoad, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone' | 'belt';
 
@@ -68,7 +68,12 @@ export interface GroundCover {
   outside(line: ReadonlyArray<P2>, before: number, over?: (shape: number) => boolean): P2[][];
   /** the nodes (`lon,lat`) of the junctions' surfaces: a road's paint runs on to its trim there, no gap (painted) */
   junctionNodes: ReadonlySet<string>;
+  /** the traffic lights of the junctions mapped with them (placeSignals) */
+  signals: ReadonlyArray<JunctionSignal>;
 }
+
+/** a traffic light at a junction's approach: its post (lattice), the way its head faces (lattice, unit), its light */
+export interface JunctionSignal { at: P2; facing: P2; green: boolean }
 
 /** a floodlit pitch: its whole outline (the shape's source) is big enough (pitch-markings isLitPitch, as the mesh) */
 const isLitPitch = (source: CoverShape['source']): boolean =>
@@ -159,6 +164,8 @@ const THROUGH_PROBE_M = 10;
 const CLUSTER_PAD_M = 4;
 /** two roads at a junction of several nodes cross where their directions are further than this from parallel (cosine; 45°) */
 const CROSS_COS = Math.SQRT1_2;
+/** a traffic light's post stands this far off the carriageway's edge, metres */
+const SIGNAL_SETBACK_M = 0.8;
 
 /** whether triangle `o` of `t` (six numbers each) holds (x, y), its edges included */
 function holds(t: Float64Array, o: number, x: number, y: number): boolean {
@@ -534,13 +541,17 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
    * keeps its paint across the surface but for its edge line on the sides the others join.
    */
   interface JArm { line: OsmLine; out: 1 | -1; node: string; dNode: number; trim: number; dTrim: number; arm: JunctionArm; next?: { node: string; d: number }; corners?: [P2, P2] }
-  interface Junction { at: LonLat; nodes: P2[]; arms: JArm[]; inner: { line: OsmLine; c: P2[] }[]; shape: JunctionShape; through: Map<OsmLine, number> }
+  interface Junction { at: LonLat; nodes: P2[]; keys: string[]; arms: JArm[]; inner: { line: OsmLine; c: P2[] }[]; shape: JunctionShape; through: Map<OsmLine, number> }
   const junctions: Junction[] = [];
   /** per way, the stretches the junctions take from it (metres along it) and the arm ends there */
   const trimsOf = new Map<OsmLine, { d0: number; d1: number; inner?: boolean }[]>();
   const cutAt = new Map<OsmLine, Map<number, { arm: JArm; start: boolean }>>();
   /** the nodes of the junctions: a road's paint runs to its trim there, no gap */
   const junctionNodes = new Set<string>();
+  /** the nodes mapped as traffic lights (highway=traffic_signals), and the lights the junctions there get */
+  const signalNodes = new Set(data.points.filter((p) => p.tags.highway === 'traffic_signals').map((p) => nodeKey(p.at)));
+  const signals: JunctionSignal[] = [];
+  const pendingSignals: { tries: P2[]; facing: P2; green: boolean }[] = [];
   {
     const carriageway = (l: OsmLine) => { const st = l.tags.highway ? classifyLine(l.tags) : undefined; return !!st && !st.path && !isTunnel(l.tags) && l.points.length >= 2; };
     const atNode = new Map<string, { line: OsmLine; i: number }[]>();
@@ -689,7 +700,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
           through.set(w, off);
         }
       }
-      const j: Junction = { at: nodes.get(ids[0])!.at, nodes: pts, arms: ext, inner: innerWays, shape, through };
+      const j: Junction = { at: nodes.get(ids[0])!.at, nodes: pts, keys: ids.map((id) => id.split('|')[0]), arms: ext, inner: innerWays, shape, through };
       junctions.push(j);
       for (const id of ids) junctionNodes.add(id.split('|')[0]);
       for (const a of ext) {
@@ -862,6 +873,35 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     return [...lo.slice(0, -1), ...hi.slice(0, -1)];
   };
   /**
+   * A junction with a traffic light on one of its nodes: a post at each approach (an arm traffic
+   * comes in on: not a one-way road leaving), at its stop line (the trim) beside the kerb on the
+   * right of the traffic coming in, SIGNAL_SETBACK_M off the carriageway, its head facing that
+   * traffic. Green for the roads through it (or, with none, the senior road), red for the others.
+   */
+  const placeSignals = (j: Junction, corners: [P2, P2][]): void => {
+    const prioOf = (l: OsmLine) => roadPriority(l.tags, classifyLine(l.tags)!.width);
+    const top = Math.max(...j.arms.map((a) => prioOf(a.line)));
+    j.arms.forEach((a, k) => {
+      const ow = a.line.tags.oneway === '-1' ? -1 : isOnewayRoad(a.line.tags) ? 1 : 0;
+      // a one-way road leaving the junction: along its drawing direction out (out 1, forward), or against it
+      if (ow !== 0 && ow === a.out) return;
+      const c = a.arm.c, i = Math.min(c.length - 1, 1);
+      const ul = Math.hypot(c[i][0] - c[0][0], c[i][1] - c[0][1]) || 1, u: P2 = [(c[i][0] - c[0][0]) / ul, (c[i][1] - c[0][1]) / ul];
+      // the traffic comes in against u: its right is the arm's right looking out (corners[k][0]; the
+      // lattice's y runs south, so that side is u turned by (u.y, −u.x))
+      const kerb = corners[k][0], off = SIGNAL_SETBACK_M * latticePerMetre;
+      const side: P2 = [u[1], -u[0]];
+      const green = j.through.size ? j.through.has(a.line) : prioOf(a.line) >= top - 1e-9;
+      // where that is another road's carriageway (a median too narrow, a slip road beside it): further
+      // out, or on its left (a median's island), else none (settled once every shape is in: settleSignals)
+      const left = corners[k][1];
+      const tries: P2[] = [1, 2, 4].map((f): P2 => [kerb[0] + side[0] * off * f, kerb[1] + side[1] * off * f])
+        .concat([1, 2].map((f): P2 => [left[0] - side[0] * off * f, left[1] - side[1] * off * f]));
+      pendingSignals.push({ tries, facing: u, green });
+    });
+  };
+
+  /**
    * A junction's surface: a carriageway over its arms (their priority, and a little more), the
    * union of its pieces (junctionPieces: the arms to their trimmed ends, the kerbs' wedges; the ways
    * between its nodes; the space between its nodes), its outline that union's; the paint of the
@@ -895,6 +935,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       return { tris: flat(tris), outline: unionOutline(ccw) };
     };
     const corners = j.arms.map((a) => a.corners ?? trimCorners(a.arm, a.trim, 0));
+    if (j.keys.some((k) => signalNodes.has(k))) placeSignals(j, corners);
     const road = surface([...junctionPieces(j.shape, arms, corners, () => 0, latticePerMetre, triangulate), ...between()]);
     if (!road.tris.length) return;
     const draft = add('carriageway', lead, prio, road.tris, road.outline, tieBreak(j.at));
@@ -1140,6 +1181,12 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     return pieces;
   };
 
+  // each traffic light's post at the first of its places off every carriageway
+  for (const p of pendingSignals) {
+    const at = p.tries.find(([x, y]) => { const si = find(x, y, -1); return si < 0 || shapes[triShape[si]].kind !== 'carriageway'; });
+    if (at) signals.push({ at, facing: p.facing, green: p.green });
+  }
+
   return {
     shapes,
     locate: (x, y, skip) => {
@@ -1148,5 +1195,6 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     },
     outside,
     junctionNodes,
+    signals,
   };
 }
