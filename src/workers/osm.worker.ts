@@ -35,8 +35,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence
-export const OSM_MESH_SCHEMA = 106;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings
+export const OSM_MESH_SCHEMA = 107;
 
 export interface OsmRequest {
   type: 'osm';
