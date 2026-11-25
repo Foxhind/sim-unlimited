@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { tileBounds } from '../src/world/geodesy';
 import { overpassQuery, parseOverpass, REACH_SELECTORS, ROAD_REACH_M, roadReachBounds, type OverpassJson } from '../src/world/overpass';
 import { LIFT_REACH_M } from '../src/world/road-levels';
+import { roofRamp, styleSeed, wallRamp } from '../src/world/building-mesher';
+import { STYLE_AT_TAG, STYLE_TYPE_TAG } from '../src/world/osm-types';
 
 const TILE = { z: 14, x: 8800, y: 5500 };
 
@@ -227,6 +229,88 @@ describe('parseOverpass buildings', () => {
       ],
     });
     expect(d.buildings.map((b) => b.tags.height ?? b.tags.building).sort()).toEqual(['15', '30', 'yes']);
+  });
+
+  describe('the parts of one building share its style', () => {
+    const parts = (outline: Record<string, string>, a: Record<string, string>, b: Record<string, string>) => parseOverpass({
+      elements: [
+        ...square,
+        { type: 'node', id: 5, lat: 0, lon: 0.5 },
+        { type: 'node', id: 6, lat: 1, lon: 0.5 },
+        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'apartments', ...outline } },
+        { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'yes', ...a } },
+        { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes', ...b } },
+      ],
+    }).buildings;
+
+    it('untagged parts take the outline colours and materials, one seed vertex and one palette type', () => {
+      const [p, q] = parts({ 'building:colour': '#d8c8a8', 'roof:material': 'metal' }, {}, {});
+      for (const t of [p.tags, q.tags]) {
+        expect(t['building:colour']).toBe('#d8c8a8');
+        expect(t['roof:material']).toBe('metal');
+        expect(t[STYLE_TYPE_TAG]).toBe('apartments');
+      }
+      expect(p.tags[STYLE_AT_TAG]).toBe('0,0');
+      expect(q.tags[STYLE_AT_TAG]).toBe(p.tags[STYLE_AT_TAG]);
+    });
+
+    it("a part's own tag of a family wins over the whole family of the outline", () => {
+      const [p, q] = parts({ 'building:colour': 'beige', 'roof:colour': 'grey' }, { 'building:material': 'brick' }, { 'roof:color': 'red' });
+      expect(p.tags['building:colour']).toBeUndefined();
+      expect(p.tags['roof:colour']).toBe('grey');
+      expect(q.tags['building:colour']).toBe('beige');
+      expect(q.tags['roof:colour']).toBeUndefined();
+    });
+
+    it('parts of a type=building relation share the outline way tags; loose parts sharing a vertex one seed', () => {
+      const d = parseOverpass({
+        elements: [
+          ...square,
+          { type: 'node', id: 5, lat: 0, lon: 0.5 },
+          { type: 'node', id: 6, lat: 1, lon: 0.5 },
+          { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'yes', 'building:colour': 'white' } },
+          { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'retail' } },
+          { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes' } },
+          { type: 'relation', id: 20, members: [{ type: 'way', ref: 10, role: 'outline' }, { type: 'way', ref: 11, role: 'part' }, { type: 'way', ref: 12, role: 'part' }], tags: { type: 'building' } },
+        ],
+      });
+      expect(d.buildings).toHaveLength(2);
+      for (const b of d.buildings) {
+        expect(b.tags['building:colour']).toBe('white');
+        expect(b.tags[STYLE_TYPE_TAG]).toBe('retail');
+        expect(b.tags[STYLE_AT_TAG]).toBe('0,0');
+      }
+      const loose = parseOverpass({
+        elements: [
+          ...square,
+          { type: 'node', id: 5, lat: 0, lon: 0.5 },
+          { type: 'node', id: 6, lat: 1, lon: 0.5 },
+          { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'yes' } },
+          { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes' } },
+        ],
+      }).buildings;
+      expect(loose[0].tags[STYLE_AT_TAG]).toBe(loose[1].tags[STYLE_AT_TAG]);
+      // two outlines sharing a wall: their parts stay two buildings
+      const block = parseOverpass({
+        elements: [
+          ...square,
+          { type: 'node', id: 5, lat: 0, lon: 0.5 },
+          { type: 'node', id: 6, lat: 1, lon: 0.5 },
+          { type: 'way', id: 10, nodes: [1, 5, 6, 4, 1], tags: { building: 'yes' } },
+          { type: 'way', id: 13, nodes: [5, 2, 3, 6, 5], tags: { building: 'yes' } },
+          { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'yes' } },
+          { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes' } },
+        ],
+      }).buildings;
+      expect(block).toHaveLength(2);
+      expect(block[0].tags[STYLE_AT_TAG]).not.toBe(block[1].tags[STYLE_AT_TAG]);
+    });
+
+    it('the mesher draws such parts in one wall and roof colour', () => {
+      const [p, q] = parts({}, { height: '60' }, { height: '20' });
+      expect(wallRamp(p.tags, styleSeed(p))).toBe(wallRamp(q.tags, styleSeed(q)));
+      expect(roofRamp(p.tags, styleSeed(p))).toBe(roofRamp(q.tags, styleSeed(q)));
+    });
   });
 
   it('type=building relation: multipolygon parts hide the outline; without parts the outline way keeps its tags', () => {

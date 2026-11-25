@@ -1,7 +1,7 @@
 import earcut from 'earcut';
 import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
-import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
+import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmBuilding, type OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
@@ -544,7 +544,8 @@ function taggedRamp(tags: Record<string, string>, colourKeys: string[], material
 export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
   const tagged = taggedRamp(tags, ['building:colour', 'building:color', 'colour', 'color'], 'building:material');
   if (tagged !== undefined) return tagged;
-  const type = tags['building:part'] || tags.building || 'yes';
+  // the parts of one building: one palette (overpass shareStyleInParts)
+  const type = tags[STYLE_TYPE_TAG] || tags['building:part'] || tags.building || 'yes';
   if (type === 'greenhouse') return rgbRamp([...GREENHOUSE.GLASS]);
   const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
   return rgbRamp(pickWeighted(wallPalette(type), t));
@@ -569,6 +570,15 @@ const ROOF_PALE: RGB[] = [[204, 202, 196], [186, 184, 178], [166, 164, 160]];
 export function buildingSeed(ring: LonLat[] | undefined): number {
   if (!ring?.length) return 0.5;
   return hash01(ring[0][0] * 1e5, ring[0][1] * 1e5, 0);
+}
+
+/**
+ * The seed a building draws its untagged colours by: of the vertex the parts of its building share
+ * (overpass STYLE_AT_TAG: they all look alike), else of its own first vertex.
+ */
+export function styleSeed(b: OsmBuilding): number {
+  const at = b.tags[STYLE_AT_TAG]?.split(',').map(Number);
+  return at?.length === 2 && at.every(Number.isFinite) ? buildingSeed([at as LonLat]) : buildingSeed(b.rings[0]);
 }
 
 /** the roof is drawn flat: no roof:shape (or `flat`), or no height left for a shaped roof */
@@ -774,8 +784,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const h = computeHeights(tags, skeleton?.tMax ?? roofRun(shape, frame));
     const wallBase = base + h.min;
     const wallTop = wallBase + h.wall;
-    const wRamp = wallRamp(tags, buildingSeed(outerLL));
-    const rRamp = roofRamp(tags, buildingSeed(outerLL), outerLL[0][1]);
+    const wRamp = wallRamp(tags, styleSeed(b));
+    const rRamp = roofRamp(tags, styleSeed(b), outerLL[0][1]);
     const isCanopy = tags.building === 'roof';
     const roof = (skeleton && skeletonRoof(skeleton, shape, h.roof)) || roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
@@ -1330,8 +1340,8 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     const y = buildingFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
-    out.push(e, y, -n, pointValue(wallRamp(b.tags, buildingSeed(ring))));
-    out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), buildingSeed(ring), lat)));
+    out.push(e, y, -n, pointValue(wallRamp(b.tags, styleSeed(b))));
+    out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), styleSeed(b), lat)));
   }
   return new Float32Array(out);
 }

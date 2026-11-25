@@ -1,7 +1,7 @@
 import { tileBounds, type Tile, type TileBounds } from './geodesy';
 import { cliffBands } from './cliffs';
 import { isAntenna } from './mast-mesher';
-import type { LonLat, OsmArea, OsmBuilding, OsmDetail, OsmLine, OsmPoint, OsmTileData } from './osm-types';
+import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmArea, type OsmBuilding, type OsmDetail, type OsmLine, type OsmPoint, type OsmTileData } from './osm-types';
 
 /** the drawn roads and paths (osm-mesher classifyLine), as an Overpass statement without its bbox */
 export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$"]';
@@ -231,6 +231,14 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   const usedWays = new Set<number>();
 
   const relById = new Map(relations.map((r) => [r.id, r]));
+  // parts of a type=building relation: one style (shareStyleInParts), the outline's tags its source
+  const partGroup = new Map<OsmBuilding, number>();
+  const groupStyle = new Map<number, Record<string, string>>();
+  const groupOfPartRel = new Map<number, number>();
+  for (const rel of relations) {
+    if (rel.tags?.type !== 'building') continue;
+    for (const m of rel.members) if (m.type === 'relation' && m.role === 'part') groupOfPartRel.set(m.ref, rel.id);
+  }
   const memberRings = (rel: RawRelation): { rings: LonLat[][][]; partWays: RawWay[]; partRelations: number; outlineTags?: Record<string, string> } => {
     const outer: LonLat[][] = [];
     const inner: LonLat[][] = [];
@@ -261,10 +269,15 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     if (tags.type === 'building') {
       if (!buildingVisible(tags)) continue;
       const { rings, partWays, partRelations, outlineTags } = memberRings(rel);
+      groupStyle.set(rel.id, { ...tags, ...(outlineTags ?? {}) });
       // S3DB: when parts exist, the outline itself is not drawn (part relations are drawn as multipolygons)
       for (const p of partWays) {
         const geom = wayGeom(p);
-        if (geom.length > 3 && buildingVisible(p.tags ?? {})) buildings.push({ rings: [geom], tags: p.tags ?? {} });
+        if (geom.length > 3 && buildingVisible(p.tags ?? {})) {
+          const part = { rings: [geom], tags: p.tags ?? {} };
+          partGroup.set(part, rel.id);
+          buildings.push(part);
+        }
       }
       if (!partWays.length && !partRelations) {
         // the heights and colours live on the outline way; the relation adds what the way lacks
@@ -277,7 +290,12 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
     if (tags.type !== 'multipolygon' || !isAreaTags(tags) && tags['building:part'] === undefined) continue;
     const { rings } = memberRings(rel);
     if (hasBuildingTags(tags)) {
-      if (buildingVisible(tags)) for (const r of rings) buildings.push({ rings: r, tags });
+      const group = groupOfPartRel.get(rel.id);
+      if (buildingVisible(tags)) for (const r of rings) {
+        const b = { rings: r, tags };
+        if (group !== undefined) partGroup.set(b, group);
+        buildings.push(b);
+      }
       continue;
     }
     for (const r of rings) areas.push({ rings: r, tags });
@@ -315,10 +333,132 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   }
   // each cliff's face: a band of bare rock on its low side (cliffs.ts)
   areas.push(...cliffBands(lines));
-  return { areas, lines, points, buildings: hideOutlinesWithParts(buildings) };
+  return { areas, lines, points, buildings: hideOutlinesWithParts(shareStyleInParts(buildings, partGroup, groupStyle)) };
 }
 
 const isPart = (b: OsmBuilding) => b.tags['building:part'] !== undefined && b.tags['building:part'] !== 'no';
+
+/**
+ * The style tags a part takes from its building's outline, by family: walls, roof. A part with any tag of
+ * a family keeps its own for it (its material is not overridden by the outline's colour).
+ */
+export const SHARED_STYLE_KEYS = [
+  ['building:colour', 'building:color', 'colour', 'color', 'building:material'],
+  ['roof:colour', 'roof:color', 'roof:material'],
+] as const;
+
+/** the vertex mean of a ring, or a vertex nudged toward it when that falls outside (a concave ring) */
+function probeOf(ring: LonLat[]): LonLat {
+  const n = ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1] ? ring.length - 1 : ring.length;
+  let lon = 0, lat = 0;
+  for (let i = 0; i < n; i++) { lon += ring[i][0]; lat += ring[i][1]; }
+  let probe: LonLat = [lon / n, lat / n];
+  if (!pointInRing(probe, ring)) {
+    for (let i = 0; i < n; i++) {
+      const q: LonLat = [ring[i][0] + (probe[0] - ring[i][0]) * 0.02, ring[i][1] + (probe[1] - ring[i][1]) * 0.02];
+      if (pointInRing(q, ring)) { probe = q; break; }
+    }
+  }
+  return probe;
+}
+
+/** the outlines (non-part buildings) each part lies in: a point inside the part lies in the outline */
+function partOwners(buildings: OsmBuilding[]): Map<OsmBuilding, OsmBuilding[]> {
+  const owners = new Map<OsmBuilding, OsmBuilding[]>();
+  const CELL = 0.001;
+  const grid = new Map<string, { part: OsmBuilding; probe: LonLat }[]>();
+  for (const p of buildings) {
+    if (!isPart(p) || !p.rings[0]?.length) continue;
+    const probe = probeOf(p.rings[0]);
+    const key = `${Math.floor(probe[0] / CELL)},${Math.floor(probe[1] / CELL)}`;
+    const list = grid.get(key);
+    if (list) list.push({ part: p, probe });
+    else grid.set(key, [{ part: p, probe }]);
+  }
+  if (!grid.size) return owners;
+  for (const b of buildings) {
+    if (isPart(b) || !b.rings[0]?.length) continue;
+    const outer = b.rings[0];
+    let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
+    for (const [lo, la] of outer) { w = Math.min(w, lo); e = Math.max(e, lo); s = Math.min(s, la); n = Math.max(n, la); }
+    for (let x = Math.floor(w / CELL); x <= Math.floor(e / CELL); x++) {
+      for (let y = Math.floor(s / CELL); y <= Math.floor(n / CELL); y++) {
+        for (const { part, probe } of grid.get(`${x},${y}`) ?? []) {
+          if (pointInRing(probe, outer) && !b.rings.slice(1).some((h) => pointInRing(probe, h))) {
+            const list = owners.get(part);
+            if (list) list.push(b);
+            else owners.set(part, [b]);
+          }
+        }
+      }
+    }
+  }
+  return owners;
+}
+
+/**
+ * The parts of one building look alike: a part takes each style tag it lacks (SHARED_STYLE_KEYS: wall
+ * and roof colours and materials) from its building's outline, and all of them draw the defaults for
+ * what is left untagged by one vertex (STYLE_AT_TAG) and one wall palette (STYLE_TYPE_TAG), not each by
+ * its own. A building is a type=building relation (`partGroup`, its outline tags in `groupStyle`), else
+ * the outline the parts lie in, else parts sharing a vertex.
+ */
+export function shareStyleInParts(
+  buildings: OsmBuilding[],
+  partGroup: ReadonlyMap<OsmBuilding, number> = new Map(),
+  groupStyle: ReadonlyMap<number, Record<string, string>> = new Map(),
+): OsmBuilding[] {
+  const parts = buildings.filter((b) => isPart(b) && b.rings[0]?.length);
+  if (!parts.length) return buildings;
+  const owners = partOwners(buildings);
+  // union-find over the parts: one relation, one outline, or a shared vertex
+  const parent = parts.map((_, i) => i);
+  const find = (i: number): number => { while (parent[i] !== i) i = parent[i] = parent[parent[i]]; return i; };
+  const union = (a: number, b: number) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb); };
+  const firstOf = new Map<unknown, number>();
+  parts.forEach((p, i) => {
+    const keys: unknown[] = [];
+    const g = partGroup.get(p);
+    if (g !== undefined) keys.push(`rel:${g}`);
+    keys.push(...owners.get(p) ?? []);
+    // loose parts only: neighbouring buildings of a block share wall vertices too
+    if (!keys.length) for (const [lo, la] of p.rings[0]) keys.push(`${lo},${la}`);
+    for (const k of keys) {
+      const j = firstOf.get(k);
+      if (j === undefined) firstOf.set(k, i);
+      else union(i, j);
+    }
+  });
+  const members = new Map<number, number[]>();
+  parts.forEach((_, i) => { const r = find(i); const m = members.get(r); if (m) m.push(i); else members.set(r, [i]); });
+  const shared = new Map<OsmBuilding, OsmBuilding>();
+  for (const idx of members.values()) {
+    // the outline's tags: the relation's, else the outline way the parts lie in
+    let source: Record<string, string> = {};
+    for (const i of idx) {
+      const g = partGroup.get(parts[i]);
+      const t = (g !== undefined ? groupStyle.get(g) : undefined) ?? owners.get(parts[i])?.[0]?.tags;
+      if (t) { source = t; break; }
+    }
+    // the anchor: the least vertex of all the parts (the same whichever tile lists them)
+    let at: LonLat | undefined;
+    for (const i of idx) for (const v of parts[i].rings[0]) if (!at || v[0] < at[0] || (v[0] === at[0] && v[1] < at[1])) at = v;
+    const specific = (t: string | undefined) => t !== undefined && t !== 'yes' && t !== 'no' ? t : undefined;
+    const type = specific(source.building)
+      ?? idx.map((i) => specific(parts[i].tags['building:part'])).filter((t): t is string => !!t).sort()[0]
+      ?? 'yes';
+    for (const i of idx) {
+      const p = parts[i];
+      const tags: Record<string, string> = { ...p.tags, [STYLE_AT_TAG]: `${at![0]},${at![1]}`, [STYLE_TYPE_TAG]: type };
+      for (const family of SHARED_STYLE_KEYS) {
+        if (family.some((k) => p.tags[k] !== undefined)) continue;
+        for (const k of family) if (source[k] !== undefined) tags[k] = source[k];
+      }
+      shared.set(p, { rings: p.rings, tags });
+    }
+  }
+  return buildings.map((b) => shared.get(b) ?? b);
+}
 
 /**
  * S3DB: a building outline with building:part areas inside is drawn by its parts only. Parts of a
@@ -327,43 +467,8 @@ const isPart = (b: OsmBuilding) => b.tags['building:part'] !== undefined && b.ta
  * part (its vertex mean, or a vertex nudged toward it) lies in the outline.
  */
 export function hideOutlinesWithParts(buildings: OsmBuilding[]): OsmBuilding[] {
-  const parts = buildings.filter(isPart);
-  if (!parts.length) return buildings;
-  const CELL = 0.001;
-  const grid = new Map<string, LonLat[]>();
-  for (const p of parts) {
-    const ring = p.rings[0];
-    if (!ring?.length) continue;
-    const n = ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1] ? ring.length - 1 : ring.length;
-    let lon = 0, lat = 0;
-    for (let i = 0; i < n; i++) { lon += ring[i][0]; lat += ring[i][1]; }
-    let probe: LonLat = [lon / n, lat / n];
-    if (!pointInRing(probe, ring)) {
-      // concave part: a vertex pulled a little toward the mean usually lands inside
-      for (let i = 0; i < n; i++) {
-        const q: LonLat = [ring[i][0] + (probe[0] - ring[i][0]) * 0.02, ring[i][1] + (probe[1] - ring[i][1]) * 0.02];
-        if (pointInRing(q, ring)) { probe = q; break; }
-      }
-    }
-    const key = `${Math.floor(probe[0] / CELL)},${Math.floor(probe[1] / CELL)}`;
-    const list = grid.get(key);
-    if (list) list.push(probe);
-    else grid.set(key, [probe]);
-  }
-  return buildings.filter((b) => {
-    if (isPart(b) || !b.rings[0]?.length) return true;
-    const outer = b.rings[0];
-    let w = Infinity, e = -Infinity, s = Infinity, n = -Infinity;
-    for (const [lo, la] of outer) { w = Math.min(w, lo); e = Math.max(e, lo); s = Math.min(s, la); n = Math.max(n, la); }
-    for (let x = Math.floor(w / CELL); x <= Math.floor(e / CELL); x++) {
-      for (let y = Math.floor(s / CELL); y <= Math.floor(n / CELL); y++) {
-        for (const p of grid.get(`${x},${y}`) ?? []) {
-          if (pointInRing(p, outer) && !b.rings.slice(1).some((h) => pointInRing(p, h))) return false;
-        }
-      }
-    }
-    return true;
-  });
+  const owning = new Set([...partOwners(buildings).values()].flat());
+  return owning.size ? buildings.filter((b) => !owning.has(b)) : buildings;
 }
 
 function pointInRing(p: LonLat, ring: LonLat[]): boolean {
