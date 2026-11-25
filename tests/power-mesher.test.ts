@@ -98,3 +98,42 @@ describe('buildPower', () => {
     expect(overpassQuery(TILE, 'full')).toContain('way["power"~"^(line|minor_line)$"];');
   });
 });
+
+describe('supports too close to stand apart', () => {
+  const mk = (pts: LonLat[]) => ({ points: pts, tags: { power: 'line', voltage: '161000' } });
+  /** how many pylons a mesh holds: one 161 kV pylon's vertices each */
+  const perPylon = buildPower(TILE, [mk([at(-200, 0), at(0, 0)])], ground).vertices.length / 2;
+  const pylons = (v: Float32Array) => v.length / perPylon;
+  const reach = Math.max(...POWER.TIERS.map(([, a]) => a)) * 36;
+  /** each conductor's two ends' distance from the axis at x = z = 0 */
+  const ends = (w: Float32Array): number[] => {
+    const p = wirePts(w), out: number[] = [];
+    for (let i = 0; i < p.length; i += POWER.PIECES * 2) {
+      for (const [x, , z] of [p[i], p[i + POWER.PIECES * 2 - 1]]) out.push(Math.hypot(x, z));
+    }
+    return out;
+  };
+
+  it('a tower shared by three lines is one pylon, every line’s conductors hanging from it', () => {
+    const lines = [mk([at(-200, 0), at(0, 0)]), mk([at(0, 0), at(200, 20)]), mk([at(0, 0), at(30, 250)])];
+    const one = buildPower(TILE, [lines[0]], ground);
+    const p = buildPower(TILE, lines, ground);
+    // the shared tower and the three far ends: four pylons' meshes, not six
+    expect(pylons(p.vertices)).toBe(4);
+    expect(p.vertices.length).toBe(one.vertices.length * 2);
+    expect(p.wires.length).toBe(one.wires.length * 3);
+    // every conductor ends on the shared tower's arms or at a far pylon
+    for (const d of ends(p.wires)) expect(d < reach + 0.01 || d > 150).toBe(true);
+  });
+
+  it('a line’s end mapped 13 m off another’s tower merges into it; pylons farther apart than both arms stay', () => {
+    const near = buildPower(TILE, [mk([at(-200, 0), at(0, 0)]), mk([at(13, 2), at(200, 0)])], ground);
+    expect(pylons(near.vertices)).toBe(3);
+    // its conductors start from the kept tower's arms, not from 13 m away
+    const w = wirePts(near.wires);
+    expect(w.some(([x, , z]) => Math.abs(x - 13) < 0.5 && Math.abs(z + 2) < 0.5)).toBe(false);
+    for (const d of ends(near.wires)) expect(d < reach + 0.01 || d > 150).toBe(true);
+    const apart = buildPower(TILE, [mk([at(-200, 0), at(0, 0)]), mk([at(0, 40), at(200, 40)])], ground);
+    expect(pylons(apart.vertices)).toBe(4);
+  });
+});
