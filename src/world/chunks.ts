@@ -1,6 +1,7 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
+import { bindIndex } from '../engine/indexed';
 import { must } from '../engine/gl';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
@@ -227,6 +228,8 @@ export interface CameraWorld {
 interface TileBuffers {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** the triangle list into the welded vertices (weld.ts); absent or empty: the vertices are the list */
+  index?: ArrayBuffer;
   morph?: ArrayBuffer;
   nearCount?: number;
   farCount?: number;
@@ -268,11 +271,11 @@ export class ChunkManager {
       const worker = new Worker(new URL('../workers/terrain.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };
       worker.onmessage = (e) => {
-        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number; retryable?: boolean; message?: string };
+        const msg = e.data as { type: string; id: number; vertices?: ArrayBuffer; ramps?: ArrayBuffer; index?: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number; retryable?: boolean; message?: string };
         const w = slot.waiting.get(msg.id);
         if (!w) return;
         slot.waiting.delete(msg.id);
-        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, morph: msg.morph, nearCount: msg.nearCount, farCount: msg.farCount });
+        if (msg.type === 'mesh') w.resolve({ vertices: msg.vertices!, ramps: msg.ramps!, index: msg.index, morph: msg.morph, nearCount: msg.nearCount, farCount: msg.farCount });
         else if (msg.retryable) w.reject(new RetryableError(0, msg.message));
         else w.reject(new Error(msg.message));
       };
@@ -461,9 +464,11 @@ export class ChunkManager {
       gl.vertexAttribPointer(5, 2, gl.FLOAT, false, 8, 0);
       chunk.buffers.push(mb);
     }
+    const ib = bindIndex(gl, vao, data.index);
+    if (ib) chunk.buffers.push(ib);
     gl.bindVertexArray(null);
     chunk.vao = vao;
-    chunk.mesh = { vao, vertexCount: data.ramps.byteLength / 4 };
+    chunk.mesh = { vao, vertexCount: (ib ? data.index! : data.ramps).byteLength / 4 };
     chunk.nearCount = data.nearCount;
     chunk.farCount = data.farCount;
     chunk.status = 'ready';

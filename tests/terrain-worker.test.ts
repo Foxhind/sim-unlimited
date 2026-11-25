@@ -1,3 +1,4 @@
+import { unweld } from '../src/world/weld';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_AREA_STYLES, type AreaStyles } from '../src/world/area-styles';
 import { bordersOf, GRID, lattice, TILE, townOverpassJson, parkOverpassJson } from './roads-helpers';
@@ -46,10 +47,15 @@ beforeEach(() => {
   osmTs = 0;
 });
 
+/** each triangle corner's face colour (the welded mesh back as its list) */
+const corners = (m: Record<string, any>) => unweld(new Uint32Array(m.ramps), 1, new Uint32Array(m.index));
+
 describe('the terrain worker with the covers', () => {
   it('builds a z14 tile with OSM with its road faces after the near ones, and caches the counts', async () => {
     const m = await ask({});
-    const vertexCount = m.ramps.byteLength / 4;
+    // welded (weld.ts): the counts are of the triangle list, which the index is
+    const vertexCount = m.index.byteLength / 4;
+    expect(vertexCount).toBeGreaterThan(m.ramps.byteLength / 4);
     expect(m.nearCount).toBeGreaterThan(0);
     expect(m.farCount).toBeGreaterThan(m.nearCount);
     expect(m.farCount).toBeLessThanOrEqual(vertexCount);
@@ -91,7 +97,7 @@ describe('the terrain worker with the covers', () => {
     const styled = await ask({ areaStyles: GREEN });
     expect(getCachedMesh).not.toHaveBeenCalled();
     expect(putCachedMesh).not.toHaveBeenCalled();
-    const a = new Uint32Array(plain.ramps), b = new Uint32Array(styled.ramps);
+    const a = corners(plain), b = corners(styled);
     expect(b.length).toBe(a.length);
     expect(b.some((v, i) => v !== a[i])).toBe(true);
     // the default styles are the cached way
@@ -106,7 +112,7 @@ describe('the terrain worker with the covers', () => {
     expect(plain.nearCount).toBeDefined();
     // the park's filter reaches the faces, so the cover was built
     const styled = await ask({ areaStyles: GREEN });
-    const a = new Uint32Array(plain.ramps), b = new Uint32Array(styled.ramps);
+    const a = corners(plain), b = corners(styled);
     expect(b.some((v, i) => v !== a[i])).toBe(true);
   });
 });

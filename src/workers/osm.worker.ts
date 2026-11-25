@@ -3,6 +3,7 @@ import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../worl
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
 import { buildTerrainMesh, terrainMeshBuffers } from '../world/terrain-mesher';
+import { weld } from '../world/weld';
 import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOATS } from '../world/building-mesher';
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
@@ -36,8 +37,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged
-export const OSM_MESH_SCHEMA = 114;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged; 115: welded meshes drawn by their index (weld.ts)
+export const OSM_MESH_SCHEMA = 115;
 
 export interface OsmRequest {
   type: 'osm';
@@ -68,6 +69,15 @@ export interface OsmMeshResponse {
   /** buildings (near), their facade window attributes (building-mesher BuildingMeshData.windows) and their dots (far: x, y, z, palette index) */
   bVertices: ArrayBuffer;
   bRamps: ArrayBuffer;
+  /**
+   * Uint32 triangle lists into the welded vertices (weld.ts) of the drape, the buildings (b), the
+   * glass (g), the roads (r) and the water (w); empty: the vertices are the list (a mesh cached before)
+   */
+  index: ArrayBuffer;
+  bIndex: ArrayBuffer;
+  gIndex: ArrayBuffer;
+  rIndex: ArrayBuffer;
+  wIndex: ArrayBuffer;
   bWindows: ArrayBuffer;
   /** the first bCore building vertices: the buildings without their small parts (the far LOD) */
   bCore: number;
@@ -183,7 +193,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
   const send = (m: Omit<OsmMeshResponse, 'type' | 'id'>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
-      res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.bKinds, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
+      res.vertices, res.ramps, res.index, res.bIndex, res.gIndex, res.rIndex, res.wIndex, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.bKinds, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires, res.flashes, res.signals,
     ]);
@@ -198,6 +208,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     if (cached) {
       send({
         vertices: cached.vertices, ramps: cached.ramps,
+        index: cached.index ?? empty(), bIndex: cached.bIndex ?? empty(), gIndex: cached.gIndex ?? empty(), rIndex: cached.rIndex ?? empty(), wIndex: cached.wIndex ?? empty(),
         levels: cached.levels ?? empty(), rLevels: cached.rLevels ?? empty(), wLevels: cached.wLevels ?? empty(),
         bVertices: cached.bVertices ?? empty(), bRamps: cached.bRamps ?? empty(), bWindows: cached.bWindows ?? empty(),
         bCore: cached.bCore ?? (cached.bRamps?.byteLength ?? 0) / 4,
@@ -352,21 +363,31 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // sorted by type: trees, air conditioners, lamp posts, then the marinas' yachts (props-mesher INSTANCE)
     const instances = concatF32(concatF32(concatF32(props.trees, houses.acs), mesh.lampPosts), props.yachts);
     applyGlowToTrees(instances, tile, locate, levels);
+    // each mesh welded into an index (weld.ts): its ranges (the core, the kinds' runs) are the index's
+    const welded = (vertices: Float32Array, ramps: Uint32Array, ...more: [Float32Array, number][]) => {
+      const w = weld(ramps.length, [{ data: vertices, size: 6, normal: true }, { data: ramps, size: 1 }, ...more.map(([data, size]) => ({ data, size }))]);
+      return { index: w.index.buffer as ArrayBuffer, streams: w.streams.map((a) => (a.buffer === vertices.buffer || more.some(([m]) => m === a) ? a.slice().buffer : a.buffer) as ArrayBuffer) };
+    };
+    const ground = welded(mesh.vertices, mesh.ramps, [mesh.depthLevels, 1]);
+    const ribbons = welded(mesh.roads.vertices, mesh.roads.ramps, [mesh.roadAttrs, WINDOW_ATTR_FLOATS], [mesh.roadDepthLevels, 1]);
+    const water = welded(mesh.water.vertices, mesh.water.ramps, [mesh.waterDepthLevels, 1]);
+    const solids = welded(bmesh.vertices, bmesh.ramps, [bmesh.windows, WINDOW_ATTR_FLOATS]);
+    const glass = welded(houses.glass.vertices, houses.glass.ramps);
     const out = {
-      vertices: mesh.vertices.slice().buffer, ramps: mesh.ramps.slice().buffer,
-      levels: mesh.depthLevels.slice().buffer, rLevels: mesh.roadDepthLevels.slice().buffer, wLevels: mesh.waterDepthLevels.slice().buffer,
-      bVertices: bmesh.vertices.slice().buffer, bRamps: bmesh.ramps.slice().buffer, bWindows: bmesh.windows.slice().buffer,
+      vertices: ground.streams[0], ramps: ground.streams[1], index: ground.index,
+      levels: ground.streams[2], rLevels: ribbons.streams[3], wLevels: water.streams[2],
+      bVertices: solids.streams[0], bRamps: solids.streams[1], bWindows: solids.streams[2], bIndex: solids.index,
       bKinds: new Uint32Array(kinds.pairs).buffer,
       // the masts come after the houses: small parts too
       bCore: core + decks,
-      gVertices: houses.glass.vertices.slice().buffer, gRamps: houses.glass.ramps.slice().buffer,
+      gVertices: glass.streams[0], gRamps: glass.streams[1], gIndex: glass.index,
       dots: dotData.slice().buffer,
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: concatF32(masts.lines, minarets.lines).buffer as ArrayBuffer,
-      rVertices: mesh.roads.vertices.slice().buffer, rRamps: mesh.roads.ramps.slice().buffer, rAttrs: mesh.roadAttrs.slice().buffer,
-      wVertices: mesh.water.vertices.slice().buffer, wRamps: mesh.water.ramps.slice().buffer,
+      rVertices: ribbons.streams[0], rRamps: ribbons.streams[1], rAttrs: ribbons.streams[2], rIndex: ribbons.index,
+      wVertices: water.streams[0], wRamps: water.streams[1], wIndex: water.index,
       roadLines: mesh.roadLines.slice().buffer,
       pitchLines: mesh.pitchLines.slice().buffer,
       lamps: mesh.lamps.slice().buffer,

@@ -36,6 +36,8 @@ export interface MeshResponse {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
   morph?: ArrayBuffer;
+  /** the triangle list into the welded vertices (weld.ts); absent: the vertices are the list (a mesh cached before) */
+  index?: ArrayBuffer;
   /** vertices drawn near (ground and skirts) and far (also the road, rail and runway faces); undefined: all */
   nearCount?: number;
   farCount?: number;
@@ -73,8 +75,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     const key = terrainMeshKey(tile, osmRaw);
     const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
-      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph, nearCount: cached.nearCount, farCount: cached.farCount };
-      ctx.postMessage(res, [res.vertices, res.ramps, ...(res.morph ? [res.morph] : [])]);
+      const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, index: cached.index, morph: cached.morph, nearCount: cached.nearCount, farCount: cached.farCount };
+      ctx.postMessage(res, [res.vertices, res.ramps, ...(res.index ? [res.index] : []), ...(res.morph ? [res.morph] : [])]);
       return;
     }
     const dem = await loadTileDem(tile, grid);
@@ -119,11 +121,11 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       areaStyles,
       glow,
     });
-    const { vertices, ramps, morph, nearCount, farCount } = terrainMeshBuffers(mesh, cover !== undefined);
+    const { vertices, ramps, index, morph, nearCount, farCount } = terrainMeshBuffers(mesh, cover !== undefined);
     // a cache that cannot take it (the quota) fails no tile: it is built again next time
-    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph, nearCount, farCount }).catch((err) => console.warn(`[terrain] ${key} not cached: ${err}`));
-    const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph, nearCount, farCount };
-    ctx.postMessage(res, [vertices, ramps, ...(morph ? [morph] : [])]);
+    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, index, morph, nearCount, farCount }).catch((err) => console.warn(`[terrain] ${key} not cached: ${err}`));
+    const res: MeshResponse = { type: 'mesh', id, vertices, ramps, index, morph, nearCount, farCount };
+    ctx.postMessage(res, [vertices, ramps, index, ...(morph ? [morph] : [])]);
   } catch (err) {
     const res: ErrorResponse = {
       type: 'error',

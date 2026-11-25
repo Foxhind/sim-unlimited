@@ -1,5 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { installUniformCache } from './uniform-cache';
+import { isIndexed } from './indexed';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
@@ -9,10 +10,12 @@ import { AIR_HAZE, FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RE
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
+  /** vertices drawn: a triangle list's, or an indexed VAO's indices (markIndexed) */
   vertexCount: number;
-  /** the first vertex drawn (0 when absent): a run of a shared VAO */
+  /** the first vertex drawn (0 when absent): a run of a shared VAO; of an indexed VAO, the first index */
   first?: number;
 }
+
 
 /** wireframe of the world's faces (renderer.wire): edges over faces filled in one colour */
 export interface Wireframe {
@@ -426,8 +429,91 @@ export class Renderer {
     gl.useProgram(this.shadowProg);
     setPlacement(gl, this.shadowU.uOffset, offset);
     gl.uniform1i(this.shadowU.uCoarse, coarse);
-    gl.bindVertexArray(mesh.vao);
-    gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
+    this.drawMesh(mesh, false);
+  }
+
+  /** a mesh's triangles: by its index on an indexed VAO, as a list otherwise (`wire`: a list always, unwelded) */
+  private drawMesh(mesh: Mesh, wire: boolean): void {
+    const gl = this.gl;
+    if (!isIndexed(mesh.vao)) {
+      gl.bindVertexArray(mesh.vao);
+      gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
+    } else if (wire) {
+      // the wireframe finds a vertex's corner by its number in a list (WORLD_VS vBary)
+      gl.bindVertexArray(this.unwelded(mesh.vao));
+      gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
+    } else {
+      gl.bindVertexArray(mesh.vao);
+      gl.drawElements(gl.TRIANGLES, mesh.vertexCount, gl.UNSIGNED_INT, (mesh.first ?? 0) * 4);
+    }
+  }
+
+  /** indexed VAOs unwelded for the wireframe (relief inspector), dropped when it is off */
+  private unweldedVaos = new Map<WebGLVertexArrayObject, { vao: WebGLVertexArrayObject; buffers: WebGLBuffer[] }>();
+
+  /**
+   * An indexed VAO as a triangle list: its element buffer and attribute buffers read back, each
+   * buffer's vertices laid out by the index, under a VAO with the same attribute pointers.
+   */
+  private unwelded(vao: WebGLVertexArrayObject): WebGLVertexArrayObject {
+    const hit = this.unweldedVaos.get(vao);
+    if (hit) return hit.vao;
+    const gl = this.gl;
+    gl.bindVertexArray(vao);
+    const index = new Uint32Array((gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER, gl.BUFFER_SIZE) as number) / 4);
+    gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, index);
+    interface Pointer { loc: number; buffer: WebGLBuffer; size: number; type: number; normalized: boolean; stride: number; offset: number; integer: boolean }
+    const pointers: Pointer[] = [];
+    const max = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number;
+    for (let loc = 0; loc < max; loc++) {
+      if (!gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_ENABLED)) continue;
+      const size = gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_SIZE) as number, type = gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_TYPE) as number;
+      const bytes = type === gl.FLOAT || type === gl.UNSIGNED_INT || type === gl.INT ? 4 : type === gl.UNSIGNED_SHORT || type === gl.SHORT || type === gl.HALF_FLOAT ? 2 : 1;
+      pointers.push({
+        loc, size, type,
+        buffer: gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_BUFFER_BINDING) as WebGLBuffer,
+        normalized: gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_NORMALIZED) as boolean,
+        stride: (gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_STRIDE) as number) || size * bytes,
+        offset: gl.getVertexAttribOffset(loc, gl.VERTEX_ATTRIB_ARRAY_POINTER),
+        integer: gl.getVertexAttrib(loc, gl.VERTEX_ATTRIB_ARRAY_INTEGER) as boolean,
+      });
+    }
+    gl.bindVertexArray(null);
+    // each buffer once, by the stride of the attributes in it
+    const lists = new Map<WebGLBuffer, WebGLBuffer>();
+    for (const p of pointers) {
+      if (lists.has(p.buffer)) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, p.buffer);
+      const src = new Uint8Array(gl.getBufferParameter(gl.ARRAY_BUFFER, gl.BUFFER_SIZE) as number);
+      gl.getBufferSubData(gl.ARRAY_BUFFER, 0, src);
+      const dst = new Uint8Array(index.length * p.stride);
+      for (let v = 0; v < index.length; v++) dst.set(src.subarray(index[v] * p.stride, index[v] * p.stride + p.stride), v * p.stride);
+      const b = must(gl.createBuffer(), 'unwelded vertices');
+      gl.bindBuffer(gl.ARRAY_BUFFER, b);
+      gl.bufferData(gl.ARRAY_BUFFER, dst, gl.STATIC_DRAW);
+      lists.set(p.buffer, b);
+    }
+    const flat = must(gl.createVertexArray(), 'unwelded VAO');
+    gl.bindVertexArray(flat);
+    for (const p of pointers) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, lists.get(p.buffer)!);
+      gl.enableVertexAttribArray(p.loc);
+      if (p.integer) gl.vertexAttribIPointer(p.loc, p.size, p.type, p.stride, p.offset);
+      else gl.vertexAttribPointer(p.loc, p.size, p.type, p.normalized, p.stride, p.offset);
+    }
+    gl.bindVertexArray(null);
+    this.unweldedVaos.set(vao, { vao: flat, buffers: [...lists.values()] });
+    return flat;
+  }
+
+  /** the wireframe's unwelded VAOs freed once it is off */
+  private dropUnwelded(): void {
+    const gl = this.gl;
+    for (const { vao, buffers } of this.unweldedVaos.values()) {
+      gl.deleteVertexArray(vao);
+      for (const b of buffers) gl.deleteBuffer(b);
+    }
+    this.unweldedVaos.clear();
   }
 
   /** Sun shadows, step 2: instanced trees, as drawTrees draws them. */
@@ -787,8 +873,8 @@ export class Renderer {
     // light sources and glints are not shaded
     this.setShadow(u, !this.selfLit && !this.additive);
     this.setWire(u);
-    gl.bindVertexArray(mesh.vao);
-    gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
+    if (!this.wire && this.unweldedVaos.size) this.dropUnwelded();
+    this.drawMesh(mesh, this.wire !== undefined);
     this.trianglesDrawn += mesh.vertexCount / 3;
     if (blend) gl.disable(gl.BLEND);
     if (!depthWrite || blend) gl.depthMask(true);

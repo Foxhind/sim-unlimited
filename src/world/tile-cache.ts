@@ -1,5 +1,5 @@
-// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow); 74: summits pull the ground up within PEAK.REACH_M; 75: terrain, zone and roof colours matched to an aerial panorama (climate-colour, area-styles, building-mesher); 76: shaded forest floor; 77: transition belts round the land areas (ground-cover 'belt'); 78: untagged roofs by climate (warm: terracotta and pale concrete), rosier town zones; 79: every sports ground on a level pad; 80: the sea up to COAST_SEA_NEAR_MAX_M near the coastline; 81: the parts of a building in one style (overpass shareStyleInParts); 82: at-grade junctions as surfaces of their own, the roads trimmed to them (junctions.ts); 102: a footbridge's ramps and steps (the urban paths its lift holds up: NetWay.approach) structures like it, decks on walls with parapets over the ground left as it was, met with it and at their bends in mitres (bridge-mesher deckJoint), coming down at 45° (road-levels PATH_GRADE); every embankment a prism a stretch, swept round its bends; the parapets closed at a slab's cut ends; 104: traffic lights at the junctions mapped with them (ground-cover signals); 105: traffic lights on the right of their traffic, lit lenses on their heads; 106: junctions' shoulders round their kerbs, a road widening over its whole length, a branch wider than its trunk narrowing to it; 107: paths over the roads' shoulders, pedestrian crossings' yellow-white zebras
-export const SCHEMA_VERSION = 107;
+// 70: summits raised to their ele (peaks.ts), cliff rock bands (cliffs.ts); 71: swimming pools; 72: land zones; 73: ruins are dark at night (night-glow); 74: summits pull the ground up within PEAK.REACH_M; 75: terrain, zone and roof colours matched to an aerial panorama (climate-colour, area-styles, building-mesher); 76: shaded forest floor; 77: transition belts round the land areas (ground-cover 'belt'); 78: untagged roofs by climate (warm: terracotta and pale concrete), rosier town zones; 79: every sports ground on a level pad; 80: the sea up to COAST_SEA_NEAR_MAX_M near the coastline; 81: the parts of a building in one style (overpass shareStyleInParts); 82: at-grade junctions as surfaces of their own, the roads trimmed to them (junctions.ts); 102: a footbridge's ramps and steps (the urban paths its lift holds up: NetWay.approach) structures like it, decks on walls with parapets over the ground left as it was, met with it and at their bends in mitres (bridge-mesher deckJoint), coming down at 45° (road-levels PATH_GRADE); every embankment a prism a stretch, swept round its bends; the parapets closed at a slab's cut ends; 104: traffic lights at the junctions mapped with them (ground-cover signals); 105: traffic lights on the right of their traffic, lit lenses on their heads; 106: junctions' shoulders round their kerbs, a road widening over its whole length, a branch wider than its trunk narrowing to it; 107: paths over the roads' shoulders, pedestrian crossings' yellow-white zebras; 108: welded terrain meshes drawn by their index (weld.ts)
+export const SCHEMA_VERSION = 108;
 const DB_NAME = 'sim-unlimited';
 const DB_VERSION = 4;
 const STORE = 'meshes';
@@ -29,6 +29,16 @@ export interface CachedMesh {
   ts: number;
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /**
+   * Uint32 triangle lists into the welded vertices (weld.ts) of the mesh (terrain; OSM: the drape),
+   * the buildings (b), the glass (g), the roads (r) and the water (w); absent or empty: the vertices
+   * are a triangle list themselves (a mesh cached before)
+   */
+  index?: ArrayBuffer;
+  bIndex?: ArrayBuffer;
+  gIndex?: ArrayBuffer;
+  rIndex?: ArrayBuffer;
+  wIndex?: ArrayBuffer;
   /** OSM tiles: per vertex of the drape, the roads and the water its depth level (osm-mesher depthLevels), or empty */
   levels?: ArrayBuffer;
   rLevels?: ArrayBuffer;
@@ -78,9 +88,10 @@ export interface CachedMesh {
   signals?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes' | 'signals';
+type MeshBuffers = 'vertices' | 'ramps' | 'index' | 'bIndex' | 'gIndex' | 'rIndex' | 'wIndex' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes' | 'signals';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
-  return m.vertices.byteLength + m.ramps.byteLength + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
+  return m.vertices.byteLength + m.ramps.byteLength +
+    (m.index?.byteLength ?? 0) + (m.bIndex?.byteLength ?? 0) + (m.gIndex?.byteLength ?? 0) + (m.rIndex?.byteLength ?? 0) + (m.wIndex?.byteLength ?? 0) + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
     (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
     (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.bKinds?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
     (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +

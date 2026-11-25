@@ -1,4 +1,5 @@
 import { isMaterial, RAMP, rampGlowLevel, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { weld } from './weld';
 import { DEFAULT_AREA_STYLES, type AreaStyles } from './area-styles';
 import { coverRamp, type GroundCover } from './ground-cover';
 import type { FaceColor } from './landsat';
@@ -155,11 +156,18 @@ function terrainFaceRamp(tin: TerrainTin, ti: number, ny: number, faceColor?: Fa
  * A terrain mesh as it is cached and sent: its buffers, and the near and far vertex counts with a
  * cover (without one the whole mesh is drawn at any distance, as ever)
  */
-export function terrainMeshBuffers(mesh: TerrainMeshData, covered: boolean): { vertices: ArrayBuffer; ramps: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number } {
+export function terrainMeshBuffers(mesh: TerrainMeshData, covered: boolean): { vertices: ArrayBuffer; ramps: ArrayBuffer; index: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number } {
+  // welded (weld.ts): the near and far counts, ranges of the triangle list, are the same of the index
+  const w = weld(mesh.vertexCount, [
+    { data: mesh.vertices, size: 6, normal: true },
+    { data: mesh.ramps, size: 1 },
+    ...(mesh.morph ? [{ data: mesh.morph, size: 2 }] : []),
+  ]);
   return {
-    vertices: mesh.vertices.slice().buffer,
-    ramps: mesh.ramps.slice().buffer,
-    morph: mesh.morph?.slice().buffer,
+    vertices: w.streams[0].buffer as ArrayBuffer,
+    ramps: w.streams[1].buffer as ArrayBuffer,
+    index: w.index.buffer as ArrayBuffer,
+    morph: mesh.morph ? (w.streams[2].buffer as ArrayBuffer) : undefined,
     nearCount: covered ? mesh.nearCount : undefined,
     farCount: covered ? mesh.farCount : undefined,
   };

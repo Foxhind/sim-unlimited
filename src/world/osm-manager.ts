@@ -2,6 +2,7 @@ import { mat4, vec3, vec4 } from 'gl-matrix';
 import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
 import { osmSourceMode } from './osm-source';
 import type { Mesh, Renderer } from '../engine/renderer';
+import { bindIndex } from '../engine/indexed';
 import { must } from '../engine/gl';
 import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorld } from './chunks';
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
@@ -124,6 +125,12 @@ interface OsmChunk {
 interface MeshPayload {
   vertices: ArrayBuffer;
   ramps: ArrayBuffer;
+  /** triangle lists into the welded vertices (weld.ts) of the drape, buildings, glass, roads, water; empty: the vertices are the list */
+  index: ArrayBuffer;
+  bIndex: ArrayBuffer;
+  gIndex: ArrayBuffer;
+  rIndex: ArrayBuffer;
+  wIndex: ArrayBuffer;
   /** per vertex of the drape, the roads and the water: its depth level (WORLD_VS aDepthLevel), or empty */
   levels: ArrayBuffer;
   rLevels: ArrayBuffer;
@@ -255,8 +262,9 @@ export class OsmManager {
         if (msg.type === 'mesh') {
           w.resolve({
             vertices: buf(msg.vertices), ramps: buf(msg.ramps),
+            index: buf(msg.index), bIndex: buf(msg.bIndex), gIndex: buf(msg.gIndex), rIndex: buf(msg.rIndex), wIndex: buf(msg.wIndex),
             levels: buf(msg.levels), rLevels: buf(msg.rLevels), wLevels: buf(msg.wLevels),
-            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? buf(msg.bRamps).byteLength / 4, bKinds: buf(msg.bKinds), dots: buf(msg.dots),
+            bVertices: buf(msg.bVertices), bRamps: buf(msg.bRamps), bWindows: buf(msg.bWindows), bCore: msg.bCore ?? (buf(msg.bIndex).byteLength || buf(msg.bRamps).byteLength) / 4, bKinds: buf(msg.bKinds), dots: buf(msg.dots),
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
@@ -385,7 +393,7 @@ export class OsmManager {
    * buildings also the facade window attributes (WORLD_VS aWinUV, aWinEdge), for the ribbons on the
    * ground's own faces their depth levels (WORLD_VS aDepthLevel; without them the shader reads 0)
    */
-  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer, windows?: ArrayBuffer, levels?: ArrayBuffer): Mesh | undefined {
+  private worldMesh(chunk: OsmChunk, vertices: ArrayBuffer, ramps: ArrayBuffer, windows?: ArrayBuffer, levels?: ArrayBuffer, index?: ArrayBuffer): Mesh | undefined {
     if (ramps.byteLength === 0) return undefined;
     const gl = this.gl;
     const vao = must(gl.createVertexArray(), 'osm VAO');
@@ -422,9 +430,12 @@ export class OsmManager {
       gl.vertexAttribPointer(6, 1, gl.FLOAT, false, 4, 0);
       chunk.buffers.push(lb);
     }
+    // a welded mesh: drawn by its index (the counts of its ranges are the index's), its element buffer the VAO's
+    const ib = bindIndex(gl, vao, index);
+    if (ib) chunk.buffers.push(ib);
     gl.bindVertexArray(null);
     chunk.vaos.push(vao);
-    return { vao, vertexCount: ramps.byteLength / 4 };
+    return { vao, vertexCount: (ib ? index! : ramps).byteLength / 4 };
   }
 
   /**
@@ -505,9 +516,9 @@ export class OsmManager {
     if (this.chunks.get(chunk.key) !== chunk) return; // unloaded (or replaced) while in flight
     this.dispose(chunk);
     const gl = this.gl;
-    chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps, undefined, data.levels);
-    chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows);
-    chunk.gmesh = this.worldMesh(chunk, data.gVertices, data.gRamps);
+    chunk.mesh = this.worldMesh(chunk, data.vertices, data.ramps, undefined, data.levels, data.index);
+    chunk.bmesh = this.worldMesh(chunk, data.bVertices, data.bRamps, data.bWindows, undefined, data.bIndex);
+    chunk.gmesh = this.worldMesh(chunk, data.gVertices, data.gRamps, undefined, undefined, data.gIndex);
     chunk.bcore = chunk.bmesh && { vao: chunk.bmesh.vao, vertexCount: Math.min(data.bCore, chunk.bmesh.vertexCount) };
     chunk.bKinds = new Uint32Array(data.bKinds);
     chunk.bParts = undefined;
@@ -531,8 +542,8 @@ export class OsmManager {
       // room for the most lit at once (red and yellow) of every light
       chunk.lenses = this.dynamicWorldMesh(chunk, lights * MAX_LIT * LENS_VERTICES);
     }
-    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels);
-    chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels);
+    chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels, data.rIndex);
+    chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels, data.wIndex);
     chunk.roadLines = this.points(chunk, data.roadLines);
     chunk.pitchLines = this.points(chunk, data.pitchLines);
     chunk.lamps = this.points(chunk, data.lamps);
