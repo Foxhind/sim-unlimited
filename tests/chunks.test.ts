@@ -183,3 +183,64 @@ describe('ChunkManager.draw (the terrain near the camera without its road faces)
     expect(drawnCount(c, vec3.fromValues(0, 900, 0), 3500)).toBe(800); // hypot(3400, 900) > 3500
   });
 });
+
+describe('ChunkManager.update: a z14 tile built once its OSM is ready', () => {
+  /** a manager whose workers only record the tiles asked of them */
+  const manager = () => {
+    const asked: string[] = [];
+    class FakeWorker {
+      onmessage: ((e: MessageEvent) => void) | null = null;
+      onerror: ((e: ErrorEvent) => void) | null = null;
+      // records the tile and fails it at once, so the queue moves on
+      postMessage(m: { id: number; tile: Tile }) {
+        asked.push(`${m.tile.z}/${m.tile.x}/${m.tile.y}`);
+        setTimeout(() => this.onmessage?.({ data: { type: 'error', id: m.id, retryable: false, message: 'test' } } as MessageEvent), 0);
+      }
+      terminate() {}
+    }
+    const Saved = (globalThis as { Worker?: unknown }).Worker;
+    (globalThis as { Worker?: unknown }).Worker = FakeWorker;
+    try {
+      const mgr = new ChunkManager({} as WebGL2RenderingContext, INNSBRUCK, 2);
+      return { mgr, asked };
+    } finally {
+      (globalThis as { Worker?: unknown }).Worker = Saved;
+    }
+  };
+  const cam = { pos: vec3.fromValues(0, 600, 0), latLon: INNSBRUCK, alt: 600, velocity: vec3.create() };
+  const proj = mat4.perspective(mat4.create(), 1, 1, 1, 1e6);
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it('asks no z14 terrain while its OSM is not ready, then asks it; coarser tiles at once', async () => {
+    const { mgr, asked } = manager();
+    let ready = new Set<string>();
+    mgr.update(cam, mat4.create(), proj, 0, (k) => ready.has(k));
+    await flush();
+    const z14 = mgr.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`);
+    expect(z14.length).toBeGreaterThan(0);
+    // coarser tiles asked; no z14 one (the queue runs as many as it may at once)
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.some((k) => k.startsWith('14/'))).toBe(false);
+    // waiting tiles do not hold the start back
+    expect(mgr.stats.chunks).toBeGreaterThan(z14.length);
+    // their OSM in: asked on the next update
+    ready = new Set(z14);
+    mgr.update(cam, mat4.create(), proj, 1, (k) => ready.has(k));
+    for (let k = 0; k < 50 && !z14.every((t) => asked.includes(t)); k++) {
+      await flush();
+      mgr.update(cam, mat4.create(), proj, 2 + k, (key) => ready.has(key));
+    }
+    expect(z14.every((t) => asked.includes(t))).toBe(true);
+  });
+
+  it('asks z14 terrain at once when the detail is not waited for (no OSM layer)', async () => {
+    const { mgr, asked } = manager();
+    mgr.update(cam, mat4.create(), proj, 0);
+    for (let k = 1; k < 200 && !mgr.detailTiles.every((t) => asked.includes(`${t.z}/${t.x}/${t.y}`)); k++) {
+      mgr.update(cam, mat4.create(), proj, k);
+      await flush();
+    }
+    expect(mgr.detailTiles.length).toBeGreaterThan(0);
+    expect(mgr.detailTiles.every((t) => asked.includes(`${t.z}/${t.x}/${t.y}`))).toBe(true);
+  });
+});

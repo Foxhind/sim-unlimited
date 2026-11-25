@@ -190,6 +190,12 @@ export interface Chunk {
    * so its family does not fall back to the coarse parent for the build
    */
   stale?: number;
+  /**
+   * a z14 tile whose OSM is not ready yet: not built until it is (update's detailReady). It is not
+   * drawn without its OSM anyway (its parent stands in), and once that is in, the OSM worker has left
+   * this mesh, built on its own surface, in the cache (osm.worker): built meanwhile it was built twice
+   */
+  awaitingDetail?: boolean;
 }
 
 /**
@@ -361,15 +367,11 @@ export class ChunkManager {
         };
         this.refreshOffset(chunk);
         this.chunks.set(key, chunk);
-        const center = tileCenter(tile);
-        const priority = horizontalDistance(lookahead ?? cam.latLon, center);
-        void this.queue
-          .submit(key, priority, () => this.buildInWorker(chunk!))
-          .then((data) => this.upload(chunk!, data))
-          .catch(() => {
-            chunk!.status = 'error';
-            chunk!.lastAttempt = performance.now();
-          });
+        if (tile.z === DETAIL_Z && !detailReady(key)) chunk.awaitingDetail = true;
+        else this.request(chunk, lookahead ?? cam.latLon);
+      } else if (chunk.awaitingDetail && detailReady(key)) {
+        chunk.awaitingDetail = undefined;
+        this.request(chunk, lookahead ?? cam.latLon);
       }
       if (chunk.status === 'ready') chunk.lastUsed = now;
     }
@@ -410,6 +412,18 @@ export class ChunkManager {
 
   private enuToLatLon(p: vec3): LatLon {
     return enuToLatLon(this.origin, p[0], -p[2], p[1]);
+  }
+
+  /** the chunk's mesh from a worker, nearest to `from` first */
+  private request(chunk: Chunk, from: LatLon): void {
+    chunk.lastAttempt = performance.now();
+    void this.queue
+      .submit(chunk.key, horizontalDistance(from, tileCenter(chunk.tile)), () => this.buildInWorker(chunk))
+      .then((data) => this.upload(chunk, data))
+      .catch(() => {
+        chunk.status = 'error';
+        chunk.lastAttempt = performance.now();
+      });
   }
 
   private buildInWorker(chunk: Chunk): Promise<TileBuffers> {
@@ -492,7 +506,8 @@ export class ChunkManager {
   nearReady(cam: LatLon, radiusM: number): boolean {
     let near = 0;
     for (const c of this.chunks.values()) {
-      if (horizontalDistance(cam, tileCenter(c.tile)) < radiusM) {
+      // a z14 tile waiting for its OSM is not built yet: its parent, loaded, stands in for it
+      if (!c.awaitingDetail && horizontalDistance(cam, tileCenter(c.tile)) < radiusM) {
         near++;
         if (c.status !== 'ready') return false;
       }
