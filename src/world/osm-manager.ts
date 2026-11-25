@@ -23,6 +23,8 @@ const SHADOW_TREE_TEXEL_M = 1.5;
 const SHADOW_RELIEF_M = 1500;
 
 export const HOUSE_RADIUS_M = 3500;
+/** the drape (areas and covers on the terrain's faces) is drawn within this slant of the eye, m (draw) */
+export const DRAPE_RADIUS_M = HOUSE_RADIUS_M;
 /**
  * Building LOD: a tile whose nearest buildings are farther than this (slant, m) draws them without
  * their small parts (parapets, roof plant, doors, masts: building-mesher coreVertexCount), each a
@@ -646,6 +648,11 @@ export class OsmManager {
     renderer.rimWeight = 0;
     for (const c of this.renderList) {
       if (!L.areas) break;
+      // near only, as the roads: farther the terrain's own faces carry the covers (coloured by them,
+      // roads and water among them) and the drape adds only what the TIN's budget left out (its loose
+      // shapes). The frame is bound by vertices over a town: central Moscow 27 → 23.4 ms, 0.1 % of
+      // the pixels changed, by the horizon
+      if (slantTo(c, camPos) >= DRAPE_RADIUS_M) continue;
       renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       // the traffic lights' lit lenses over their dark ones in the drape, as the drape draws them
