@@ -4,7 +4,7 @@
  *
  * A bridge asks for a lift only where it crosses something, by the tags of what is under it (a road
  * or a railway LEVEL_M, a bridge of level m under it LEVEL_M · (m + 1), water WATER_CLEAR_M...).
- * From there the lift falls along the road network at LIFT_GRADE, on over the ways that join the
+ * From there the lift falls along the road network at LIFT_GRADE (a path's at PATH_GRADE), on over the ways that join the
  * bridge: the approaches come by themselves, and ways sharing a node share its lift. The roads, the
  * railways and the paths are three networks: steps from a bridge down to the street under it do
  * not pull that street up, nor does a level crossing by a bridge raise the track.
@@ -29,6 +29,11 @@ export const CANAL_CLEAR_M = 2;
 export const STREAM_CLEAR_M = 1.5;
 /** the approaches' slope */
 export const LIFT_GRADE = 0.08;
+/**
+ * a path's (not its bridge's): a footbridge's ramp or steps come down at 45°. At a road's grade a
+ * ramp ran 75 m from a 6 m bridge, a deck on walls over every drive and path it crossed on its way
+ */
+export const PATH_GRADE = 1;
 /**
  * no lift reaches further than this along the roads: a higher one falls steeper. 90 m: with the
  * road heights' window (road-heights.ts) the ground a tile builds at its border still depends on
@@ -311,7 +316,8 @@ export function buildRoadLevels(
 
   // --- the graph: the ways' points (shared by their coordinates) and the points that ask ---
   const nodeOf = new Map<string, number>();
-  const adj: [number, number][][] = [];
+  /** per node its neighbours: the node, the metres to it, and the least grade the lift falls at on the way (a path's: PATH_GRADE; else 0) */
+  const adj: [number, number, number][][] = [];
   /** the edges that are bridges */
   const bridgeAdj: [number, number][][] = [];
   const node = (k: string): number => {
@@ -337,8 +343,9 @@ export function buildRoadLevels(
     for (let i = 0; i + 1 < w.stops.length; i++) {
       const a = w.stops[i], b = w.stops[i + 1];
       if (a.node === b.node) continue;
-      adj[a.node].push([b.node, b.d - a.d]);
-      adj[b.node].push([a.node, b.d - a.d]);
+      const steep = w.path && !w.bridge ? PATH_GRADE : 0;
+      adj[a.node].push([b.node, b.d - a.d, steep]);
+      adj[b.node].push([a.node, b.d - a.d, steep]);
       if (w.bridge) {
         bridgeAdj[a.node].push([b.node, b.d - a.d]);
         bridgeAdj[b.node].push([a.node, b.d - a.d]);
@@ -418,8 +425,8 @@ export function buildRoadLevels(
     while (heap.size) {
       const [v, n] = heap.pop();
       if (v < val[n]) continue;
-      for (const [m, len] of adj[n]) {
-        const next = v - g * len;
+      for (const [m, len, steep] of adj[n]) {
+        const next = v - Math.max(g, steep) * len;
         if (next > 0 && next > val[m]) {
           val[m] = next;
           heap.push([next, m]);
@@ -451,7 +458,8 @@ export function buildRoadLevels(
     }
     const t = d - s[lo].d, rest = s[hi].d - d;
     let lift = 0;
-    for (const { g, val } of passes) lift = Math.max(lift, val[s[lo].node] - g * t, val[s[hi].node] - g * rest);
+    const steep = w.path && !w.bridge ? PATH_GRADE : 0;
+    for (const { g, val } of passes) lift = Math.max(lift, val[s[lo].node] - Math.max(g, steep) * t, val[s[hi].node] - Math.max(g, steep) * rest);
     // a held stretch of a bridge: straight between its ends
     if (t + rest > 0 && held.has(edgeKey(s[lo].node, s[hi].node))) lift = Math.max(lift, (nodeLift[s[lo].node] * rest + nodeLift[s[hi].node] * t) / (t + rest));
     return lift < LIFT_EPS_M ? 0 : lift;

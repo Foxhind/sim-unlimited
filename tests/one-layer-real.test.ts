@@ -184,8 +184,8 @@ describe('what the vertex budget drops on a real dense tile (Innsbruck 14/8710/5
     // the roads' too, but the low corners of a deck's pieces: a piece lifted JUNCTION_LIFT_M or more
     // on average over a street's face is drawn whole (osm-mesher underSenior), its triangle at the
     // low end under that — where a footbridge's ramp, a deck since (NetWay.approach), comes down by
-    // a street (Herzog-Siegmund-Ufer, the Innbrücke): 0.65 m² in all
-    expect(on('roads', ['runway', 'ballast', 'carriageway'])).toBeLessThan(1);
+    // a street (Herzog-Siegmund-Ufer, the Innbrücke): 1.4 m² in all
+    expect(on('roads', ['runway', 'ballast', 'carriageway'])).toBeLessThan(2);
     // the right-of-way strips and the areas (the drape) are junior to a shoulder, a path and the water; the water to the first two
     expect(on('main', ['shoulder', 'path', 'water'])).toBeLessThan(1e-4);
     expect(on('water', ['shoulder', 'path'])).toBeLessThan(1e-4);

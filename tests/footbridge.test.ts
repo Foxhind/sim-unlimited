@@ -58,8 +58,10 @@ describe('a footbridge and its approaches', () => {
     expect(run[0][0]).toBe(0);
     // its end: where the lift falls under DECK_CLEAR_M, well before the pavement's own
     const len = net.samples[w.first + w.count - 1].d;
-    expect(run[0][1]).toBeGreaterThan(30);
-    expect(run[0][1]).toBeLessThan(len - 10);
+    // (down at PATH_GRADE, 45°, between the network's samples, 10 m apart at most)
+    expect(run[0][1]).toBeGreaterThan(4);
+    expect(run[0][1]).toBeLessThan(10);
+    expect(len).toBeGreaterThan(100);
     const lift = roads.lift!;
     let i = w.first;
     while (net.samples[i + 1].d < run[0][1]) i++;
@@ -76,16 +78,16 @@ describe('a footbridge and its approaches', () => {
     const v: { x: number; y: number; z: number }[] = [];
     for (let i = 0; i < b.vertexCount; i++) v.push({ x: b.vertices[i * 6], y: b.vertices[i * 6 + 1], z: b.vertices[i * 6 + 2] });
     const node = enu(f.ramp.points[0]);
-    // the ramp 30 m down from the bridge: its walls at its edges (1 m each side), from under the ground to the parapet's top over the deck
-    const at30 = v.filter((p) => Math.abs(p.z - node[1] - 30) < 6 && Math.abs(p.x - node[0]) < 3);
+    // the ramp down from the bridge (its stretch to the next vertex of its line): its walls at its edges (1 m each side), from under the ground to the parapet's top over the deck
+    const at30 = v.filter((p) => p.z - node[1] > 0.5 && p.z - node[1] < 12 && Math.abs(p.x - node[0]) < 3);
     expect(at30.length).toBeGreaterThan(0);
     expect(Math.max(...at30.map((p) => Math.abs(p.x - node[0])))).toBeCloseTo(1, 1);
     expect(Math.min(...at30.map((p) => p.y))).toBeLessThan(100);
     const top = Math.max(...at30.map((p) => p.y));
-    expect(top).toBeGreaterThan(100 + 2 + PARAPET_M);
-    expect(top).toBeLessThan(100 + 6 + PARAPET_M);
+    expect(top).toBeGreaterThan(100 + 1 + PARAPET_M);
+    expect(top).toBeLessThan(100 + 6 + PARAPET_M + 0.01);
     // nothing built along the pavement past the deck's end
-    expect(v.filter((p) => p.z - node[1] > 90 && Math.abs(p.x - node[0]) < 3)).toEqual([]);
+    expect(v.filter((p) => p.z - node[1] > 15 && Math.abs(p.x - node[0]) < 3)).toEqual([]);
     // at the node, from the deck up: the node itself and the two decks' shared corners (their edges' and their parapets' inner edges'), no square end
     const legs = [{ dir: [1, 0] as [number, number], half: 1 }, { dir: [0, 1] as [number, number], half: 1 }];
     const corners = [node, ...deckJoint(node, legs).flatMap((e) => [e.l, e.r]), ...deckJoint(node, legs, PARAPET_THICK_M).flatMap((e) => [e.l, e.r])];
