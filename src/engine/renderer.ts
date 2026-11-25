@@ -1,4 +1,5 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
+import { installUniformCache } from './uniform-cache';
 import { createProgram, must, uniformMap, type Uniforms } from './gl';
 import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette';
 import { NO_RIM, type RimFrame } from './rim';
@@ -196,6 +197,8 @@ export class Renderer {
       powerPreference: 'high-performance',
     });
     if (!gl) throw new Error('WebGL2 is not available');
+    // a uniform set again to the value it holds is skipped: most of a frame's WebGL calls were such
+    installUniformCache(gl);
     this.gl = gl;
     const hdrGl = gl as HdrGl;
     // drawingBufferToneMapping is optional: Chrome (156) has none on WebGL, yet shows an RGBA16F
