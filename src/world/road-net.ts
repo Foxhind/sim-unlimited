@@ -4,7 +4,8 @@
  * a node. It carries what the roads-first surface needs of each way: its bed (carriageway and
  * shoulder), the band over which the ground is pulled to it, and the weight of its DEM samples.
  * Rivers, canals and streams are in it too, as water ways: their bed is the water, level across,
- * at the water's height along them, and their banks are pulled to it.
+ * at the water's height along them, and their banks are pulled to it. So are the railways: their
+ * ballast is a bed like a carriageway's, its height smoothed along the line, the ground pulled to it.
  */
 import { EARTH_R } from './geodesy';
 import { classifyLine, isTunnel, roadClassWidth, roadPriority, waterwayWidth } from './osm-mesher';
@@ -71,6 +72,23 @@ export function isCarriageway(tags: Record<string, string>): boolean {
   return !!style && !style.path && !style.rail;
 }
 
+/**
+ * A railway the OSM layer draws (railway=rail, narrow_gauge, light_rail): by the roads' rules, its
+ * ballast a bed with a height of its own. Left on the raw DEM it took every bump of it, and the
+ * ground beside a road bridge's approach climbed over the tracks (55.80917, 37.94793).
+ */
+export function isRailWay(tags: Record<string, string>): boolean {
+  return !tags.highway && !!classifyLine(tags)?.rail;
+}
+/** a railway's band: an embankment's or a cutting's slopes */
+const RAIL_BAND_M = 40;
+/**
+ * above every road where beds meet (a level crossing: the road comes up to the rails), and its
+ * samples weighted as a motorway's: a street joining it bends it by nothing
+ */
+const RAIL_PRIO = 10;
+const RAIL_WEIGHT = 8000;
+
 /** waterways in the network: the surface of their water is level across */
 const WATER_KINDS = new Set(['river', 'canal', 'stream']);
 /** a river, canal or stream the OSM layer draws (not an area) */
@@ -119,7 +137,8 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
   };
   for (const line of lines) {
     const water = isWaterWay(line.tags);
-    if ((!water && !isCarriageway(line.tags) && !isUrbanPath(line.tags)) || !line.points.length) continue;
+    const rail = !water && isRailWay(line.tags);
+    if ((!water && !rail && !isCarriageway(line.tags) && !isUrbanPath(line.tags)) || !line.points.length) continue;
     const way = ways.length;
     const first = samples.length;
     let d = 0;
@@ -154,10 +173,10 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
     const style = classifyLine(line.tags)!;
     ways.push({
       line,
-      prio: roadPriority(line.tags, style.width),
+      prio: rail ? RAIL_PRIO : roadPriority(line.tags, style.width),
       half: style.width / 2 + (style.shoulder ?? 0),
-      band: bandOf(line.tags.highway),
-      weight: (roadClassWidth(line.tags.highway) ?? style.width) ** 3,
+      band: rail ? RAIL_BAND_M : bandOf(line.tags.highway),
+      weight: rail ? RAIL_WEIGHT : (roadClassWidth(line.tags.highway) ?? style.width) ** 3,
       bridge: !!line.tags.bridge && line.tags.bridge !== 'no',
       tunnel: isTunnel(line.tags),
       water: false,

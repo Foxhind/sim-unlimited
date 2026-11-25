@@ -358,7 +358,7 @@ function coverUnits(
       profiles.set(own, [...(profiles.get(own) ?? []), ...b.edges]);
       return;
     }
-    const road = !!line.tags.highway;
+    const road = !ways[b.way].water;
     const u: Unit = {
       lines: b.edges, count: 0, shapes: [], way: line, rank: budgetRank(road ? 'carriageway' : 'water'),
       prio: road ? roadPriority(line.tags, classifyLine(line.tags)?.width ?? 0) : 0, tie: road ? tieBreak(line.points[0]) : 0, first: cover.shapes.length + i,

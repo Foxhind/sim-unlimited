@@ -178,8 +178,9 @@ describe('what the vertex budget drops on a real dense tile (Innsbruck 14/8710/5
     }
     const on = (mesh: keyof typeof over, kinds: CoverKind[]) => kinds.reduce((s, k) => s + (over[mesh].get(k) ?? 0), 0);
     // the budget drops the juniors first: every way left to its ribbon is junior to every road, railway and runway in the faces
-    // (to a sliver along a face's edge, its centre found on the neighbour: under 1 cm² in all)
-    for (const m of ['main', 'roads', 'water'] as const) expect([m, on(m, ['runway', 'ballast', 'carriageway']) < 1e-4]).toEqual([m, true]);
+    // (to a sliver along a face's edge, its centre found on the neighbour: under 2 cm² in all; 1.3
+    // since the railways' beds are pulled as the roads' are)
+    for (const m of ['main', 'roads', 'water'] as const) expect([m, on(m, ['runway', 'ballast', 'carriageway']) < 2e-4]).toEqual([m, true]);
     // the right-of-way strips and the areas (the drape) are junior to a shoulder, a path and the water; the water to the first two
     expect(on('main', ['shoulder', 'path', 'water'])).toBeLessThan(1e-4);
     expect(on('water', ['shoulder', 'path'])).toBeLessThan(1e-4);
