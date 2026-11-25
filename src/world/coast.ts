@@ -42,7 +42,7 @@ const cross = (a: Pt, b: Pt, p: Pt) => (b.x - a.x) * (p.y - a.y) - (b.y - a.y) *
  * otherwise their intersection. Undefined where the nearest point is a loose end of a way: the
  * coastline goes on somewhere not downloaded, and the side cannot be told.
  */
-export function coastSeaTest(lines: ReadonlyArray<Pt[]>, near?: Pt): (p: Pt) => boolean | undefined {
+export function coastSeaTest(lines: ReadonlyArray<Pt[]>, near?: Pt): (p: Pt, dist?: { d: number }) => boolean | undefined {
   const water = (a: Pt, b: Pt, p: Pt) => cross(a, b, p) > 0;
   // every segment once, nearest to `near` (the tile) first: the best distance shrinks at once, and
   // the search stops where no farther segment can be nearer (ways run to 2000 nodes)
@@ -56,7 +56,8 @@ export function coastSeaTest(lines: ReadonlyArray<Pt[]>, near?: Pt): (p: Pt) => 
     }
   });
   segs.sort((s1, s2) => s1.d - s2.d);
-  return (p) => {
+  // `dist`, when given, gets the distance from p to the nearest coastline (lattice cells)
+  return (p, dist) => {
     let best = Infinity;
     let sea: boolean | undefined = false;
     // a segment is at least its box's distance from `near` minus p's own distance from `near` away
@@ -93,6 +94,7 @@ export function coastSeaTest(lines: ReadonlyArray<Pt[]>, near?: Pt): (p: Pt) => 
         sea = water(a, b, p);
       }
     }
+    if (dist) dist.d = Math.sqrt(best);
     return sea;
   };
 }

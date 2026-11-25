@@ -123,7 +123,7 @@ export interface TinOptions {
    * OSM natural=coastline ways (lon/lat, whole, land on their left) when the tile's OSM is loaded.
    * Fixed edges at 0 m where they cross the tile, and the side of the nearest one decides sea and
    * land — for the faces, and for the lattice (sea nodes down to 0 m, land nodes up to LAND_MIN_M)
-   * — wherever it can tell and the DEM is low enough (COAST_SEA_MAX_M); elsewhere the DEM's
+   * — wherever it can tell and the DEM is low enough (COAST_SEA_MAX_M, near the coastline COAST_SEA_NEAR_MAX_M); elsewhere the DEM's
    * shoreline still decides. An empty list means the tile's OSM is loaded and has no coastline:
    * the tile is then all sea or all land (the DEM's majority). Undefined: OSM not loaded, the DEM
    * decides alone. Every builder of a tile's TIN must pass the same.
@@ -175,6 +175,13 @@ export const LAND_MIN_M = 1;
  * tile is not downloaded), and a wrong side once laid whole mountains under the sea.
  */
 export const COAST_SEA_MAX_M = 5;
+/**
+ * Within COAST_SEA_NEAR_M of the coastline the sea may go up to this: the DEM can hold a false
+ * shore of 5–12 m hundreds of metres out to sea (Netanya, 14/9777/6635: up to 450 m past the
+ * coastline), which stood in the water as a green headland. A mountain on a wrong side stays dry.
+ */
+export const COAST_SEA_NEAR_MAX_M = 20;
+export const COAST_SEA_NEAR_M = 600;
 /** a TIN vertex this close outside an aerodrome outline (metres) is on it */
 const PAD_ON_M = 0.5;
 /** simplification of the OSM coastline inside a tile, lattice cells */
@@ -979,23 +986,37 @@ export function buildTerrainTin(tile: Tile, grid: number, heights: Float32Array,
   // OSM loaded and no coastline crosses the tile: no shore runs through it, so it is all sea or all
   // land, whatever the DEM says — a depression below 0.5 m inland (14/9515/6394) is no sea. The
   // DEM's majority decides which.
+  // A coastline that only passes round the tile (our tiles hand over a stub of it from their buffer)
+  // counts the same: the tile lies whole on one side, which its centre tells when the side test can,
+  // and near a stub's loose ends, where it cannot, the DEM's majority (14/9777/6634).
+  const tileBox = { west: 0, south: 0, east: grid, north: grid };
+  const crosses = coastAll.some((l) => clipPolyline(l.map((p) => [p.x, p.y] as LonLat), tileBox).some((piece) => piece.length >= 2));
   let wholeSea = false;
-  if (opts.coast && !coastAll.length) {
-    let below = 0;
-    for (let k = 0; k < heights.length; k++) if (heights[k] < COAST_LEVEL) below++;
-    wholeSea = below * 2 >= heights.length;
+  if (opts.coast && !crosses) {
+    const centre = coastAll.length ? coastSeaTest(coastAll)({ x: grid / 2, y: grid / 2 }) : undefined;
+    if (centre !== undefined) wholeSea = centre;
+    else {
+      let below = 0;
+      for (let k = 0; k < heights.length; k++) if (heights[k] < COAST_LEVEL) below++;
+      wholeSea = below * 2 >= heights.length;
+    }
   }
-  const coastSide = coastAll.length
+  const coastSide = crosses
     ? coastSeaTest(coastAll, { x: grid / 2, y: grid / 2 })
     : opts.coast ? () => wholeSea : undefined;
   /**
    * Sea or land at point p of DEM height h, by the coastline where it can tell and the DEM can
    * agree: sea only below COAST_SEA_MAX_M; undefined leaves it to the DEM.
    */
+  const cellM = tileRowMeters(tile.z, tile.y + 0.5) / grid;
+  const coastDist = { d: Infinity };
   const coastVerdict = coastSide
     ? (p: Pt, h: number): boolean | undefined => {
-        const sea = coastSide(p);
-        return sea === undefined ? undefined : sea && h < COAST_SEA_MAX_M;
+        coastDist.d = Infinity;
+        const sea = coastSide(p, coastDist);
+        if (sea === undefined) return undefined;
+        if (!sea || h < COAST_SEA_MAX_M) return sea;
+        return h < COAST_SEA_NEAR_MAX_M && coastDist.d * cellM <= COAST_SEA_NEAR_M;
       }
     : undefined;
   const seaAt = coastVerdict

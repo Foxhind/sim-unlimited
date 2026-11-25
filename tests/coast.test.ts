@@ -114,6 +114,32 @@ describe('TIN with the OSM coastline', () => {
     expect(Math.max(...tin.vh)).toBeCloseTo(Math.max(...plain.vh), 0);
   });
 
+  it('a false shore the DEM holds at 5–12 m just off the coastline is sea (Netanya, 14/9777/6635)', () => {
+    // land north of the coast at 30 m; on its sea side a DEM bank at 10 m reaching 8 cells (~200 m) out
+    const bank = Float32Array.from({ length: side * side }, (_, k) => {
+      const j = Math.floor(k / side);
+      return j < GRID / 2 - 2 ? 30 : j < GRID / 2 + 8 ? 10 : 0;
+    });
+    const tin = buildTerrainTin(TILE, GRID, bank, { coast });
+    expect(seaShare(tin, false)).toBeGreaterThan(0.9);
+    tin.tris.forEach((t, i) => {
+      const y = (tin.vy[t.a] + tin.vy[t.b] + tin.vy[t.c]) / 3;
+      if (y > GRID * 0.6 && y < GRID / 2 + 8) expect(isSeaFace(tin, i)).toBe(true);
+    });
+  });
+
+  it('a coastline stub that only passes round the tile leaves it whole: no DEM land patch in its sea (14/9777/6634)', () => {
+    // open sea with a 3 m DEM bank in the south-east corner; the coastline is a stub beyond that corner
+    const corner = Float32Array.from({ length: side * side }, (_, k) => {
+      const i = k % side, j = Math.floor(k / side);
+      return i + j > GRID * 1.6 ? 3 : 0;
+    });
+    const w = b.east - b.west, h = b.north - b.south;
+    const stub = [[[b.east + w * 0.12, b.south - h * 0.03], [b.east + w * 0.1, b.south - h * 0.12]] as [number, number][]];
+    const tin = buildTerrainTin(TILE, GRID, corner, { coast: stub });
+    tin.tris.forEach((_, i) => expect(isSeaFace(tin, i)).toBe(true));
+  });
+
   it('beyond a loose end of a way the DEM decides, not a half-plane of sea', () => {
     // a way ending just west of the tile, its continuation not downloaded; the tile is low land at
     // 2 m (below COAST_SEA_MAX_M, so only the loose-end rule keeps it dry)
