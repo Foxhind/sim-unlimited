@@ -423,6 +423,8 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
     const floor = Math.min(Math.max(...here.map((o) => o.rank)), LINK_RANK);
     const big = here.filter((o) => o.rank >= floor);
     if (big.length < 3 || big.some((o) => !o.end)) return undefined;
+    // a roundabout's entries and exits join its ring: junctions (junctions.ts), not forks
+    if (big.some((o) => o.line.tags.junction === 'roundabout' || o.line.tags.junction === 'circular')) return undefined;
     const twoWay = big.filter((o) => !isOnewayRoad(o.line.tags));
     let trunk: (typeof big)[number] | undefined;
     if (twoWay.length === 1) trunk = twoWay[0];
@@ -535,7 +537,12 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
   };
 
   const continuationWidth = (line: OsmLine, at: LonLat): number | undefined => {
-    if (forkAt(at, roadLayer(line.tags))) return undefined;
+    const f = forkAt(at, roadLayer(line.tags));
+    if (f) {
+      // a branch wider than the trunk it leaves or joins (three lanes merging into two) narrows to it there
+      const b = f.branches.find((x) => x.line === line);
+      return b && b.half * 2 > f.width ? f.width : undefined;
+    }
     const own = roadRank(line.tags), layer = roadLayer(line.tags), oneway = isOnewayRoad(line.tags);
     let found: number | undefined, n = 0;
     for (const o of roadsAtNode.get(nodeKey(at)) ?? []) {
@@ -574,7 +581,7 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
  * is shorter than a millimetre; `breaks` the vertices where the paint is not linear across (u turns
  * at the middle, the width bends where a taper begins or ends). Where the way that continues it is
  * narrower (a lane fewer: the speed-change lanes at ramps), this one narrows to its width at the
- * shared node, linearly over ROAD_TAPER_M (at most half its length): the dropped lane closes on the
+ * shared node, linearly over ROAD_TAPER_M (at most its length; half of it narrowing at both ends): the dropped lane closes on the
  * right, the lines measured from the left edge stay put. Vertex attributes:
  *   u   ROAD_U_BASE + metres from the start in the first half, -(ROAD_U_BASE + metres from the end)
  *       in the second (a vertex at the middle, so no triangle spans both)
@@ -583,20 +590,27 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
  *   edge.y  full width / 0.25 m + (start narrowing / 0.5 m) · 1024 + (end narrowing / 0.5 m) · 32768
  *   edge.z  the ROAD_MARK code + (start gap / 0.5 m) << 7 + (end gap / 0.5 m) << 13
  */
-export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork, gapAt?: (line: OsmLine, at: LonLat) => number | undefined): { c: P2[]; half: number[]; segs: VertexAttr[]; breaks: number[] } {
+export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork, gapAt?: (line: OsmLine, at: LonLat) => number | undefined, holdAt?: (line: OsmLine, at: LonLat) => number | undefined): { c: P2[]; half: number[]; segs: VertexAttr[]; breaks: number[] } {
   const q = (v: number, step: number, max: number) => Math.max(0, Math.min(max, Math.round(v / step)));
   const wq = q(half * 2, 0.25, 1023), width = wq * 0.25;
   const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
   const length = lens.reduce((a, b) => a + b, 0);
   if (length < 1e-3) return { c: [], half: [], segs: [], breaks: [] };
   const first = line.points[0], last = line.points[line.points.length - 1];
-  const narrow = (at: LonLat) => {
+  // an end at a junction's surface (holdAt: how far from it the junction takes the road) keeps its
+  // full width there: the junction takes whatever its roads' widths differ by
+  const h0 = holdAt?.(line, first), h1 = holdAt?.(line, last);
+  const narrow = (at: LonLat, hold: number | undefined) => {
+    if (hold !== undefined) return 0;
     const w = net.continuationWidth(line, at);
     return w !== undefined && w < width ? q(width - w, 0.5, 31) : 0;
   };
-  const n0 = narrow(first), n1 = narrow(last);
-  const taperLen = (n: number) => (n ? q(Math.min(ROAD_TAPER_M, length / 2 - 1), 2, 63) : 0);
-  const t0q = taperLen(n0), t1q = taperLen(n1);
+  const n0 = narrow(first, h0), n1 = narrow(last, h1);
+  // over ROAD_TAPER_M, or the whole way where it is shorter (half of it where it narrows at both ends;
+  // short of what a junction at the other end takes): a short approach to a roundabout taking a lane
+  // more does so over all its length, not in a step
+  const taperLen = (n: number, far: number | undefined) => (n ? q(Math.max(0, Math.min(ROAD_TAPER_M, (n0 && n1 ? length / 2 : length) - (far ?? 0) - 1)), 2, 63) : 0);
+  const t0q = taperLen(n0, h1), t1q = taperLen(n1, h0);
   const t0 = t0q * 2, t1 = t1q * 2;
   const gap = (at: LonLat) => gapAt?.(line, at) ?? net.junctionGap(line, at);
   const g0q = q(gap(first), 0.5, 63), g1q = q(gap(last), 0.5, 63);

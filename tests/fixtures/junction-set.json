@@ -178,5 +178,25 @@
   ],
   "span": 0.2,
   "note": "plain: two-way tertiaries crossing (renders well before)"
+ },
+ {
+  "name": "j21",
+  "at": [
+   36.65139,
+   29.12239
+  ],
+  "span": 0.2,
+  "note": "Fethiye: a roundabout of one-way secondaries, entries of two and three lanes",
+  "archive": "turkey.pmtiles"
+ },
+ {
+  "name": "j22",
+  "at": [
+   36.65173,
+   29.12129
+  ],
+  "span": 0.2,
+  "note": "Fethiye: a street joining a dual carriageway across its median",
+  "archive": "turkey.pmtiles"
  }
 ]

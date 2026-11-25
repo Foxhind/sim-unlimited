@@ -9,7 +9,18 @@
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, tileLattice, type Tile } from '../src/world/geodesy';
-import { buildGroundCover, type CoverKind } from '../src/world/ground-cover';
+import { buildGroundCover, COVER_RANK, type CoverKind } from '../src/world/ground-cover';
+
+/** whether (x, y) lies in one of the triangles `t` (six numbers each) */
+function inTris(t: Float64Array, x: number, y: number): boolean {
+  for (let o = 0; o < t.length; o += 6) {
+    const d1 = (t[o + 2] - t[o]) * (y - t[o + 1]) - (t[o + 3] - t[o + 1]) * (x - t[o]);
+    const d2 = (t[o + 4] - t[o + 2]) * (y - t[o + 3]) - (t[o + 5] - t[o + 3]) * (x - t[o + 2]);
+    const d3 = (t[o] - t[o + 4]) * (y - t[o + 5]) - (t[o + 1] - t[o + 5]) * (x - t[o + 4]);
+    if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return true;
+  }
+  return false;
+}
 import type { OsmLine } from '../src/world/osm-types';
 import * as palette from '../src/engine/palette';
 
@@ -86,7 +97,12 @@ for (const fx of set) {
       covers.set(key, c);
     }
     const [x, y] = c.toLattice([ll.lon, ll.lat]);
-    const si = c.cover.locate(x, y);
+    let si = c.cover.locate(x, y);
+    // the overlays (a junction's shoulders) over the ground and the covers junior to them, not over water
+    if (si < 0 || COVER_RANK[c.cover.shapes[si].kind] > COVER_RANK.shoulder) {
+      const ov = c.cover.shapes.findIndex((sh) => sh.overlay && inTris(sh.tris, x, y));
+      if (ov >= 0 && (si < 0 || c.cover.shapes[si].kind !== 'water')) si = ov;
+    }
     let col: [number, number, number] = [36, 52, 30];
     if (si >= 0) {
       const sh = c.cover.shapes[si];

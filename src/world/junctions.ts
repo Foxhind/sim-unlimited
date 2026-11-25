@@ -52,6 +52,13 @@ export const MAX_TRIM_M = 30;
 const ARC_TOL_M = 0.25;
 /** two arms at least this far round from each other (radians, short of a straight line) leave the space between them open */
 const OPEN_GAP = Math.PI - 0.02;
+/** a road going on (its arms within this of opposite: cosine, about 30°) narrower flares over this many times the difference in width */
+const FLARE_COS = 0.85;
+const FLARE = 4;
+/** …where the widths differ by more than this each side, metres */
+const FLARE_MIN_M = 0.2;
+/** a shoulder's band turns a corner up to this mitred, sharper bevelled (radians; 60°) */
+const MITRE_TURN = Math.PI / 3;
 /** two arms leaving within this of one direction (cosine; about 18°) lie side by side */
 const PARALLEL_COS = 0.95;
 /** an arm's direction is taken over its first this many metres */
@@ -78,6 +85,10 @@ function track(c: P2[]): Track {
     at.push(at[i] + l);
   }
   return { c, dir, len, at, total: at[at.length - 1] };
+}
+/** an arm's direction out over its first HEADING_M or so (in lattice units of that: the caller's scale) */
+function heading(tr: Track): P2 {
+  return unit(sub(tr.c[Math.min(tr.c.length - 1, Math.max(1, tr.at.findIndex((d) => d > 0)))], tr.c[0]));
 }
 /** the segment of an arm holding the point t along it */
 function segOf(tr: Track, t: number): number {
@@ -266,6 +277,19 @@ export function junctionPieces(
     const atB = (t: number): P2 => (t >= trB - 1e-9 ? ends[kb][0] : edgeAt(tb, t, wb, -1));
     const nodes = same(A.c[0], B.c[0]) ? [A.c[0]] : [B.c[0], A.c[0]];
     const wedge = (ring: P2[]) => triangulate(ring).forEach(push);
+    // a road going on as a narrower or wider one (a lane more onto a roundabout): the kerb flares
+    // from the wider one's trimmed corner onto the narrower one's edge over FLARE times the difference
+    const ha = heading(ta), hb = heading(tb);
+    if (dot(ha, hb) < -FLARE_COS && Math.abs(wa - wb) > FLARE_MIN_M * latticePerMetre && corner.kind !== 'fillet' && corner.kind !== 'sharp') {
+      if (wa > wb) {
+        const tf = Math.min(tb.total, trB + FLARE * (wa - wb));
+        wedge([...nodes, atA(0), ...edgeVertices(ta, 0, trA, wa, 1), atA(trA), atB(tf), ...edgeVertices(tb, tf, 0, wb, -1), atB(0)]);
+      } else {
+        const tf = Math.min(ta.total, trA + FLARE * (wb - wa));
+        wedge([...nodes, atA(0), ...edgeVertices(ta, 0, tf, wa, 1), atA(tf), atB(trB), ...edgeVertices(tb, trB, 0, wb, -1), atB(0)]);
+      }
+      return;
+    }
     if (corner.kind === 'open') {
       if (nodes.length === 1) {
         const pa = atA(0), pb = atB(0), a0 = angleOf(sub(pa, A.c[0]));
@@ -389,4 +413,73 @@ function chain(lines: P2[][], tol = 1e-3): P2[][] {
 export function trimCorners(arm: JunctionArm, t: number, extra: number): [P2, P2] {
   const tr = track(arm.c);
   return [edgeAt(tr, t, arm.half + extra, -1), edgeAt(tr, t, arm.half + extra, 1)];
+}
+
+/**
+ * The band along the outside of outline polylines `lines` (their inside on the left, counter-
+ * clockwise: unionOutline's), `r(p)` wide at each of their points (lattice): the polylines offset
+ * outwards, mitred at each turn (bevelled at a convex one sharper than MITRE_TURN), in quads
+ * between the line and its offset that meet edge to edge; none along the segments `skip` says (a
+ * junction's trim lines, and where the roads' own shoulders run) — convex pieces. A shoulder round
+ * a junction: it follows the kerbs' fillets.
+ */
+export function bandPieces(lines: ReadonlyArray<ReadonlyArray<P2>>, r: (p: P2) => number, skip?: (a: P2, b: P2) => boolean): P2[][] {
+  const pieces: P2[][] = [];
+  for (const line of lines) {
+    const n = line.length, closed = n > 3 && same(line[0], line[n - 1]);
+    const rs = line.map(r);
+    /** the outward normal of segment i (to the right of its direction) */
+    const out = (i: number): P2 => { const u = unit(sub(line[i + 1], line[i])); return [u[1], -u[0]]; };
+    const on = line.map((_, i) => i + 1 < n && !same(line[i], line[i + 1]) && !skip?.(line[i], line[i + 1]));
+    const prevOf = (i: number) => (i > 0 ? i - 1 : closed ? n - 2 : -1);
+    const nextOf = (i: number) => (i < n - 1 ? i : closed ? 0 : -1);
+    /** the offset of vertex i as segment `seg` ends there (end) or starts there (start) */
+    const offset = (i: number, seg: number, end: boolean): P2 => {
+      const p = line[i], ri = rs[i];
+      const other = end ? nextOf(i) : prevOf(i);
+      // a band's end, or a segment beside one not in the band: square
+      if (other < 0 || !on[other]) return add(p, mul(out(seg), ri));
+      const o0 = out(end ? seg : other), o1 = out(end ? other : seg);
+      const turn = Math.atan2(cross(o0, o1), dot(o0, o1));
+      // convex (the outline turning left) and sharp: bevelled, each segment its own square end
+      if (turn > MITRE_TURN) return add(p, mul(out(seg), ri));
+      const m = unit(add(o0, o1));
+      return add(p, mul(m, ri / Math.max(dot(m, o0), 0.5)));
+    };
+    for (let i = 0; i + 1 < n; i++) {
+      if (!on[i] || (rs[i] <= 1e-12 && rs[i + 1] <= 1e-12)) continue;
+      const a = line[i], b = line[i + 1];
+      pieces.push([a, offset(i, i, false), offset(i + 1, i, true), b]);
+    }
+    // the bevels' wedges
+    for (let i = closed ? 0 : 1; i < n - 1; i++) {
+      const pv = prevOf(i);
+      if (pv < 0 || !on[pv] || !on[i] || rs[i] <= 1e-12) continue;
+      const o0 = out(pv), o1 = out(i);
+      if (Math.atan2(cross(o0, o1), dot(o0, o1)) <= MITRE_TURN) continue;
+      pieces.push([line[i], add(line[i], mul(o0, rs[i])), add(line[i], mul(o1, rs[i]))]);
+    }
+  }
+  return pieces;
+}
+
+/**
+ * The width of a junction's shoulder at a point of its outline: its arms' shoulders weighed by how
+ * near the point is to each arm's edge (inverse square), so it is each arm's own along it and goes
+ * smoothly from one to the next round a kerb
+ */
+export function shoulderAt(arms: ReadonlyArray<JunctionArm>, trims: ReadonlyArray<number>, p: P2): number {
+  let sw = 0, w = 0;
+  arms.forEach((a, k) => {
+    const tr = track(a.c), reach = Math.min(tr.total, trims[k] + a.half * 2);
+    let d = Infinity;
+    for (let i = 0; i < tr.len.length && tr.at[i] <= reach; i++) {
+      const q = sub(p, tr.c[i]), t = Math.max(0, Math.min(Math.min(tr.len[i], reach - tr.at[i]), dot(q, tr.dir[i])));
+      d = Math.min(d, Math.hypot(q[0] - tr.dir[i][0] * t, q[1] - tr.dir[i][1] * t));
+    }
+    const e = Math.max(0, d - a.half), wk = 1 / (e * e + 1e-6 * a.half * a.half);
+    sw += a.shoulder * wk;
+    w += wk;
+  });
+  return w > 0 ? sw / w : 0;
 }

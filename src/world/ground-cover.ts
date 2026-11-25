@@ -15,7 +15,7 @@ import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-style
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
-import { junctionPieces, junctionShape, MAX_TRIM_M, trimCorners, unionOutline, type JunctionArm, type JunctionShape } from './junctions';
+import { bandPieces, junctionPieces, shoulderAt, junctionShape, MAX_TRIM_M, trimCorners, unionOutline, type JunctionArm, type JunctionShape } from './junctions';
 import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type RibbonGeom, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
@@ -47,8 +47,13 @@ export interface CoverShape {
    * where none holds it)
    */
   attr?: { segs: VertexAttr[]; segAt(x: number, y: number): number };
-  /** a junction's surface or its shoulders (junctions.ts), not a way's ribbon */
-  junction?: boolean;
+  /** a junction's surface or its shoulders (junctions.ts), not a way's ribbon: the same token for both */
+  junction?: object;
+  /**
+   * drawn over the surface's faces, never an edge of them nor what holds a point (locate passes it
+   * over): a junction's shoulders round its kerbs, which would take the vertex budget of whole roads
+   */
+  overlay?: boolean;
 }
 
 export interface GroundCover {
@@ -70,6 +75,8 @@ export interface GroundCover {
   junctionNodes: ReadonlySet<string>;
   /** the traffic lights of the junctions mapped with them (placeSignals) */
   signals: ReadonlyArray<JunctionSignal>;
+  /** how far from a junction's node (`at`) its junction takes a road ending there, metres, or undefined (painted holdAt) */
+  junctionHold(line: OsmLine, at: LonLat): number | undefined;
 }
 
 /** a traffic light at a junction's approach: its post (lattice), the way its head faces (lattice, unit), its light */
@@ -548,6 +555,13 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   const cutAt = new Map<OsmLine, Map<number, { arm: JArm; start: boolean }>>();
   /** the nodes of the junctions: a road's paint runs to its trim there, no gap */
   const junctionNodes = new Set<string>();
+  /** per way and junction node (`lon,lat|`), how far from the node the junction takes the way, metres */
+  const taken = new Map<OsmLine, Map<string, number>>();
+  const hold = (line: OsmLine, at: LonLat, d: number) => {
+    let m = taken.get(line);
+    if (!m) taken.set(line, m = new Map());
+    m.set(nodeKey(at), Math.max(m.get(nodeKey(at)) ?? 0, d));
+  };
   /** the nodes mapped as traffic lights (highway=traffic_signals), and the lights the junctions there get */
   const signalNodes = new Set(data.points.filter((p) => p.tags.highway === 'traffic_signals').map((p) => nodeKey(p.at)));
   const signals: JunctionSignal[] = [];
@@ -703,6 +717,10 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       const j: Junction = { at: nodes.get(ids[0])!.at, nodes: pts, keys: ids.map((id) => id.split('|')[0]), arms: ext, inner: innerWays, shape, through };
       junctions.push(j);
       for (const id of ids) junctionNodes.add(id.split('|')[0]);
+      for (const a of all) {
+        const at = nodes.get(a.node)!.at;
+        hold(a.line, at, inner(a) ? a.next!.d : Math.abs(a.dTrim - a.dNode));
+      }
       for (const a of ext) {
         const d0 = Math.min(a.dNode, a.dTrim), d1 = Math.max(a.dNode, a.dTrim);
         const list = trimsOf.get(a.line);
@@ -728,6 +746,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     }
     return out;
   };
+  /** how far from a junction's node the junction takes a road ending there, metres (painted: no taper in it) */
+  const holdAt = (line: OsmLine, at: LonLat): number | undefined => taken.get(line)?.get(nodeKey(at));
   /** a road's paint at a junction's node: to its trim, no gap */
   const gapAt = (_line: OsmLine, at: LonLat): number | undefined => (junctionNodes.has(nodeKey(at)) ? 0 : undefined);
   /** each painted road's centre line, half widths and paint (painted), once */
@@ -736,7 +756,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     let p = paintCache.get(line);
     if (p === undefined) {
       const style = classifyLine(line.tags), pts = drawnPts(line);
-      p = style?.marks && pts ? painted(line, pts, style.width / 2, style.marks, net, gapAt) : null;
+      p = style?.marks && pts ? painted(line, pts, style.width / 2, style.marks, net, gapAt, holdAt) : null;
       paintCache.set(line, p);
     }
     return p ?? undefined;
@@ -851,12 +871,16 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       return;
     }
     const prio = roadPriority(line.tags, style.width);
-    if (style.marks) {
+    const p = style.marks ? paintOf(line) : undefined;
+    if (p) {
       // narrowing into a narrower continuation; its paint per segment of the whole way
-      const p = paintOf(line)!;
       if (p.c.length >= 2) along('carriageway', p.c, p.half, ends, prio, p.segs, new Set(p.breaks));
     } else along('carriageway', c, half, ends, prio);
-    if (shoulder) along('shoulder', c, half + shoulder, ends, prio);
+    // its shoulders narrowing with it
+    if (shoulder) {
+      if (p && p.c.length >= 2) along('shoulder', p.c, p.half.map((h) => h + shoulder), ends, prio);
+      else along('shoulder', c, half + shoulder, ends, prio);
+    }
   };
 
   /** a polygon's triangles (earcut), as pieces of a union */
@@ -924,7 +948,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       if (j.nodes.length >= 3) out.push(hull(j.nodes));
       return out;
     };
-    const surface = (pieces: P2[][]): { tris: Float64Array; outline: P2[][] } => {
+    const surface = (pieces: P2[][]): { tris: Float64Array; outline: P2[][]; pieces: P2[][] } => {
       const ccw = pieces.filter((p) => p.length >= 3).map((p) => {
         let a = 0;
         for (let i = 0; i < p.length; i++) a += p[i][0] * p[(i + 1) % p.length][1] - p[(i + 1) % p.length][0] * p[i][1];
@@ -932,14 +956,37 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       });
       const tris: P2[] = [];
       for (const p of ccw) for (let k = 1; k + 1 < p.length; k++) tris.push(p[0], p[k], p[k + 1]);
-      return { tris: flat(tris), outline: unionOutline(ccw) };
+      return { tris: flat(tris), outline: unionOutline(ccw), pieces: ccw };
     };
     const corners = j.arms.map((a) => a.corners ?? trimCorners(a.arm, a.trim, 0));
     if (j.keys.some((k) => signalNodes.has(k))) placeSignals(j, corners);
     const road = surface([...junctionPieces(j.shape, arms, corners, () => 0, latticePerMetre, triangulate), ...between()]);
     if (!road.tris.length) return;
     const draft = add('carriageway', lead, prio, road.tris, road.outline, tieBreak(j.at));
-    if (draft) draft.shape.junction = true;
+    const token = {};
+    if (draft) draft.shape.junction = token;
+    // its shoulders round its kerbs (a band along its outline but where the arms' own shoulders run,
+    // along their edges, or its outline crosses their ends), each arm's own width along it and going
+    // smoothly from one to the next (shoulderAt); the band alone, its inner edge on the carriageway's
+    if (j.arms.some((a) => a.arm.shoulder > 0)) {
+      const trims = j.arms.map((a) => a.trim), width = (q: P2) => shoulderAt(arms, trims, q);
+      const near = (p: P2, q: P2) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-7;
+      const onEdge = (q: P2) => j.arms.some((a) => {
+        const c = a.arm.c;
+        for (let i = 0; i + 1 < c.length; i++) {
+          const dx = c[i + 1][0] - c[i][0], dy = c[i + 1][1] - c[i][1], l2 = dx * dx + dy * dy;
+          const t = l2 > 0 ? ((q[0] - c[i][0]) * dx + (q[1] - c[i][1]) * dy) / l2 : 0;
+          if (t < -1e-9 || t > 1 + 1e-9) continue;
+          if (Math.abs(Math.hypot(q[0] - c[i][0] - dx * t, q[1] - c[i][1] - dy * t) - a.arm.half) < 1e-6) return true;
+        }
+        return false;
+      });
+      const skip = (a: P2, b: P2) => corners.some(([r, l]) => (near(a, r) && near(b, l)) || (near(a, l) && near(b, r))) || (onEdge(a) && onEdge(b));
+      // round the carriageway's outline as the cover keeps it (thinned): the band's inner edge on its very points
+      const band = surface(bandPieces(road.outline.map((l) => thinLine(l, THIN_M * latticePerMetre)), width, skip));
+      const sd = band.tris.length ? add('shoulder', lead, prio, band.tris, band.outline, tieBreak(j.at)) : undefined;
+      if (sd) Object.assign(sd.shape, { junction: token, overlay: true });
+    }
     if (draft && j.through.size) {
       const segs: VertexAttr[] = [], owner: { c: P2[]; base: number }[] = [];
       for (const [line, off] of j.through) {
@@ -1107,7 +1154,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     for (let e = start[cell]; e < start[cell + 1]; e++) {
       const gi = entries[e], si = triShape[gi];
       if (x < triBox[4 * gi] || y < triBox[4 * gi + 1] || x > triBox[4 * gi + 2] || y > triBox[4 * gi + 3]) continue;
-      if (only >= 0 ? si !== only : skip?.(si)) continue;
+      if (only >= 0 ? si !== only : shapes[si].overlay || skip?.(si)) continue;
       if (holds(shapes[si].tris, 6 * triLocal[gi], x, y)) return gi;
     }
     return -1;
@@ -1196,5 +1243,6 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     outside,
     junctionNodes,
     signals,
+    junctionHold: holdAt,
   };
 }

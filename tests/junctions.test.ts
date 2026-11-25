@@ -71,11 +71,11 @@ describe('junctions in the ground cover', () => {
     const street = road({ highway: 'tertiary' }, [[32, 32], [32, 56]]);
     const cover = buildGroundCover(TILE, GRID, data([ew, street]));
     const node = shapeAt(cover, 32, 32);
-    expect(node?.junction).toBe(true);
+    expect(node?.junction).toBeTruthy();
     expect(node?.kind).toBe('carriageway');
     // the street's own ribbon starts past the road and the fillets
     const half = classifyLine(ew.tags)!.width / 2;
-    expect(shapeAt(cover, 32, 32 + (half + 1) * M)?.junction).toBe(true);
+    expect(shapeAt(cover, 32, 32 + (half + 1) * M)?.junction).toBeTruthy();
     expect(shapeAt(cover, 32, 32 + 20 * M)?.junction).toBeFalsy();
     // across the junction: the road's lanes, its edge line off on the south (its right, driving east)
     const code = codeAt(cover, TILE, 32, 32)!;
@@ -88,7 +88,7 @@ describe('junctions in the ground cover', () => {
   it('two equal roads crossing: neither paints across the junction', () => {
     const ns = road({ highway: 'secondary' }, [[32, 8], [32, 32], [32, 56]]);
     const cover = buildGroundCover(TILE, GRID, data([ew, ns]));
-    expect(shapeAt(cover, 32, 32)?.junction).toBe(true);
+    expect(shapeAt(cover, 32, 32)?.junction).toBeTruthy();
     expect(codeAt(cover, TILE, 32, 32)).toBeUndefined();
     for (const sh of cover.shapes.filter((s) => s.junction)) for (const l of sh.outline) expect(closed(l)).toBe(true);
   });

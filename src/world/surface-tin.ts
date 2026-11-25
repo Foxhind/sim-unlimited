@@ -232,6 +232,7 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   // in it too (a small pool under a big face goes, rather than painting the face), else the next under it
   const dropped = new Uint8Array(cover.shapes.length);
   for (const u of units.slice(picked)) for (const si of u.shapes) dropped[si] = RIBBON_KINDS.has(cover.shapes[si].kind) && !cover.shapes[si].junction ? 1 : 2;
+  cover.shapes.forEach((s, si) => { if (isOverlay(s)) dropped[si] = 2; });
   let passed: number[] = [];
   const skip = (si: number) => dropped[si] === 1 || passed.includes(si);
   const holds = (si: number, x: number, y: number) => cover.locate(x, y, (sj) => sj !== si) === si;
@@ -317,9 +318,11 @@ function coverUnits(
       if (!belts.has(s.source)) belts.set(s.source, {});
       key = belts.get(s.source)!;
     }
+    // a junction's shoulders are no edges of the surface: drawn over its faces (overlay: looseShapes)
+    if (isOverlay(s)) return;
     // a junction's surface is a unit of its own, after every road but the service roads and tracks:
     // over the budget it goes before them, drawn over the faces (looseShapes)
-    if (s.junction) key = s;
+    if (s.junction) key = s.junction;
     let u = bySource.get(key);
     if (!u) {
       const road = s.kind === 'carriageway' || s.kind === 'shoulder';
@@ -333,11 +336,12 @@ function coverUnits(
   });
   units.sort(byPlace);
   /** each shape's unit's place */
-  const place = new Int32Array(cover.shapes.length);
+  const place = new Int32Array(cover.shapes.length).fill(0x7fffffff);
   units.forEach((u, i) => { for (const si of u.shapes) place[si] = i; });
   /** each unit's edges inside the tile (every one's border points now), cut by the seniors when it is picked */
   const pending = units.map(() => [] as { si: number; piece: P2[] }[]);
   cover.shapes.forEach((s, si) => {
+    if (isOverlay(s)) return;
     for (const line of s.outline) for (const piece of clipToTile(line, grid, border)) pending[place[si]].push({ si, piece: piece.map((p): P2 => [p.x, p.y]) });
   });
   units.forEach((u, i) => {
@@ -448,6 +452,8 @@ function distinctPoints(lines: ReadonlyArray<ReadonlyArray<Pt>>): number {
  * the DEM's, its water drawn over that tilted, and a bridge's deck over a bank (14/9517/6398, where
  * every river and canal went). Where they overlap the path still lies over the water.
  */
+/** a junction's shoulders: never in the surface, drawn over its faces (they would take the budget of whole roads) */
+const isOverlay = (s: GroundCover['shapes'][number]): boolean => !!s.overlay;
 /** a junction's surface's place in the budget among the carriageways: a priority above a service road's, below a living street's */
 const JUNCTION_BUDGET_PRIO = 1.95;
 const budgetRank = (k: CoverKind): number => (k === 'water' ? COVER_RANK.path - 0.5 : COVER_RANK[k]);

@@ -266,9 +266,10 @@ function ownArea(cover: GroundCover, s: number): number {
 const droppedKinds = (tin: TerrainTin, cover: GroundCover): string[] =>
   [...new Set(cover.shapes.filter((s, si) => !s.outline.every((l) => cover.outside(l, si).every((piece) => edgeInTin(tin, piece)))).map((s) => s.kind))].sort();
 
-it('puts every edge of every cover into the surface, but where it lies inside a senior one', () => {
+it('puts every edge of every cover into the surface, but where it lies inside a senior one (an overlay drawn over it has none)', () => {
   const { tin, cover } = coverSurface(townFixture());
   cover.shapes.forEach((s, si) => {
+    if (s.overlay) return;
     for (const line of s.outline) for (const piece of cover.outside(line, si)) expect(edgeInTin(tin, piece)).toBe(true);
   });
 });
@@ -323,7 +324,11 @@ it('gives each face one cover, the senior shape under its centre (a road’s ban
 it('covers each shape’s area less its seniors’, to the outline’s simplification', () => {
   const { tin, cover } = coverSurface(townFixture());
   // within 2 % (the plan's ruling 1: the seniors' areas taken off on rows across the tile)
-  for (let s = 0; s < cover.shapes.length; s++) expect(Math.abs(coverArea(tin, s, cover) - ownArea(cover, s))).toBeLessThanOrEqual(0.02 * ownArea(cover, s) + 1e-9);
+  // (an overlay, drawn over the faces, holds none)
+  for (let s = 0; s < cover.shapes.length; s++) {
+    if (cover.shapes[s].overlay) continue;
+    expect(Math.abs(coverArea(tin, s, cover) - ownArea(cover, s))).toBeLessThanOrEqual(0.02 * ownArea(cover, s) + 1e-9);
+  }
 });
 it('drops the parks before the roads when over the budget, and cracks nowhere', () => {   // Review Focus 4
   const { tin, cover } = coverSurface(denseTown(2500));

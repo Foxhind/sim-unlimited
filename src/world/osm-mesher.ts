@@ -97,6 +97,8 @@ const FACE_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'b
 
 /** the covers a lifted ribbon barely over them gives way to (liftedRibbons onJunction) */
 const JUNCTION_KINDS: ReadonlySet<CoverKind> = new Set<CoverKind>(['carriageway', 'ballast', 'runway', 'path']);
+/** the covers a junction's shoulders (an overlay) are not drawn over: the ways' own, water and a railway's strip */
+const OVERLAY_OFF: ReadonlySet<CoverKind> = new Set<CoverKind>(['runway', 'ballast', 'carriageway', 'shoulder', 'path', 'water', 'railZone']);
 /** a lifted ribbon's piece lifted less than this over a junction's face is left out, metres */
 const JUNCTION_LIFT_M = 0.5;
 /**
@@ -945,14 +947,18 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     // under the carriageway: the right-of-way strip of a railway, the shoulders of a road
     if (look.zone) draw('railZone', c, look.half + look.zone, RAIL_ZONE_RAMP, ZONE_BIAS, main);
     // the shoulders of an approach rise with it: the top of its embankment
-    if (look.shoulder) draw('shoulder', c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
+    // a painted road: narrowing into a narrower continuation, its paint in its vertex attributes
+    const p = !look.rail && look.marks ? painted(line, pts, look.half, look.marks, net, junctionGap, cover?.junctionHold) : undefined;
+    // its shoulders narrowing with it
+    if (look.shoulder) {
+      if (p?.c.length) draw('shoulder', p.c, p.half.map((h) => h + look.shoulder), lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
+      else draw('shoulder', c, look.half + look.shoulder, lit(SHOULDER_RAMP), SHOULDER_BIAS, roads, undefined, ends, lift);
+    }
     if (!look.rail) {
-      if (!look.marks) {
+      if (!p) {
         draw(kind, c, look.half, look.ramp, look.bias, look.out, undefined, ends, lift);
         return;
       }
-      // a painted road: narrowing into a narrower continuation, its paint in its vertex attributes
-      const p = painted(line, pts, look.half, look.marks, net, junctionGap);
       if (p.c.length) draw(kind, p.c, p.half, look.ramp, look.bias, look.out, p.segs, ends, lift);
       return;
     }
@@ -1021,13 +1027,16 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const onBank = (f: number): boolean => (banks[f] ||= tin.bank?.(f) ? 1 : 2) === 1;
     for (const si of tin.looseShapes) {
       const shape = cover.shapes[si], wet = shape.kind === 'water';
-      // a junction's surface goes with the roads, unpainted
+      // a junction's surface and its shoulders (an overlay) go with the roads, unpainted
       const out = wet ? water : shape.junction ? roads : main, part = partOf(out);
       // an area with a filter: the imagery of the face under each piece through it, as the terrain colours its faces (coverRamp)
       const filter = shape.kind === 'belt' ? beltFilter(shape.source.tags, styles)
         : shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
       const ramp = coverRamp(shape, styles, undefined);
-      const over: LeftOut = (fc, _lifts, f) => fc === si || (fc >= 0 && fc < si) || (wet ? onBank(f) : isSeaFace(tin, f));
+      // an overlay (a junction's shoulders) on the ground and the areas, not on a road's cover, water or a bank
+      const over: LeftOut = shape.overlay
+        ? (fc, _lifts, f) => (fc >= 0 && (fc < si || OVERLAY_OFF.has(cover.shapes[fc].kind))) || onBank(f) || isSeaFace(tin, f)
+        : (fc, _lifts, f) => fc === si || (fc >= 0 && fc < si) || (wet ? onBank(f) : isSeaFace(tin, f));
       const t = shape.tris;
       for (let k = 0; k < t.length; k += 6) onFaces([[t[k], t[k + 1]], [t[k + 2], t[k + 3]], [t[k + 4], t[k + 5]]], ramp, 0, part, filter, undefined, undefined, over);
       if (part.ramps.length) loose.push({ rank: COVER_RANK[shape.kind], out, part });
@@ -1098,7 +1107,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     let cl = pts.map((p) => p.c), half: number | number[] = look.half, segs: VertexAttr[] | undefined;
     if (look.rail) segs = trackSegs(pts);
     else if (look.marks) {
-      const p = painted(line, pts, look.half, look.marks, net, junctionGap);
+      const p = painted(line, pts, look.half, look.marks, net, junctionGap, cover?.junctionHold);
       if (!p.c.length) return;
       cl = p.c;
       half = p.half;

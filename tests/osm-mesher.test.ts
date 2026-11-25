@@ -596,9 +596,15 @@ describe('roads and water as the terrain’s own faces', () => {
     expect(tin.loose).toBeUndefined();
     const m = buildOsmMesh({ ...opts, cover });
     // every carriageway, ballast and runway face, nothing else (no bridge here: no lifted stretch)
-    expect(m.roads.vertexCount).toBe(3 * facesOf(tin, cover, ['carriageway', 'ballast', 'runway']));
+    // but the junctions' shoulders drawn over the faces round them (an overlay, in their own colour)
+    const overlay = new Set(cover.shapes.filter((s) => s.overlay).map((s) => coverRamp(s, DEFAULT_AREA_STYLES, undefined)));
+    let over = 0;
+    for (let v = 0; v < m.roads.vertexCount; v++) if (overlay.has(m.roads.ramps[v])) over++;
+    expect(m.roads.vertexCount - over).toBe(3 * facesOf(tin, cover, ['carriageway', 'ballast', 'runway']));
     expect(m.roads.vertexCount).toBeGreaterThan(0);
-    expect(maxLiftOverTin(m.roads, tin)).toBeLessThan(1e-4);
+    // the faces on the TIN's own vertices (the overlay cut by the faces under it: on them, not on their corners)
+    const own = m.roads.vertices.filter((_, k) => !overlay.has(m.roads.ramps[Math.floor(k / 6)]));
+    expect(maxLiftOverTin({ vertices: own, vertexCount: own.length / 6 }, tin)).toBeLessThan(1e-4);
     expect(m.roadAttrs.length).toBe(m.roads.vertexCount * WINDOW_ATTR_FLOATS);
   });
 
@@ -764,11 +770,12 @@ describe('roads and water as the terrain’s own faces', () => {
     // and for its bridge's slab and parapets, level across as its deck is (bridge-mesher DeckRun.level)
     // and for its railway: a way of the network since (railways by the roads' rules), its ground pulled to its bed
     // and for its bridge's parapets, closed at the slab's two cut ends (4 faces: 24 vertices more)
+    // and for its roads' shoulders, narrowing with a road that narrows into its continuation (84 vertices more)
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  7665, 3587145424, 2517069178, 18234, 1319275899, 3243031021, 1357240368, 2685, 4088249153, 243433191, 570, 2770884446, 3865651733,
+  7665, 3587145424, 2517069178, 18318, 1101202010, 3220254437, 495376912, 2685, 4088249153, 243433191, 570, 2770884446, 3865651733,
   275609523, 1348067417, 3047867437, 2037975868,
 ];

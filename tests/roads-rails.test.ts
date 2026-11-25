@@ -396,16 +396,17 @@ describe('one-way splits and merges', () => {
       return zs;
     };
     // the 3.5 m primary south (+z: it heads south-east), shifted 1.75 m: its outer edge on the 7 m
-    // trunk's at +3.5; the 10.5 m link, wider than the trunk, on the trunk's line (it overlaps both sides)
+    // trunk's at +3.5; the 10.5 m link, wider than the trunk, on the trunk's line, narrowed to the
+    // trunk's width there (continuationWidth): no step out of either side
     const primary = zsOf(3.5), link = zsOf(10.5);
     expect(primary.length).toBeGreaterThan(0);
     expect(link.length).toBeGreaterThan(0);
     expect(Math.min(...primary)).toBeGreaterThan(-0.3);
     expect(Math.max(...primary)).toBeLessThan(3.5 + 0.3);
-    expect(Math.max(...link)).toBeGreaterThan(5);
-    expect(Math.min(...link)).toBeLessThan(-5);
-    expect(Math.max(...link)).toBeLessThan(5.25 + 0.3);
-    expect(Math.min(...link)).toBeGreaterThan(-5.25 - 0.3);
+    expect(Math.max(...link)).toBeGreaterThan(3);
+    expect(Math.min(...link)).toBeLessThan(-3);
+    expect(Math.max(...link)).toBeLessThan(3.5 + 0.3);
+    expect(Math.min(...link)).toBeGreaterThan(-3.5 - 0.3);
     // the trunk keeps its width up to the node (no taper to either branch)
     for (let i = 0; i < m.roads.vertexCount; i++) {
       const a = m.roadAttrs.subarray(i * WINDOW_ATTR_FLOATS, (i + 1) * WINDOW_ATTR_FLOATS);
