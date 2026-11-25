@@ -547,6 +547,7 @@ export function roadSurfaceOf(tile: Tile, data: { lines: OsmLine[]; areas: OsmAr
   const c = tileCenter(tile);
   const ky = (EARTH_R * Math.PI) / 180, kx = ky * Math.cos((c.lat * Math.PI) / 180);
   const levels = buildRoadLevels(data.lines, data.areas, ([lon, lat]) => [(lon - c.lon) * kx, -(lat - c.lat) * ky], { height: heightAt });
-  const z = Float64Array.from(net.samples, (s, i) => h[i] + levels.liftAt(net.ways[s.way].line, s.d));
-  return { net, z, dem, over: bridgeCrossings(net, data.lines) };
+  const lift = Float64Array.from(net.samples, (s) => levels.liftAt(net.ways[s.way].line, s.d));
+  const z = Float64Array.from(net.samples, (_, i) => h[i] + lift[i]);
+  return { net, z, dem, over: bridgeCrossings(net, data.lines), lift };
 }

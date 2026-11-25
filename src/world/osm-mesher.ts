@@ -17,7 +17,8 @@ import { isSeaFace } from './terrain-tin';
 import { COVER_RANK, coverRamp, cumulative, liftedJoints, liftedRuns, runPart, type CoverKind, type GroundCover } from './ground-cover';
 import { buildRoadLevels, coverLifted, LIFT_EPS_M, type RoadLevels } from './road-levels';
 import { bridgeDecks, DECK_CLEAR_M, type RoadSurface } from './road-pull';
-import { buildDecks, type DeckRun, type DeckStation } from './bridge-mesher';
+import { buildDecks, deckJoint, PARAPET_THICK_M, type JointLeg, type DeckRun, type DeckStation } from './bridge-mesher';
+
 import { lineNetwork, painted, ribbonGeom, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
 import { clipToBox, depthLevels, type LevelItem } from './depth-levels';
 import {
@@ -82,6 +83,8 @@ const LIFT_STEP_M = 10;
 const DECK_SAMPLE_M = 2;
 /** a road lifted less than this has nothing built under it */
 const DECK_MIN_LIFT_M = 0.3;
+/** the paths whose lifted stretches are built, not heaped: a footbridge's ramp or steps a deck on walls like it (bridge-mesher solid) */
+const PATH_STRUCTURE = new Set(['footway', 'path', 'cycleway', 'bridleway', 'steps', 'pedestrian']);
 /**
  * how far a ribbon reaches from its centre line, × its half width and in metres more: a mitred
  * joint (a turn no sharper than a right angle, ribbon-shapes) reaches √2 half widths out
@@ -596,9 +599,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
 
   /** bridges over what they cross and the approaches to them: near, on the TIN (road-levels.ts) */
   const plainLevels = tin && opts.detail === 'full' ? buildRoadLevels(opts.data.lines, opts.data.areas, ([lon, lat]) => enu(lon, lat)) : undefined;
-  const levels = straightDecks(plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels);
   /** with the cover: whether a way is lifted d metres along it, as the cover was cut (ground-cover.ts) */
   const coverLift = cover && plainLevels ? coverLifted(opts.roads, plainLevels, opts.roads && bridgeDecks(tile, tin!.grid, opts.roads, ([lon, lat]) => enu(lon, lat))) : undefined;
+  const levels = straightDecks(plainLevels && opts.roads ? bridgeLevels(opts.roads, plainLevels) : plainLevels);
   /** with the cover: the ends of the ways where a lifted run ends, as the cover has them (ground-cover liftedJoints) */
   const coverJoints = coverLift ? liftedJoints(opts.data.lines, enu, toLattice, coverLift) : undefined;
   /** whether a way's lift is its own height over the ground (a carriageway of the roads with heights) */
@@ -724,7 +727,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /**
    * With the roads' own heights: of the carriageways with a height (the network's ways), only the
    * bridges are lifted, to their height, over the ground left as it was under them (the approaches
-   * lie on ground pulled up to them). A lift is the bridge's height less the ground under its centre
+   * lie on ground pulled up to them; a footbridge's, NetWay.approach, are lifted like it where they
+   * climb to it). A lift is the bridge's height less the ground under its centre
    * line. Every other way (railways, paths, a road without a height) lifts as without them.
    */
   function bridgeLevels(roads: RoadSurface, plain: RoadLevels): RoadLevels & { own(line: OsmLine): boolean } {
@@ -750,7 +754,10 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       return [a.lon + (b.lon - a.lon) * t, a.lat + (b.lat - a.lat) * t, za + (zb - za) * t];
     };
     const liftOf = (k: number, d: number): number => {
-      if (!net.ways[k].bridge) return 0;
+      const w = net.ways[k];
+      if (!w.bridge) return 0;
+      // a footbridge's approach: lifted only where it is a deck (its climb: road-pull liftDecks), on the ground elsewhere
+      if (w.approach && !coverLift?.(w.line, d)) return 0;
       const [lon, lat, h] = axis(k, d);
       return Number.isFinite(h) ? h - Math.max(sampleHeight(lon, lat), 0) : 0;
     };
@@ -841,6 +848,9 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   /** with the cover a road's paint runs on to its trim at a junction's surface (ground-cover junctionNodes), as on the cover's faces */
   const junctionGap = cover ? (_line: OsmLine, at: LonLat): number | undefined => (cover.junctionNodes.has(`${at[0]},${at[1]}`) ? 0 : undefined) : undefined;
 
+  /** the footbridges' approaches of the network (NetWay.approach): decks where they climb, on the ground elsewhere */
+  const approaches = new Set<OsmLine>();
+  for (const w of opts.roads?.net.ways ?? []) if (w.approach) approaches.add(w.line);
   /** a lifted way as the bridge and embankment builder takes it: its centre line and what it looks like */
   const raisedWays: { line: OsmLine; half: number; bias: number; pts: { c: P2; e: [number, number]; d: number }[] }[] = [];
   /**
@@ -887,6 +897,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       }
       // with a height of its own (the roads', a straight deck's): the deck's height over the ground
       // under this very vertex, so it is level across however the ground under it slopes
+      // (a footbridge's approach off its decks lies on its face, as a way on the ground does;
+      // on a deck, level across, never under the face beside it: a path along a slope)
+      if (approaches.has(line)) {
+        const up = levels.liftAt(line, d);
+        return up === 0 ? 0 : Math.max(0, up + groundAlong(line, d) - groundUnder(p));
+      }
       return levelDeck(line) ? levels.liftAt(line, d) + groundAlong(line, d) - groundUnder(p) : levels.liftAt(line, d);
     };
     raisedWays.push({ line, half, bias, pts });
@@ -1389,11 +1405,67 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const p = l.points.map(([lon, lat]) => enu(lon, lat));
       return p.slice(1).map((b, i) => ({ a: p[i], b, reach: style.width / 2 + 1, tags: l.tags }));
     });
-    interface Raw { e: [number, number]; d: number; lift: number }
+    /** a lifted path (a footbridge, its ramp or steps): a structure, its decks met in mitres at its bends and nodes */
+    const structure = (line: OsmLine): boolean => !!line.tags.highway && PATH_STRUCTURE.has(line.tags.highway);
+    const liftsOf = new Map<(typeof raisedWays)[number], number[]>();
+    for (const w of raisedWays) liftsOf.set(w, w.pts.map((p) => levels.liftAt(w.line, p.d)));
+    /** whether the stretch from vertex i to j of a way has a body (buildBridges' own rule below) */
+    const built = (w: (typeof raisedWays)[number], i: number, j: number): boolean => {
+      const l = liftsOf.get(w)!;
+      if (l[i] < DECK_MIN_LIFT_M && l[j] < DECK_MIN_LIFT_M) return false;
+      // a path with the cover: only where the cover leaves it lifted (a long pavement's low stretches lie on the ground)
+      return !coverLift || !structure(w.line) || coverLift(w.line, w.pts[i].d) || coverLift(w.line, w.pts[j].d) || coverLift(w.line, (w.pts[i].d + w.pts[j].d) / 2);
+    };
+    // the structures' vertices by place (mm): where they meet
+    const nodeKey = (e: [number, number]): string => `${Math.round(e[0] * 1000)},${Math.round(e[1] * 1000)}`;
+    const atNode = new Map<string, Array<{ w: (typeof raisedWays)[number]; i: number }>>();
+    for (const w of raisedWays) {
+      if (!structure(w.line)) continue;
+      w.pts.forEach((p, i) => {
+        const k = nodeKey(p.e), list = atNode.get(k);
+        if (list) list.push({ w, i });
+        else atNode.set(k, [{ w, i }]);
+      });
+    }
+    interface Edges { l: [number, number]; r: [number, number]; li: [number, number]; ri: [number, number]; legs: number }
+    const joints = new Map<string, Map<string, Edges>>();
+    /** the deck's edges at vertex i of structure w, of its stretch towards vertex j (deckJoint of every stretch built there) */
+    const edgesAt = (w: (typeof raisedWays)[number], i: number, j: number): Edges | undefined => {
+      const key = nodeKey(w.pts[i].e);
+      let joint = joints.get(key);
+      if (!joint) {
+        joints.set(key, (joint = new Map()));
+        const legs: JointLeg[] = [], ids: string[] = [];
+        (atNode.get(key) ?? []).forEach(({ w: o, i: oi }, n) => {
+          for (const oj of [oi - 1, oi + 1]) {
+            if (oj < 0 || oj >= o.pts.length || !built(o, oi, oj)) continue;
+            const dx = o.pts[oj].e[0] - o.pts[oi].e[0], dz = o.pts[oj].e[1] - o.pts[oi].e[1], len = Math.hypot(dx, dz);
+            if (len < 1e-6) continue;
+            legs.push({ dir: [dx / len, dz / len], half: o.half });
+            ids.push(`${n}:${oj > oi ? 1 : 0}`);
+          }
+        });
+        const outer = deckJoint(w.pts[i].e, legs), inner = deckJoint(w.pts[i].e, legs, PARAPET_THICK_M);
+        (atNode.get(key) ?? []).forEach(({ w: o, i: oi }, n) => {
+          for (const fwd of [0, 1]) {
+            const q = ids.indexOf(`${n}:${fwd}`);
+            if (q < 0) continue;
+            // a stretch back along the way: its left is the way's right
+            const e: Edges = fwd
+              ? { l: outer[q].l, r: outer[q].r, li: inner[q].l, ri: inner[q].r, legs: legs.length }
+              : { l: outer[q].r, r: outer[q].l, li: inner[q].r, ri: inner[q].l, legs: legs.length };
+            joint!.set(`${raisedWays.indexOf(o)}:${oi}:${fwd}`, e);
+          }
+        });
+      }
+      return joint.get(`${raisedWays.indexOf(w)}:${i}:${j > i ? 1 : 0}`);
+    };
+    interface Raw { e: [number, number]; d: number; lift: number; edges?: Edges }
     const runs: DeckRun[] = [];
     for (const w of raisedWays) {
-      const bridge = isBridge(w.line.tags);
-      const lifts = w.pts.map((p) => levels.liftAt(w.line, p.d));
+      const path = structure(w.line);
+      const bridge = isBridge(w.line.tags) || path;
+      const lifts = liftsOf.get(w)!;
       const blocked = (x: number, z: number): boolean => others.some((o) => {
         if (o.tags === w.line.tags) return false;
         const dx = o.b[0] - o.a[0], dz = o.b[1] - o.a[1], l2 = dx * dx + dz * dz;
@@ -1414,17 +1486,23 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
               d: p.d, x, z, y: ground + w.bias * biasScale + p.lift, ground,
               groundL: groundAt(x + nx * w.half, z + nz * w.half), groundR: groundAt(x - nx * w.half, z - nz * w.half),
               nx, nz, half: w.half,
+              ...(p.edges ? { l: p.edges.l, r: p.edges.r, li: p.edges.li, ri: p.edges.ri } : {}),
             };
           });
           const m = raw[raw.length >> 1].e, ll = enuToLatLon(center, m[0], -m[1], 0);
-          runs.push({ stations, bridge, earth: groundColourAt(ll.lon, ll.lat), blocked, level: levelDeck(w.line) });
+          runs.push({
+            stations, bridge, blocked, level: levelDeck(w.line), groundAt,
+            earth: groundColourAt(ll.lon, ll.lat),
+            // a path's ramp or steps to a footbridge: built like it, on walls
+            ...(path ? { solid: !isBridge(w.line.tags), cap: true, joined: [(raw[0].edges?.legs ?? 0) >= 2, (raw[raw.length - 1].edges?.legs ?? 0) >= 2] as [boolean, boolean] } : {}),
+          });
         }
         cur = [];
       };
       for (let i = 0; i + 1 < w.pts.length; i++) {
         const a = w.pts[i], b = w.pts[i + 1];
         // from the vertex before the lift passes DECK_MIN_LIFT_M: no lifted stretch without a body
-        if (lifts[i] < DECK_MIN_LIFT_M && lifts[i + 1] < DECK_MIN_LIFT_M) { flush(); continue; }
+        if (!built(w, i, i + 1)) { flush(); continue; }
         // this tile's part of the segment (Liang–Barsky on the lattice square)
         let t0 = 0, t1 = 1, inside = true;
         const dx = b.c[0] - a.c[0], dy = b.c[1] - a.c[1];
@@ -1435,11 +1513,18 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
           else t1 = Math.min(t1, r);
         }
         if (!inside || t0 >= t1) { flush(); continue; }
-        const at = (t: number): Raw => ({ e: [a.e[0] + (b.e[0] - a.e[0]) * t, a.e[1] + (b.e[1] - a.e[1]) * t], d: a.d + (b.d - a.d) * t, lift: lifts[i] + (lifts[i + 1] - lifts[i]) * t });
-        if (t0 > 0) flush();
-        if (!cur.length) cur.push(at(t0));
-        cur.push(at(t1));
-        if (t1 < 1) flush();
+        const at = (t: number): Raw => ({
+          e: [a.e[0] + (b.e[0] - a.e[0]) * t, a.e[1] + (b.e[1] - a.e[1]) * t], d: a.d + (b.d - a.d) * t, lift: lifts[i] + (lifts[i + 1] - lifts[i]) * t,
+          // at a vertex of a structure: its edges as its joint there has them (cut by the tile: square)
+          edges: !path ? undefined : t === 0 ? edgesAt(w, i, i + 1) : t === 1 ? edgesAt(w, i + 1, i) : undefined,
+        });
+        const from = at(t0);
+        // more than two stretches meet at this vertex: each a run of its own, ended at the node
+        if (t0 > 0 || (from.edges?.legs ?? 0) > 2) flush();
+        if (!cur.length) cur.push(from);
+        const to = at(t1);
+        cur.push(to);
+        if (t1 < 1 || (to.edges?.legs ?? 0) > 2) flush();
       }
       flush();
     }

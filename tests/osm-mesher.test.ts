@@ -763,11 +763,12 @@ describe('roads and water as the terrain’s own faces', () => {
     // and for its relief: the z14 isolines every 25 m, to 0.1 cell, not inscribed (Z14_RELIEF)
     // and for its bridge's slab and parapets, level across as its deck is (bridge-mesher DeckRun.level)
     // and for its railway: a way of the network since (railways by the roads' rules), its ground pulled to its bed
+    // and for its bridge's parapets, closed at the slab's two cut ends (4 faces: 24 vertices more)
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
-  7665, 3587145424, 2517069178, 18234, 1319275899, 3243031021, 1357240368, 2685, 4088249153, 243433191, 546, 3628067213, 1187553749,
+  7665, 3587145424, 2517069178, 18234, 1319275899, 3243031021, 1357240368, 2685, 4088249153, 243433191, 570, 2770884446, 3865651733,
   275609523, 1348067417, 3047867437, 2037975868,
 ];

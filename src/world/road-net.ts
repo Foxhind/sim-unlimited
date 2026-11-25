@@ -28,6 +28,14 @@ export interface NetWay {
    */
   weight: number;
   bridge: boolean;
+  /**
+   * an urban path (not tagged a bridge) from a footbridge's end, its ramp or steps: a structure like
+   * the bridge (`bridge` set too): where it lies over the ground a deck on walls, the ground under
+   * it left as it was (pulled up to it, a wall 6 m high in a heightfield was a ragged bank). Only
+   * where the bridge's lift holds it over the ground is it a deck (road-pull liftDecks): the rest
+   * of a long pavement is a way on the ground like any
+   */
+  approach?: boolean;
   /** a tunnel, or a waterway in a culvert: pulls nothing */
   tunnel: boolean;
   /** a river, canal or stream: its bed is the water */
@@ -107,6 +115,12 @@ export const WATER_DEPTH_M: Readonly<Record<string, number>> = { river: 2.5, can
 /** below every road: a ford is the road's surface */
 const WATER_PRIO = -1;
 
+/**
+ * a footbridge's approaches: the urban paths this near its ends along the paths, metres (no lift
+ * reaches further along the ways: road-levels LIFT_REACH_M)
+ */
+export const APPROACH_REACH_M = 90;
+
 /** pull band beyond the bed by class, metres */
 function bandOf(highway: string): number {
   const cls = highway.replace(/_link$/, '');
@@ -135,6 +149,42 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
     next[i].push([j, m]);
     next[j].push([i, m]);
   };
+  // The approaches to the urban paths' bridges: the urban paths within APPROACH_REACH_M of a
+  // footbridge's end along the paths (one way after another: a ramp mapped in pieces). `from`: per
+  // node the metres to the nearest such end
+  const pathLines = lines.filter((l) => isUrbanPath(l.tags) && l.points.length >= 2);
+  const tagged = (l: OsmLine): boolean => !!l.tags.bridge && l.tags.bridge !== 'no';
+  const from = new Map<string, number>();
+  const keyOf = (p: readonly [number, number]): string => `${p[0]},${p[1]}`;
+  {
+    const adj = new Map<string, Array<[string, number]>>();
+    for (const l of pathLines) {
+      if (tagged(l)) {
+        for (const p of [l.points[0], l.points[l.points.length - 1]]) from.set(keyOf(p), 0);
+        continue;
+      }
+      if (isTunnel(l.tags)) continue;
+      for (let i = 1; i < l.points.length; i++) {
+        const a = keyOf(l.points[i - 1]), b = keyOf(l.points[i]);
+        const m = metresBetween(l.points[i - 1][0], l.points[i - 1][1], l.points[i][0], l.points[i][1]);
+        (adj.get(a) ?? adj.set(a, []).get(a)!).push([b, m]);
+        (adj.get(b) ?? adj.set(b, []).get(b)!).push([a, m]);
+      }
+    }
+    // few nodes within reach of a bridge: a plain scan for the nearest
+    const open = new Set(from.keys());
+    while (open.size) {
+      let k = '', best = Infinity;
+      for (const o of open) if (from.get(o)! < best) { best = from.get(o)!; k = o; }
+      open.delete(k);
+      for (const [o, m] of adj.get(k) ?? []) {
+        const d = best + m;
+        if (d < APPROACH_REACH_M && d < (from.get(o) ?? Infinity)) { from.set(o, d); open.add(o); }
+      }
+    }
+  }
+  /** whether an urban path (not a bridge or a tunnel itself) has a node within that reach */
+  const approachOf = (l: OsmLine): boolean => from.size > 0 && isUrbanPath(l.tags) && !tagged(l) && !isTunnel(l.tags) && l.points.some((p) => from.has(keyOf(p)));
   for (const line of lines) {
     const water = isWaterWay(line.tags);
     const rail = !water && isRailWay(line.tags);
@@ -171,13 +221,15 @@ export function buildRoadNet(lines: ReadonlyArray<OsmLine>): RoadNet {
       continue;
     }
     const style = classifyLine(line.tags)!;
+    const approach = !rail && approachOf(line);
     ways.push({
       line,
       prio: rail ? RAIL_PRIO : roadPriority(line.tags, style.width),
       half: style.width / 2 + (style.shoulder ?? 0),
       band: rail ? RAIL_BAND_M : bandOf(line.tags.highway),
       weight: rail ? RAIL_WEIGHT : (roadClassWidth(line.tags.highway) ?? style.width) ** 3,
-      bridge: !!line.tags.bridge && line.tags.bridge !== 'no',
+      bridge: approach || (!!line.tags.bridge && line.tags.bridge !== 'no'),
+      ...(approach ? { approach } : {}),
       tunnel: isTunnel(line.tags),
       water: false,
       depth: 0,

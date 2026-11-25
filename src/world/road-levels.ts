@@ -511,18 +511,21 @@ export type Lifted = ((line: OsmLine, d: number) => boolean) & { probes?: (line:
 export function coverLifted(roads: RoadSurface | undefined, plain: RoadLevels, decks?: ReadonlyMap<OsmLine, ReadonlyArray<[number, number]>>): Lifted {
   /** the network's ways with heights: whether each is a bridge */
   const own = new Map<OsmLine, boolean>();
+  /** a footbridge's approaches (NetWay.approach): lifted only where a deck (never whole, without the decks) */
+  const approaches = new Set<OsmLine>();
   if (roads) {
     const { net, z } = roads;
     net.ways.forEach((w) => {
       for (let i = w.first; i < w.first + w.count; i++) if (!Number.isFinite(z[i])) return;
       own.set(w.line, w.bridge);
+      if (w.approach) approaches.add(w.line);
     });
   }
   const lifted: Lifted = (line, d) => {
     const bridge = own.get(line);
     if (bridge === undefined) return plain.liftAt(line, d) >= LIFT_EPS_M;
     const runs = bridge ? decks?.get(line) : undefined;
-    return runs ? runs.some(([a, b]) => d >= a && d <= b) : bridge;
+    return runs ? runs.some(([a, b]) => d >= a && d <= b) : bridge && !approaches.has(line);
   };
   // a deck's stretch may be shorter than a probe's step: its ends, and a hair outside them
   lifted.probes = (line) => (own.get(line) ? decks?.get(line) ?? [] : []).flatMap(([a, b]) => [a - 1e-3, a, b, b + 1e-3]);

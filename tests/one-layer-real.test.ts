@@ -180,7 +180,12 @@ describe('what the vertex budget drops on a real dense tile (Innsbruck 14/8710/5
     // the budget drops the juniors first: every way left to its ribbon is junior to every road, railway and runway in the faces
     // (to a sliver along a face's edge, its centre found on the neighbour: under 2 cm² in all; 1.3
     // since the railways' beds are pulled as the roads' are)
-    for (const m of ['main', 'roads', 'water'] as const) expect([m, on(m, ['runway', 'ballast', 'carriageway']) < 2e-4]).toEqual([m, true]);
+    for (const m of ['main', 'water'] as const) expect([m, on(m, ['runway', 'ballast', 'carriageway']) < 2e-4]).toEqual([m, true]);
+    // the roads' too, but the low corners of a deck's pieces: a piece lifted JUNCTION_LIFT_M or more
+    // on average over a street's face is drawn whole (osm-mesher underSenior), its triangle at the
+    // low end under that — where a footbridge's ramp, a deck since (NetWay.approach), comes down by
+    // a street (Herzog-Siegmund-Ufer, the Innbrücke): 0.65 m² in all
+    expect(on('roads', ['runway', 'ballast', 'carriageway'])).toBeLessThan(1);
     // the right-of-way strips and the areas (the drape) are junior to a shoulder, a path and the water; the water to the first two
     expect(on('main', ['shoulder', 'path', 'water'])).toBeLessThan(1e-4);
     expect(on('water', ['shoulder', 'path'])).toBeLessThan(1e-4);

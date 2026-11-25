@@ -28,6 +28,12 @@ export interface RoadSurface {
   dem?: ArrayLike<number>;
   /** per way (its index), a bridge's stretches over a mapped way it crosses (bridgeCrossings), the network's metres along it */
   over?: ReadonlyArray<ReadonlyArray<[number, number]>>;
+  /**
+   * the lift in each sample's height (road-levels: what a bridge over what it crosses adds to H,
+   * falling along the ways from it): a footbridge's approach (NetWay.approach) is a deck only where
+   * it has one; without it, nowhere
+   */
+  lift?: ArrayLike<number>;
 }
 
 export interface RoadPull {
@@ -183,7 +189,8 @@ export function bridgeCrossings(net: RoadNet, lines: ReadonlyArray<OsmLine>): Ar
     return [{ l, half: style.width / 2 + (style.shoulder ?? 0), box: boxOf(l) }];
   });
   net.ways.forEach((w, wi) => {
-    if (!w.bridge || w.count < 2) return;
+    // (not a footbridge's approach: a path on the ground further along, crossing what it crosses there)
+    if (!w.bridge || w.approach || w.count < 2) return;
     const pts = w.line.points, own = keysOf(w.line);
     const [lon0, lat0] = pts[0], ky = (EARTH_R * Math.PI) / 180, kx = ky * Math.cos((lat0 * Math.PI) / 180);
     const plane = ([lon, lat]: LonLat): [number, number] => [(lon - lon0) * kx, (lat - lat0) * ky];
@@ -274,7 +281,8 @@ export function bridgeDecks(tile: Tile, grid: number, roads: RoadSurface, enu: (
 export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, covered = false): RoadPull {
   const { net } = roads;
   /** the ways: the network's, and after them the low stretches of its bridges (covered: liftDecks) */
-  const ways: NetWay[] = [...net.ways];
+  // (without the covers no deck is told from a low stretch: a footbridge's approach is a way on the ground, pulling it)
+  const ways: NetWay[] = covered ? [...net.ways] : net.ways.map((w) => (w.approach ? { ...w, bridge: false } : w));
   /** each sample's height (the low stretches' after the network's) */
   let z: Float64Array = roads.z;
   const n = 2 ** tile.z;
@@ -456,7 +464,8 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
   net.samples.forEach((_, k) => {
     for (const [o, m] of net.next[k]) {
       const w = ways[net.samples[o].way];
-      if (m === 0 && (w.bridge || w.tunnel)) atStructure[k] = 1;
+      // (an approach of a footbridge: only where it is lifted, not all along a long pavement)
+      if (m === 0 && (w.bridge || w.tunnel) && (!w.approach || (roads.lift?.[o] ?? 0) >= DECK_CLEAR_M)) atStructure[k] = 1;
     }
   });
   /** per way: its ends at a structure — the end point and the unit direction out of the way there */
@@ -921,9 +930,14 @@ export function buildRoadPull(tile: Tile, grid: number, roads: RoadSurface, cove
       // that has it): the pulled ground under it, and the tile's view of it, differ from tile to tile
       // and so would its low stretches, which pull
       const over = roads.over?.[wi] ?? [];
+      const lift = roads.lift;
       const lifted = (d: number): boolean => {
         if (over.some(([a, b]) => d >= a && d <= b)) return true;
         const { i, t } = along(first, last, d);
+        // a footbridge's approach: only where the bridge's lift holds it up, DECK_CLEAR_M or more (a
+        // long pavement's height lies over the raw DEM here and there by itself: the window along
+        // it, a slope; there the ground is pulled up to it, as under any way)
+        if (w.approach && !(lift && lift[i] + (lift[i + 1] - lift[i]) * t >= DECK_CLEAR_M)) return false;
         return z[i] + (z[i + 1] - z[i]) * t - (dem[i] + (dem[i + 1] - dem[i]) * t) >= DECK_CLEAR_M;
       };
       const runs: Array<[number, number]> = [];
