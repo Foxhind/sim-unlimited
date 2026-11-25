@@ -289,6 +289,13 @@ export function footprintHeight(outer: XZ[]): number {
   return Math.max(MIN_FOOTPRINT_HEIGHT_M, (maxX - minX + (maxZ - minZ)) / 2);
 }
 
+/**
+ * A building=yes or building=residential with neither `height` nor `building:levels` and a footprint
+ * under MAX_AREA_M2 is an outbuilding (a shed, a summer kitchen, a garage): one storey, WALL_M of
+ * facade, under a flat roof — not two floors under a hipped roof, nor the mean bbox side (footprintHeight).
+ */
+export const OUTBUILDING = { MAX_AREA_M2: 60, WALL_M: LEVEL_M } as const;
+
 /** building values that get a hipped roof by default when low-rise */
 const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
 /** a footprint larger than this (m²) keeps the flat default roof: a hipped roof over it would tower over the walls */
@@ -297,7 +304,8 @@ export const HIPPED_DEFAULT_MAX_AREA_M2 = 1000;
 /**
  * The tags a building is drawn with: OSM tags plus the defaults it lacks. A building=residential
  * without `height` and `building:levels` has the footprint height as its facade (FOOTPRINT_WALL_TAG;
- * the roof goes on top); others get DEFAULT_LEVELS in computeHeights. Without `roof:shape`, a low-rise
+ * the roof goes on top); a small one of either (OUTBUILDING) is a one-storey outbuilding under a flat
+ * roof; others get DEFAULT_LEVELS in computeHeights. Without `roof:shape`, a low-rise
  * building=yes or building=residential (facade from height, else building:levels × 3 m, else the
  * default, up to 12 m) with a footprint up to HIPPED_DEFAULT_MAX_AREA_M2 gets a `hipped` roof; larger
  * footprints, every other type and building:part areas stay flat.
@@ -305,13 +313,18 @@ export const HIPPED_DEFAULT_MAX_AREA_M2 = 1000;
 export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | undefined): Record<string, string> {
   const out = { ...tags };
   const levels = parseLength(tags['building:levels']);
-  if (tags.building === 'residential' && parseLength(tags.height) === undefined && levels === undefined && outer && outer.length >= 3) {
+  const area = outer && outer.length >= 3 ? Math.abs(ringAreaXZ(outer)) : undefined;
+  const isPart = isBuildingPart(tags);
+  const untold = parseLength(tags.height) === undefined && levels === undefined;
+  if (untold && !isPart && area !== undefined && area < OUTBUILDING.MAX_AREA_M2 && HIPPED_DEFAULT_TYPES.has(tags.building)) {
+    out[FOOTPRINT_WALL_TAG] = String(OUTBUILDING.WALL_M);
+    if (tags['roof:shape'] === undefined) out['roof:shape'] = 'flat';
+  } else if (tags.building === 'residential' && untold && outer && outer.length >= 3) {
     out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
   }
-  if (outer && outer.length >= 3 && Math.abs(ringAreaXZ(outer)) < FACADE_ZONES.BOOTH_MAX_AREA_M2) out[BOOTH_TAG] = 'yes';
-  const isPart = isBuildingPart(tags);
-  const small = !outer || Math.abs(ringAreaXZ(outer)) <= HIPPED_DEFAULT_MAX_AREA_M2;
-  if (tags['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
+  if (area !== undefined && area < FACADE_ZONES.BOOTH_MAX_AREA_M2) out[BOOTH_TAG] = 'yes';
+  const small = area === undefined || area <= HIPPED_DEFAULT_MAX_AREA_M2;
+  if (out['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
     const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
       ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
     if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = 'hipped';

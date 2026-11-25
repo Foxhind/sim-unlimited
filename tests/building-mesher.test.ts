@@ -91,6 +91,21 @@ describe('default height and roof', () => {
     expect(buildingHeights(yes).roof).toBeGreaterThan(0);
   });
 
+  it('a small yes/residential without height/levels is a one-storey outbuilding under a flat roof', () => {
+    const shed = rect(0.00004, 0.00003); // ~ 40 m², over a booth (BOOTH_MAX_AREA_M2), under OUTBUILDING
+    for (const building of ['yes', 'residential']) {
+      const b: OsmBuilding = { rings: [shed], tags: { building } };
+      expect(buildingTags(b)['roof:shape']).toBe('flat');
+      expect(buildingTags(b)[BOOTH_TAG]).toBeUndefined();
+      expect(buildingHeights(b)).toMatchObject({ min: 0, wall: 3, roof: 0 });
+    }
+    // OSM levels, height or roof shape win; other types and the ~ 80 m² house keep their defaults
+    expect(buildingHeights({ rings: [shed], tags: { building: 'yes', 'building:levels': '2' } }).wall).toBeCloseTo(7, 6);
+    expect(buildingTags({ rings: [shed], tags: { building: 'yes', 'roof:shape': 'gabled' } })['roof:shape']).toBe('gabled');
+    expect(buildingHeights({ rings: [shed], tags: { building: 'house' } }).wall).toBe(8.5);
+    expect(buildingTags({ rings: [rect(0.00005, 0.00004)], tags: { building: 'yes' } })['roof:shape']).toBe('hipped');
+  });
+
   it('default hipped only for low-rise yes/residential; OSM tags, other types and parts stay as they are', () => {
     const ring = rect(0.00005, 0.00004);
     const roof = (tags: Record<string, string>) => buildingTags({ rings: [ring], tags })['roof:shape'];
@@ -267,7 +282,7 @@ describe('facade zones', () => {
     const booth = { rings: [rect(0.00002, 0.00002)], tags: { building: 'yes' } }; // ~ 2.5 × 4.5 m
     expect(buildingTags(booth)[BOOTH_TAG]).toBe('yes');
     expect(facade(build([booth]))).toHaveLength(0);
-    expect(buildingHeights(booth).wall).toBe(6);
+    expect(buildingHeights(booth).wall).toBe(3); // a booth of building=yes is an outbuilding (OUTBUILDING)
   });
 });
 
