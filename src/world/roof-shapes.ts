@@ -9,6 +9,9 @@
  * walls up to the same field, so gable ends close by themselves.
  */
 
+import earcut from 'earcut';
+import { straightSkeleton, type Skeleton } from './straight-skeleton';
+
 export type XZ = [number, number];
 /** a world plane y = a·x + b·z + c (height above the eaves) */
 export type Plane = [number, number, number];
@@ -41,7 +44,17 @@ export interface FanRoof {
   kind: 'fan';
 }
 
-export type RoofModel = PlanarRoof | RadialRoof | FanRoof | { kind: 'flat' };
+/** a roof over the straight skeleton of the footprint: triangles in plan with heights above the eaves */
+export interface MeshRoof {
+  kind: 'mesh';
+  /** [x, height, z] per corner */
+  tris: [number, number, number][][];
+  /** points on the footprint's outline where the roof's edge bends (the tops of gables) */
+  breaks: XZ[];
+  field: (p: XZ) => number;
+}
+
+export type RoofModel = PlanarRoof | RadialRoof | FanRoof | MeshRoof | { kind: 'flat' };
 
 /** roof:shape values drawn with a ridge (frame along the long side) */
 const RIDGED = new Set([
@@ -378,4 +391,133 @@ export function crossings(p: XZ, q: XZ, lines: Plane[]): number[] {
   ts.sort((a, b) => a - b);
   const len = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
   return ts.filter((t, i) => t * len > SAME_POINT && (1 - t) * len > SAME_POINT && (i === 0 || (t - ts[i - 1]) * len > SAME_POINT));
+}
+
+/** roofs built on the straight skeleton where the footprint is not a plain rectangle */
+const SKELETAL = new Set(['hipped', 'gabled']);
+
+function ringArea(r: XZ[]): number {
+  let s = 0;
+  for (let i = 0; i < r.length; i++) {
+    const p = r[i], q = r[(i + 1) % r.length];
+    s += p[0] * q[1] - q[0] * p[1];
+  }
+  return Math.abs(s / 2);
+}
+
+/**
+ * The straight skeleton a hipped or gabled roof follows, where the footprint has a courtyard or is
+ * not close to its bounding rectangle (an L, a T, a bend): there one ridge along the long side runs
+ * off the building. Rectangles keep the min/max planes (and roof:direction / roof:orientation).
+ */
+export function roofSkeleton(shape: string, frame: RoofFrame, outer: XZ[], holes: XZ[][]): Skeleton | undefined {
+  if (!SKELETAL.has(shape)) return undefined;
+  const fill = ringArea(outer) / (4 * frame.halfU * frame.halfV);
+  if (!holes.length && fill > 0.97) return undefined;
+  return straightSkeleton([outer, ...holes]);
+}
+
+/**
+ * The roof over a skeleton, `H` high at its top: every face a plane through its edge (hipped). A
+ * gabled roof turns the triangular end faces whose apex starts a ridge across the edge into gables:
+ * the apex moves out over the edge (at the same height), the wall below rises to it.
+ */
+export function skeletonRoof(sk: Skeleton, shape: string, H: number): MeshRoof | undefined {
+  if (sk.tMax < 1e-3) return undefined;
+  const slope = H / sk.tMax;
+  const at = sk.nodes.map((n) => [n.p[0], n.p[1]] as XZ);
+  const breaks: XZ[] = [];
+  if (shape === 'gabled') {
+    // the skeleton's links between nodes, footprint edges left out
+    const links = new Map<number, Set<number>>();
+    const link = (a: number, b: number) => {
+      if (!links.has(a)) links.set(a, new Set());
+      links.get(a)!.add(b);
+    };
+    sk.faces.forEach((f) => {
+      for (let i = 1; i < f.length; i++) {
+        const a = f[i], b = f[(i + 1) % f.length];
+        link(a, b);
+        link(b, a);
+      }
+    });
+    const moved = new Set<number>();
+    sk.faces.forEach((f, e) => {
+      if (f.length !== 3) return;
+      const [a, b, x] = f;
+      if (moved.has(x) || sk.nodes[x].t < 1e-6) return;
+      const others = [...(links.get(x) ?? [])].filter((k) => k !== a && k !== b);
+      if (others.length !== 1) return;
+      const r: XZ = [sk.nodes[others[0]].p[0] - sk.nodes[x].p[0], sk.nodes[others[0]].p[1] - sk.nodes[x].p[1]];
+      const len = Math.hypot(r[0], r[1]);
+      const { d, n, c } = sk.edges[e];
+      if (len < 1e-6 || Math.abs((r[0] * d[0] + r[1] * d[1]) / len) > 0.35) return;
+      const p = sk.nodes[x].p, dist = n[0] * p[0] + n[1] * p[1] - c;
+      at[x] = [p[0] - n[0] * dist, p[1] - n[1] * dist];
+      moved.add(x);
+      breaks.push(at[x]);
+    });
+  }
+  const tris: [number, number, number][][] = [];
+  for (const f of sk.faces) {
+    const poly = f.map((i) => at[i]);
+    if (ringArea(poly) < 1e-4) continue;
+    const idx = earcut(poly.flat(), undefined, 2);
+    for (let k = 0; k < idx.length; k += 3) {
+      tris.push([idx[k], idx[k + 1], idx[k + 2]].map((j) => [poly[j][0], slope * sk.nodes[f[j]].t, poly[j][1]] as [number, number, number]));
+    }
+  }
+  if (!tris.length) return undefined;
+  const field = (p: XZ): number => {
+    let best = 0;
+    for (const [A, B, C] of tris) {
+      const d = (B[2] - C[2]) * (A[0] - C[0]) + (C[0] - B[0]) * (A[2] - C[2]);
+      if (Math.abs(d) < 1e-12) continue;
+      const l1 = ((B[2] - C[2]) * (p[0] - C[0]) + (C[0] - B[0]) * (p[1] - C[2])) / d;
+      const l2 = ((C[2] - A[2]) * (p[0] - C[0]) + (A[0] - C[0]) * (p[1] - C[2])) / d;
+      const l3 = 1 - l1 - l2;
+      const tol = 1e-4 / Math.sqrt(Math.abs(d));
+      if (l1 < -tol || l2 < -tol || l3 < -tol) continue;
+      best = Math.max(best, l1 * A[1] + l2 * B[1] + l3 * C[1]);
+    }
+    return best;
+  };
+  return { kind: 'mesh', tris, breaks, field };
+}
+
+/** where a wall p→q is broken under the roof, as sorted parameters strictly inside (0, 1) */
+export function roofBreaks(roof: RoofModel, creases: Plane[], p: XZ, q: XZ): number[] {
+  if (roof.kind !== 'mesh') return crossings(p, q, creases);
+  const dx = q[0] - p[0], dz = q[1] - p[1], len = Math.hypot(dx, dz) || 1;
+  const ts: number[] = [];
+  for (const b of roof.breaks) {
+    const t = ((b[0] - p[0]) * dx + (b[1] - p[1]) * dz) / (len * len);
+    const off = Math.abs((b[0] - p[0]) * dz - (b[1] - p[1]) * dx) / len;
+    if (off < ON_LINE && t * len > SAME_POINT && (1 - t) * len > SAME_POINT) ts.push(t);
+  }
+  return ts.sort((a, b) => a - b);
+}
+
+/** the roof's height above the eaves at a point (0 off a sloped roof) */
+export function roofField(roof: RoofModel): (p: XZ) => number {
+  return roof.kind === 'planar' || roof.kind === 'mesh' ? roof.field : () => 0;
+}
+
+/** where a segment p→q inside the footprint crosses the edges of a mesh roof's triangles, sorted in (0, 1) */
+export function meshCrossings(roof: MeshRoof, p: XZ, q: XZ): number[] {
+  const rx = q[0] - p[0], rz = q[1] - p[1], len = Math.hypot(rx, rz) || 1;
+  const ts: number[] = [];
+  for (const tri of roof.tris) {
+    for (let k = 0; k < 3; k++) {
+      const a = tri[k], b = tri[(k + 1) % 3];
+      const sx = b[0] - a[0], sz = b[2] - a[2];
+      const den = rx * sz - rz * sx;
+      if (Math.abs(den) < 1e-12) continue;
+      const t = ((a[0] - p[0]) * sz - (a[2] - p[1]) * sx) / den;
+      const u = ((a[0] - p[0]) * rz - (a[2] - p[1]) * rx) / den;
+      if (u >= -1e-9 && u <= 1 + 1e-9 && t * len > SAME_POINT && (1 - t) * len > SAME_POINT) ts.push(t);
+    }
+  }
+  ts.sort((a, b) => a - b);
+  return ts.filter((t, i) => i === 0 || (t - ts[i - 1]) * len > SAME_POINT);
 }

@@ -5,7 +5,7 @@ import type { LonLat, OsmBuilding, OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
-import { crossings, roofCreases, roofFrame, roofModel, roofRun, roofShape, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
+import { crossings, meshCrossings, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 import { KindRuns, structureKind } from './structure-kinds';
 
 /** floats per vertex of BuildingMeshData.windows */
@@ -378,9 +378,11 @@ export function buildingHeights(b: OsmBuilding): { min: number; wall: number; ro
   const tags = buildingTags(b);
   const ring = b.rings[0];
   if (!ring || ring.length < 3 || roofShape(tags) === 'flat') return computeHeights(tags);
-  const outer = localXZ(ring);
+  const outer = normalizeRing(dedupe(localXZ(ring)), true);
+  const holes = b.rings.slice(1).map((r) => normalizeRing(dedupe(localXZ(r)), false)).filter((r) => r.length >= 3);
   const shape = roofShape(tags);
-  return computeHeights(tags, roofRun(shape, roofFrame(outer, tags)));
+  const frame = roofFrame(outer, tags);
+  return computeHeights(tags, roofSkeleton(shape, frame, outer, holes)?.tMax ?? roofRun(shape, frame));
 }
 
 /** typical colour of an OSM material value (building:material / roof:material) */
@@ -767,13 +769,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const { base, low } = buildingFooting(outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
     const shape = roofShape(tags);
     const frame = roofFrame(outer, tags);
-    const h = computeHeights(tags, roofRun(shape, frame));
+    // an L, a T or a courtyard: the roof follows the footprint's straight skeleton
+    const skeleton = roofSkeleton(shape, frame, outer, holes);
+    const h = computeHeights(tags, skeleton?.tMax ?? roofRun(shape, frame));
     const wallBase = base + h.min;
     const wallTop = wallBase + h.wall;
     const wRamp = wallRamp(tags, buildingSeed(outerLL));
     const rRamp = roofRamp(tags, buildingSeed(outerLL), outerLL[0][1]);
     const isCanopy = tags.building === 'roof';
-    const roof = roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
+    const roof = (skeleton && skeletonRoof(skeleton, shape, h.roof)) || roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
     const centroid = areaCentroid(outer);
     coreFeet.push(core.ramps.length, centroid[0], centroid[1]);
@@ -854,6 +858,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       }
     } else if (roof.kind === 'radial') {
       radialRoof(outer, centroid, wallTop, h.roof, roof.profile, rRamp);
+    } else if (roof.kind === 'mesh') {
+      for (const t of roof.tris) emitTri([t[0][0], wallTop + t[0][1], t[0][2]], [t[1][0], wallTop + t[1][1], t[1][2]], [t[2][0], wallTop + t[2][1], t[2][2]], rRamp, true);
     } else {
       planarRoof(outer, holes, wallTop, roof.field, creases, rRamp);
     }
@@ -872,7 +878,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * every PURLIN_M, one on the ridge line. Radial and fan roofs get the walls' bars only.
    */
   function glassFrame(outer: XZ[], yBase: number, yTop: number, roof: RoofModel, creases: Plane[], rf: RoofFrame, ramp: number, centroid: XZ, canopy: boolean): void {
-    const field = roof.kind === 'planar' ? roof.field : () => 0;
+    const field = roofField(roof);
     const top = (p: XZ): number => yTop + field(p);
     const W = GREENHOUSE.BAR_M / 2, L = GREENHOUSE.LIFT_M;
     if (!canopy) {
@@ -898,7 +904,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
           wallBar([a[0], yBase, a[1]], [a[0], top(a), a[1]], [c[0], top(c), c[1]], [c[0], yBase, c[1]]);
         }
         // the beam along the top, broken where the roof bends over the edge
-        const ts = [0, ...crossings(p, q, creases), 1];
+        const ts = [0, ...roofBreaks(roof, creases, p, q), 1];
         for (let k = 0; k + 1 < ts.length; k++) {
           const a = at(ts[k], 0), c = at(ts[k + 1], 0);
           const ya = top(a), yc = top(c);
@@ -906,13 +912,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
         }
       }
     }
-    if (roof.kind !== 'planar' && roof.kind !== 'flat') return;
+    if (roof.kind !== 'planar' && roof.kind !== 'flat' && roof.kind !== 'mesh') return;
     // bars on the roof: along `dir` through `origin`, where the line is inside the footprint
     const bar = (origin: XZ, dir: XZ, side: XZ): void => {
       for (const [t0, t1] of lineInside(origin, dir, outer)) {
         const p: XZ = [origin[0] + dir[0] * t0, origin[1] + dir[1] * t0];
         const q: XZ = [origin[0] + dir[0] * t1, origin[1] + dir[1] * t1];
-        const ts = [0, ...crossings(p, q, creases), 1];
+        const ts = [0, ...(roof.kind === 'mesh' ? meshCrossings(roof, p, q) : crossings(p, q, creases)), 1];
         for (let k = 0; k + 1 < ts.length; k++) {
           const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
           const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
@@ -946,8 +952,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   function wallUnderRoof(
     p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number,
   ): void {
-    const field = roof.kind === 'planar' ? roof.field : () => 0;
-    const ts = [0, ...crossings(p, q, creases), 1];
+    const field = roofField(roof);
+    const ts = [0, ...roofBreaks(roof, creases, p, q), 1];
     const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
     const wallH = len >= WINDOWS.MIN_EDGE_M ? windowH : 0;
     // stable across rebuilds: from the edge's start in tile-centre ENU; the code is an integer below 2^24, exact in a float

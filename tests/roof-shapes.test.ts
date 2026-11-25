@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import { buildBuildingMesh, computeHeights } from '../src/world/building-mesher';
-import { roofDirection, roofFrame, roofModel, roofShape, type XZ } from '../src/world/roof-shapes';
+import { roofDirection, roofFrame, roofModel, roofShape, roofSkeleton, skeletonRoof, type XZ } from '../src/world/roof-shapes';
 import type { OsmBuilding } from '../src/world/osm-types';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
@@ -157,5 +157,42 @@ describe('roof shapes (S3DB)', () => {
         expect(ny).toBeGreaterThan(0);
       }
     }
+  });
+
+  describe('on the straight skeleton', () => {
+    const BRACKET = ring([[0, 0], [30, 0], [30, 12], [12, 12], [12, 68], [30, 68], [30, 80], [0, 80]]);
+    const YARD = ring([[-20, -15], [20, -15], [20, 15], [-20, 15]]);
+    const YARD_IN = ring([[-10, -5], [10, -5], [10, 5], [-10, 5]]).reverse();
+
+    it('a rectangle keeps its planes; an L, a [ and a courtyard follow the skeleton', () => {
+      const rect: XZ[] = [[-12, -5], [12, -5], [12, 5], [-12, 5]];
+      expect(roofSkeleton('hipped', roofFrame(rect, {}), rect, [])).toBeUndefined();
+      const ell: XZ[] = [[-12, -5], [12, -5], [12, 15], [2, 15], [2, 5], [-12, 5]];
+      const sk = roofSkeleton('hipped', roofFrame(ell, {}), ell, []);
+      // the ridges run down the middle of the 10 m wide arms, not of the bounding box
+      expect(sk?.tMax).toBeCloseTo(5, 6);
+      expect(roofSkeleton('gambrel', roofFrame(ell, {}), ell, [])).toBeUndefined();
+    });
+
+    it.each(['hipped', 'gabled'])('%s closes the shell and tops out at height', (shape) => {
+      for (const rings of [[ELL], [BRACKET], [YARD, YARD_IN]]) {
+        const m = mesh([{ rings, tags: { building: 'yes', height: '14', 'roof:shape': shape, 'roof:height': '4' } }]);
+        for (let i = 0; i < m.vertices.length; i++) expect(Number.isFinite(m.vertices[i])).toBe(true);
+        expect(openEdges(m)).toBe(0);
+        expect(maxY(m)).toBeCloseTo(GROUND + 14, 1);
+      }
+    });
+
+    it('a gabled L gets a gable at the end of each arm, the corner stays hipped', () => {
+      const ell: XZ[] = [[-12, -5], [12, -5], [12, 15], [2, 15], [2, 5], [-12, 5]];
+      const roof = skeletonRoof(roofSkeleton('gabled', roofFrame(ell, {}), ell, [])!, 'gabled', 4)!;
+      const tops = roof.breaks.map(([x, z]) => [Math.round(x * 1e3) / 1e3, Math.round(z * 1e3) / 1e3]).sort((a, b) => a[0] - b[0]);
+      expect(tops).toEqual([[-12, 0], [7, 15]]);
+      expect(roof.field([-12, 0])).toBeCloseTo(4, 6);
+      expect(roof.field([12, -5])).toBeCloseTo(0, 6);
+      const hip = skeletonRoof(roofSkeleton('hipped', roofFrame(ell, {}), ell, [])!, 'hipped', 4)!;
+      expect(hip.breaks).toEqual([]);
+      expect(hip.field([-12, 0])).toBeCloseTo(0, 6);
+    });
   });
 });
