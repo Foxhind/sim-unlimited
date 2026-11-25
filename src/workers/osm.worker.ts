@@ -375,7 +375,11 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       signals: mesh.signals.slice().buffer,
     };
     // under the raw it was built from (just fetched, or kept)
-    if (useCache) await putCachedMesh({ key: keyOf(await rawNow()), ts: Date.now(), ...out });
+    // a cache that cannot take it (the quota) fails no tile: it is built again next time
+    if (useCache) {
+      const key = keyOf(await rawNow());
+      await putCachedMesh({ key, ts: Date.now(), ...out }).catch((err) => console.warn(`[osm] ${key} not cached: ${err}`));
+    }
     send({ ...out, ...(detail === 'full' ? terrainFlags(data, lattice) : { runways: 0, coast: false }), roads: cover !== undefined });
   } catch (err) {
     const res: OsmErrorResponse = {

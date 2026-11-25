@@ -7,12 +7,17 @@ const store = new Map<string, unknown>();
 let osmJson: string | undefined;
 /** when the raw OSM was downloaded */
 let osmTs = 0;
+/** the cache refuses every write (its quota) */
+let cacheFull = false;
 
 vi.mock('../src/world/tile-cache', () => ({
   setOsmRawStamp: () => undefined,
   SCHEMA_VERSION: 69,
   getCachedMesh: async (key: string) => store.get(key),
-  putCachedMesh: async (r: { key: string }) => void store.set(r.key, r),
+  putCachedMesh: async (r: { key: string }) => {
+    if (cacheFull) throw new DOMException('quota', 'QuotaExceededError');
+    store.set(r.key, r);
+  },
   getOsmRaw: async () => (osmJson ? { key: 'raw', ts: osmTs, json: osmJson } : undefined),
 }));
 vi.mock('../src/world/terrain-source', async (orig) => ({
@@ -56,12 +61,23 @@ async function osmReply(detail: 'full' | 'large' = 'full'): Promise<{ res: Recor
 const cachedOf = (prefix: string) => [...store.entries()].find(([k]) => k.startsWith(prefix))?.[1] as Record<string, any> | undefined;
 
 beforeEach(() => {
+  cacheFull = false;
   store.clear();
   osmJson = townOverpassJson();
   osmTs = 0;
 });
 
 describe('the OSM worker with the covers', () => {
+  it('a full cache fails no tile: both workers send their meshes', async () => {
+    cacheFull = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await osmReply()).res.bVertices).toBeInstanceOf(ArrayBuffer);
+    expect(await terrainTin()).toBeDefined();
+    expect(store.size).toBe(0);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('leaves the z14 terrain mesh on its surface in the terrain\'s cache: the same bytes, no surface built again', async () => {
     osmTs = 7;
     const o = await osmReply();

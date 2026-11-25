@@ -120,7 +120,8 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       glow,
     });
     const { vertices, ramps, morph, nearCount, farCount } = terrainMeshBuffers(mesh, cover !== undefined);
-    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph, nearCount, farCount });
+    // a cache that cannot take it (the quota) fails no tile: it is built again next time
+    if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph, nearCount, farCount }).catch((err) => console.warn(`[terrain] ${key} not cached: ${err}`));
     const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph, nearCount, farCount };
     ctx.postMessage(res, [vertices, ramps, ...(morph ? [morph] : [])]);
   } catch (err) {

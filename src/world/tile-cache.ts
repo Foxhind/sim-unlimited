@@ -7,7 +7,22 @@ const META = 'meta';
 const OSM_STORE = 'osm';
 export const OSM_TTL_MS = 30 * 24 * 3600 * 1000;
 export const MAX_ENTRIES = 4000;
-export const MAX_BYTES = 1_000_000_000;
+/**
+ * The meshes' budget: half the origin's storage quota (Chrome keeps IndexedDB values compressed on
+ * disk, a mesh at about 40 % of its bytes), from MIN to MAX. A fixed gigabyte held 15 tiles of central
+ * Moscow (an OSM mesh of 45–104 MB): the first ones were evicted while the view was still loading.
+ */
+export const CACHE_BYTES = { MIN: 1e9, MAX: 8e9, QUOTA_SHARE: 0.5 } as const;
+export function cacheBudget(quota: number | undefined): number {
+  return Math.max(CACHE_BYTES.MIN, Math.min(CACHE_BYTES.MAX, (quota ?? 0) * CACHE_BYTES.QUOTA_SHARE));
+}
+let budget: Promise<number> | undefined;
+/** this origin's budget, asked once per thread */
+function meshBudget(): Promise<number> {
+  return (budget ??= Promise.resolve(globalThis.navigator?.storage?.estimate?.())
+    .then((e) => cacheBudget(e?.quota))
+    .catch(() => CACHE_BYTES.MIN));
+}
 
 export interface CachedMesh {
   key: string;
@@ -164,7 +179,7 @@ export async function putCachedMesh(mesh: CachedMesh): Promise<void> {
       }),
   );
   const all = await tx<CacheEntryMeta[]>('readonly', (s) => s.getAll(), META);
-  const evict = pickEvictions(all, MAX_ENTRIES, MAX_BYTES);
+  const evict = pickEvictions(all, MAX_ENTRIES, await meshBudget());
   if (evict.length) {
     await openDB().then(
       (db) =>

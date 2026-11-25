@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meshBytes, pickEvictions } from '../src/world/tile-cache';
+import { cacheBudget, CACHE_BYTES, meshBytes, pickEvictions } from '../src/world/tile-cache';
 
 const entries = [
   { key: 'a', ts: 300, bytes: 400 },
@@ -28,5 +28,14 @@ describe('meshBytes', () => {
     const buf = (n: number) => new ArrayBuffer(n);
     const old = { vertices: buf(8), ramps: buf(4), rVertices: buf(16), glowVertices: buf(100), glowRamps: buf(50) };
     expect(meshBytes(old)).toBe(28);
+  });
+});
+
+describe('cacheBudget', () => {
+  it('half the quota, from 1 to 8 GB', () => {
+    expect(cacheBudget(undefined)).toBe(CACHE_BYTES.MIN);
+    expect(cacheBudget(1e9)).toBe(CACHE_BYTES.MIN);
+    expect(cacheBudget(4.3e9)).toBe(2.15e9);
+    expect(cacheBudget(100e9)).toBe(CACHE_BYTES.MAX);
   });
 });
