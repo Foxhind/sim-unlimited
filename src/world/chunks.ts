@@ -1,5 +1,5 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { RequestQueue, RetryableError } from '../engine/queue';
+import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
@@ -248,14 +248,16 @@ export class ChunkManager {
   detailTiles: Tile[] = [];
   /** z14 tiles drawn this frame (terrain and OSM both ready): only these show their OSM */
   shownDetail = new Set<string>();
-  private queue = new RequestQueue(4);
+  /** two tiles in flight per worker */
+  private queue: RequestQueue;
   private workers: WorkerSlot[] = [];
   private rr = 0;
   private vp = mat4.create();
   private planes: Float32Array[] = [];
 
-  constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = 2) {
+  constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = tileWorkerCount()) {
     this.origin = origin;
+    this.queue = new RequestQueue(2 * workerCount);
     for (let i = 0; i < workerCount; i++) {
       const worker = new Worker(new URL('../workers/terrain.worker.ts', import.meta.url), { type: 'module' });
       const slot: WorkerSlot = { worker, nextId: 1, waiting: new Map() };

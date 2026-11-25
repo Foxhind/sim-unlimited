@@ -1,5 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
-import { RequestQueue, RetryableError } from '../engine/queue';
+import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
+import { osmSourceMode } from './osm-source';
 import type { Mesh, Renderer } from '../engine/renderer';
 import { must } from '../engine/gl';
 import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorld } from './chunks';
@@ -225,15 +226,18 @@ export class OsmManager {
   localHour = 12;
   private readyFired = new Set<string>();
   private origin: LatLon;
-  private queue = new RequestQueue(2);
+  /** one tile in flight per worker */
+  private queue: RequestQueue;
   private workers: WorkerSlot[] = [];
   private rr = 0;
   private vp = mat4.create();
   private planes: Float32Array[] = [];
   private treeGeometry: WebGLBuffer;
 
-  constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = 2) {
+  /** by the cores with our own tiles; 2 against a public API (Overpass, the OSM API: their rate limits) */
+  constructor(private gl: WebGL2RenderingContext, origin: LatLon, workerCount = osmSourceMode() === 'pmtiles' ? tileWorkerCount() : 2) {
     this.origin = origin;
+    this.queue = new RequestQueue(workerCount);
     this.treeGeometry = must(gl.createBuffer(), 'tree geometry');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.treeGeometry);
     gl.bufferData(gl.ARRAY_BUFFER, TREE_GEOMETRY, gl.STATIC_DRAW);

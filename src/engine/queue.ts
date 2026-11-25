@@ -18,6 +18,12 @@ interface Entry<T> {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** tile workers of a kind (terrain, OSM): half the cores, 2 to TILE_WORKERS.MAX (2 alike everywhere left a dense city centre minutes behind) */
+export const TILE_WORKERS = { MIN: 2, MAX: 4 } as const;
+export function tileWorkerCount(cores: number | undefined = globalThis.navigator?.hardwareConcurrency): number {
+  return Math.max(TILE_WORKERS.MIN, Math.min(TILE_WORKERS.MAX, Math.floor((cores ?? 4) / 2)));
+}
+
 /**
  * Priority queue with capped concurrency, key dedup and exponential backoff
  * for RetryableError (429/504). Lower priority number runs first.

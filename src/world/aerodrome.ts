@@ -328,6 +328,32 @@ function nodeLonLat(t: Tile, i: number, j: number, grid: number): [number, numbe
 
 const smooth = (t: number) => t * t * (3 - 2 * t);
 
+/** a pad's hull box (ENU metres of its origin) and metres per degree there, for padOutOfReach */
+const padBoxes = new WeakMap<Pad, { e0: number; e1: number; n0: number; n1: number; kx: number; ky: number }>();
+/**
+ * Whether lon/lat is surely beyond a pad's reach (flat margin and blend): its box on the sphere's
+ * plane about the pad's origin, missed by more than the reach plus PAD_REACH_SLACK (the plane's
+ * error against the ellipsoid's ENU, and more), so padNode weighs it 0 there anyway. A cheap test
+ * before the exact ENU: the pitches of a town centre are dozens of pads for every road sample.
+ */
+function padOutOfReach(p: Pad, lon: number, lat: number, flatM: number): boolean {
+  let b = padBoxes.get(p);
+  if (!b) {
+    const ky = (EARTH_R * Math.PI) / 180;
+    b = { e0: Infinity, e1: -Infinity, n0: Infinity, n1: -Infinity, kx: ky * Math.cos((p.origin.lat * Math.PI) / 180), ky };
+    for (const [e, n] of p.hull) {
+      b.e0 = Math.min(b.e0, e); b.e1 = Math.max(b.e1, e);
+      b.n0 = Math.min(b.n0, n); b.n1 = Math.max(b.n1, n);
+    }
+    padBoxes.set(p, b);
+  }
+  const e = (lon - p.origin.lon) * b.kx, n = (lat - p.origin.lat) * b.ky;
+  const out = Math.max(b.e0 - e, e - b.e1, b.n0 - n, n - b.n1);
+  return out > flatM + (p.blend ?? PAD_BLEND_M) + PAD_REACH_SLACK.M + PAD_REACH_SLACK.SHARE * (Math.abs(e) + Math.abs(n));
+}
+/** padOutOfReach's slack: metres, and a share of the distance from the pad's origin */
+export const PAD_REACH_SLACK = { M: 30, SHARE: 0.02 } as const;
+
 /**
  * A relief height at a lattice node moved onto the pads: the plane on the flat part (the hull and
  * `flatM` beyond, so every lattice cell the outline touches is flat), blended over PAD_BLEND_M.
@@ -335,6 +361,7 @@ const smooth = (t: number) => t * t * (3 - 2 * t);
 function padNode(h: number, lon: number, lat: number, pads: ReadonlyArray<Pad>, flatM: number): number {
   let bestW = 0, bestH = h;
   for (const p of pads) {
+    if (padOutOfReach(p, lon, lat, flatM)) continue;
     const [e, n] = latLonToEnu(p.origin, lat, lon, 0);
     const d = padDistance(p, e, n) - flatM, blend = p.blend ?? PAD_BLEND_M;
     const w = d <= 0 ? 1 : d >= blend ? 0 : smooth(1 - d / blend);

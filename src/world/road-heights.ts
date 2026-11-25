@@ -48,12 +48,20 @@ export function solveRoadHeights(net: RoadNet, dem: ArrayLike<number>, window = 
   const dist = new Float64Array(n);
   const stamp = new Int32Array(n).fill(-1);
   const done = new Int32Array(n).fill(-1);
-  // a binary heap of (distance, sample)
-  const hd: number[] = [], hi: number[] = [];
+  // the neighbours flat (CSR), in net.next's order
+  const first = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) first[i + 1] = first[i] + net.next[i].length;
+  const to = new Int32Array(first[n]), len = new Float64Array(first[n]);
+  for (let i = 0; i < n; i++) net.next[i].forEach(([r, m], k) => { to[first[i] + k] = r; len[first[i] + k] = m; });
+  // a binary heap of (distance, sample) in typed arrays, grown as needed
+  let hd = new Float64Array(1024), hi = new Int32Array(1024), size = 0;
   const push = (d: number, i: number) => {
-    let k = hd.length;
-    hd.push(d);
-    hi.push(i);
+    if (size === hd.length) {
+      const d2 = new Float64Array(2 * size), i2 = new Int32Array(2 * size);
+      d2.set(hd); i2.set(hi);
+      hd = d2; hi = i2;
+    }
+    let k = size++;
     while (k > 0) {
       const p = (k - 1) >> 1;
       if (hd[p] <= d) break;
@@ -66,13 +74,14 @@ export function solveRoadHeights(net: RoadNet, dem: ArrayLike<number>, window = 
   };
   const pop = (): number => {
     const top = hi[0];
-    const d = hd.pop()!, i = hi.pop()!;
-    if (hd.length) {
+    size--;
+    const d = hd[size], i = hi[size];
+    if (size) {
       let k = 0;
       for (;;) {
         let c = 2 * k + 1;
-        if (c >= hd.length) break;
-        if (c + 1 < hd.length && hd[c + 1] < hd[c]) c++;
+        if (c >= size) break;
+        if (c + 1 < size && hd[c + 1] < hd[c]) c++;
         if (hd[c] >= d) break;
         hd[k] = hd[c];
         hi[k] = hi[c];
@@ -85,11 +94,11 @@ export function solveRoadHeights(net: RoadNet, dem: ArrayLike<number>, window = 
   };
   for (let q = 0; q < n; q++) {
     let sum = 0, wsum = 0;
-    hd.length = hi.length = 0;
+    size = 0;
     stamp[q] = q;
     dist[q] = 0;
     push(0, q);
-    while (hd.length) {
+    while (size) {
       const d0 = hd[0];
       const p = pop();
       if (done[p] === q || d0 > dist[p]) continue;
@@ -99,7 +108,8 @@ export function solveRoadHeights(net: RoadNet, dem: ArrayLike<number>, window = 
         sum += k * dem[p];
         wsum += k;
       }
-      for (const [r, m] of net.next[p]) {
+      for (let e = first[p], end = first[p + 1]; e < end; e++) {
+        const r = to[e], m = len[e];
         const d = d0 + m;
         if (d >= window || done[r] === q) continue;
         if (stamp[r] !== q || d < dist[r]) {

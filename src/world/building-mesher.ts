@@ -394,7 +394,9 @@ export function buildingTags(b: OsmBuilding): Record<string, string> {
 }
 
 /** computeHeights with the roof run taken from the footprint (dots, collision, lit windows) */
-export function buildingHeights(b: OsmBuilding): { min: number; wall: number; roof: number } {
+const heightsCache = new WeakMap<OsmBuilding, Readonly<{ min: number; wall: number; roof: number }>>();
+/** buildingHeights' own work (computed once a building: a pitched roof's run takes its straight skeleton) */
+function heightsOf(b: OsmBuilding): { min: number; wall: number; roof: number } {
   const tags = buildingTags(b);
   const ring = b.rings[0];
   if (!ring || ring.length < 3 || roofShape(tags) === 'flat') return computeHeights(tags);
@@ -403,6 +405,11 @@ export function buildingHeights(b: OsmBuilding): { min: number; wall: number; ro
   const shape = roofShape(tags);
   const frame = roofFrame(outer, tags);
   return computeHeights(tags, roofSkeleton(shape, frame, outer, holes)?.tMax ?? roofRun(shape, frame));
+}
+export function buildingHeights(b: OsmBuilding): Readonly<{ min: number; wall: number; roof: number }> {
+  let h = heightsCache.get(b);
+  if (!h) heightsCache.set(b, (h = Object.freeze(heightsOf(b))));
+  return h;
 }
 
 /** typical colour of an OSM material value (building:material / roof:material) */
@@ -731,6 +738,15 @@ const PLINTH_EARTH = snowy(colour(112, 94, 70));
  * the midpoints of its edges, at most PLINTH_MAX_M over the lowest), `low` the lowest ground there
  * (both at least sea level)
  */
+const footingCache = new WeakMap<HeightSampler, WeakMap<ReadonlyArray<LonLat>, { base: number; low: number }>>();
+/** buildingFooting of a building's own outline, once per sampler (the far dots and the night lights both ask) */
+function outlineFooting(ring: ReadonlyArray<LonLat>, sampleHeight: HeightSampler): { base: number; low: number } {
+  let of = footingCache.get(sampleHeight);
+  if (!of) footingCache.set(sampleHeight, (of = new WeakMap()));
+  let f = of.get(ring);
+  if (!f) of.set(ring, (f = buildingFooting(ring, sampleHeight)));
+  return f;
+}
 export function buildingFooting(ring: ReadonlyArray<LonLat>, sampleHeight: HeightSampler): { base: number; low: number } {
   let lo = Infinity, hi = -Infinity;
   const at = (lon: number, lat: number) => {
@@ -1438,7 +1454,7 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     lat /= ring.length;
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
-    const y = buildingFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
+    const y = outlineFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
     out.push(e, y, -n, pointValue(wallRamp(buildingTags(b), styleSeed(b))));
     out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), styleSeed(b), lat)));
   }
@@ -1563,7 +1579,7 @@ export function buildingNightLights(
     if (ring.length > 1 && ring[0][0] === ring[ring.length - 1][0] && ring[0][1] === ring[ring.length - 1][1]) ring.pop();
     if (ring.length < 3) continue;
     const h = buildingHeights(b);
-    const { base } = buildingFooting(ringLL, sampleHeight);
+    const { base } = outlineFooting(ringLL, sampleHeight);
     const wallBase = base + h.min;
     const roofTop = wallBase + h.wall + h.roof;
     const cx = ring.reduce((s, p) => s + p[0], 0) / ring.length;

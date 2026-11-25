@@ -409,11 +409,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const x0 = Math.min(tri[0][0], tri[1][0], tri[2][0]), x1 = Math.max(tri[0][0], tri[1][0], tri[2][0]);
     const y0 = Math.min(tri[0][1], tri[1][1], tri[2][1]), y1 = Math.max(tri[0][1], tri[1][1], tri[2][1]);
     for (const f of facesNear(x0, y0, x1, y1)) {
+      // a face left out whatever the piece (no lift to weigh): before cutting the piece and placing its points
+      if (!lift && over?.(f.cover, undefined, f.id)) continue;
       const piece = clipToTriangle(tri, f.c);
       if (piece.length < 3) continue;
       const pts = piece.map(([x, y]) => onFace(f, x, y, bias));
       const lifts = lift ? pts.map((p) => lift(p)) : undefined;
-      if (over?.(f.cover, lifts, f.id)) continue;
+      if (lift && over?.(f.cover, lifts, f.id)) continue;
       if (lifts) pts.forEach((p, k) => { p.y += lifts[k]; });
       if (lifts && floor && lifts.some((l) => l < floor.clear)) {
         // cut where its lift passes the floor along its edges (the piece as drawn is straight along them)
