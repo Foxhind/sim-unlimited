@@ -231,7 +231,7 @@ export function buildSurfaceTin(tile: Tile, grid: number, heights: Float32Array,
   // A dropped area's or water's edge is no edge of the faces: one takes it only when its corners lie
   // in it too (a small pool under a big face goes, rather than painting the face), else the next under it
   const dropped = new Uint8Array(cover.shapes.length);
-  for (const u of units.slice(picked)) for (const si of u.shapes) dropped[si] = RIBBON_KINDS.has(cover.shapes[si].kind) ? 1 : 2;
+  for (const u of units.slice(picked)) for (const si of u.shapes) dropped[si] = RIBBON_KINDS.has(cover.shapes[si].kind) && !cover.shapes[si].junction ? 1 : 2;
   let passed: number[] = [];
   const skip = (si: number) => dropped[si] === 1 || passed.includes(si);
   const holds = (si: number, x: number, y: number) => cover.locate(x, y, (sj) => sj !== si) === si;
@@ -317,15 +317,19 @@ function coverUnits(
       if (!belts.has(s.source)) belts.set(s.source, {});
       key = belts.get(s.source)!;
     }
+    // a junction's surface is a unit of its own, after every road but the service roads and tracks:
+    // over the budget it goes before them, drawn over the faces (looseShapes)
+    if (s.junction) key = s;
     let u = bySource.get(key);
     if (!u) {
       const road = s.kind === 'carriageway' || s.kind === 'shoulder';
-      u = { lines: [], count: 0, shapes: [], rank: budgetRank(s.kind), prio: s.prio, tie: road ? tieBreak((s.source as OsmLine).points[0]) : 0, first: si };
+      // a road's unit is a carriageway's, though only its shoulder reaches the tile (its carriageway trimmed to a junction past the border)
+      u = { lines: [], count: 0, shapes: [], rank: budgetRank(s.kind === 'shoulder' ? 'carriageway' : s.kind), prio: s.junction ? JUNCTION_BUDGET_PRIO : s.prio, tie: road ? tieBreak((s.source as OsmLine).points[0]) : 0, first: si };
       bySource.set(key, u);
       units.push(u);
     }
     u.shapes.push(si);
-    if (RIBBON_KINDS.has(s.kind)) u.way = s.source as OsmLine;
+    if (RIBBON_KINDS.has(s.kind) && !s.junction) u.way = s.source as OsmLine;
   });
   units.sort(byPlace);
   /** each shape's unit's place */
@@ -444,6 +448,8 @@ function distinctPoints(lines: ReadonlyArray<ReadonlyArray<Pt>>): number {
  * the DEM's, its water drawn over that tilted, and a bridge's deck over a bank (14/9517/6398, where
  * every river and canal went). Where they overlap the path still lies over the water.
  */
+/** a junction's surface's place in the budget among the carriageways: a priority above a service road's, below a living street's */
+const JUNCTION_BUDGET_PRIO = 1.95;
 const budgetRank = (k: CoverKind): number => (k === 'water' ? COVER_RANK.path - 0.5 : COVER_RANK[k]);
 /** the senior unit first: by rank (budgetRank), priority, tie and first shape (a bed alone after every shape) */
 const byPlace = (a: Unit, b: Unit): number => a.rank - b.rank || b.prio - a.prio || a.tie - b.tie || a.first - b.first;

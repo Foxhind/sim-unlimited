@@ -98,7 +98,8 @@ describe('real dense tiles in the surface budget', () => {
     // each between a road's cover and what it meets (a bridge's approach's shoulder mitred onto its lifted deck reaches 11–16 cm past its end line)
     expect(deep.filter((o) => ![o.kind, o.into].some((k) => ['carriageway', 'shoulder', 'path'].includes(k)))).toEqual([]);
     expect(Math.max(0, ...off.map((o) => o.reach)) * mPer).toBeLessThan(0.2);
-    expect(off.length).toBeLessThanOrEqual(12);
+    // the junctions' surfaces (junctions.ts) meet their arms' trimmed ends and round their kerbs: a few more shallow slivers there
+    expect(off.length).toBeLessThanOrEqual(18);
   });
 
   it('Fethiye 14/9517/6397: no face of a road’s cover falls more than 0.5 m to a river’s water: no road-cover vertex takes its level', async () => {

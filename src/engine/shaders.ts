@@ -6,7 +6,7 @@
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
 import { TREE_THIN } from '../world/props-mesher';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -953,7 +953,10 @@ vec3 roadMarkAt(vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   float lanes = float(code & ${ROAD_MARK.LANES}u);
   float lw = full / max(lanes, 1.0);
   float dash = roadDash(d, fw.x);
-  if ((code & ${ROAD_MARK.EDGES}u) != 0u) a = max(paintLine(vl - 0.35, fw.y), paintLine(w - 0.35 - vl, fw.y));
+  if ((code & ${ROAD_MARK.EDGES}u) != 0u) {
+    if ((code & ${ROAD_EDGE_OFF.LEFT}u) == 0u) a = paintLine(vl - 0.35, fw.y);
+    if ((code & ${ROAD_EDGE_OFF.RIGHT}u) == 0u) a = max(a, paintLine(w - 0.35 - vl, fw.y));
+  }
   if ((code & ${ROAD_MARK.ONEWAY}u) != 0u) {
     for (float k = 1.0; k < 15.0; k++) {
       if (k >= lanes || k * lw > w - 0.5) break;

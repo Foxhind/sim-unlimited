@@ -1,0 +1,36 @@
+/**
+ * The junctions regression set (tests/fixtures/junctions.json): for each junction of
+ * tests/fixtures/junction-set.json, the roads of its z14 tile within REACH_M of it, as the OSM
+ * worker has the tile (the local PMTiles: tiles/build.sh), whole ways.
+ *
+ *   npx vite-node tools/junction-fixtures.ts -- tiles/data/out/central-fed-district-261118.pmtiles
+ */
+import fs from 'node:fs';
+import { latLonToEnu, tileForLatLon } from '../src/world/geodesy';
+import { pmtilesToOverpass } from '../src/world/osm-pmtiles';
+import { parseOverpass } from '../src/world/overpass';
+import type { OsmLine } from '../src/world/osm-types';
+import { Pmtiles } from '../src/world/pmtiles';
+
+/** the ways kept: those with a point within this of the junction, metres */
+const REACH_M = 220;
+
+const archivePath = process.argv.slice(2).filter((a) => a !== '--')[0];
+if (!archivePath) throw new Error('usage: junction-fixtures.ts <archive.pmtiles>');
+const fd = fs.openSync(archivePath, 'r');
+const archive = new Pmtiles(async (offset, length) => {
+  const buf = Buffer.alloc(length);
+  fs.readSync(fd, buf, 0, length, offset);
+  return new Uint8Array(buf.buffer, buf.byteOffset, length);
+});
+const set = JSON.parse(fs.readFileSync('tests/fixtures/junction-set.json', 'utf8')) as { name: string; at: [number, number]; span: number; note: string }[];
+const out = [];
+for (const j of set) {
+  const [lat, lon] = j.at, tile = tileForLatLon(lat, lon, 14);
+  const data = parseOverpass(pmtilesToOverpass(await archive.tile(14, tile.x, tile.y), tile, { aerodromes: [], runways: [] }));
+  const near = (l: OsmLine) => l.points.some(([plon, plat]) => { const [e, n] = latLonToEnu({ lat, lon }, plat, plon, 0); return Math.hypot(e, n) < REACH_M; });
+  const lines = data.lines.filter((l) => (l.tags.highway || l.tags.railway) && near(l));
+  out.push({ ...j, tile, lines });
+  console.log(j.name, lines.length, 'ways');
+}
+fs.writeFileSync('tests/fixtures/junctions.json', JSON.stringify(out));

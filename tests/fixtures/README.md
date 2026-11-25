@@ -5,3 +5,5 @@
 Their raw DEM (`roadDem`) was taken again on 2026-11-24 at the samples of the network with the urban paths (footways, cycleways, steps: `isUrbanPath`), the rest of each file as it was.
 
 `surface-14-9514-6399-hills.json` (the hills west of Fethiye): the same, with no ways (its coastlines only), for its relief.
+
+`junctions.json` (the regression set of tests/junctions.test.ts, the junctions listed in `junction-set.json` round Moscow): map data © OpenStreetMap contributors, ODbL; per junction its z14 tile's ways (roads and railways) within 220 m of it, from the local PMTiles (`tools/junction-fixtures.ts`). `tools/junction-render.ts` draws them (cover and paint from above) to compare before and after a change.

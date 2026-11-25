@@ -1002,6 +1002,12 @@ export const FACADE_BLIND = 1 << 22;
  * between their lanes. Town streets, service roads and tracks have none.
  */
 export const ROAD_MARK = { LANES: 15, ONEWAY: 16, EDGES: 32, DOUBLE: 64 } as const;
+/**
+ * Bits of the same code above the end gaps (bits 7..18): no edge line on the road's left (v = 0) or
+ * right side — a junction's surface carries the paint of the road through it but for the edge line
+ * where other roads join (junctions.ts)
+ */
+export const ROAD_EDGE_OFF = { LEFT: 1 << 19, RIGHT: 1 << 20 } as const;
 /** aWinEdge.x of a painted road vertex (WORLD_FS roadMarkAt, osm-mesher roadMarks) */
 export const ROAD_EDGE = -2;
 /** at a junction a yielding road's paint stops this far short of the widest road it meets (osm-mesher junctionGap) */

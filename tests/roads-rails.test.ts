@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RAMP, withGlow } from '../src/engine/palette';
+import { RAMP, ROAD_EDGE_OFF, withGlow } from '../src/engine/palette';
 import { WORLD_FS } from '../src/engine/shaders';
 import { WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { gridLatLon, latLonToEnu, tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
@@ -598,17 +598,30 @@ describe('paint on the terrain’s own faces', () => {
       // through the junction
       ...Array.from({ length: 81 }, (_, k): [number, number] => [j[0] + ((k % 9) - 4.03) * 1.37 * COVER_M, j[1] + (Math.floor(k / 9) - 4.03) * 1.37 * COVER_M]),
     ];
-    let painted = 0;
+    // the junction's surface is the cover's own (junctions.ts): the primary's paint across it but for
+    // the edge line on the side the secondary joins; and a road's paint runs on to its trim there, no
+    // gap at its end (the end-gap bits, 7..18, of the code are the ribbons')
+    const GAPS = ((1 << 19) - 1) & ~127;
+    const onJunction = ([x, y]: [number, number]) => { const si = cover.locate(x, y); return si >= 0 && !!cover.shapes[si].junction; };
+    let painted = 0, across = 0;
     for (const probe of pts) {
       const got = markAt(withCover, probe), want = markAt(ribbon, probe);
+      if (onJunction(probe)) {
+        if (!got) continue;
+        across++;
+        expect(got[4] & (ROAD_EDGE_OFF.LEFT | ROAD_EDGE_OFF.RIGHT), `edge off at ${probe}`).not.toBe(0);
+        expect(got[4] & ROAD_MARK.LANES, `lanes at ${probe}`).toBe(markAt(ribbon, j)![4] & ROAD_MARK.LANES);
+        continue;
+      }
       expect(got === undefined, `${probe}`).toBe(want === undefined);
       if (!got || !want) continue;
       painted++;
       // u lies on ROAD_U_BASE: its float32 attribute is only good to its last bit (4 mm), in either mesh
       expect(Math.abs(got[0] - want[0]), `u at ${probe}`).toBeLessThan(Math.max(1e-3, 2 ** (Math.floor(Math.log2(Math.abs(want[0]))) - 23)));
       expect(Math.abs(got[1] - want[1]), `v at ${probe}`).toBeLessThan(1e-3);
-      expect(got.slice(2), `codes at ${probe}`).toEqual(want.slice(2));
+      expect([got[2], got[3], got[4] & ~GAPS], `codes at ${probe}`).toEqual([want[2], want[3], want[4] & ~GAPS]);
     }
-    expect(painted).toBeGreaterThan(250);
+    expect(painted).toBeGreaterThan(200);
+    expect(across).toBeGreaterThan(20);
   });
 });

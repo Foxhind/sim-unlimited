@@ -35,6 +35,8 @@ export function capSides(half: number, tol?: number): number {
 }
 /** a fork branch's direction is taken over its first this many metres */
 const FORK_PROBE_M = 15;
+/** a fork's branches leave within this of the trunk's line (cosine; 60°): one turning off more makes a junction */
+const FORK_MAX_COS = Math.cos((60 * Math.PI) / 180);
 
 /** a ribbon's shape in the lattice */
 export interface RibbonGeom {
@@ -384,6 +386,8 @@ export interface LineNetwork {
    * one-way-ness ending there), or undefined where there is none or more than one
    */
   continuationWidth(line: OsmLine, at: LonLat): number | undefined;
+  /** whether the roads of `layer` at node `at` make a fork (forkShift lays its branches into the trunk) */
+  isFork(at: LonLat, layer: number): boolean;
 }
 
 /**
@@ -429,6 +433,13 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
       trunk = ins.length === 1 ? ins[0] : ins.length === big.length - 1 ? big.find((o) => !into(o)) : undefined;
     }
     if (!trunk) return undefined;
+    // the branches go on from the trunk: none turns off it (that is a junction of its own, junctions.ts)
+    const [tx, tz] = leaving(trunk.line, at);
+    for (const o of big) {
+      if (o === trunk) continue;
+      const [bx, bz] = leaving(o.line, at);
+      if (-(tx * bx + tz * bz) < FORK_MAX_COS) return undefined;
+    }
     return { width: trunk.half * 2, trunk: trunk.line, branches: big.filter((o) => o !== trunk).map((o) => ({ line: o.line, half: o.half })) };
   };
   /** the unit direction (x, z) a way leaves the node `at` in, over its first FORK_PROBE_M or so */
@@ -554,7 +565,7 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
     return { start: s.dir, end: e.dir, capStart: s.cap, capEnd: e.cap };
   };
 
-  return { forkShift, roadEnds, junctionGap, continuationWidth };
+  return { forkShift, roadEnds, junctionGap, continuationWidth, isFork: (at, layer) => !!forkAt(at, layer) };
 }
 
 /**
@@ -572,7 +583,7 @@ export function lineNetwork(lines: ReadonlyArray<OsmLine>, enu: (lon: number, la
  *   edge.y  full width / 0.25 m + (start narrowing / 0.5 m) · 1024 + (end narrowing / 0.5 m) · 32768
  *   edge.z  the ROAD_MARK code + (start gap / 0.5 m) << 7 + (end gap / 0.5 m) << 13
  */
-export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork): { c: P2[]; half: number[]; segs: VertexAttr[]; breaks: number[] } {
+export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, marks: number, net: LineNetwork, gapAt?: (line: OsmLine, at: LonLat) => number | undefined): { c: P2[]; half: number[]; segs: VertexAttr[]; breaks: number[] } {
   const q = (v: number, step: number, max: number) => Math.max(0, Math.min(max, Math.round(v / step)));
   const wq = q(half * 2, 0.25, 1023), width = wq * 0.25;
   const lens = src.slice(1).map((p, i) => Math.hypot(p.e[0] - src[i].e[0], p.e[1] - src[i].e[1]));
@@ -587,7 +598,8 @@ export function painted(line: OsmLine, src: { c: P2; e: P2 }[], half: number, ma
   const taperLen = (n: number) => (n ? q(Math.min(ROAD_TAPER_M, length / 2 - 1), 2, 63) : 0);
   const t0q = taperLen(n0), t1q = taperLen(n1);
   const t0 = t0q * 2, t1 = t1q * 2;
-  const g0q = q(net.junctionGap(line, first), 0.5, 63), g1q = q(net.junctionGap(line, last), 0.5, 63);
+  const gap = (at: LonLat) => gapAt?.(line, at) ?? net.junctionGap(line, at);
+  const g0q = q(gap(first), 0.5, 63), g1q = q(gap(last), 0.5, 63);
   const widthAt = (d0: number): number => {
     let w = width;
     if (t0 > 0) w -= n0 * 0.5 * (1 - Math.min(1, Math.max(0, d0) / t0));

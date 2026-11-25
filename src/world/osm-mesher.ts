@@ -838,6 +838,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   };
   /** where roads meet (the whole ways, not this tile's share): ribbon ends, forks, paint gaps */
   const net = lineNetwork(opts.data.lines, enu, toLattice, latticePerMetre);
+  /** with the cover a road's paint runs on to its trim at a junction's surface (ground-cover junctionNodes), as on the cover's faces */
+  const junctionGap = cover ? (_line: OsmLine, at: LonLat): number | undefined => (cover.junctionNodes.has(`${at[0]},${at[1]}`) ? 0 : undefined) : undefined;
 
   /** a lifted way as the bridge and embankment builder takes it: its centre line and what it looks like */
   const raisedWays: { line: OsmLine; half: number; bias: number; pts: { c: P2; e: [number, number]; d: number }[] }[] = [];
@@ -931,7 +933,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         return;
       }
       // a painted road: narrowing into a narrower continuation, its paint in its vertex attributes
-      const p = painted(line, pts, look.half, look.marks, net);
+      const p = painted(line, pts, look.half, look.marks, net, junctionGap);
       if (p.c.length) draw(kind, p.c, p.half, look.ramp, look.bias, look.out, p.segs, ends, lift);
       return;
     }
@@ -1000,7 +1002,8 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const onBank = (f: number): boolean => (banks[f] ||= tin.bank?.(f) ? 1 : 2) === 1;
     for (const si of tin.looseShapes) {
       const shape = cover.shapes[si], wet = shape.kind === 'water';
-      const out = wet ? water : main, part = partOf(out);
+      // a junction's surface goes with the roads, unpainted
+      const out = wet ? water : shape.junction ? roads : main, part = partOf(out);
       // an area with a filter: the imagery of the face under each piece through it, as the terrain colours its faces (coverRamp)
       const filter = shape.kind === 'belt' ? beltFilter(shape.source.tags, styles)
         : shape.kind === 'pitch' || shape.kind === 'area' || shape.kind === 'zone' ? classifyArea(shape.source.tags, styles)?.filter : undefined;
@@ -1076,7 +1079,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     let cl = pts.map((p) => p.c), half: number | number[] = look.half, segs: VertexAttr[] | undefined;
     if (look.rail) segs = trackSegs(pts);
     else if (look.marks) {
-      const p = painted(line, pts, look.half, look.marks, net);
+      const p = painted(line, pts, look.half, look.marks, net, junctionGap);
       if (!p.c.length) return;
       cl = p.c;
       half = p.half;

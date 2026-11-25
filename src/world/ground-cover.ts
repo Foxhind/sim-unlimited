@@ -10,15 +10,16 @@
  * where it meets a lifted one at a joint (liftedJoints).
  */
 import earcut from 'earcut';
-import { colourOf, RAMP, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
+import { colourOf, RAMP, ROAD_EDGE_OFF, snowy, withGlow, rampGlowLevel, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaStyles } from './area-styles';
 import { enuToLatLon, latLonToEnu, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import type { LonLat, OsmArea, OsmLine, OsmPoint } from './osm-types';
 import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
-import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type VertexAttr } from './ribbon-shapes';
+import { junctionPieces, junctionShape, MAX_TRIM_M, trimCorners, unionOutline, type JunctionArm, type JunctionShape } from './junctions';
+import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type RibbonGeom, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
 import { bridgeDecks, type RoadSurface } from './road-pull';
-import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
+import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
 export type CoverKind = 'runway' | 'ballast' | 'carriageway' | 'shoulder' | 'path' | 'water' | 'railZone' | 'aeroArea' | 'carPark' | 'pitchPaint' | 'pitch' | 'pool' | 'area' | 'zone' | 'belt';
 
@@ -46,6 +47,8 @@ export interface CoverShape {
    * where none holds it)
    */
   attr?: { segs: VertexAttr[]; segAt(x: number, y: number): number };
+  /** a junction's surface or its shoulders (junctions.ts), not a way's ribbon */
+  junction?: boolean;
 }
 
 export interface GroundCover {
@@ -63,6 +66,8 @@ export interface GroundCover {
    * line's own points are kept as they are
    */
   outside(line: ReadonlyArray<P2>, before: number, over?: (shape: number) => boolean): P2[][];
+  /** the nodes (`lon,lat`) of the junctions' surfaces: a road's paint runs on to its trim there, no gap (painted) */
+  junctionNodes: ReadonlySet<string>;
 }
 
 /** a floodlit pitch: its whole outline (the shape's source) is big enough (pitch-markings isLitPitch, as the mesh) */
@@ -147,6 +152,13 @@ const ALONG_EDGE = 1e-7;
 const MERGE_GAP = 1e-4;
 
 const SQUARE_ENDS: RibbonEnds = { capStart: false, capEnd: false };
+/** a junction's road straight through leaves it in directions at least this far apart (cosine; 120°), each over its first THROUGH_PROBE_M */
+const THROUGH_MAX_COS = -0.5;
+const THROUGH_PROBE_M = 10;
+/** junction nodes closer along a way than their widest roads' halves and this are one junction, metres */
+const CLUSTER_PAD_M = 4;
+/** two roads at a junction of several nodes cross where their directions are further than this from parallel (cosine; 45°) */
+const CROSS_COS = Math.SQRT1_2;
 
 /** whether triangle `o` of `t` (six numbers each) holds (x, y), its edges included */
 function holds(t: Float64Array, o: number, x: number, y: number): boolean {
@@ -488,23 +500,255 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     if (lifted(line, len)) liftedEnds.add(latticeKey(toLattice(line.points[line.points.length - 1])));
   }
 
+  /** a road's centre line as its ribbons have it (a fork's branch shifted onto the trunk), ENU and lattice */
+  const drawnCache = new Map<OsmLine, { c: P2; e: P2 }[] | null>();
+  const drawnPts = (line: OsmLine): { c: P2; e: P2 }[] | undefined => {
+    let pts = drawnCache.get(line);
+    if (pts === undefined) {
+      const e = line.points.map((ll) => enu(ll[0], ll[1]));
+      let p: { c: P2; e: P2 }[] | null = line.points.map((ll, i) => ({ c: toLattice(ll), e: e[i] }))
+        .filter((q, i, a) => i === 0 || q.c[0] !== a[i - 1].c[0] || q.c[1] !== a[i - 1].c[1]);
+      if (p.length < 2) p = null;
+      else if (line.tags.highway) p = net.forkShift(line, p);
+      drawnCache.set(line, pts = p);
+    }
+    return pts ?? undefined;
+  };
+  /** a way's length along its points (ENU metres) and at each of them */
+  const wayLength = (line: OsmLine): number[] => {
+    const at = [0];
+    for (let i = 1; i < line.points.length; i++) {
+      const [ax, az] = enu(line.points[i - 1][0], line.points[i - 1][1]), [bx, bz] = enu(line.points[i][0], line.points[i][1]);
+      at.push(at[i - 1] + Math.hypot(bx - ax, bz - az));
+    }
+    return at;
+  };
+
+  /**
+   * The junctions (junctions.ts): every node where three or more carriageways of one layer meet
+   * (a way passing through it counts twice) on the ground, but a fork (forkShift lays its branches
+   * into the trunk). Nodes closer together along a way than their widest roads reach (the crossings
+   * of a dual carriageway) are one junction, the ways between them its own. Each arm leaving it is
+   * trimmed back and the junction's surface fills between their ends; a road that goes straight
+   * through a node, senior to every other road there or meeting at most one of its own standing,
+   * keeps its paint across the surface but for its edge line on the sides the others join.
+   */
+  interface JArm { line: OsmLine; out: 1 | -1; node: string; dNode: number; trim: number; dTrim: number; arm: JunctionArm; next?: { node: string; d: number }; corners?: [P2, P2] }
+  interface Junction { at: LonLat; nodes: P2[]; arms: JArm[]; inner: { line: OsmLine; c: P2[] }[]; shape: JunctionShape; through: Map<OsmLine, number> }
+  const junctions: Junction[] = [];
+  /** per way, the stretches the junctions take from it (metres along it) and the arm ends there */
+  const trimsOf = new Map<OsmLine, { d0: number; d1: number; inner?: boolean }[]>();
+  const cutAt = new Map<OsmLine, Map<number, { arm: JArm; start: boolean }>>();
+  /** the nodes of the junctions: a road's paint runs to its trim there, no gap */
+  const junctionNodes = new Set<string>();
+  {
+    const carriageway = (l: OsmLine) => { const st = l.tags.highway ? classifyLine(l.tags) : undefined; return !!st && !st.path && !isTunnel(l.tags) && l.points.length >= 2; };
+    const atNode = new Map<string, { line: OsmLine; i: number }[]>();
+    for (const line of data.lines) {
+      if (!carriageway(line)) continue;
+      line.points.forEach((p, i) => {
+        const k = nodeKey(p);
+        const list = atNode.get(k);
+        if (list) list.push({ line, i }); else atNode.set(k, [{ line, i }]);
+      });
+    }
+    const lengths = new Map<OsmLine, number[]>();
+    const lengthOf = (l: OsmLine) => { let v = lengths.get(l); if (!v) lengths.set(l, v = wayLength(l)); return v; };
+    const nodeId = (k: string, layer: number) => `${k}|${layer}`;
+    // the candidate nodes, each with its arms
+    const candidates = new Set<string>();
+    for (const [k, here] of atNode) {
+      if (here.length < 2) continue;
+      for (const layer of new Set(here.map((o) => roadLayer(o.line.tags)))) {
+        const at = here[0].line.points[here[0].i];
+        // three roads of standing (no driveway, track or yard counts), one of them painted
+        const big = (o: { line: OsmLine; i: number }) => { const st = classifyLine(o.line.tags)!; return roadLayer(o.line.tags) === layer && !st.minor; };
+        const standing = here.filter(big).reduce((n, o) => n + (o.i === 0 || o.i === o.line.points.length - 1 ? 1 : 2), 0);
+        const paint = here.some((o) => big(o) && classifyLine(o.line.tags)!.marks);
+        if (standing >= 3 && paint && !net.isFork(at, layer)) candidates.add(nodeId(k, layer));
+      }
+    }
+    const nodes = new Map<string, { at: LonLat; p: P2; layer: number; arms: JArm[] }>();
+    for (const id of candidates) {
+      const [k, ls] = id.split('|'), layer = Number(ls), here = atNode.get(k)!;
+      const at = here[0].line.points[here[0].i], node = toLattice(at), arms: JArm[] = [];
+      let ok = true;
+      for (const { line, i } of here) {
+        if (roadLayer(line.tags) !== layer) continue;
+        const pts = drawnPts(line), style = classifyLine(line.tags)!;
+        const dAt = lengthOf(line), len = dAt[dAt.length - 1];
+        if (!pts || len <= 0 || lifted(line, dAt[i])) { ok = false; break; }
+        const c = pts.map((p) => p.c), cum = cumulative(c), total = cum[cum.length - 1];
+        // the node on the drawn line (a fork's shift elsewhere on the way leaves it where it is)
+        const iv = c.findIndex((p) => Math.abs(p[0] - node[0]) < 1e-7 && Math.abs(p[1] - node[1]) < 1e-7);
+        if (iv < 0 || total <= 0) { ok = false; break; }
+        for (const out of [1, -1] as const) {
+          if (out === 1 ? i === line.points.length - 1 : i === 0) continue;
+          // the next junction node along the way, if any: the arm reaches half way to it
+          let next: { node: string; d: number } | undefined;
+          for (let m = i + out; m >= 0 && m < line.points.length; m += out) {
+            const id2 = nodeId(nodeKey(line.points[m]), layer);
+            if (candidates.has(id2)) { next = { node: id2, d: Math.abs(dAt[m] - dAt[i]) }; break; }
+          }
+          const arm = out === 1 ? c.slice(iv) : c.slice(0, iv + 1).reverse();
+          if (arm.length < 2) continue;
+          const reach = ((next ? next.d : out === 1 ? len - dAt[i] : dAt[i]) / len) * total;
+          arms.push({
+            line, out, node: id, dNode: dAt[i], trim: 0, dTrim: 0, next,
+            arm: { c: arm, half: (style.width / 2) * latticePerMetre, shoulder: (style.shoulder ?? 0) * latticePerMetre, maxTrim: Math.min(reach * (next ? 0.45 : 0.8), MAX_TRIM_M * latticePerMetre) },
+          });
+        }
+      }
+      if (ok && arms.length >= 3) nodes.set(id, { at, p: node, layer, arms });
+    }
+    // nodes closer along a way than their widest roads reach are one junction (never round a roundabout)
+    const parent = new Map<string, string>();
+    const root = (id: string): string => { let r = id; while (parent.get(r) !== r) r = parent.get(r)!; parent.set(id, r); return r; };
+    for (const id of nodes.keys()) parent.set(id, id);
+    const widest = (id: string) => Math.max(...nodes.get(id)!.arms.map((a) => a.arm.half)) / latticePerMetre;
+    const inner = (a: JArm) => !!a.next && nodes.has(a.next.node) && a.line.tags.junction !== 'roundabout' && a.next.d < widest(a.node) + widest(a.next.node) + CLUSTER_PAD_M;
+    for (const [id, n] of nodes) for (const a of n.arms) if (inner(a)) parent.set(root(id), root(a.next!.node));
+    const clusters = new Map<string, string[]>();
+    for (const id of nodes.keys()) { const r = root(id); clusters.set(r, [...(clusters.get(r) ?? []), id]); }
+    const prio = (a: JArm) => roadPriority(a.line.tags, classifyLine(a.line.tags)!.width);
+    for (const ids of clusters.values()) {
+      const all = ids.flatMap((id) => nodes.get(id)!.arms);
+      const ext = all.filter((a) => !inner(a));
+      const pts = ids.map((id) => nodes.get(id)!.p);
+      const centre: P2 = [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
+      if (ext.length < 2) continue;
+      const shape = junctionShape(ext.map((a) => a.arm), centre, latticePerMetre);
+      if (!shape) continue;
+      ext.forEach((a, n) => {
+        a.trim = shape.trims[n];
+        const total = cumulative(drawnPts(a.line)!.map((p) => p.c)).at(-1)!, len = lengthOf(a.line).at(-1)!;
+        a.dTrim = a.dNode + a.out * (a.trim / total) * len;
+      });
+      // the ways between its nodes, once each
+      const innerWays: { line: OsmLine; c: P2[] }[] = [];
+      for (const a of all) {
+        if (!inner(a) || a.out !== 1) continue;
+        const c = drawnPts(a.line)!.map((p) => p.c), total = cumulative(c).at(-1)!, len = lengthOf(a.line).at(-1)!;
+        const s0 = (a.dNode / len) * total, s1 = ((a.dNode + a.next!.d) / len) * total, cum = cumulative(c);
+        innerWays.push({ line: a.line, c: c.filter((_, m) => cum[m] >= s0 - 1e-9 && cum[m] <= s1 + 1e-9) });
+        const list = trimsOf.get(a.line), cut = { d0: a.dNode, d1: a.dNode + a.next!.d, inner: true };
+        if (list) list.push(cut); else trimsOf.set(a.line, [cut]);
+      }
+      /** an arm's direction from its node over its first THROUGH_PROBE_M or so */
+      const armDir = (a: JArm): P2 => {
+        const c = a.arm.c, cum = cumulative(c);
+        let i = 1;
+        while (i < c.length - 1 && cum[i] < THROUGH_PROBE_M * latticePerMetre) i++;
+        const l = Math.hypot(c[i][0] - c[0][0], c[i][1] - c[0][1]) || 1;
+        return [(c[i][0] - c[0][0]) / l, (c[i][1] - c[0][1]) / l];
+      };
+      // the roads through its nodes: which edges the others join on
+      const through = new Map<OsmLine, number>();
+      for (const id of ids) {
+        const { p: node, arms } = nodes.get(id)!;
+        /** the direction an arm leaves in, over its first THROUGH_PROBE_M or so */
+        const dir = (a: JArm): P2 => {
+          const c = a.arm.c, cum = cumulative(c);
+          let i = 1;
+          while (i < c.length - 1 && cum[i] < THROUGH_PROBE_M * latticePerMetre) i++;
+          const q = c[i], l = Math.hypot(q[0] - node[0], q[1] - node[1]) || 1;
+          return [(q[0] - node[0]) / l, (q[1] - node[1]) / l];
+        };
+        let best: [JArm, JArm] | undefined, bestPrio = -Infinity;
+        for (let p = 0; p < arms.length; p++) for (let q = p + 1; q < arms.length; q++) {
+          const a = arms[p], b = arms[q], da = dir(a), db = dir(b), cos = da[0] * db[0] + da[1] * db[1];
+          if (cos > THROUGH_MAX_COS || !classifyLine(a.line.tags)!.marks || !classifyLine(b.line.tags)!.marks) continue;
+          const round = a.line.tags.junction === 'roundabout' && b.line.tags.junction === 'roundabout';
+          // the senior first, then the straighter
+          const m = Math.min(prio(a), prio(b)) + (round ? 100 : 0) - cos * 1e-3;
+          if (m > bestPrio) { bestPrio = m; best = [a, b]; }
+        }
+        if (!best) continue;
+        const [a, b] = best, own = Math.min(prio(a), prio(b));
+        const round = a.line.tags.junction === 'roundabout' && b.line.tags.junction === 'roundabout';
+        const rivals = arms.filter((o) => o !== a && o !== b && prio(o) >= own - 1e-9);
+        if (!round && (rivals.length > 1 || rivals.some((o) => prio(o) > own + 1e-9))) continue;
+        // in a junction of several nodes, no road paints across another of its standing or higher crossing it
+        if (ids.length > 1) {
+          const da = dir(a);
+          const crossed = all.some((o) => o.line !== a.line && o.line !== b.line && prio(o) >= own - 1e-9 && Math.abs(armDir(o)[0] * da[0] + armDir(o)[1] * da[1]) < CROSS_COS);
+          if (crossed) continue;
+        }
+        for (const w of new Set([a.line, b.line])) {
+          let off = through.get(w) ?? 0;
+          const c = drawnPts(w)!.map((q) => q.c);
+          let k = 0, bd = Infinity;
+          for (let m = 0; m + 1 < c.length; m++) { const d = toSegment(node, c[m], c[m + 1]); if (d < bd) { bd = d; k = m; } }
+          const dx = c[k + 1][0] - c[k][0], dy = c[k + 1][1] - c[k][1], flip = w.tags.oneway === '-1' ? -1 : 1;
+          for (const o of arms) {
+            if (o === a || o === b) continue;
+            const q = dir(o);
+            // across > 0: to the right of the driving direction (v grows from the left edge)
+            off |= flip * (q[1] * dx - q[0] * dy) > 0 ? ROAD_EDGE_OFF.RIGHT : ROAD_EDGE_OFF.LEFT;
+          }
+          through.set(w, off);
+        }
+      }
+      const j: Junction = { at: nodes.get(ids[0])!.at, nodes: pts, arms: ext, inner: innerWays, shape, through };
+      junctions.push(j);
+      for (const id of ids) junctionNodes.add(id.split('|')[0]);
+      for (const a of ext) {
+        const d0 = Math.min(a.dNode, a.dTrim), d1 = Math.max(a.dNode, a.dTrim);
+        const list = trimsOf.get(a.line);
+        if (list) list.push({ d0, d1 }); else trimsOf.set(a.line, [{ d0, d1 }]);
+        let cuts = cutAt.get(a.line);
+        if (!cuts) cutAt.set(a.line, cuts = new Map());
+        // the ribbon past the trim starts there (an arm out along the way) or ends there (back along it)
+        cuts.set(a.dTrim, { arm: a, start: a.out === 1 });
+      }
+    }
+  }
+  /** a way's stretches on the ground less what the junctions take */
+  const untrimmed = (line: OsmLine, runs: [number, number][], innerOnly = false): [number, number][] => {
+    const cut = trimsOf.get(line)?.filter((c) => !innerOnly || c.inner);
+    if (!cut?.length) return runs;
+    const out: [number, number][] = [];
+    for (const [a, b] of runs) {
+      let pieces: [number, number][] = [[a, b]];
+      for (const { d0, d1 } of cut) {
+        pieces = pieces.flatMap(([p, q]): [number, number][] => (d1 <= p || d0 >= q ? [[p, q]] : [...(d0 > p ? [[p, d0] as [number, number]] : []), ...(d1 < q ? [[d1, q] as [number, number]] : [])]));
+      }
+      out.push(...pieces.filter(([p, q]) => q - p > 1e-3));
+    }
+    return out;
+  };
+  /** a road's paint at a junction's node: to its trim, no gap */
+  const gapAt = (_line: OsmLine, at: LonLat): number | undefined => (junctionNodes.has(nodeKey(at)) ? 0 : undefined);
+  /** each painted road's centre line, half widths and paint (painted), once */
+  const paintCache = new Map<OsmLine, ReturnType<typeof painted> | null>();
+  const paintOf = (line: OsmLine): ReturnType<typeof painted> | undefined => {
+    let p = paintCache.get(line);
+    if (p === undefined) {
+      const style = classifyLine(line.tags), pts = drawnPts(line);
+      p = style?.marks && pts ? painted(line, pts, style.width / 2, style.marks, net, gapAt) : null;
+      paintCache.set(line, p);
+    }
+    return p ?? undefined;
+  };
+
   interface Draft { shape: CoverShape; rank: number; tie: number; triSeg?: Int32Array; index: number }
   const drafts: Draft[] = [];
   /** a cover's shape; its edge thinned to THIN_M, the points in `keep` kept */
-  const add = (kind: CoverKind, source: CoverShape['source'], prio: number, tris: Float64Array, edge: P2[][], tie = 0, segs?: VertexAttr[], triSeg?: Int32Array, keep?: ReadonlySet<P2>): void => {
+  const add = (kind: CoverKind, source: CoverShape['source'], prio: number, tris: Float64Array, edge: P2[][], tie = 0, segs?: VertexAttr[], triSeg?: Int32Array, keep?: ReadonlySet<P2>): Draft | undefined => {
     let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
     for (let k = 0; k < tris.length; k += 2) {
       x0 = Math.min(x0, tris[k]); x1 = Math.max(x1, tris[k]);
       y0 = Math.min(y0, tris[k + 1]); y1 = Math.max(y1, tris[k + 1]);
     }
     // nothing of it in the tile (none at all: no triangles)
-    if (!(x1 >= 0 && x0 <= grid && y1 >= 0 && y0 <= grid)) return;
+    if (!(x1 >= 0 && x0 <= grid && y1 >= 0 && y0 <= grid)) return undefined;
     const outline = edge.map((l) => thinLine(l, THIN_M * latticePerMetre, keep));
     // equal roads by their first point; anything else keeps its place
     const road = kind === 'carriageway' || kind === 'shoulder';
     const draft: Draft = { shape: { kind, source, prio, tris, outline }, rank: COVER_RANK[kind], tie: road ? tie : 0, triSeg, index: -1 };
     if (segs && triSeg) draft.shape.attr = { segs, segAt: (x, y) => segAt(draft, x, y) };
     drafts.push(draft);
+    return draft;
   };
   const flat = (pts: P2[]): Float64Array => {
     const out = new Float64Array(pts.length * 2);
@@ -518,8 +762,8 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
    * paint stays linear past it (cutNeeded), or `breaks` has it (its index in the longer line), or a
    * lifted run ends there (liftedEnds).
    */
-  const ribbon = (kind: CoverKind, line: OsmLine, c: P2[], half: number | number[], ends: RibbonEnds, prio: number, tie: number, segs?: VertexAttr[], first = 0, breaks?: ReadonlySet<number>): void => {
-    if (c.length < 2) return;
+  const ribbon = (kind: CoverKind, line: OsmLine, c: P2[], half: number | number[], ends: RibbonEnds, prio: number, tie: number, segs?: VertexAttr[], first = 0, breaks?: ReadonlySet<number>): RibbonGeom | undefined => {
+    if (c.length < 2) return undefined;
     const g = ribbonGeom(c, half, ends, latticePerMetre, CAP_TOL_M);
     const keep = new Set<P2>(), cuts: P2[][] = [];
     if (kind === 'carriageway' || kind === 'ballast' || kind === 'runway') {
@@ -531,6 +775,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       });
     }
     add(kind, line, prio, flat(g.tris), [...g.outline, ...cuts], tie, segs, segs ? Int32Array.from(g.triSeg, (s) => s + first) : undefined, keep);
+    return g;
   };
 
   const buildLine = (line: OsmLine): void => {
@@ -538,28 +783,43 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     if (!style || line.points.length < 2 || isTunnel(line.tags)) return;
     const road = !!line.tags.highway;
     const e = line.points.map((ll) => enu(ll[0], ll[1]));
-    let pts = line.points.map((ll, i) => ({ c: toLattice(ll), e: e[i] }))
-      .filter((p, i, a) => i === 0 || p.c[0] !== a[i - 1].c[0] || p.c[1] !== a[i - 1].c[1]);
-    if (pts.length < 2) return;
-    if (road) pts = net.forkShift(line, pts);
+    const pts = drawnPts(line);
+    if (!pts) return;
     const c = pts.map((p) => p.c);
     // no right-of-way strip on a bridge (as the mesh: it would paint what the bridge crosses)
     const half = style.width / 2, shoulder = style.shoulder ?? 0, zone = style.rail && !isBridge(line.tags) ? RAIL_ZONE_M : 0;
     // nothing of it reaches the tile: skip the work
     const r = (half + shoulder + zone) * latticePerMetre;
     if (c.every((p) => p[0] < -r) || c.every((p) => p[0] > grid + r) || c.every((p) => p[1] < -r) || c.every((p) => p[1] > grid + r)) return;
-    const { runs, len } = groundRuns(line, e, lifted);
+    const ground = groundRuns(line, e, lifted), len = ground.len;
+    // the junctions take their share of a road (they cover it)
+    const runs = untrimmed(line, ground.runs);
     if (!runs.length) return;
     const tie = tieBreak(line.points[0]);
+    const cuts = cutAt.get(line);
+    // its shoulders but between a junction's nodes (none where the junctions take all its carriageway)
+    const shoulderRuns = untrimmed(line, ground.runs, true);
     /**
      * a ribbon along each stretch on the ground: centre line cl (a stretch at the same share of its
      * length as of the way's), its own ends at the way's ends, square where the lift begins
      */
     const along = (kind: CoverKind, cl: P2[], w: number | number[], ways: RibbonEnds, prio = 0, segs?: VertexAttr[], breaks?: ReadonlySet<number>): void => {
       const cum = cumulative(cl), ends = joints(line, ways);
-      for (const [d0, d1] of runs) {
+      // a road's shoulders run on under its junctions (the junior of every carriageway): round a kerb's fillet they are its ground
+      for (const [d0, d1] of kind === 'shoulder' ? shoulderRuns : runs) {
         const part = runPart(cl, cum, w, ends, d0, d1, len);
-        ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first, breaks);
+        const g = ribbon(kind, line, part.c, part.half, part.ends, prio, tie, segs, part.first, breaks);
+        if (!g || kind !== 'carriageway') continue;
+        // its square ends at a junction's trim: the junction's outline takes their corners as they are
+        const ends2 = g.outline.slice(-2);
+        for (const [d, start] of [[d0, true], [d1, false]] as const) {
+          const cut = cuts?.get(d);
+          if (!cut || cut.start !== start) continue;
+          const [l, r] = start ? ends2[0] : ends2[1];
+          // [right, left] looking out of the junction: an arm out along the way starts here, one back along it ends here
+          const corners: [P2, P2] = start ? [r, l] : [l, r];
+          cut.arm.corners = corners;
+        }
       }
     };
     if (style.rail) {
@@ -582,10 +842,85 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
     const prio = roadPriority(line.tags, style.width);
     if (style.marks) {
       // narrowing into a narrower continuation; its paint per segment of the whole way
-      const p = painted(line, pts, half, style.marks, net);
+      const p = paintOf(line)!;
       if (p.c.length >= 2) along('carriageway', p.c, p.half, ends, prio, p.segs, new Set(p.breaks));
     } else along('carriageway', c, half, ends, prio);
     if (shoulder) along('shoulder', c, half + shoulder, ends, prio);
+  };
+
+  /** a polygon's triangles (earcut), as pieces of a union */
+  const triangulate = (ring: P2[]): P2[][] => {
+    const co = ring.flat(), idx = earcut(co), out: P2[][] = [];
+    for (let k = 0; k < idx.length; k += 3) out.push([0, 1, 2].map((m) => [co[2 * idx[k + m]], co[2 * idx[k + m] + 1]] as P2));
+    return out;
+  };
+  /** the convex hull of points (counter-clockwise) */
+  const hull = (ps: P2[]): P2[] => {
+    const p = [...ps].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const half = (pts: P2[]) => { const h: P2[] = []; for (const q of pts) { while (h.length >= 2 && (h[h.length - 1][0] - h[h.length - 2][0]) * (q[1] - h[h.length - 2][1]) - (h[h.length - 1][1] - h[h.length - 2][1]) * (q[0] - h[h.length - 2][0]) <= 0) h.pop(); h.push(q); } return h; };
+    const lo = half(p), hi = half([...p].reverse());
+    return [...lo.slice(0, -1), ...hi.slice(0, -1)];
+  };
+  /**
+   * A junction's surface: a carriageway over its arms (their priority, and a little more), the
+   * union of its pieces (junctionPieces: the arms to their trimmed ends, the kerbs' wedges; the ways
+   * between its nodes; the space between its nodes), its outline that union's; the paint of the
+   * roads through it, without the edge line on the sides the others join (ROAD_EDGE_OFF), the
+   * nearest segment of those roads at each point. Its shoulders round it, as the arms'.
+   */
+  const buildJunction = (j: Junction): void => {
+    const arms = j.arms.map((a) => a.arm);
+    const prioOf = (l: OsmLine) => roadPriority(l.tags, classifyLine(l.tags)!.width);
+    const lead = [...j.arms.map((a) => a.line), ...j.inner.map((w) => w.line)].reduce((p, q) => (prioOf(q) > prioOf(p) ? q : p));
+    const prio = Math.max(...j.arms.map((a) => prioOf(a.line)), ...j.inner.map((w) => prioOf(w.line))) + 1e-6;
+    /** the ways between its nodes, and the space between three or more nodes close together */
+    const between = (): P2[][] => {
+      const out: P2[][] = [];
+      for (const w of j.inner) {
+        if (w.c.length < 2) continue;
+        const g = ribbonGeom(w.c, (classifyLine(w.line.tags)!.width / 2) * latticePerMetre, SQUARE_ENDS, latticePerMetre);
+        for (let k = 0; k < g.tris.length; k += 3) out.push([g.tris[k], g.tris[k + 1], g.tris[k + 2]]);
+      }
+      if (j.nodes.length >= 3) out.push(hull(j.nodes));
+      return out;
+    };
+    const surface = (pieces: P2[][]): { tris: Float64Array; outline: P2[][] } => {
+      const ccw = pieces.filter((p) => p.length >= 3).map((p) => {
+        let a = 0;
+        for (let i = 0; i < p.length; i++) a += p[i][0] * p[(i + 1) % p.length][1] - p[(i + 1) % p.length][0] * p[i][1];
+        return a >= 0 ? p : [...p].reverse();
+      });
+      const tris: P2[] = [];
+      for (const p of ccw) for (let k = 1; k + 1 < p.length; k++) tris.push(p[0], p[k], p[k + 1]);
+      return { tris: flat(tris), outline: unionOutline(ccw) };
+    };
+    const corners = j.arms.map((a) => a.corners ?? trimCorners(a.arm, a.trim, 0));
+    const road = surface([...junctionPieces(j.shape, arms, corners, () => 0, latticePerMetre, triangulate), ...between()]);
+    if (!road.tris.length) return;
+    const draft = add('carriageway', lead, prio, road.tris, road.outline, tieBreak(j.at));
+    if (draft) draft.shape.junction = true;
+    if (draft && j.through.size) {
+      const segs: VertexAttr[] = [], owner: { c: P2[]; base: number }[] = [];
+      for (const [line, off] of j.through) {
+        const p = paintOf(line);
+        if (!p || p.c.length < 2) continue;
+        owner.push({ c: p.c, base: segs.length });
+        for (const f of p.segs) segs.push((q) => { const a = f(q); a[4] += off; return a; });
+      }
+      if (segs.length) {
+        draft.shape.attr = {
+          segs,
+          segAt: (x, y) => {
+            let best = Infinity, at = 0;
+            for (const { c, base } of owner) for (let i = 0; i + 1 < c.length; i++) {
+              const d = toSegment([x, y], c[i], c[i + 1]);
+              if (d < best) { best = d; at = base + i; }
+            }
+            return at;
+          },
+        };
+      }
+    }
   };
 
   const buildArea = (area: OsmArea): void => {
@@ -655,6 +990,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   };
 
   for (const line of data.lines) buildLine(line);
+  for (const j of junctions) buildJunction(j);
   for (const area of data.areas) buildArea(area);
   for (const p of data.points) buildPoint(p);
 
@@ -811,5 +1147,6 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
       return gi < 0 ? -1 : triShape[gi];
     },
     outside,
+    junctionNodes,
   };
 }

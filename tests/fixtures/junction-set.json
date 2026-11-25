@@ -1,0 +1,182 @@
+[
+ {
+  "name": "j01",
+  "at": [
+   55.78844,
+   37.76237
+  ],
+  "span": 0.2,
+  "note": "given: a five-lane road splitting into carriageways and ramps, an unclassified road joining"
+ },
+ {
+  "name": "j02",
+  "at": [
+   55.79306,
+   37.78823
+  ],
+  "span": 0.2,
+  "note": "given: a street across a dual carriageway (two nodes, one junction)"
+ },
+ {
+  "name": "j03",
+  "at": [
+   55.80332,
+   37.8301
+  ],
+  "span": 0.24,
+  "note": "given: a roundabout, forks into its entries"
+ },
+ {
+  "name": "j04",
+  "at": [
+   55.81423,
+   37.95481
+  ],
+  "span": 0.2,
+  "note": "given: a primary turning, a secondary and a service road joining at acute angles"
+ },
+ {
+  "name": "j05",
+  "at": [
+   55.68809,
+   37.54523
+  ],
+  "span": 0.2,
+  "note": "Vernadsky / Lomonosovsky: dual carriageways crossing, a cluster of eighteen nodes"
+ },
+ {
+  "name": "j06",
+  "at": [
+   55.7826,
+   37.69686
+  ],
+  "span": 0.2,
+  "note": "tertiary carriageways and a link, five nodes close together"
+ },
+ {
+  "name": "j07",
+  "at": [
+   55.71129,
+   37.62205
+  ],
+  "span": 0.2,
+  "note": "primary and secondary carriageways, six arms"
+ },
+ {
+  "name": "j08",
+  "at": [
+   55.75138,
+   37.53765
+  ],
+  "span": 0.2,
+  "note": "seven arms, ramps merging into an avenue"
+ },
+ {
+  "name": "j09",
+  "at": [
+   55.72312,
+   37.6938
+  ],
+  "span": 0.2,
+  "note": "primary with links (an interchange's ground level)"
+ },
+ {
+  "name": "j10",
+  "at": [
+   55.90093,
+   37.54499
+  ],
+  "span": 0.2,
+  "note": "secondary links, six arms"
+ },
+ {
+  "name": "j11",
+  "at": [
+   55.73851,
+   37.58612
+  ],
+  "span": 0.2,
+  "note": "Zubovskaya square: the 28 m Garden Ring across secondaries"
+ },
+ {
+  "name": "j12",
+  "at": [
+   55.78738,
+   37.54455
+  ],
+  "span": 0.2,
+  "note": "six tertiary arms"
+ },
+ {
+  "name": "j13",
+  "at": [
+   55.77953,
+   37.72087
+  ],
+  "span": 0.2,
+  "note": "four secondary links meeting"
+ },
+ {
+  "name": "j14",
+  "at": [
+   55.89848,
+   37.58689
+  ],
+  "span": 0.2,
+  "note": "a primary across busways"
+ },
+ {
+  "name": "j15",
+  "at": [
+   55.81143,
+   37.65416
+  ],
+  "span": 0.2,
+  "note": "a roundabout with one-way entries"
+ },
+ {
+  "name": "j16",
+  "at": [
+   55.60131,
+   37.46651
+  ],
+  "span": 0.2,
+  "note": "eight unclassified arms at one node"
+ },
+ {
+  "name": "j17",
+  "at": [
+   55.77265,
+   37.63258
+  ],
+  "span": 0.2,
+  "note": "primary 17.5 m carriageways across secondaries"
+ },
+ {
+  "name": "j18",
+  "at": [
+   55.91531,
+   37.39836
+  ],
+  "span": 0.2,
+  "note": "a roundabout of secondaries"
+ },
+ {
+  "name": "j19",
+  "at": [
+   55.68089,
+   37.74939
+  ],
+  "span": 0.2,
+  "note": "plain: two-way secondaries crossing (renders well before)"
+ },
+ {
+  "name": "j20",
+  "at": [
+   55.64529,
+   37.64261
+  ],
+  "span": 0.2,
+  "note": "plain: two-way tertiaries crossing (renders well before)"
+ }
+]
