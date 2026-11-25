@@ -251,6 +251,13 @@ const TUNNEL_DARK = colour(16, 16, 18);
 /** the tube's outside when there is no imagery under it */
 const TUNNEL_EARTH = colour(112, 94, 70);
 
+/** `src` pushed onto `dst` in chunks (one push a number cost the loose ribbons' flush 70–150 ms a dense tile) */
+function appendAll(dst: number[], src: readonly number[]): void {
+  const CHUNK = 8192;
+  if (src.length <= CHUNK) { dst.push(...src); return; }
+  for (let i = 0; i < src.length; i += CHUNK) dst.push(...src.slice(i, i + CHUNK));
+}
+
 export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const { tile, sampleHeight } = opts;
   // only this tile's share: the drape knows no terrain beyond the tile border
@@ -1076,13 +1083,20 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const own = item ? levels[ri++] : 0;
       const depth = (out.depth ??= { from: out.ramps.length, levels: [] });
       while (depth.from + depth.levels.length < out.ramps.length) depth.levels.push(0);
-      for (const v of part.verts) out.verts.push(v);
-      part.ramps.forEach((r, v) => {
-        out.ramps.push(r);
-        const of = ranks.get(part.faceOf![v]);
-        depth.levels.push(rank === undefined ? own + (of?.length ?? 0) : of!.indexOf(rank) + 1);
-      });
-      if (out.attrs) for (const a of part.attrs!) out.attrs.push(a);
+      appendAll(out.verts, part.verts);
+      appendAll(out.ramps, part.ramps);
+      // a level a vertex, the same over a face's run of vertices (a piece's triangles follow each other)
+      const faceOf = part.faceOf!;
+      let face = -1, level = 0;
+      for (let v = 0; v < part.ramps.length; v++) {
+        if (faceOf[v] !== face) {
+          face = faceOf[v];
+          const of = ranks.get(face);
+          level = rank === undefined ? own + (of?.length ?? 0) : of!.indexOf(rank) + 1;
+        }
+        depth.levels.push(level);
+      }
+      if (out.attrs) appendAll(out.attrs, part.attrs!);
     }
   };
 
