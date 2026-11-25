@@ -77,6 +77,16 @@ describe('our tiles as Overpass JSON', () => {
     expect(road[1][0]).toBeCloseTo(b.east, 6);
   });
 
+  it('an area reaching past the tile edge (a sports ground, SimProfile GROUND_BUFFER_PX) comes back whole', () => {
+    const data = mvt(layer('areas', [{ type: 3, props: { leisure: 'stadium' }, parts: [[[-1000, 3500], [1500, 3500], [1500, 5000], [-1000, 5000], [-1000, 3500]]] }]));
+    const osm = parseOverpass(pmtilesToOverpass(data, TILE, NO_AERODROMES));
+    const b = tileBounds(TILE);
+    const ring = osm.areas[0].rings[0];
+    expect(Math.min(...ring.map(([lon]) => lon))).toBeLessThan(b.west);
+    expect(Math.min(...ring.map(([, lat]) => lat))).toBeLessThan(b.south);
+    expect(Math.max(...ring.map(([lon]) => lon))).toBeGreaterThan(b.west);
+  });
+
   it('aerodromes within reach of the tile and runways crossing it come whole from the index', () => {
     const b = tileBounds(TILE);
     const near: [number, number][] = [[b.east + 0.01, b.south], [b.east + 0.03, b.south], [b.east + 0.03, b.north], [b.east + 0.01, b.north], [b.east + 0.01, b.south]];

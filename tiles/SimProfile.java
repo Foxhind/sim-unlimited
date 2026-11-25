@@ -48,6 +48,15 @@ public class SimProfile implements Profile {
    * more up to 60° of latitude
    */
   static final int REACH_BUFFER_PX = 32;
+  /**
+   * sports grounds (leisure=pitch | track | stadium, src/world/aerodrome.ts isPitchGround) reach a
+   * whole tile past the edge: one smaller than a tile is then whole in every tile it touches, as
+   * Overpass hands it over. Its pad, its floodlights and a stadium's stands are built from the whole
+   * outline (aerodrome.ts, pitch-markings.ts, stadium-mesher.ts); a share cut at the tile edge would
+   * put stands on the cut and a pad of its own in each tile
+   */
+  static final int GROUND_BUFFER_PX = 256;
+  static final Pattern GROUND = Pattern.compile("^(pitch|track|stadium)$");
 
   /** overpass.ts ROAD_SELECTOR: the drawn roads and paths */
   static final Pattern HIGHWAY = Pattern.compile("^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$");
@@ -219,6 +228,7 @@ public class SimProfile implements Profile {
       var feat = withTags(fc.polygon("areas"), tags);
       if (isBuilding(f)) feat.setBufferPixels(BUILDING_BUFFER_PX);
       else if ("water".equals(s(f, "natural")) || f.hasTag("waterway")) feat.setBufferPixels(REACH_BUFFER_PX);
+      else if (find(GROUND, s(f, "leisure"))) feat.setBufferPixels(GROUND_BUFFER_PX);
     } else if (!relation) {
       withTags(fc.line("lines"), tags).setBufferPixels(REACH_BUFFER_PX);
     }

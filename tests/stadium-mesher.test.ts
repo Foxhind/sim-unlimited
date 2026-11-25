@@ -56,4 +56,15 @@ describe('buildStadiums', () => {
   it('drawn by the tile holding its centre only', () => {
     expect(buildStadiums({ ...TILE, x: TILE.x + 1 }, [stadium()], flat).ramps.length).toBe(0);
   });
+
+  it('across a tile border, handed whole to both tiles (our tiles: SimProfile GROUND_BUFFER_PX), its two stands once', () => {
+    // centred 30 m north of the tile's south edge: the outline reaches 20 m into the tile below
+    const b = { south: c.lat - 0.5 * (tileCenter(TILE).lat - tileCenter({ ...TILE, y: TILE.y + 1 }).lat) };
+    const dy = (b.south - c.lat) * KY + 30;
+    const whole: OsmArea = { rings: [ring(160, 100).map(([lon, lat]) => [lon, lat + dy / KY] as LonLat)], tags: { leisure: 'stadium' } };
+    const here = buildStadiums(TILE, [whole], flat), below = buildStadiums({ ...TILE, y: TILE.y + 1 }, [whole], flat);
+    expect(below.ramps.length).toBe(0);
+    // seating, wall, two ends: 4 quads of 2 triangles a stand
+    expect(here.ramps.length / 3).toBe(2 * 4 * 2);
+  });
 });
