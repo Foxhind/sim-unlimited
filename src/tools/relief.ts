@@ -5,6 +5,7 @@
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
+import type { HdrBlocker } from '../engine/output-mode';
 import { BASE_LAND, frameLighting, litShare, moonLightOn, paletteAt, seasonOf, snowy, solarHour, sunColour, WINDOWS } from '../engine/palette';
 import { rim, rimFrame } from '../engine/rim';
 import { Renderer } from '../engine/renderer';
@@ -479,6 +480,8 @@ function setFly(on: boolean): void {
   b.textContent = on ? 'Вернуться к виду сверху' : 'Свободный полёт';
   // Space must not press the button again
   b.blur();
+  // XDR as in the simulator, in free flight only: the plan view stays SDR
+  renderer.setHdr(on);
   syncInputs();
 }
 
@@ -585,6 +588,14 @@ function drawMarks(dpr: number): void {
 
 // ---------- side panel ----------
 
+/** why free flight is not in XDR (output-mode.ts HdrBlocker) */
+const HDR_BLOCKER_TEXT: Record<HdrBlocker, string> = {
+  setting: 'XDR выключен',
+  browser: 'браузер не умеет XDR',
+  display: 'экран сейчас не HDR',
+  pending: 'XDR включается',
+};
+
 function showStats(osmOn: boolean): void {
   const st = chunks.stats;
   const byZoom = new Map<number, number>();
@@ -598,12 +609,13 @@ function showStats(osmOn: boolean): void {
   $('stats').textContent = [
     `${fps} кадр/с`,
     `тайлов в кадре ${chunks.renderList.length} (${zooms || '—'})`,
-    `треугольников ${Math.round(verts / 3)}`,
+    `треугольников в кадре ${Math.round(renderer.trianglesDrawn).toLocaleString('ru-RU')} (рельеф ${Math.round(verts / 3).toLocaleString('ru-RU')})`,
     `рельеф: загружено ${st.chunks}, в очереди ${st.pending}`,
     osmOn ? `OSM: загружено ${os.chunks}, в очереди ${os.pending}, ошибок ${os.errors}` : 'OSM: выключен',
     fly.on
       ? `скорость ×${+fly.speedFactor.toFixed(3)} (колесо), высота ${Math.round(fly.alt)} м`
       : `масштаб ${(state.span / canvas.clientWidth).toFixed(1)} м/пкс`,
+    `вывод ${renderer.output === 'hdr' ? 'XDR' : `SDR${fly.on ? ` (${HDR_BLOCKER_TEXT[renderer.hdrBlocker ?? 'pending']})` : ''}`}`,
   ].join('\n');
 }
 

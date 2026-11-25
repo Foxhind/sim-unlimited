@@ -63,6 +63,8 @@ export class Renderer {
   private starsVao: WebGLVertexArrayObject;
   private starsBuf: WebGLBuffer;
   private starsCount = 0;
+  /** triangles of the world passes (drawWorld, drawTrees) since beginFrame: what the frame shows, shadows not counted */
+  trianglesDrawn = 0;
   /** what drawSky drew this frame, for drawStars: moon, ground height, overcast decks above / below */
   private skyMoon = vec3.create();
   private skyCover = new Float32Array(3);
@@ -612,6 +614,7 @@ export class Renderer {
   beginFrame(lut: Uint8Array, light: LightUniforms): void {
     const gl = this.gl;
     this.light = light;
+    this.trianglesDrawn = 0;
     gl.activeTexture(gl.TEXTURE0 + LUT_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, this.lutTex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, LUT_ENTRIES / 256, gl.RGBA, gl.UNSIGNED_BYTE, lut);
@@ -783,6 +786,7 @@ export class Renderer {
     this.setWire(u);
     gl.bindVertexArray(mesh.vao);
     gl.drawArrays(gl.TRIANGLES, mesh.first ?? 0, mesh.vertexCount);
+    this.trianglesDrawn += mesh.vertexCount / 3;
     if (blend) gl.disable(gl.BLEND);
     if (!depthWrite || blend) gl.depthMask(true);
   }
@@ -829,6 +833,7 @@ export class Renderer {
     this.setWire(this.treeU);
     gl.bindVertexArray(vao);
     gl.drawArraysInstanced(gl.TRIANGLES, first, vertexCount, count);
+    this.trianglesDrawn += (vertexCount / 3) * count;
   }
 
   /** Q7: fixed-screen-size emissive points (or 1 px GL lines: vertex pairs); depth-tested but no depth writes. */
