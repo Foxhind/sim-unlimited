@@ -343,12 +343,15 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
 const isPart = (b: OsmBuilding) => b.tags['building:part'] !== undefined && b.tags['building:part'] !== 'no';
 
 /**
- * The style tags a part takes from its building's outline, by family: walls, roof. A part with any tag of
+ * The style tags a part takes from its building's outline, by family: walls, roof, architectural style. A part with any tag of
  * a family keeps its own for it (its material is not overridden by the outline's colour).
  */
 export const SHARED_STYLE_KEYS = [
   ['building:colour', 'building:color', 'colour', 'color', 'building:material'],
   ['roof:colour', 'roof:color', 'roof:material'],
+  ['building:architecture'],
+  // the year a style is inferred from (arch-styles inferArchitecture), also of shop and panoramic windows
+  ['start_date'],
 ] as const;
 
 /** the vertex mean of a ring, or a vertex nudged toward it when that falls outside (a concave ring) */

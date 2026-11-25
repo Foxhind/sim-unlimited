@@ -219,7 +219,7 @@ describe('building night lights', () => {
 
   it('the ground floor differs: its own shade, shop windows or full glazing, signs only on residential', () => {
     expect(WORLD_FS).toContain('bool groundFloorAt(');
-    expect(WORLD_FS).toContain('bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops);');
+    expect(WORLD_FS).toContain('bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops) && (prof == 0u || shops);');
     expect(WORLD_FS).toMatch(/if \(resid && winRand\(/);
     expect(WORLD_FS).toContain(`bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;`);
     expect(WORLD_VS).toContain('flat out vec3 vRef;');

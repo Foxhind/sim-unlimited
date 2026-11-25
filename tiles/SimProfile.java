@@ -80,7 +80,8 @@ public class SimProfile implements Profile {
 
   /**
    * tags the client reads (grep of src/world): the rest are dropped. Wall and roof materials and
-   * colours (building:material, roof:material, building:colour, roof:colour...) come with KEY_PREFIXES.
+   * colours (building:material, roof:material, building:colour, roof:colour...) and the architectural
+   * style (building:architecture, arch-styles archProfile) come with KEY_PREFIXES.
    */
   static final Set<String> KEYS = Set.of(
     "building", "building:part", "height", "min_height", "location", "layer", "colour", "color",
@@ -90,7 +91,8 @@ public class SimProfile implements Profile {
     "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type",
     // pedestrian crossings: their nodes and the crossing ways (ground-cover zebras)
     "crossing", "footway", "cycleway",
-    // the year a building was built (building-mesher hasPanoramicWindows)
+    // the year a building was built (building-mesher hasPanoramicWindows, arch-styles inferArchitecture;
+    // amenity=place_of_worship there too)
     "start_date");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};

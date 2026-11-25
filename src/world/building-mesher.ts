@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, FAR_WINDOWS, isMaterial, LIGHT, pointValue, rgbOf, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmBuilding, type OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -7,6 +7,7 @@ import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
 import { crossings, meshCrossings, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 import { KindRuns, structureKind } from './structure-kinds';
+import { ARCH_INFERRED_TAG, archProfile, BELT, inferArchitecture, paneHalfHeight, type ArchProfile } from './arch-styles';
 
 /** floats per vertex of BuildingMeshData.windows */
 export const WINDOW_ATTR_FLOATS = 5;
@@ -375,12 +376,18 @@ function greenhouseDefaults(tags: Record<string, string>, out: Record<string, st
 }
 
 const defaultTagsCache = new WeakMap<OsmBuilding, Record<string, string>>();
-/** withDefaultTags of a building, its footprint in metres about its first vertex (stable across tiles) */
+/**
+ * withDefaultTags of a building, its footprint in metres about its first vertex (stable across tiles),
+ * and without building:architecture the style its start_date and place suggest (ARCH_INFERRED_TAG,
+ * inferArchitecture; drawn by styleSeed, so the parts of a building agree)
+ */
 export function buildingTags(b: OsmBuilding): Record<string, string> {
   let t = defaultTagsCache.get(b);
   if (!t) {
     const ring = b.rings[0];
     t = withDefaultTags(b.tags, ring && ring.length >= 3 ? localXZ(ring) : undefined);
+    const style = ring?.length ? inferArchitecture(b.tags, ring[0][0], ring[0][1], styleSeed(b)) : undefined;
+    if (style) t[ARCH_INFERRED_TAG] = style;
     defaultTagsCache.set(b, t);
   }
   return t;
@@ -551,7 +558,8 @@ function taggedRamp(tags: Record<string, string>, colourKeys: string[], material
 
 /**
  * Wall colour from OSM (Simple 3D Buildings: building:colour, then building:material), else one of
- * the type's palette (wallPalette), deterministic by the building seed. A hex or rgb() value is taken
+ * its architectural style's colours (arch-styles), else of the type's palette (wallPalette),
+ * deterministic by the building seed. A hex or rgb() value is taken
  * as tagged unless too saturated (pastelColour); a CSS colour name as a muted shade of it.
  */
 export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
@@ -561,7 +569,16 @@ export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
   const type = tags[STYLE_TYPE_TAG] || tags['building:part'] || tags.building || 'yes';
   if (type === 'greenhouse') return rgbRamp([...GREENHOUSE.GLASS]);
   const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
-  return rgbRamp(pickWeighted(wallPalette(type), t));
+  // a building of an architectural style: that style's colours
+  return rgbRamp(pickWeighted(archProfile(tags)?.walls ?? wallPalette(type), t));
+}
+
+/** a style's detail colour (cornices, belts): its trim, else the wall's a little lighter (a material wall: as it is) */
+export function trimRamp(arch: ArchProfile, wRamp: number): number {
+  if (arch.trim) return rgbRamp(arch.trim);
+  if (isMaterial(wRamp)) return wRamp;
+  const [r, g, b] = rgbOf(wRamp);
+  return colour(r + (255 - r) * 0.25, g + (255 - g) * 0.25, b + (255 - b) * 0.25);
 }
 
 /** the pitched roof of a building up to this height (wall + roof, above its base) may be orange */
@@ -811,8 +828,11 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const winBase = wallBase + (zoned && h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
     const winH = wallTop - winBase - (roof.kind === 'flat' && hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : 0);
     const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
-    // residential: balconies on some edges, rare signs on the ground floor
-    const balconies = windowed && hasBalconies(tags, winH);
+    // an architectural style: its windows and wall paint (the profile rides on the wall height), its cornice and belts
+    const arch = archProfile(tags);
+    const profile = arch?.id ?? 0;
+    // residential: balconies on some edges (none on a pre-1900 style), rare signs on the ground floor
+    const balconies = windowed && hasBalconies(tags, winH) && (!arch || arch.balconies);
     // two floors: every window alike, one seed for the whole building (FACADE_UNIFORM)
     const uniform = windowed && facadeFloors(winH) === 2;
     const uniformSeed = uniform ? Math.floor(styleSeed(b) * (1 << FACADE_SEED_BITS)) : -1;
@@ -820,7 +840,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const flags = (isAllNight(tags) ? FACADE_ALL_NIGHT : 0)
       + (uniform ? FACADE_UNIFORM : 0)
       + ((uniform && hasShopFloor(tags)) || hasStorefronts(tags) ? FACADE_SHOPS : 0)
-      + (hasPanoramicWindows(tags, styleSeed(b)) ? FACADE_PANORAMIC : 0);
+      + ((arch ? arch.panoramic : hasPanoramicWindows(tags, styleSeed(b))) ? FACADE_PANORAMIC : 0);
 
     // a plinth of the ground's colour from under the lowest ground up to the walls: a house on a slope
     if (!isCanopy && h.min < 0.5 && base - low > 0.05) {
@@ -844,16 +864,17 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags, uniformSeed);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags, uniformSeed, profile);
         }
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4 && !glassy) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
-          detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags, uniformSeed));
+          detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags, uniformSeed, profile));
         }
       }
-      if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH);
+      if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH, arch);
+      if (arch && !glassy) detail(() => styleBands(arch, [outer, ...holes], wallTop, h.wall, windowed ? winH : 0, winBase, wRamp));
     }
 
     // ceiling under elevated parts (arches, bridges)
@@ -977,10 +998,11 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   /**
    * windowH: the height of the facade with windows (0: none), from winBase up (the facade's v is
    * measured from there: the plinth under it is negative, no windows); balconies: some edges may carry them;
-   * uniformSeed: the building's seed for every edge (FACADE_UNIFORM), -1: each edge its own
+   * uniformSeed: the building's seed for every edge (FACADE_UNIFORM), -1: each edge its own;
+   * profile: the architectural style (arch-styles), carried above the wall height (FACADE_PROFILE_M)
    */
   function wallUnderRoof(
-    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number, uniformSeed: number,
+    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number, uniformSeed: number, profile: number,
   ): void {
     const field = roofField(roof);
     const ts = [0, ...roofBreaks(roof, creases, p, q), 1];
@@ -998,7 +1020,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       const ua = ts[k] * len, uc = ts[k + 1] * len;
       const v0 = yBase - winBase;
       for (const [u, v] of [[ua, v0], [uc, v0], [uc, yc - winBase], [ua, v0], [uc, yc - winBase], [ua, ya - winBase]]) {
-        win.push(u, v, len, wallH, seed);
+        win.push(u, v, len, wallH > 0 ? wallH + profile * FACADE_PROFILE_M : 0, seed);
       }
     }
   }
@@ -1079,7 +1101,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * that slot's ground floor is covered by a blind patch of the wall (the edge's facade code with
    * FACADE_BLIND: the ground floor's tint, no openings), so no pane or shop window shows round the door.
    */
-  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean, flags: number, uniformSeed: number): void {
+  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean, flags: number, uniformSeed: number, profile: number): void {
     const [w, hgt] = DOOR_SIZE[e.kind] ?? DOOR_SIZE.default;
     let best: { p: XZ; dir: XZ; len: number; u: number; d: number } | undefined;
     for (const ring of rings) {
@@ -1110,7 +1132,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // the slot's whole ground floor (wallUnderRoof gives the edge the same code)
       const fh = wallH / Math.max(1, Math.floor(wallH / WINDOWS.FLOOR_M));
       const code = edgeCode(p, wallBase, len, residential, uniformSeed) + flags + FACADE_BLIND;
-      wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, winBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, winBase]);
+      wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, winBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH + profile * FACADE_PROFILE_M, code, winBase]);
     }
     const garage = e.kind === 'garage';
     wallRect(p, dir, n, u - w / 2 - 0.1, u + w / 2 + 0.1, y0, top + 0.1, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
@@ -1125,11 +1147,11 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   }
 
   /** air-conditioner instances under the windows of the outer walls (ring ccw: outward is to the right of each edge) */
-  function airConditioners(ring: XZ[], winBase: number, winH: number): void {
+  function airConditioners(ring: XZ[], winBase: number, winH: number, arch: ArchProfile | undefined): void {
     const floors = Math.max(1, Math.floor(winH / WINDOWS.FLOOR_M));
     const fh = winH / floors;
-    // the pane of WORLD_FS windowAt: centred 0.55 of the floor up, half as high as min(0.75, 0.27 fh)
-    const sill = 0.55 * fh - Math.min(0.75, 0.27 * fh) - AC.GAP_M - AC_SIZE.HEIGHT;
+    // the pane of WORLD_FS windowAt: centred 0.55 of the floor up, half as high as min(0.75, 0.27 fh) (a style's: paneHalfHeight)
+    const sill = 0.55 * fh - (arch ? paneHalfHeight(arch, fh) : Math.min(0.75, 0.27 * fh)) - AC.GAP_M - AC_SIZE.HEIGHT;
     if (sill < 0) return;
     for (let i = 0; i < ring.length; i++) {
       const p = ring[i], q = ring[(i + 1) % ring.length];
@@ -1191,6 +1213,62 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       ];
       for (const [a, b, n] of sides) flatQuad(c(a, y), c(b, y), c(b, y1), c(a, y1), n, ramp);
       flatQuad(c([-1, -1], y1), c([1, -1], y1), c([1, 1], y1), c([-1, 1], y1), [0, 1, 0], snowy(ramp));
+    }
+  }
+
+  /**
+   * A style's mouldings round the walls (rings: outer ccw, holes cw): the crowning cornice under the wall
+   * top (at most a fifth of the wall high) and belt courses at the window floors' lines (BELT), in the
+   * style's trim colour or the wall's a little lighter.
+   */
+  function styleBands(arch: ArchProfile, rings: XZ[][], wallTop: number, wallH: number, windowH: number, winBase: number, wRamp: number): void {
+    const ramp = trimRamp(arch, wRamp);
+    if (arch.cornice && wallH >= PARAPET.MIN_WALL_M) {
+      const ch = Math.min(arch.cornice.h, 0.2 * wallH);
+      for (const ring of rings) moulding(ring, wallTop - ch, wallTop, arch.cornice.out * (ch / arch.cornice.h), ramp, 0.45);
+    }
+    if (arch.belts && windowH > 0) {
+      const floors = facadeFloors(windowH);
+      const fh = windowH / floors;
+      const last = arch.belts === 1 ? Math.min(1, floors - 1) : floors - 1;
+      for (let k = 1; k <= last; k++) {
+        const y0 = winBase + k * fh - BELT.BELOW;
+        if (y0 + BELT.H > wallTop - 0.3) break;
+        for (const ring of rings) moulding(ring, y0, y0 + BELT.H, BELT.OUT, ramp, 0);
+      }
+    }
+  }
+
+  /**
+   * A horizontal moulding round a ring from y0 to y1, standing `out` metres out of the wall: an
+   * underside (sloping up to the front over `slope` of the height: a cornice's cove; 0: flat), a
+   * vertical front and a top (snow in winter). Corners are mitred, a near-reversal offset by the next edge alone.
+   */
+  function moulding(ring: XZ[], y0: number, y1: number, out: number, ramp: number, slope: number): void {
+    const n = ring.length;
+    // outward of an edge: the right side (the inside is on the left of every ring edge, as for parapet)
+    const right = (p: XZ, q: XZ): XZ => {
+      const ex = q[0] - p[0], ez = q[1] - p[1], len = Math.hypot(ex, ez) || 1;
+      return [ez / len, -ex / len];
+    };
+    const off = ring.map((p, i): XZ => {
+      const n1 = right(ring[(i + n - 1) % n], p), n2 = right(p, ring[(i + 1) % n]);
+      const denom = 1 + n1[0] * n2[0] + n1[1] * n2[1];
+      const k = denom < 0.2 ? 0 : out / denom;
+      return k ? [p[0] + (n1[0] + n2[0]) * k, p[1] + (n1[1] + n2[1]) * k] : [p[0] + n2[0] * out, p[1] + n2[1] * out];
+    });
+    const yc = y0 + slope * (y1 - y0);
+    const top = snowy(ramp);
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const p = ring[i], q = ring[j], po = off[i], qo = off[j];
+      const [ox, oz] = right(p, q);
+      // the underside: from the wall at y0 out to the front at yc, facing out and down
+      const dy = yc - y0;
+      const nl = Math.hypot(dy, out) || 1;
+      flatQuad([p[0], y0, p[1]], [q[0], y0, q[1]], [qo[0], yc, qo[1]], [po[0], yc, po[1]], [ox * dy / nl, -out / nl, oz * dy / nl], ramp);
+      flatQuad([po[0], yc, po[1]], [qo[0], yc, qo[1]], [qo[0], y1, qo[1]], [po[0], y1, po[1]], [ox, 0, oz], ramp);
+      flatQuad([po[0], y1, po[1]], [qo[0], y1, qo[1]], [q[0], y1, q[1]], [p[0], y1, p[1]], [0, 1, 0], top);
     }
   }
 
@@ -1361,7 +1439,7 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
     const h = buildingHeights(b);
     const [e, n] = latLonToEnu(center, lat, lon, 0);
     const y = buildingFooting(ring, sampleHeight).base + h.min + (h.wall + h.roof) * 0.5;
-    out.push(e, y, -n, pointValue(wallRamp(b.tags, styleSeed(b))));
+    out.push(e, y, -n, pointValue(wallRamp(buildingTags(b), styleSeed(b))));
     out.push(e, y, -n, pointValue(roofRamp(buildingTags(b), styleSeed(b), lat)));
   }
   return new Float32Array(out);

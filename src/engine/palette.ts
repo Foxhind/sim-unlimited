@@ -1008,6 +1008,12 @@ export const FACADE_RESIDENTIAL = 1 << 21;
 /** a blind patch (the wall round a door): the ground floor's tint, no openings or signs */
 export const FACADE_BLIND = 1 << 22;
 /**
+ * A facade vertex's wall height (aWinEdge.y) carries the building's architectural style above it:
+ * wall height + profile × FACADE_PROFILE_M (arch-styles ARCH_PROFILES; 0: no style). Walls stay
+ * under this height; up to 31 profiles keep the height within 4 mm in a float.
+ */
+export const FACADE_PROFILE_M = 1024;
+/**
  * Road paint, WORLD_FS roadMarkAt (aWinEdge.z of a road vertex): the lane count in bits 0..3, ONEWAY,
  * EDGES (solid lines along both edges), DOUBLE (a double solid centre line). Two-way roads have a
  * dashed centre line and dashed lines between the lanes of each direction, one-way roads dashed lines

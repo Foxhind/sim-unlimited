@@ -6,7 +6,8 @@
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
 import { TREE_THIN } from '../world/props-mesher';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { ARCH_GLSL } from '../world/arch-styles';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -732,6 +733,13 @@ float windowFade(float d) {
  * ground floor's windows as the upper floor's unless it keeps its shop windows (FACADE_SHOPS, which
  * also puts them on a building of one floor: supermarkets, malls, newer retail and commercial). On
  * FACADE_PANORAMIC the plain windows are panoramic: nearly the floor's height and the slot's width.
+ *
+ * Above its wall height (edge.y) a facade carries its architectural style (palette.ts FACADE_PROFILE_M,
+ * arch-styles ARCH_PROFILES): archWall paints the wall (rusticated courses from the ground, quoins at the
+ * edge's ends, pilaster strips between the window columns) and archWindow the windows (the head: flat,
+ * segmental, round, pointed, horseshoe or a ribbon along the floor; a surround, a cornice bar over it or a
+ * keystone, a dark reveal; T, 6/6, transom or strip glazing). A styled facade keeps its ground floor's
+ * windows unless it has shop windows (FACADE_SHOPS). Fine lines show only where they are about a pixel wide or more.
  * Returns true on a lit pane.
  */
 const WINDOW_GLSL = `${WINDOW_LIGHT_GLSL}
@@ -817,13 +825,150 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
   c = glass;
   return false;
 }
+${ARCH_GLSL}
+// the style's detail colour on this wall, into the wall's with the fog
+vec3 archTrim(uint prof, vec3 c, float fog) {
+  vec3 t = ARCH_TRIM[prof];
+  return t.x < 0.0 ? min(c * 1.18, vec3(1.0)) : mix(vRef * t, c, fog);
+}
+// inside an opening centred on x = 0, y = 0 (metres), hw × hh its half box, grown by e: a flat, segmental,
+// round, pointed (equilateral) or horseshoe head (arch-styles HEAD)
+bool paneIn(float x, float y, float hw, float hh, uint head, float e) {
+  float w = hw + e, top = hh + e;
+  if (y < -hh - e || w <= 0.0) return false;
+  if (head == 4u) {
+    float R = 1.15 * w, cy = top - R;
+    if (y < cy - sqrt(R * R - w * w)) return abs(x) < w;
+    return x * x + (y - cy) * (y - cy) < R * R;
+  }
+  if (abs(x) > w || y > top) return false;
+  if (head == 1u) {
+    float rise = 0.3 * w, R = (w * w + rise * rise) / (2.0 * rise), cy = top - R;
+    return y < top - rise || x * x + (y - cy) * (y - cy) < R * R;
+  }
+  if (head == 2u) {
+    float cy = top - w;
+    return y < cy || x * x + (y - cy) * (y - cy) < w * w;
+  }
+  if (head == 3u) {
+    float sy = top - 1.732 * w, d = y - sy;
+    return y < sy || ((x + w) * (x + w) + d * d < 4.0 * w * w && (x - w) * (x - w) + d * d < 4.0 * w * w);
+  }
+  return true;
+}
+// a style's wall paint (archWall in windowAt's comment); len the edge's length, slots of cw metres
+void archWall(inout vec3 c, uint prof, vec2 uv, float len, float fh, float cw, float slots, vec2 fw, float fog) {
+  uint bits = ARCH_BITS[prof];
+  float course = 0.5;
+  float row = floor(uv.y / course);
+  float gy = abs(fract(uv.y / course + 0.5) - 0.5) * course;
+  bool lines = 0.05 > 0.7 * fw.y;
+  if ((bits & 1u) != 0u) {
+    // quoins: long and short blocks in turn at both ends of the edge
+    float qw = mod(row, 2.0) < 0.5 ? 0.9 : 0.55;
+    if (min(uv.x, len - uv.x) < qw && qw > 2.0 * fw.x) {
+      c = lines && gy < 0.02 ? c * mix(vec3(0.75), vec3(1.0), fog) : archTrim(prof, c, fog);
+      return;
+    }
+  }
+  if (uv.y < ARCH_RUST[prof] * fh) {
+    // rusticated courses, their blocks staggered, a little darker than the wall
+    c *= mix(vec3(0.93), vec3(1.0), fog);
+    float bl = 1.2;
+    float gx = abs(fract(uv.x / bl + 0.5 * mod(row, 2.0) + 0.5) - 0.5) * bl;
+    if (lines && (gy < 0.025 || (gx < 0.02 && 0.04 > 0.7 * fw.x))) c *= mix(vec3(0.72), vec3(1.0), fog);
+    return;
+  }
+  if ((bits & 2u) != 0u && slots >= 2.0 && 0.3 > 1.5 * fw.x) {
+    // pilaster strips on the slot boundaries (the edge's ends too), lit on one side, shadowed on the other
+    float d = (fract(uv.x / cw + 0.5) - 0.5) * cw;
+    if (abs(d) < 0.3) c = d > 0.25 && 0.04 > 0.7 * fw.x ? c * mix(vec3(0.8), vec3(1.0), fog) : mix(min(c * 1.08, vec3(1.0)), c, fog);
+  }
+}
+// a style's window in its slot (archWindow in windowAt's comment); du, dv: from the slot's centre and the floor's base
+bool archWindow(inout vec3 c, uint prof, float du, float dv, float fh, float cw, float k, float f, float ux, float len, uint seed, uint ws, bool lit, vec3 light, vec3 glass, vec2 fw, float fog) {
+  uint head = ARCH_HEAD[prof];
+  uint frame = ARCH_FRAME[prof];
+  uint bits = ARCH_BITS[prof];
+  float hw = min(max(min(ARCH_W[prof], 0.42 * cw), 0.6 * fw.x), 0.45 * cw);
+  float hh = min(max(min(ARCH_H[prof], 0.38 * fh), 0.6 * fw.y), 0.45 * fh);
+  if ((bits & 4u) != 0u) {
+    // each window column its own head and width: flat, segmental or round
+    float rv = winRand(seed * 3u + winHash(uint(k) + 0x77u));
+    head = uint(rv * 3.0);
+    hw = min(hw * (0.75 + 0.5 * fract(rv * 7.0)), 0.45 * cw);
+  }
+  // a surround changing floor by floor: plain, under a cornice bar, with a keystone
+  if ((bits & 8u) != 0u) frame = 1u + uint(mod(f, 3.0));
+  float dy = dv - 0.55 * fh;
+  vec3 fc = mix(vRef * (ARCH_TRIM[prof].x < 0.0 ? vec3(0.27, 0.28, 0.3) : ARCH_TRIM[prof]), c, fog);
+  if (head == 5u) {
+    // a ribbon along the floor, mullions about every 1.3 m
+    if (abs(dy) > hh || ux < 0.3 || ux > len - 0.3) return false;
+    float m = cw / max(1.0, floor(cw / 1.3 + 0.5));
+    float d = abs(fract(ux / m + 0.5) - 0.5) * m;
+    if (0.05 > 0.7 * max(fw.x, fw.y) && (d < 0.025 || hh - abs(dy) < 0.05)) { c = fc; return false; }
+    if (lit) { c = light; return true; }
+    c = glass;
+    return false;
+  }
+  float s = 0.14;
+  bool trims = s > 0.7 * max(fw.x, fw.y);
+  if (!paneIn(du, dy, hw, hh, head, 0.0)) {
+    if (!trims || frame == 0u) return false;
+    if (frame == 2u) {
+      // the cornice bar over the surround, a shadow line under it
+      float y = dy - (hh + s);
+      if (abs(du) < hw + s + 0.12 && y > 0.0 && y < 0.2) { c = y < 0.04 ? c * mix(vec3(0.7), vec3(1.0), fog) : archTrim(prof, c, fog); return false; }
+    }
+    if (frame == 3u) {
+      // a keystone wedge over the head
+      float y = dy - (hh + s - 0.06);
+      if (y > 0.0 && y < 0.28 && abs(du) < 0.1 + 0.07 * y / 0.28) { c = archTrim(prof, c, fog); return false; }
+    }
+    if (paneIn(du, dy, hw, hh, head, frame == 4u ? 0.12 : s)) c = frame == 4u ? c * mix(vec3(0.5), vec3(1.0), fog) : archTrim(prof, c, fog);
+    return false;
+  }
+  // the frame round the pane and the bars across it, where they are about a pixel wide or more
+  float bar = 0.05;
+  float px = max(fw.x, fw.y);
+  if (bar > 0.7 * px) {
+    uint g = ARCH_GLAZE[prof];
+    float y0 = dy + hh, H = 2.0 * hh;
+    bool fine = 0.6 * bar > 0.7 * px;
+    bool on = !paneIn(du, dy, hw, hh, head, -bar);
+    if (g == 1u) on = on || (hw > 0.3 && abs(du) < 0.5 * bar) || abs(y0 - 0.66 * H) < 0.5 * bar;
+    else if (g == 2u) on = on || abs(y0 - 0.5 * H) < 0.5 * bar
+      || (fine && (abs(abs(du) - hw / 3.0) < 0.3 * bar || abs(fract(y0 / (H / 6.0) + 0.5) - 0.5) * (H / 6.0) < 0.3 * bar));
+    else if (g == 3u) {
+      float t = 0.68 * H;
+      on = on || abs(y0 - t) < 0.5 * bar || (y0 < t && abs(du) < 0.5 * bar)
+        || (fine && y0 > t && (abs(fract(du / (0.5 * hw) + 0.5) - 0.5) * 0.5 * hw < 0.3 * bar || abs(fract((y0 - t) / (0.5 * (H - t)) + 0.5) - 0.5) * 0.5 * (H - t) < 0.3 * bar));
+    }
+    else if (g == 4u) on = on || abs(du) < 0.5 * bar || (fine && abs(fract(y0 / 0.26 + 0.5) - 0.5) * 0.26 < 0.3 * bar);
+    else {
+      uint fs = winHash(ws * 13u + 5u);
+      uint bars = (fs >> 5u) % 3u;
+      on = on || (bars >= 1u && hw > 0.45 && abs(du) < 0.5 * bar) || (bars == 2u && abs(dy - 0.33 * hh) < 0.5 * bar);
+      if (ARCH_TRIM[prof].x < 0.0) fc = mix(vRef * frameColour(fs), c, fog);
+    }
+    if (on) { c = fc; return false; }
+  }
+  if (lit) { c = light; return true; }
+  c = glass;
+  return false;
+}
 bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
-  float floors = max(1.0, floor(edge.y / ${WINDOWS.FLOOR_M.toFixed(1)}));
-  float fh = edge.y / floors;
+  // the style above the wall height (FACADE_PROFILE_M)
+  uint prof = uint(edge.y / ${FACADE_PROFILE_M.toFixed(1)});
+  float wallH = edge.y - float(prof) * ${FACADE_PROFILE_M.toFixed(1)};
+  float floors = max(1.0, floor(wallH / ${WINDOWS.FLOOR_M.toFixed(1)}));
+  float fh = wallH / floors;
   float f = floor(uv.y / fh);
-  if (uv.y < 0.0 || f >= floors) return false;
   float slots = max(1.0, floor(edge.x / ${WINDOWS.SPACING_M.toFixed(1)}));
   float cw = edge.x / slots;
+  if (prof > 0u) archWall(c, prof, uv, edge.x, fh, cw, slots, fw, fog);
+  if (uv.y < 0.0 || f >= floors) return false;
   float k = clamp(floor(uv.x / cw), 0.0, slots - 1.0);
   uint code = uint(edge.z);
   uint seed = code & ${(1 << FACADE_SEED_BITS) - 1}u;
@@ -840,8 +985,9 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   float r = winRand(litSeed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));
   // a shop floor (FACADE_SHOPS): shop windows on the ground floor whatever the floors
   bool shops = (code & ${FACADE_SHOPS}u) != 0u;
-  bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops);
-  if (ground && floors >= 2.0) {
+  // a styled facade: its own windows on the ground floor too, unless it has shop windows
+  bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops) && (prof == 0u || shops);
+  if (ground && floors >= 2.0 && prof == 0u) {
     // the ground floor in its own shade, per edge: darker, warm stone, lighter or cool grey
     uint gt = winHash(seed * 7u + 3u) & 3u;
     vec3 tint = gt == 0u ? vec3(0.74) : gt == 1u ? vec3(0.86, 0.8, 0.72) : gt == 2u ? vec3(1.14) : vec3(0.7, 0.73, 0.8);
@@ -889,6 +1035,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
     c *= mix(vec3(0.32), vec3(1.0), fog);
     return false;
   }
+  if (prof > 0u && !pano) return archWindow(c, prof, du, dv, fh, cw, k, f, uv.x, edge.x, seed, ws, lit, light, glass, fw, fog);
   // plain windows a little above the middle of the floor; panoramic ones from near the floor to near the ceiling
   float hw = pano ? min(max(min(1.3, 0.44 * cw), 0.6 * fw.x), 0.46 * cw) : min(max(min(0.7, 0.3 * cw), 0.6 * fw.x), 0.45 * cw);
   float hh = pano ? max(0.43 * fh, 0.6 * fw.y) : min(max(min(0.75, 0.27 * fh), 0.6 * fw.y), 0.4 * fh);
