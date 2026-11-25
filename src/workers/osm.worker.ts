@@ -2,6 +2,7 @@ import { RetryableError } from '../engine/queue';
 import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
 import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
+import { buildTerrainMesh, terrainMeshBuffers } from '../world/terrain-mesher';
 import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOATS } from '../world/building-mesher';
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
@@ -17,7 +18,7 @@ import { buildStadiums } from '../world/stadium-mesher';
 import { buildDams } from '../world/dam-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { buildPower } from '../world/power-mesher';
-import { OsmSource, osmRawKey, osmSourceMode } from '../world/osm-source';
+import { OsmSource, osmRawKey, osmSourceMode, terrainMeshKey } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import type { OsmDetail, OsmTileData } from '../world/osm-types';
 import { loadTileDem } from '../world/terrain-source';
@@ -295,6 +296,25 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     // night glow: each terrain triangle lit by how densely it is built up, and everything on it too;
     // a house as one, by its footprint (a wall split between two lit levels shows a diagonal seam)
     const levels = glowLevels(buildingCoverage(tin, tile, own, locate));
+    // the z14 terrain mesh on this same surface, into the terrain worker's cache (as it would build it
+    // from the same raw OSM): the terrain tile rebuilt once this OSM is in finds it there, instead of
+    // loading the pads, the road surface, the covers and the TIN again. Before the reply, which triggers that rebuild
+    if (cover && isNeutralGrade(grade) && (!areaStyles || isDefaultAreaStyles(areaStyles))) {
+      try {
+        const raw = await rawNow();
+        const key = raw && terrainMeshKey(tile, raw);
+        if (key && !(await getCachedMesh(key))) {
+          const terrain = buildTerrainMesh({
+            tile, grid, heights: lattice, borders, faceColor: ls.faceColor, coast: coastlineWays(data.lines), pads, roads, cover, areaStyles,
+            glow: () => levels, surface: tin,
+          });
+          await putCachedMesh({ key, ts: Date.now(), ...terrainMeshBuffers(terrain, true) });
+        }
+      } catch (err) {
+        // the terrain worker builds it itself then
+        console.warn(`[osm] terrain mesh of ${tile.z}/${tile.x}/${tile.y} not cached: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     applyGlowByRuns(houses.ramps, houses.footprints, tile, locate, levels);
     applyGlow(solid.vertices, solid.ramps, tile, locate, levels);
     applyGlow(masts.vertices, masts.ramps, tile, locate, levels);

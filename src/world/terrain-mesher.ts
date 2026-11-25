@@ -55,6 +55,11 @@ export interface TerrainMeshOptions {
   areaStyles?: AreaStyles;
   /** the night glow level of each face of the surface TIN (night-glow.ts glowLevels), taken into the face's colour */
   glow?: (tin: SurfaceTin) => Uint8Array;
+  /**
+   * the surface already built from these same inputs (the OSM worker's, buildSurfaceTin with the
+   * heights, borders, coast, pads, roads and cover above and no step, eps or colour lines): read, not built again
+   */
+  surface?: SurfaceTin;
 }
 
 function faceRamp(avgH: number, ny: number): number {
@@ -146,12 +151,26 @@ function terrainFaceRamp(tin: TerrainTin, ti: number, ny: number, faceColor?: Fa
  * on the work lattice, simplified (Douglas–Peucker), joined with a simplified
  * tile border, and triangulated (Delaunay). Flat normals, one ramp per face.
  */
+/**
+ * A terrain mesh as it is cached and sent: its buffers, and the near and far vertex counts with a
+ * cover (without one the whole mesh is drawn at any distance, as ever)
+ */
+export function terrainMeshBuffers(mesh: TerrainMeshData, covered: boolean): { vertices: ArrayBuffer; ramps: ArrayBuffer; morph?: ArrayBuffer; nearCount?: number; farCount?: number } {
+  return {
+    vertices: mesh.vertices.slice().buffer,
+    ramps: mesh.ramps.slice().buffer,
+    morph: mesh.morph?.slice().buffer,
+    nearCount: covered ? mesh.nearCount : undefined,
+    farCount: covered ? mesh.farCount : undefined,
+  };
+}
+
 export function buildTerrainMesh(opts: TerrainMeshOptions): TerrainMeshData {
   const { tile, grid, heights } = opts;
   const skirt = opts.skirtDepth ?? Math.min(tileSizeMeters(tile) / 2, 2000);
   const side = grid + 1;
   if (heights.length !== side * side) throw new Error('heights grid size mismatch');
-  const surface = buildSurfaceTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads, roads: opts.roads, cover: opts.cover });
+  const surface = opts.surface ?? buildSurfaceTin(tile, grid, heights, { step: opts.step, eps: opts.epsCells, borders: opts.borders, colourLines: opts.colourLines, coast: opts.coast, pads: opts.pads, roads: opts.roads, cover: opts.cover });
   const { vx, vy, vh, tris, coarse, sea } = surface;
 
   const { wx, wz } = tinToWorld(tile, grid, vx, vy);

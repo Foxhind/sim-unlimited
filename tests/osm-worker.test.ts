@@ -52,6 +52,9 @@ async function osmReply(detail: 'full' | 'large' = 'full'): Promise<{ res: Recor
   return { res: posted[0], tin: tins[0] };
 }
 
+/** the cached entry whose key starts so: the OSM worker's mesh (osmmesh), the terrain's (dem) */
+const cachedOf = (prefix: string) => [...store.entries()].find(([k]) => k.startsWith(prefix))?.[1] as Record<string, any> | undefined;
+
 beforeEach(() => {
   store.clear();
   osmJson = townOverpassJson();
@@ -59,6 +62,33 @@ beforeEach(() => {
 });
 
 describe('the OSM worker with the covers', () => {
+  it('leaves the z14 terrain mesh on its surface in the terrain\'s cache: the same bytes, no surface built again', async () => {
+    osmTs = 7;
+    const o = await osmReply();
+    const shared = cachedOf('dem/')!;
+    expect(shared.key).toMatch(/\/op@7$|\/o@7$/);
+    // the terrain worker takes it: a mesh, no surface built
+    expect(await terrainTin()).toBeUndefined();
+    expect(new Uint8Array(posted[0].vertices)).toEqual(new Uint8Array(shared.vertices));
+    // and it is what the terrain worker builds itself
+    store.delete(shared.key);
+    const t = await terrainTin();
+    expect(t.tris).toEqual(o.tin!.tris);
+    const own = cachedOf('dem/')!;
+    for (const k of ['vertices', 'ramps', 'morph']) expect(own[k] && new Uint8Array(own[k])).toEqual(shared[k] && new Uint8Array(shared[k]));
+    expect([own.nearCount, own.farCount]).toEqual([shared.nearCount, shared.farCount]);
+  });
+
+  it('leaves no terrain mesh below the detail zoom, nor over one already cached', async () => {
+    await osmReply('large');
+    expect(cachedOf('dem/')).toBeUndefined();
+    await terrainTin();
+    const before = cachedOf('dem/')!;
+    for (const k of [...store.keys()]) if (k.startsWith('osmmesh')) store.delete(k);
+    await osmReply();
+    expect(cachedOf('dem/')).toBe(before);
+  });
+
   it('builds the drape on the same surface and covers as the terrain worker', async () => {
     const t = await terrainTin();
     store.clear();
@@ -88,6 +118,10 @@ describe('the OSM worker with the covers', () => {
     const { res, tin } = await osmReply();
     expect(tin).toBeDefined();
     expect(res.roads).toBe(true);
+    // the terrain mesh of the new raw is the OSM worker's, cached on its surface: no surface built again
+    expect(await terrainTin()).toBeUndefined();
+    // and the terrain worker builds that surface itself without it
+    for (const k of [...store.keys()]) if (k.startsWith('dem/')) store.delete(k);
     const t = await terrainTin();
     expect(t.tris).toEqual(tin!.tris);
     expect(t.cover).toEqual(tin!.cover);
@@ -106,13 +140,13 @@ describe('the OSM worker with the covers', () => {
     const { res } = await osmReply();
     expect('glowVertices' in res).toBe(false);
     expect('glowRamps' in res).toBe(false);
-    const cached = [...store.values()][0] as Record<string, unknown>;
+    const cached = cachedOf('osmmesh')!;
     expect('glowVertices' in cached).toBe(false);
   });
 
   it('sends and caches the structure kinds of the building vertices: ascending runs on whole triangles', async () => {
     const { res } = await osmReply();
-    const cached = [...store.values()][0] as Record<string, ArrayBuffer>;
+    const cached = cachedOf('osmmesh') as Record<string, ArrayBuffer>;
     for (const m of [res, cached]) {
       const runs = new Uint32Array(m.bKinds);
       const vertexCount = m.bRamps.byteLength / 4;
@@ -128,7 +162,7 @@ describe('the OSM worker with the covers', () => {
 
   it('sends and caches the depth levels of the drape, the roads and the water, per vertex or none', async () => {
     const { res } = await osmReply();
-    const cached = [...store.values()][0] as Record<string, ArrayBuffer>;
+    const cached = cachedOf('osmmesh') as Record<string, ArrayBuffer>;
     for (const m of [res, cached]) {
       for (const [levels, ramps] of [['levels', 'ramps'], ['rLevels', 'rRamps'], ['wLevels', 'wRamps']]) {
         expect(m[levels]).toBeInstanceOf(ArrayBuffer);

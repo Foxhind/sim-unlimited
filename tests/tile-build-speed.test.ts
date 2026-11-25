@@ -6,6 +6,17 @@ import { buildRoadNet, type RoadNet } from '../src/world/road-net';
 import { solveRoadHeights } from '../src/world/road-heights';
 import { buildingHeights } from '../src/world/building-mesher';
 import { demOf, road } from './roads-helpers';
+import type { Tile } from '../src/world/geodesy';
+import type { TileBorders } from '../src/world/terrain-source';
+import type { OsmArea, OsmLine, OsmPoint } from '../src/world/osm-types';
+import { roadSurfaceOf, buildSurfaceTin } from '../src/world/surface-tin';
+import { buildGroundCover } from '../src/world/ground-cover';
+import { coastlineWays } from '../src/world/coast';
+import { buildOsmMesh } from '../src/world/osm-mesher';
+import { tinSampler } from '../src/world/terrain-tin';
+import { buildTerrainMesh, terrainMeshBuffers } from '../src/world/terrain-mesher';
+import { terrainMeshKey } from '../src/world/osm-source';
+import { SCHEMA_VERSION } from '../src/world/tile-cache';
 
 // The speed-ups of a dense tile's build (central Moscow: 4000 buildings, 84 pitch pads, 35 000 road
 // samples) must not change what is built: each is checked against the plain computation here.
@@ -136,5 +147,43 @@ describe('building heights once a building', () => {
     expect(buildingHeights(b)).toBe(first);
     expect(Object.isFrozen(first)).toBe(true);
     expect(buildingHeights({ rings: b.rings, tags: { ...b.tags } })).toEqual(first);
+  });
+});
+
+describe('the z14 terrain mesh built once, on the OSM worker\'s surface', () => {
+  it.each(['surface-14-9517-6397'])('%s: the same bytes as the terrain worker builds alone', async (name) => {
+    const fx = (await import(`./fixtures/${name}.json`)).default as {
+      tile: Tile; grid: number; heights: number[]; pads: Pad[]; roadDem: number[] | null;
+      borders: Record<'n' | 's' | 'w' | 'e', number[]> & { coarse?: Partial<Record<'n' | 's' | 'w' | 'e', number[]>> };
+      data: { lines: OsmLine[]; areas: OsmArea[]; points: OsmPoint[] };
+    };
+    const f32 = (a: number[]) => Float32Array.from(a);
+    const borders: TileBorders = { n: f32(fx.borders.n), s: f32(fx.borders.s), w: f32(fx.borders.w), e: f32(fx.borders.e) };
+    if (fx.borders.coarse) borders.coarse = Object.fromEntries(Object.entries(fx.borders.coarse).map(([k, v]) => [k, f32(v!)]));
+    // each worker its own inputs from the same OSM and DEM
+    const inputs = () => {
+      const net = buildRoadNet(fx.data.lines);
+      const roads = fx.roadDem ? roadSurfaceOf(fx.tile, fx.data, net, Float64Array.from(fx.roadDem)) : undefined;
+      return { heights: f32(fx.heights), coast: coastlineWays(fx.data.lines), roads, cover: buildGroundCover(fx.tile, fx.grid, fx.data, roads) };
+    };
+    const t = inputs();
+    const alone = buildTerrainMesh({ tile: fx.tile, grid: fx.grid, heights: t.heights, borders, coast: t.coast, pads: fx.pads, roads: t.roads, cover: t.cover });
+    // the OSM worker: its surface, its OSM mesh draped on it, then the terrain mesh on that surface
+    const o = inputs();
+    const tin = buildSurfaceTin(fx.tile, fx.grid, o.heights, { borders, coast: o.coast, pads: fx.pads, roads: o.roads, cover: o.cover });
+    buildOsmMesh({ tile: fx.tile, detail: 'full', data: { ...fx.data, buildings: [] }, sampleHeight: tinSampler(tin, fx.tile), tin, roads: o.roads, cover: o.cover });
+    const shared = buildTerrainMesh({ tile: fx.tile, grid: fx.grid, heights: o.heights, borders, coast: o.coast, pads: fx.pads, roads: o.roads, cover: o.cover, surface: tin });
+    const a = terrainMeshBuffers(alone, true), b = terrainMeshBuffers(shared, true);
+    expect(new Uint8Array(b.vertices)).toEqual(new Uint8Array(a.vertices));
+    expect(new Uint32Array(b.ramps)).toEqual(new Uint32Array(a.ramps));
+    expect(b.morph && new Float32Array(b.morph)).toEqual(a.morph && new Float32Array(a.morph));
+    expect([b.nearCount, b.farCount]).toEqual([a.nearCount, a.farCount]);
+  });
+
+  it('one cache key for both workers: the DEM schema, then our tiles\' or Overpass\' raw by its time', () => {
+    const tile = { z: 14, x: 9903, y: 5121 };
+    expect(terrainMeshKey(tile, undefined, 'pmtiles')).toBe(`dem/14/9903/5121/${SCHEMA_VERSION}`);
+    expect(terrainMeshKey(tile, { ts: 42 }, 'pmtiles')).toBe(`dem/14/9903/5121/${SCHEMA_VERSION}/op@42`);
+    expect(terrainMeshKey(tile, { ts: 42 }, 'overpass')).toBe(`dem/14/9903/5121/${SCHEMA_VERSION}/o@42`);
   });
 });

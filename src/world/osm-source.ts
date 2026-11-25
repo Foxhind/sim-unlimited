@@ -1,7 +1,7 @@
 import { RetryableError } from '../engine/queue';
 import { tileBounds, tileKey, type Tile } from './geodesy';
 import { fetchOsmApiTile } from './osm-api';
-import { getOsmRaw, putOsmRaw, setOsmRawStamp } from './tile-cache';
+import { getOsmRaw, putOsmRaw, SCHEMA_VERSION, setOsmRawStamp } from './tile-cache';
 import { overpassQuery, parseOverpass, type OverpassJson } from './overpass';
 import { PmtilesOsm } from './osm-pmtiles';
 import type { OsmDetail, OsmTileData, TileSource } from './osm-types';
@@ -65,6 +65,15 @@ export function osmSourceMode(): OsmSourceMode {
  */
 export function osmRawKey(tile: Tile, detail: OsmDetail = 'full', mode: OsmSourceMode = osmSourceMode()): string {
   return `${tileKey(mode === 'pmtiles' ? 'osm-pm' : 'osm', tile, OSM_SCHEMA_VERSION)}/${detail}`;
+}
+
+/**
+ * The cache key of a tile's terrain mesh: built with the raw OSM `raw` (its download time; our own
+ * tiles' kept apart from Overpass') or without OSM. The terrain worker reads and writes it, and the
+ * OSM worker writes the z14 terrain mesh it builds on its own surface (osm.worker), so both must agree.
+ */
+export function terrainMeshKey(tile: Tile, raw?: { ts: number }, mode: OsmSourceMode = osmSourceMode()): string {
+  return tileKey('dem', tile, SCHEMA_VERSION) + (raw ? `${mode === 'pmtiles' ? '/op' : '/o'}@${raw.ts}` : '');
 }
 
 /** our archives' build, once per thread: a raw tile cached from an earlier build is read anew (tiles/build.sh) */

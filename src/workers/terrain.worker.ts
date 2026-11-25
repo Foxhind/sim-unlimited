@@ -1,9 +1,9 @@
 import { RetryableError } from '../engine/queue';
-import { SCHEMA_VERSION, getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
-import { tileKey, type Tile } from '../world/geodesy';
-import { buildTerrainMesh } from '../world/terrain-mesher';
+import { getCachedMesh, getOsmRaw, putCachedMesh } from '../world/tile-cache';
+import type { Tile } from '../world/geodesy';
+import { buildTerrainMesh, terrainMeshBuffers } from '../world/terrain-mesher';
 import { loadTileDem } from '../world/terrain-source';
-import { osmRawKey, osmSourceMode } from '../world/osm-source';
+import { osmRawKey, terrainMeshKey } from '../world/osm-source';
 import { parseOverpass } from '../world/overpass';
 import { coastlineWays } from '../world/coast';
 import type { LonLat } from '../world/osm-types';
@@ -70,7 +70,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
     // and a mesh is of the raw OSM that built it (its download time): once that has expired and was
     // fetched anew the OSM mesh is built from the new one, on a surface this mesh must share face for
     // face (a cached mesh of the old one left holes and overlaps along the roads and the water)
-    const key = tileKey('dem', tile, SCHEMA_VERSION) + (osmRaw ? `${osmSourceMode() === 'pmtiles' ? '/op' : '/o'}@${osmRaw.ts}` : '');
+    const key = terrainMeshKey(tile, osmRaw);
     const cached = useCache ? await getCachedMesh(key) : undefined;
     if (cached) {
       const res: MeshResponse = { type: 'mesh', id, vertices: cached.vertices, ramps: cached.ramps, morph: cached.morph, nearCount: cached.nearCount, farCount: cached.farCount };
@@ -119,12 +119,7 @@ ctx.onmessage = async (e: MessageEvent<TileRequest>) => {
       areaStyles,
       glow,
     });
-    const vertices = mesh.vertices.slice().buffer;
-    const ramps = mesh.ramps.slice().buffer;
-    const morph = mesh.morph?.slice().buffer;
-    // without a cover the whole mesh is drawn at any distance, as ever
-    const nearCount = cover ? mesh.nearCount : undefined;
-    const farCount = cover ? mesh.farCount : undefined;
+    const { vertices, ramps, morph, nearCount, farCount } = terrainMeshBuffers(mesh, cover !== undefined);
     if (useCache) await putCachedMesh({ key, ts: Date.now(), vertices, ramps, morph, nearCount, farCount });
     const res: MeshResponse = { type: 'mesh', id, vertices, ramps, morph, nearCount, farCount };
     ctx.postMessage(res, [vertices, ramps, ...(morph ? [morph] : [])]);
