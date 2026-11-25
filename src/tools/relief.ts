@@ -80,6 +80,11 @@ interface State {
   grade: ColourGrade;
 }
 
+/**
+ * The address keeps the view: #lat,lon,span km,camera alt,yaw,tilt (degrees), and in free flight
+ * also ,fly,alt,heading,pitch: the flying camera's height above sea level (m) and where it looks
+ * (degrees); lat,lon are then the flying camera's own place. #z/x/y opens a tile.
+ */
 function parseHash(): Partial<State> {
   const h = location.hash.slice(1);
   const tile = /^(\d+)\/(\d+)\/(\d+)$/.exec(h);
@@ -93,7 +98,46 @@ function parseHash(): Partial<State> {
     centre: { lat: p[0], lon: p[1] },
     ...(Number.isFinite(p[2]) && p[2] > 0 ? { span: p[2] * 1000 } : {}),
     ...(Number.isFinite(p[3]) && p[3] >= 0 ? { camAlt: p[3] } : {}),
+    ...(Number.isFinite(p[4]) ? { yaw: ((p[4] + 540) % 360) - 180 } : {}),
+    ...(Number.isFinite(p[5]) ? { tilt: Math.max(0, Math.min(MAX_TILT_DEG, p[5])) } : {}),
   };
+}
+
+/** the free flight in the address: null for the view from above or an address without the view's fields */
+function hashFly(): { alt: number; heading: number; pitch: number } | null | undefined {
+  const p = location.hash.slice(1).split(',');
+  if (p.length < 6) return undefined;
+  if (p[6] !== 'fly') return null;
+  const [alt, heading, pitch] = p.slice(7, 10).map(Number);
+  return [alt, heading, pitch].every(Number.isFinite) ? { alt, heading, pitch } : null;
+}
+
+/** put the flying camera where the address or the query says, starting free flight if it is off */
+function flyTo(ll: LatLon, alt: number, heading: number, pitch: number): void {
+  setFly(true);
+  state.centre = fly.latLon = ll;
+  fly.alt = Math.max(1, Math.min(FLY_ALT_MAX_M, alt));
+  fly.yaw = heading * D2R;
+  fly.pitch = Math.max(-89, Math.min(89, pitch)) * D2R;
+}
+
+/** the view as the address keeps it (parseHash, hashFly) */
+function viewHash(): string {
+  const r1 = (v: number) => +v.toFixed(1);
+  let h = `#${state.centre.lat.toFixed(5)},${state.centre.lon.toFixed(5)},${(state.span / 1000).toFixed(2)},${Math.round(state.camAlt)},${r1(state.yaw)},${r1(state.tilt)}`;
+  if (fly.on) {
+    const heading = (((fly.yaw / D2R) % 360) + 360) % 360;
+    h += `,fly,${Math.round(fly.alt)},${r1(heading)},${r1(fly.pitch / D2R)}`;
+  }
+  return h;
+}
+
+/** the view's address in place of the page's: it replaces a ?fly= start, which would otherwise win on reload */
+function writeHash(): void {
+  const url = new URL(location.href);
+  url.searchParams.delete('fly');
+  url.hash = viewHash();
+  if (url.href !== location.href) history.replaceState(null, '', url);
 }
 
 const state: State = {
@@ -373,8 +417,7 @@ function frame(now: number): void {
   }
   if (now - hashAt > 700) {
     hashAt = now;
-    const h = `#${state.centre.lat.toFixed(5)},${state.centre.lon.toFixed(5)},${(state.span / 1000).toFixed(2)},${Math.round(state.camAlt)}`;
-    if (h !== location.hash) history.replaceState(null, '', h);
+    writeHash();
   }
   requestAnimationFrame(frame);
 }
@@ -1000,9 +1043,15 @@ function init(): void {
 
   document.addEventListener('paste', onPaste);
   initFly();
+  const f = hashFly();
+  if (f) flyTo(state.centre, f.alt, f.heading, f.pitch);
   startFromQuery();
   window.addEventListener('hashchange', () => {
+    const f = hashFly();
+    // leaving flight first: it hands its heading to the view's yaw, which the address then sets
+    if (f === null) setFly(false);
     Object.assign(state, parseHash());
+    if (f) flyTo(state.centre, f.alt, f.heading, f.pitch);
     syncInputs();
   });
 
@@ -1022,12 +1071,7 @@ function startFromQuery(): void {
   const q = new URLSearchParams(location.search);
   const f = (q.get('fly') ?? '').split(',').map(Number);
   if (f.length >= 3 && f.every(Number.isFinite) && Math.abs(f[0]) <= 85 && Math.abs(f[1]) <= 180) {
-    setFly(true);
-    const ll = { lat: f[0], lon: f[1] };
-    state.centre = fly.latLon = ll;
-    fly.alt = Math.max(1, Math.min(FLY_ALT_MAX_M, f[2]));
-    fly.yaw = (f[3] ?? 0) * D2R;
-    fly.pitch = Math.max(-89, Math.min(89, f[4] ?? 0)) * D2R;
+    flyTo({ lat: f[0], lon: f[1] }, f[2], f[3] ?? 0, f[4] ?? 0);
   }
   const at = new Date(q.get('at') ?? '');
   if (!Number.isNaN(at.getTime())) Object.assign(state, solarClock(at, state.centre.lon), { byTime: true });

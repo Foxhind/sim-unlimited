@@ -130,7 +130,7 @@ export const RELIEF_TILES_ACROSS = 3;
 /**
  * Links of this project, on whatever host it runs. The page is told by the path:
  *   /            #lat,lon[,alt[,hdg[,aircraft[,time]]]]   simulator
- *   /relief      #lat,lon[,span km[,camera alt]]  or  #z/x/y
+ *   /relief      #lat,lon[,span km[,camera alt[,yaw,tilt[,fly,alt,heading,pitch]]]]  or  #z/x/y
  *   /inspector   #z/x/y
  * (with or without .html). Any other path is not ours.
  */
