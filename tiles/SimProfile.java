@@ -89,7 +89,9 @@ public class SimProfile implements Profile {
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
     "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type",
     // pedestrian crossings: their nodes and the crossing ways (ground-cover zebras)
-    "crossing", "footway", "cycleway");
+    "crossing", "footway", "cycleway",
+    // the year a building was built (building-mesher hasPanoramicWindows)
+    "start_date");
   /** the charted lights' keys (lighthouse-mesher.ts) */
   static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};

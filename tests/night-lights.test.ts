@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB,
+  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB,
 } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
-import { buildBuildingMesh, buildingNightLights, hasBalconies, isLitBuilding, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
+import { buildBuildingMesh, buildingNightLights, hasBalconies, hasPanoramicWindows, hasStorefronts, isLitBuilding, startYear, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, tileSizeMeters, type Tile } from '../src/world/geodesy';
 import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
@@ -219,13 +219,85 @@ describe('building night lights', () => {
 
   it('the ground floor differs: its own shade, shop windows or full glazing, signs only on residential', () => {
     expect(WORLD_FS).toContain('bool groundFloorAt(');
-    expect(WORLD_FS).toContain('bool ground = f == 0.0 && floors >= 2.0;');
+    expect(WORLD_FS).toContain('bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops);');
     expect(WORLD_FS).toMatch(/if \(resid && winRand\(/);
     expect(WORLD_FS).toContain(`bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;`);
     expect(WORLD_VS).toContain('flat out vec3 vRef;');
     expect(TREE_VS).toContain('vRef = vec3(0.0);');
     const office = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect()], tags: { building: 'office', 'building:levels': '5' } }], sampleHeight: flat });
     for (let i = 0; i < office.vertexCount; i++) expect(office.windows[i * WINDOW_ATTR_FLOATS + 4] & FACADE_RESIDENTIAL).toBe(0);
+  });
+
+  it('two floors: every window alike, shop windows on the ground floor only on retail and office', () => {
+    const codes = (tags: Record<string, string>, w = 0.0004) => {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect(w)], tags }], sampleHeight: flat });
+      const out = new Set<number>();
+      for (let i = 0; i < m.vertexCount; i++) if (m.windows[i * WINDOW_ATTR_FLOATS + 3] > 0) out.add(m.windows[i * WINDOW_ATTR_FLOATS + 4]);
+      return [...out];
+    };
+    for (let i = 0; i < 20; i++) {
+      // one code on every edge: the building's seed, plain windows (no balconies), uniform, no shops
+      const house = codes({ building: 'apartments', 'building:levels': '2' }, 0.0003 + i * 0.00001);
+      expect(house).toHaveLength(1);
+      expect((house[0] >> FACADE_SEED_BITS) & 3).toBe(FACADE.WINDOWS);
+      expect(house[0] & FACADE_UNIFORM).toBe(FACADE_UNIFORM);
+      expect(house[0] & FACADE_SHOPS).toBe(0);
+    }
+    for (const building of ['retail', 'office']) {
+      const [c] = codes({ building, 'building:levels': '2' });
+      expect(c & (FACADE_UNIFORM | FACADE_SHOPS)).toBe(FACADE_UNIFORM | FACADE_SHOPS);
+    }
+    // one floor and three floors: as before, each edge its own
+    for (const levels of ['1', '3']) for (const c of codes({ building: 'apartments', 'building:levels': levels })) expect(c & FACADE_UNIFORM).toBe(0);
+    expect(WORLD_FS).toContain(`bool alike = (code & ${FACADE_UNIFORM}u) != 0u;`);
+    expect(WORLD_FS).toContain('if (!alike && winRand(seed ^ winHash(uint(f) * 0x2545u + 77u)) < 0.25)');
+    expect(WORLD_FS).toContain('if (!alike && resid && winRand(');
+  });
+
+  it('shop windows on every wall: supermarkets, malls, retail and commercial without a date or from 2000', () => {
+    for (const tags of [
+      { building: 'supermarket' } as Record<string, string>, { building: 'yes', shop: 'mall' }, { building: 'retail', shop: 'department_store', start_date: '1975' },
+      { building: 'retail' }, { building: 'retail', start_date: '2003' }, { building: 'commercial' }, { building: 'commercial', start_date: '2000' },
+    ]) expect(hasStorefronts(tags)).toBe(true);
+    for (const tags of [{ building: 'retail', start_date: '1999' } as Record<string, string>, { building: 'commercial', start_date: '1960' }, { building: 'office' }, { building: 'apartments' }]) {
+      expect(hasStorefronts(tags)).toBe(false);
+    }
+    const codes = (tags: Record<string, string>) => {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect()], tags }], sampleHeight: flat });
+      const out = new Set<number>();
+      for (let i = 0; i < m.vertexCount; i++) if (m.windows[i * WINDOW_ATTR_FLOATS + 3] > 0) out.add(m.windows[i * WINDOW_ATTR_FLOATS + 4] & FACADE_SHOPS);
+      return out;
+    };
+    // every edge, one floor or several
+    for (const levels of ['1', '2', '4']) expect(codes({ building: 'commercial', 'building:levels': levels })).toEqual(new Set([FACADE_SHOPS]));
+    expect(codes({ building: 'commercial', 'building:levels': '2', start_date: '1980' })).toEqual(new Set([0]));
+    expect(codes({ building: 'retail', 'building:levels': '1', start_date: '1980' })).toEqual(new Set([0]));
+  });
+
+  it('built in 2000 or later: panoramic windows on half the buildings, by the building seed', () => {
+    expect(startYear({ start_date: '2005-06-01' })).toBe(2005);
+    expect(startYear({ start_date: '~2001' })).toBe(2001);
+    expect(startYear({ start_date: '1999' })).toBe(1999);
+    expect(startYear({})).toBeUndefined();
+    const seeds = Array.from({ length: 2000 }, (_, i) => (i + 0.5) / 2000);
+    const share = (date?: string) => seeds.filter((s) => hasPanoramicWindows(date ? { start_date: date } : {}, s)).length / seeds.length;
+    expect(share('2000')).toBeGreaterThan(0.45);
+    expect(share('2000')).toBeLessThan(0.55);
+    expect(share('2015-03')).toBeGreaterThan(0.45);
+    expect(share('1999')).toBe(0);
+    expect(share()).toBe(0);
+    // every edge of a building alike
+    let pano = 0;
+    for (let i = 0; i < 40; i++) {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [{ rings: [rect(0.0003 + i * 0.00001)], tags: { building: 'apartments', 'building:levels': '5', start_date: '2010' } }], sampleHeight: flat });
+      const flags = new Set<number>();
+      for (let v = 0; v < m.vertexCount; v++) if (m.windows[v * WINDOW_ATTR_FLOATS + 3] > 0) flags.add(m.windows[v * WINDOW_ATTR_FLOATS + 4] & FACADE_PANORAMIC);
+      expect(flags.size).toBe(1);
+      if (flags.has(FACADE_PANORAMIC)) pano++;
+    }
+    expect(pano).toBeGreaterThan(5);
+    expect(pano).toBeLessThan(35);
+    expect(WORLD_FS).toContain(`bool pano = (code & ${FACADE_PANORAMIC}u) != 0u;`);
   });
 
   it('far: a window dot per facade cell, just outside the walls, over the near windows band; garages stay dark', () => {

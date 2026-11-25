@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, FAR_WINDOWS, LIGHT, pointValue, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmBuilding, type OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -14,7 +14,7 @@ export const WINDOW_ATTR_FLOATS = 5;
 /**
  * The building mesh, and per vertex where it is on a windowed facade (WORLD_VS aWinUV, aWinEdge):
  * u metres along the wall edge from its start, v metres above the wall base, the edge's length,
- * the wall height (0: no windows on this face) and the edge's code: a 20-bit seed (which windows are
+ * the wall height (0: no windows on this face) and the edge's code: a 16-bit seed (which windows are
  * lit, which slots carry balconies) plus the FACADE style and flags (palette.ts FACADE_SEED_BITS).
  */
 export interface BuildingMeshData extends TerrainMeshData {
@@ -800,8 +800,14 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges, rare signs on the ground floor
     const balconies = windowed && hasBalconies(tags, winH);
+    // two floors: every window alike, one seed for the whole building (FACADE_UNIFORM)
+    const uniform = windowed && facadeFloors(winH) === 2;
+    const uniformSeed = uniform ? Math.floor(styleSeed(b) * (1 << FACADE_SEED_BITS)) : -1;
     // hospitals and supermarkets keep their lights on all night
-    const flags = isAllNight(tags) ? FACADE_ALL_NIGHT : 0;
+    const flags = (isAllNight(tags) ? FACADE_ALL_NIGHT : 0)
+      + (uniform ? FACADE_UNIFORM : 0)
+      + ((uniform && hasShopFloor(tags)) || hasStorefronts(tags) ? FACADE_SHOPS : 0)
+      + (hasPanoramicWindows(tags, styleSeed(b)) ? FACADE_PANORAMIC : 0);
 
     // a plinth of the ground's colour from under the lowest ground up to the walls: a house on a slope
     if (!isCanopy && h.min < 0.5 && base - low > 0.05) {
@@ -825,13 +831,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (!isCanopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
-          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags);
+          wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags, uniformSeed);
         }
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4 && !glassy) {
         for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
-          detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags));
+          detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags, uniformSeed));
         }
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH);
@@ -957,17 +963,18 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
 
   /**
    * windowH: the height of the facade with windows (0: none), from winBase up (the facade's v is
-   * measured from there: the plinth under it is negative, no windows); balconies: some edges may carry them
+   * measured from there: the plinth under it is negative, no windows); balconies: some edges may carry them;
+   * uniformSeed: the building's seed for every edge (FACADE_UNIFORM), -1: each edge its own
    */
   function wallUnderRoof(
-    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number,
+    p: XZ, q: XZ, yBase: number, yTop: number, roof: RoofModel, creases: Plane[], ramp: number, centroid: XZ, windowH: number, winBase: number, balconies: boolean, flags: number, uniformSeed: number,
   ): void {
     const field = roofField(roof);
     const ts = [0, ...roofBreaks(roof, creases, p, q), 1];
     const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
     const wallH = len >= WINDOWS.MIN_EDGE_M ? windowH : 0;
     // stable across rebuilds: from the edge's start in tile-centre ENU; the code is an integer below 2^24, exact in a float
-    const seed = wallH > 0 ? edgeCode(p, yBase, len, balconies) + flags : 0;
+    const seed = wallH > 0 ? edgeCode(p, yBase, len, balconies, uniformSeed) + flags : 0;
     for (let k = 0; k + 1 < ts.length; k++) {
       const a: XZ = [p[0] + (q[0] - p[0]) * ts[k], p[1] + (q[1] - p[1]) * ts[k]];
       const c: XZ = [p[0] + (q[0] - p[0]) * ts[k + 1], p[1] + (q[1] - p[1]) * ts[k + 1]];
@@ -1059,7 +1066,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
    * that slot's ground floor is covered by a blind patch of the wall (the edge's facade code with
    * FACADE_BLIND: the ground floor's tint, no openings), so no pane or shop window shows round the door.
    */
-  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean, flags: number): void {
+  function door(e: Entrance, rings: XZ[][], wallBase: number, wallTop: number, wRamp: number, windowH: number, winBase: number, residential: boolean, flags: number, uniformSeed: number): void {
     const [w, hgt] = DOOR_SIZE[e.kind] ?? DOOR_SIZE.default;
     let best: { p: XZ; dir: XZ; len: number; u: number; d: number } | undefined;
     for (const ring of rings) {
@@ -1089,7 +1096,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (wallH > 0) {
       // the slot's whole ground floor (wallUnderRoof gives the edge the same code)
       const fh = wallH / Math.max(1, Math.floor(wallH / WINDOWS.FLOOR_M));
-      const code = edgeCode(p, wallBase, len, residential) + flags + FACADE_BLIND;
+      const code = edgeCode(p, wallBase, len, residential, uniformSeed) + flags + FACADE_BLIND;
       wallRect(p, dir, n, k * cw + 0.02, (k + 1) * cw - 0.02, wallBase, winBase + fh - 0.02, DOOR_LAYERS_M[0], wRamp, [len, wallH, code, winBase]);
     }
     const garage = e.kind === 'garage';
@@ -1273,12 +1280,13 @@ export function lineInside(origin: XZ, dir: XZ, ring: XZ[]): [number, number][] 
 
 /**
  * The code of a windowed wall edge (BuildingMeshData.windows): a seed from its start and, on a
- * residential building, FACADE_RESIDENTIAL and (on an edge long enough) maybe a balcony style.
+ * residential building, FACADE_RESIDENTIAL and (on an edge long enough) maybe a balcony style. With a
+ * uniformSeed (>= 0, FACADE_UNIFORM) every edge has that seed and plain windows, no balconies.
  */
-function edgeCode(p: XZ, yBase: number, len: number, residential: boolean): number {
-  const seed = Math.floor(hash01(p[0], yBase, p[1]) * (1 << FACADE_SEED_BITS));
+function edgeCode(p: XZ, yBase: number, len: number, residential: boolean, uniformSeed = -1): number {
+  const seed = uniformSeed >= 0 ? uniformSeed : Math.floor(hash01(p[0], yBase, p[1]) * (1 << FACADE_SEED_BITS));
   let style: number = FACADE.WINDOWS;
-  if (residential && len >= BALCONY_MIN_EDGE_M) {
+  if (residential && uniformSeed < 0 && len >= BALCONY_MIN_EDGE_M) {
     const r = hash01(p[1], p[0], yBase + 17);
     style = r < GLAZED_SHARE ? FACADE.GLAZED_BALCONIES : r < GLAZED_SHARE + OPEN_SHARE ? FACADE.OPEN_BALCONIES : FACADE.WINDOWS;
   }
@@ -1353,6 +1361,45 @@ export function buildingDots(buildings: OsmBuilding[], tile: Tile, sampleHeight:
  */
 export function isRuin(tags: Record<string, string>): boolean {
   return tags.building === 'ruins' || tags['building:part'] === 'ruins' || tags.historic === 'ruins' || (tags.ruins !== undefined && tags.ruins !== 'no');
+}
+
+/** the floors WORLD_FS windowAt cuts a facade of this height into */
+export function facadeFloors(winH: number): number {
+  return Math.max(1, Math.floor(winH / WINDOWS.FLOOR_M));
+}
+
+/** a building of two floors keeps its shop windows on the ground floor (FACADE_SHOPS) */
+export function hasShopFloor(tags: Record<string, string>): boolean {
+  const b = tags['building:part'] || tags.building;
+  return b === 'retail' || b === 'office' || tags.building === 'retail' || tags.building === 'office';
+}
+
+/** shop types of a mall or a supermarket (hasStorefronts) */
+const MALL_SHOPS = new Set(['supermarket', 'hypermarket', 'mall', 'department_store']);
+/**
+ * Shop windows on the ground floor of every wall, a building of one floor too (FACADE_SHOPS):
+ * supermarkets and malls, and retail and commercial buildings without a start_date or built in 2000 or later.
+ */
+export function hasStorefronts(tags: Record<string, string>): boolean {
+  const b = tags['building:part'] || tags.building;
+  if (MALL_SHOPS.has(b) || MALL_SHOPS.has(tags.building) || MALL_SHOPS.has(tags.shop)) return true;
+  const year = startYear(tags);
+  return (b === 'retail' || b === 'commercial' || tags.building === 'retail' || tags.building === 'commercial')
+    && (year === undefined || year >= PANORAMIC.FROM_YEAR);
+}
+
+/** the year of an OSM start_date (2005, 2005-06-01, ~2005, 2000s, C18 has none), undefined without one */
+export function startYear(tags: Record<string, string>): number | undefined {
+  const m = tags.start_date?.match(/\d{4}/);
+  return m ? Number(m[0]) : undefined;
+}
+
+/** built in 2000 or later: panoramic windows by half a chance, drawn by the building's seed (FACADE_PANORAMIC) */
+export const PANORAMIC = { FROM_YEAR: 2000, SHARE: 0.5 } as const;
+export function hasPanoramicWindows(tags: Record<string, string>, seed: number): boolean {
+  const year = startYear(tags);
+  // a draw decorrelated from the wall's and the roof's colours (wallRamp, roofRamp)
+  return year !== undefined && year >= PANORAMIC.FROM_YEAR && (seed * 65537 + 0.37) % 1 < PANORAMIC.SHARE;
 }
 
 /** hospitals and supermarkets: lit all night (FACADE_ALL_NIGHT) */

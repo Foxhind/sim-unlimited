@@ -6,7 +6,7 @@
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
 import { TREE_THIN } from '../world/props-mesher';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_RESIDENTIAL, FACADE_SEED_BITS, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -727,7 +727,12 @@ float windowFade(float d) {
  * The edge code (edge.z) carries a building-mesher FACADE style above its seed: on a balconied edge
  * some slot columns (by the slot's hash, the same on every floor) carry balconies from the first
  * floor up — glazed (a parapet panel under a lighter glazing with mullions) or open (a railing in
- * front of a dark recess with the balcony door, which lights like a window). Returns true on a lit pane.
+ * front of a dark recess with the balcony door, which lights like a window). A building of two floors
+ * (FACADE_UNIFORM) has every window alike: no floor refitted, no window changed by its owner, and the
+ * ground floor's windows as the upper floor's unless it keeps its shop windows (FACADE_SHOPS, which
+ * also puts them on a building of one floor: supermarkets, malls, newer retail and commercial). On
+ * FACADE_PANORAMIC the plain windows are panoramic: nearly the floor's height and the slot's width.
+ * Returns true on a lit pane.
  */
 const WINDOW_GLSL = `${WINDOW_LIGHT_GLSL}
 uint winHash(uint x) {
@@ -826,11 +831,17 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   bool resid = (code & ${FACADE_RESIDENTIAL}u) != 0u;
   bool blind = (code & ${FACADE_BLIND}u) != 0u;
   bool allNight = (code & ${FACADE_ALL_NIGHT}u) != 0u;
+  bool alike = (code & ${FACADE_UNIFORM}u) != 0u;
+  bool pano = (code & ${FACADE_PANORAMIC}u) != 0u;
   float du = uv.x - (k + 0.5) * cw;
   float dv = uv.y - f * fh;
-  float r = winRand(seed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));
-  bool ground = f == 0.0 && floors >= 2.0;
-  if (ground) {
+  // the edges of a uniform building share its seed: which windows are lit differs by the edge's length
+  uint litSeed = alike ? seed ^ winHash(uint(edge.x * 16.0) + 0x3c6eu) : seed;
+  float r = winRand(litSeed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));
+  // a shop floor (FACADE_SHOPS): shop windows on the ground floor whatever the floors
+  bool shops = (code & ${FACADE_SHOPS}u) != 0u;
+  bool ground = f == 0.0 && (floors >= 2.0 || shops) && (!alike || shops);
+  if (ground && floors >= 2.0) {
     // the ground floor in its own shade, per edge: darker, warm stone, lighter or cool grey
     uint gt = winHash(seed * 7u + 3u) & 3u;
     vec3 tint = gt == 0u ? vec3(0.74) : gt == 1u ? vec3(0.86, 0.8, 0.72) : gt == 2u ? vec3(1.14) : vec3(0.7, 0.73, 0.8);
@@ -848,8 +859,8 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
   // changed by its owner (residential only), so frames and glass vary up a wall and along it
   uint ws = seed;
-  if (winRand(seed ^ winHash(uint(f) * 0x2545u + 77u)) < 0.25) ws = winHash(seed + uint(f) * 0x632be5abu);
-  if (resid && winRand(seed ^ winHash(uint(k) * 0x27d4eb2du + uint(f) * 0x165667b1u + 3u)) < 0.75)
+  if (!alike && winRand(seed ^ winHash(uint(f) * 0x2545u + 77u)) < 0.25) ws = winHash(seed + uint(f) * 0x632be5abu);
+  if (!alike && resid && winRand(seed ^ winHash(uint(k) * 0x27d4eb2du + uint(f) * 0x165667b1u + 3u)) < 0.75)
     ws = winHash(ws ^ (uint(k) * 0x9e3779b9u + uint(f) * 0x85ebca6bu));
   vec3 glass = paneGlass(c, ws, r, fog);
   if (style > 0u && f >= 1.0 && winRand(seed * 31u + uint(k) * 0x9e3779b9u) < 0.6) {
@@ -878,9 +889,10 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
     c *= mix(vec3(0.32), vec3(1.0), fog);
     return false;
   }
-  float hw = min(max(min(0.7, 0.3 * cw), 0.6 * fw.x), 0.45 * cw);
-  float hh = min(max(min(0.75, 0.27 * fh), 0.6 * fw.y), 0.4 * fh);
-  float dy = dv - 0.55 * fh;
+  // plain windows a little above the middle of the floor; panoramic ones from near the floor to near the ceiling
+  float hw = pano ? min(max(min(1.3, 0.44 * cw), 0.6 * fw.x), 0.46 * cw) : min(max(min(0.7, 0.3 * cw), 0.6 * fw.x), 0.45 * cw);
+  float hh = pano ? max(0.43 * fh, 0.6 * fw.y) : min(max(min(0.75, 0.27 * fh), 0.6 * fw.y), 0.4 * fh);
+  float dy = dv - (pano ? 0.51 : 0.55) * fh;
   if (abs(du) > hw || abs(dy) > hh) return false;
   // the frame: its true width where that is about a pixel or more, else a pixel wide round a pane of
   // 6 pixels or more; the bars across the pane only where they are wider than about a pixel
@@ -889,7 +901,8 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   bool real = bar > 0.7 * max(fw.x, fw.y);
   bool outline = hw > 3.0 * fw.x && hh > 3.0 * fw.y;
   if (real || outline) {
-    uint bars = (fs >> 5u) % 3u;
+    // a panoramic pane: a mullion at most
+    uint bars = pano ? min((fs >> 5u) % 3u, 1u) : (fs >> 5u) % 3u;
     bool inFrame = hw - abs(du) < max(bar, fw.x) || hh - abs(dy) < max(bar, fw.y)
       || (real && bars >= 1u && hw > 0.45 && abs(du) < 0.5 * bar)
       || (real && bars == 2u && abs(dy - 0.33 * hh) < 0.5 * bar);

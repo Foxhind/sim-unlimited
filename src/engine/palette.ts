@@ -990,7 +990,19 @@ export const FACADE = { WINDOWS: 0, GLAZED_BALCONIES: 1, OPEN_BALCONIES: 2 } as 
  * A wall edge's code (building-mesher BuildingMeshData.windows), an integer below 2^24 (exact in a
  * float): FACADE_SEED_BITS of seed, the FACADE style in the next two bits, then the flags.
  */
-export const FACADE_SEED_BITS = 19;
+export const FACADE_SEED_BITS = 16;
+/**
+ * a building of two floors: every window alike (one style for the whole building, the ground floor's
+ * windows as the upper floor's unless FACADE_SHOPS), the seed the building's own (building-mesher edgeCode)
+ */
+export const FACADE_UNIFORM = 1 << 18;
+/**
+ * the ground floor has shop windows on every wall, also on a building of one floor (building-mesher
+ * hasStorefronts) and with FACADE_UNIFORM (two floors of retail or office)
+ */
+export const FACADE_SHOPS = 1 << 19;
+/** panoramic windows instead of the plain ones: nearly the floor's height and the slot's width */
+export const FACADE_PANORAMIC = 1 << 20;
 /** the edge is on a residential building (balconies above, rare pastel signs on the ground floor) */
 export const FACADE_RESIDENTIAL = 1 << 21;
 /** a blind patch (the wall round a door): the ground floor's tint, no openings or signs */
