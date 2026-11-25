@@ -9,6 +9,7 @@ let osmJson: string | undefined;
 let osmTs = 0;
 
 vi.mock('../src/world/tile-cache', () => ({
+  setOsmRawStamp: () => undefined,
   SCHEMA_VERSION: 69,
   getCachedMesh: async (key: string) => store.get(key),
   putCachedMesh: async (r: { key: string }) => void store.set(r.key, r),

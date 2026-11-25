@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { gzipSync } from 'node:zlib';
-import { pmtilesToOverpass, type AerodromeIndex } from '../src/world/osm-pmtiles';
+import { PmtilesOsm, pmtilesToOverpass, type AerodromeIndex } from '../src/world/osm-pmtiles';
 import { parseOverpass } from '../src/world/overpass';
 import { parseDirectory, Pmtiles, zxyToTileId } from '../src/world/pmtiles';
 import { tileBounds, type Tile } from '../src/world/geodesy';
@@ -46,6 +46,29 @@ describe('PMTiles reader', () => {
     expect(new TextDecoder().decode(await archive.tile(14, TILE.x, TILE.y))).toBe('hello');
     expect(await archive.tile(14, TILE.x + 1, TILE.y)).toBeUndefined();
     expect(await archive.tile(13, TILE.x >> 1, TILE.y >> 1)).toBeUndefined();
+  });
+});
+
+describe('our archives’ build', () => {
+  /** a minimal archive: a header whose root directory is `rootLength` bytes long, the rest empty */
+  const archive = (rootLength: number) => {
+    const header = new Uint8Array(127 + rootLength);
+    const v = new DataView(header.buffer);
+    header.set(new TextEncoder().encode('PMTiles'), 0);
+    header[7] = 3;
+    v.setUint32(8, 127, true); v.setUint32(16, rootLength, true);
+    v.setUint32(40, 127 + rootLength, true); v.setUint32(56, 127 + rootLength, true);
+    header[97] = 1; header[98] = 2; header[100] = 14; header[101] = 14;
+    return header;
+  };
+  const served = (file: Uint8Array): typeof fetch => (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+    const [a, b] = (init?.headers?.Range ?? 'bytes=0-0').slice(6).split('-').map(Number);
+    return new Response(file.slice(a, b + 1), { status: 206 });
+  }) as typeof fetch;
+  it('stamps a raw tile with it: a rebuilt archive is another build (tile-cache reads it anew)', async () => {
+    const once = await new PmtilesOsm('a.pmtiles', served(archive(0))).stamp();
+    expect(await new PmtilesOsm('a.pmtiles', served(archive(0))).stamp()).toBe(once);
+    expect(await new PmtilesOsm('a.pmtiles', served(archive(1))).stamp()).not.toBe(once);
   });
 });
 

@@ -12,6 +12,7 @@ import { bordersOf, demOf, GRID, lattice, road, TILE, townOverpassJson } from '.
 
 const relief = (x: number, y: number) => 500 + 0.2 * x + 0.05 * y;
 vi.mock('../src/world/tile-cache', () => ({
+  setOsmRawStamp: () => undefined,
   getOsmRaw: async () => ({ key: 'raw', ts: 0, json: townOverpassJson() }),
 }));
 vi.mock('../src/world/terrain-source', async (orig) => ({

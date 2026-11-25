@@ -1,7 +1,7 @@
 import { RetryableError } from '../engine/queue';
 import { tileBounds, tileKey, type Tile } from './geodesy';
 import { fetchOsmApiTile } from './osm-api';
-import { getOsmRaw, putOsmRaw } from './tile-cache';
+import { getOsmRaw, putOsmRaw, setOsmRawStamp } from './tile-cache';
 import { overpassQuery, parseOverpass, type OverpassJson } from './overpass';
 import { PmtilesOsm } from './osm-pmtiles';
 import type { OsmDetail, OsmTileData, TileSource } from './osm-types';
@@ -65,6 +65,15 @@ export function osmSourceMode(): OsmSourceMode {
  */
 export function osmRawKey(tile: Tile, detail: OsmDetail = 'full', mode: OsmSourceMode = osmSourceMode()): string {
   return `${tileKey(mode === 'pmtiles' ? 'osm-pm' : 'osm', tile, OSM_SCHEMA_VERSION)}/${detail}`;
+}
+
+/** our archives' build, once per thread: a raw tile cached from an earlier build is read anew (tiles/build.sh) */
+let archivesStamp: Promise<string | undefined> | undefined;
+if (osmSourceMode() === 'pmtiles') {
+  setOsmRawStamp('osm-pm/', () => (archivesStamp ??= new PmtilesOsm().stamp().catch((err) => {
+    archivesStamp = undefined;
+    throw err;
+  })));
 }
 
 /**

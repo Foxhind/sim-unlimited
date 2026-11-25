@@ -205,14 +205,33 @@ export interface CachedOsmRaw {
   key: string;
   ts: number;
   json: string;
+  /** the build of the archives it was read from (our own tiles: setOsmRawStamp) */
+  src?: string;
 }
+
+/** the raw OSM keys a source build stamps, and that build (our own tiles: osm-source) */
+let rawStamp: { prefix: string; stamp: () => Promise<string | undefined> } | undefined;
+/**
+ * Raw tiles under `prefix` are of a build of their source (`stamp`: our archives, rebuilt by
+ * tiles/build.sh): one cached from another build is stale, whatever its age
+ */
+export function setOsmRawStamp(prefix: string, stamp: () => Promise<string | undefined>): void {
+  rawStamp = { prefix, stamp };
+}
+const stampOf = async (key: string): Promise<string | undefined> =>
+  rawStamp && key.startsWith(rawStamp.prefix) ? rawStamp.stamp().catch(() => undefined) : undefined;
 
 export async function getOsmRaw(key: string): Promise<CachedOsmRaw | undefined> {
   const hit = await tx<CachedOsmRaw | undefined>('readonly', (s) => s.get(key), OSM_STORE);
   if (hit && Date.now() - hit.ts > OSM_TTL_MS) return undefined;
+  if (hit) {
+    const now = await stampOf(key);
+    if (now !== undefined && hit.src !== now) return undefined;
+  }
   return hit;
 }
 
 export async function putOsmRaw(entry: CachedOsmRaw): Promise<void> {
-  await tx('readwrite', (s) => s.put(entry), OSM_STORE);
+  const src = entry.src ?? (await stampOf(entry.key));
+  await tx('readwrite', (s) => s.put(src === undefined ? entry : { ...entry, src }), OSM_STORE);
 }

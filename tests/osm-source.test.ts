@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const store = new Map<string, string>();
 vi.mock('../src/world/tile-cache', () => ({
+  setOsmRawStamp: () => undefined,
   getOsmRaw: async (key: string) => (store.has(key) ? { key, ts: 0, json: store.get(key)! } : undefined),
   putOsmRaw: async (r: { key: string; json: string }) => void store.set(r.key, r.json),
 }));

@@ -185,6 +185,19 @@ export class PmtilesOsm {
   }
 
   /** Overpass-shaped JSON of a z14 tile, or null outside every archive (nothing to cache) */
+  /**
+   * The build of our archives: each one's URL and where its header puts its directories and tiles,
+   * which a rebuild moves. Raw tiles cached from another build are stale (tile-cache getOsmRaw).
+   */
+  async stamp(): Promise<string> {
+    const archives = await this.open();
+    const parts = await Promise.all(archives.map(async ({ archive }) => {
+      const h = await archive.tiles.header();
+      return `${archive.url}:${h.rootOffset}:${h.rootLength}:${h.leafOffset}:${h.tileDataOffset}`;
+    }));
+    return parts.join('|');
+  }
+
   async fetchJson(tile: Tile): Promise<string | null> {
     const archives = await this.open();
     const b = tileBounds(tile);
