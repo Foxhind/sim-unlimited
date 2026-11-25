@@ -12,7 +12,7 @@ import { farLightSize } from '../src/world/osm-manager';
 import { INSTANCE, LAMP_SHAPE, setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
-import { antennaHeight, beaconHeights, buildMasts, isAntenna } from '../src/world/mast-mesher';
+import { antennaHeight, beaconHeights, buildMasts, isAntenna, isMonopole } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
 import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
@@ -328,6 +328,46 @@ describe('antenna masts', () => {
     expect(line[0][0]).toBe(line[1][0]);
     expect(line[0][2]).toBe(line[1][2]);
     expect(line[1][1] - line[0][1]).toBeCloseTo(110, 3);
+  });
+
+  it('a mast without height or lattice tags: a 25 m hexagonal monopole with three antenna housings', () => {
+    const tags = { man_made: 'mast', 'tower:type': 'communication', 'communication:mobile_phone': 'yes' };
+    expect(antennaHeight(tags)).toBe(25);
+    expect(isMonopole(tags)).toBe(true);
+    expect(isMonopole({ ...tags, 'tower:construction': 'lattice' })).toBe(false);
+    expect(isMonopole({ ...tags, 'tower:construction': 'guyed_lattice' })).toBe(false);
+    expect(isMonopole({ ...tags, height: '110' })).toBe(false);
+    expect(isMonopole({ man_made: 'tower', 'tower:type': 'communication' })).toBe(false);
+
+    const m = buildMasts([{ at: mast.at, tags }], TILE, flat);
+    // 6 sides × 2 + 6 cap triangles, and 3 housings of 6 faces × 2
+    expect(m.ramps.length).toBe((12 + 6 + 3 * 12) * 3);
+    let maxY = -Infinity, maxR = 0;
+    const [cx, , cz] = quads(m.lines)[0];
+    for (let i = 0; i < m.vertices.length; i += 6) {
+      maxY = Math.max(maxY, m.vertices[i + 1]);
+      maxR = Math.max(maxR, Math.hypot(m.vertices[i] - cx, m.vertices[i + 2] - cz));
+      // every normal a unit vector
+      expect(Math.hypot(m.vertices[i + 3], m.vertices[i + 4], m.vertices[i + 5])).toBeCloseTo(1, 5);
+    }
+    expect(maxY).toBeCloseTo(GROUND + 25, 3);
+    // the housings stand out of the tube, within a metre and a half of the axis
+    expect(maxR).toBeGreaterThan(0.6);
+    expect(maxR).toBeLessThan(1.5);
+    // one red light, on the top
+    expect(quads(m.beacons).map((q) => Math.round(q[1] - GROUND))).toEqual([25]);
+  });
+
+  it('a monopole’s faces look outwards: their normals agree with the winding', () => {
+    const tags = { man_made: 'mast' };
+    const m = buildMasts([{ at: mast.at, tags }], TILE, flat);
+    const v = m.vertices;
+    for (let i = 0; i < v.length; i += 18) {
+      const a = [v[i], v[i + 1], v[i + 2]], b = [v[i + 6], v[i + 7], v[i + 8]], c = [v[i + 12], v[i + 13], v[i + 14]];
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+      expect(n[0] * v[i + 3] + n[1] * v[i + 4] + n[2] * v[i + 5]).toBeGreaterThan(0);
+    }
   });
 
   it('ignores other point objects', () => {

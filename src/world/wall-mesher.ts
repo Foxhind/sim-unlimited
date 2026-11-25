@@ -1,4 +1,4 @@
-import { colourOf, snowy, type RGB } from '../engine/palette';
+import { colourOf, pointValue, snowy, type RGB } from '../engine/palette';
 import { parseLength } from './building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmLine } from './osm-types';
@@ -10,7 +10,10 @@ import type { HeightSampler } from './terrain-source';
  * the higher; a town's wall high and thick, crenellated (Gemiler island's Byzantine one). Fences
  * (barrier=fence): a thin panel on the ground, coloured by its fence_type or material, its height
  * within FENCE_MAX_M (a stone one is a dry-stone wall). Each a solid band along the line, its
- * joints mitred; a piece drawn by the tile holding its middle. Hedges are left out.
+ * joints mitred; a piece drawn by the tile holding its middle. Along the top of every one a 1 px
+ * GL line too (drawn with the power lines' conductors): a fence a few centimetres thick, a garden
+ * wall of 30, are under a pixel from above, and the line keeps them in sight at any scale.
+ * Hedges are left out.
  */
 export const WALL = {
   /** height, thickness by kind (`height` and `width` tags over them) */
@@ -33,6 +36,8 @@ export const WALL = {
     metal: [122, 126, 130], steel: [122, 126, 130], chain_link: [138, 142, 144], bars: [96, 98, 102], railing: [96, 98, 102],
     wire: [138, 142, 144], mesh: [138, 142, 144], split_rail: [146, 112, 82], pole: [146, 112, 82], picket: [168, 136, 100],
   } as Record<string, RGB>,
+  /** the line along a wall's top: its colour × this */
+  LINE_SHADE: 0.45,
   /** a fence without a known fence_type or material: painted metal */
   FENCE: [118, 122, 126] as RGB,
   STONE: [184, 174, 152] as RGB,
@@ -57,6 +62,8 @@ export interface WallData {
   /** pos + normal (stride 6) with face colours, as the building mesh */
   vertices: Float32Array;
   ramps: Uint32Array;
+  /** along the top of each: GL line vertex pairs of x, y, z, colour value (palette pointValue) */
+  lines: Float32Array;
 }
 
 type V3 = [number, number, number];
@@ -68,6 +75,7 @@ export function buildWalls(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
   const b = tileBounds(tile);
   const owns = ([lon, lat]: LonLat) => lon >= b.west && lon < b.east && lat > b.south && lat <= b.north;
   const verts: number[] = [];
+  const tops: number[] = [];
   const ramps: number[] = [];
   const toXZ = ([lon, lat]: LonLat): XZ => {
     const [e, n] = latLonToEnu(center, lat, lon, 0);
@@ -112,7 +120,11 @@ export function buildWalls(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
     const tagged = parseLength(l.tags.height);
     const H = (kind === 'fence' && tagged !== undefined ? Math.min(WALL.FENCE_MAX_M, tagged) : tagged) ?? (dry ? WALL.DRY.HEIGHT_M : WALL.HEIGHT_M[kind]);
     const T = parseLength(l.tags.width) ?? (dry ? WALL.DRY.THICK_M : WALL.THICK_M[kind]);
-    const ramp = snowy(colourOf(stoneFence(l.tags) ? WALL.COLOURS.dry_stone : wallColour(l.tags, kind)));
+    const rgb = stoneFence(l.tags) ? WALL.COLOURS.dry_stone : wallColour(l.tags, kind);
+    const ramp = snowy(colourOf(rgb));
+    // the line darker than the wall: from above a fence reads as the dark stroke of its shadow
+    const shade = (v: number) => Math.round(v * WALL.LINE_SHADE);
+    const lineValue = pointValue(colourOf([shade(rgb[0]), shade(rgb[1]), shade(rgb[2])]));
     const pts = l.points.map(toXZ);
     const n = pts.length;
     const closed = n > 3 && pts[0][0] === pts[n - 1][0] && pts[0][1] === pts[n - 1][1];
@@ -151,6 +163,8 @@ export function buildWalls(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
       const [ya0, ya1] = span[i], [yb0, yb1] = span[i + 1];
       block([corner(i, 1, ya0), corner(i + 1, 1, yb0), corner(i + 1, -1, yb0), corner(i, -1, ya0),
         corner(i, 1, ya1), corner(i + 1, 1, yb1), corner(i + 1, -1, yb1), corner(i, -1, ya1)], ramp);
+      // its top's centre line: in sight from above whatever its thickness
+      tops.push(pts[i][0], ya1, pts[i][1], lineValue, pts[i + 1][0], yb1, pts[i + 1][1], lineValue);
       if (kind !== 'city_wall') continue;
       // merlons on its left half, every EVERY_M from the way's own start along this piece
       const M = WALL.MERLON, len = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]);
@@ -169,5 +183,5 @@ export function buildWalls(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
     }
     // the ends of an open wall are its blocks' end faces already
   }
-  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps) };
+  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), lines: new Float32Array(tops) };
 }

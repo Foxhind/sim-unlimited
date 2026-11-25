@@ -75,7 +75,7 @@ public class SimProfile implements Profile {
    */
   static final Set<String> KEYS = Set.of(
     "building", "building:part", "height", "min_height", "location", "layer", "colour", "color",
-    "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type",
+    "highway", "railway", "waterway", "aeroway", "natural", "landuse", "leisure", "man_made", "tower:type", "tower:construction",
     "entrance", "width", "lanes", "lit", "surface", "oneway", "tunnel", "bridge", "ref", "local_ref",
     "leaf_type", "wood", "icao", "iata", "aerodrome", "aerodrome:type", "area", "name", "name:en",
     "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type");

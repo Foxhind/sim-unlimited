@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { tileBounds, tileCenter, type Tile } from '../src/world/geodesy';
-import { colourOf, snowy } from '../src/engine/palette';
+import { colourOf, pointValue, snowy } from '../src/engine/palette';
 import { buildWalls, WALL, wallKind } from '../src/world/wall-mesher';
 import type { LonLat, OsmLine } from '../src/world/osm-types';
 import { overpassQuery, parseOverpass } from '../src/world/overpass';
@@ -91,6 +91,11 @@ describe('buildWalls', () => {
     expect(Math.max(...col(fence({ height: '9.9' }).vertices, 1))).toBeCloseTo(20 + WALL.FENCE_MAX_M, 4);
     expect(fence({ fence_type: 'wood' }).ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.wood)));
     expect(fence({ fence_type: 'chain_link' }).ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.chain_link)));
+    // a 1 px line along its top: one pair a piece, at its top's height, in its colour
+    expect(plain.lines.length).toBe(8);
+    expect(plain.lines[1]).toBeCloseTo(20 + WALL.HEIGHT_M.fence, 4);
+    expect(plain.lines[5]).toBeCloseTo(20 + WALL.HEIGHT_M.fence, 4);
+    expect(plain.lines[3]).toBe(pointValue(colourOf(WALL.FENCE.map((v) => Math.round(v * WALL.LINE_SHADE)) as [number, number, number])));
     const stone = fence({ fence_type: 'stone' });
     expect(Math.max(...col(stone.vertices, 1))).toBeCloseTo(20 + WALL.DRY.HEIGHT_M, 4);
     expect(stone.ramps[0]).toBe(snowy(colourOf(WALL.COLOURS.dry_stone)));
