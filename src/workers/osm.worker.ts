@@ -35,8 +35,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial
-export const OSM_MESH_SCHEMA = 110;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape
+export const OSM_MESH_SCHEMA = 111;
 
 export interface OsmRequest {
   type: 'osm';
@@ -101,6 +101,8 @@ export interface OsmMeshResponse {
   wires: ArrayBuffer;
   /** lighthouses' and sea lights' flashes (lighthouse-mesher FLASH_STRIDE) */
   flashes: ArrayBuffer;
+  /** traffic lights, their lenses lit each frame (traffic-signals SIGNAL_STRIDE) */
+  signals: ArrayBuffer;
   runways: number;
   /**
    * The tile's OSM, just downloaded, decides its shore (a coastline, or DEM sea without one): its
@@ -182,7 +184,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.bKinds, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
       res.roofLights, res.nightDots, res.beacons, res.mastLines,
-      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires, res.flashes,
+      res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires, res.flashes, res.signals,
     ]);
   };
   const empty = () => new ArrayBuffer(0);
@@ -206,7 +208,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(), pitchLines: cached.pitchLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
-        lamps: cached.lamps ?? empty(), wires: cached.wires ?? empty(), flashes: cached.flashes ?? empty(),
+        lamps: cached.lamps ?? empty(), wires: cached.wires ?? empty(), flashes: cached.flashes ?? empty(), signals: cached.signals ?? empty(),
         ...(detail === 'full' ? await cachedTerrainFlags(tile) : { runways: 0, coast: false }),
         roads: false,
       });
@@ -350,6 +352,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       lamps: mesh.lamps.slice().buffer,
       wires: [power.wires, lifts.ropes, walls.lines].reduce(concatF32).slice().buffer,
       flashes: lighthouses.flashes.slice().buffer,
+      signals: mesh.signals.slice().buffer,
     };
     // under the raw it was built from (just fetched, or kept)
     if (useCache) await putCachedMesh({ key: keyOf(await rawNow()), ts: Date.now(), ...out });

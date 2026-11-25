@@ -11,6 +11,7 @@ import { buildOsmMesh } from '../src/world/osm-mesher';
 import { INSTANCE, SIGNAL_SHAPE, TREE_STRIDE } from '../src/world/props-mesher';
 import { latLonToEnu, tileCenter, tileLattice, type Tile } from '../src/world/geodesy';
 import { buildGroundCover, ZEBRA_WHITE, ZEBRA_YELLOW, type GroundCover } from '../src/world/ground-cover';
+import { LENS_OUT, LENS_RGB, LENS_VERTICES, litLenses, MAX_LIT, signalAspects, SIGNAL_STRIDE } from '../src/world/traffic-signals';
 import { junctionPieces, junctionShape, unionOutline, type JunctionArm } from '../src/world/junctions';
 import type { OsmLine, OsmPoint } from '../src/world/osm-types';
 import { lineNetwork, type P2 } from '../src/world/ribbon-shapes';
@@ -92,7 +93,7 @@ describe('junctions in the ground cover', () => {
     expect(codeAt(cover, TILE, 32, 32)).toBeUndefined();
     for (const sh of cover.shapes.filter((s) => s.junction)) for (const l of sh.outline) expect(closed(l)).toBe(true);
   });
-  it('traffic lights on the node: a post at each approach, by the kerb on the right of its traffic, the road through green', () => {
+  it('traffic lights on the node: a post at each approach, by the kerb on the right of its traffic, the road through on its own half of the cycle', () => {
     const street = road({ highway: 'tertiary' }, [[32, 32], [32, 56]]);
     // a one-way street leaving north: no traffic comes in on it
     const out = road({ highway: 'tertiary', oneway: 'yes' }, [[32, 32], [32, 8]]);
@@ -112,13 +113,29 @@ describe('junctions in the ground cover', () => {
     }
     // the post of the approach from the east (its traffic driving west) stands north of the road
     expect(cover.signals.find((s) => s.facing[0] > 0)!.at[1]).toBeLessThan(32);
-    // east and west the road through: green; the street from the south: red
-    expect(cover.signals.filter((s) => s.green).map((s) => Math.sign(s.facing[0])).sort()).toEqual([-1, 1]);
-    expect(cover.signals.filter((s) => !s.green).map((s) => Math.sign(s.facing[1]))).toEqual([1]);
+    // east and west the road through: one group, the senior, open the cycle's first half; the street
+    // from the south the second half; one junction, one shift; a secondary road: no night duty
+    expect(cover.signals.filter((s) => s.phases === 0b0011).map((s) => Math.sign(s.facing[0])).sort()).toEqual([-1, 1]);
+    expect(cover.signals.filter((s) => s.phases === 0b1100).map((s) => Math.sign(s.facing[1]))).toEqual([1]);
+    expect(new Set(cover.signals.map((s) => s.shift)).size).toBe(1);
+    expect(cover.signals[0].shift).toBeGreaterThanOrEqual(0);
+    expect(cover.signals[0].shift).toBeLessThan(4);
+    expect(cover.signals.every((s) => !s.duty)).toBe(true);
     // no light on the node: no posts
     expect(buildGroundCover(TILE, GRID, data([ew, street, out])).signals).toHaveLength(0);
   });
-  it('a traffic light’s post faces its traffic, its lit lens on the face of its head', () => {
+  it('traffic lights at a junction of minor streets only (unclassified, residential): on night duty', () => {
+    const a = road({ highway: 'unclassified' }, [[8, 32], [32, 32], [56, 32]]);
+    const b = road({ highway: 'residential' }, [[32, 32], [32, 56]]);
+    const signal = { at: a.points[1], tags: { highway: 'traffic_signals' } };
+    const cover = buildGroundCover(TILE, GRID, data([a, b], [], [signal]));
+    expect(cover.signals.length).toBeGreaterThan(0);
+    expect(cover.signals.every((s) => s.duty)).toBe(true);
+    // a tertiary road among them: none
+    const c = road({ highway: 'tertiary' }, [[32, 32], [32, 8]]);
+    expect(buildGroundCover(TILE, GRID, data([a, b, c], [], [signal])).signals.every((s) => !s.duty)).toBe(true);
+  });
+  it('a traffic light’s post faces its traffic, three dark lenses on the face of its head, its lit ones drawn over them by the clock', () => {
     const street = road({ highway: 'tertiary' }, [[32, 32], [32, 56]]);
     const signal = { at: ew.points[1], tags: { highway: 'traffic_signals' } };
     const { opts, cover } = osmMeshOf(data([ew, street], [], [signal]), () => 300);
@@ -126,13 +143,34 @@ describe('junctions in the ground cover', () => {
     const posts: { x: number; z: number; yaw: number }[] = [];
     for (let i = 0; i < m.lampPosts.length; i += TREE_STRIDE) if (m.lampPosts[i + 5] === INSTANCE.SIGNAL) posts.push({ x: m.lampPosts[i], z: m.lampPosts[i + 2], yaw: m.lampPosts[i + 7] });
     expect(posts).toHaveLength(3);
-    // the lenses: self-lit faces, each a little in front of a post's head along its yaw, none behind
-    const lit: [number, number][] = [];
-    for (let v = 0; v < m.vertexCount; v++) if ((m.ramps[v] & SELF_LIT_FLAG) !== 0) lit.push([m.vertices[v * 6], m.vertices[v * 6 + 2]]);
+    // nothing lit in the tile's mesh: the lenses are dark, three to a head (both windings), a little in
+    // front of a post's head along its yaw, none behind
+    for (let v = 0; v < m.vertexCount; v++) expect(m.ramps[v] & SELF_LIT_FLAG).toBe(0);
+    const dark: [number, number][] = [];
+    for (let v = 0; v < m.vertexCount; v++) if (m.ramps[v] === LENS_RGB.DARK) dark.push([m.vertices[v * 6], m.vertices[v * 6 + 2]]);
     for (const p of posts) {
-      const mine = lit.filter(([x, z]) => Math.hypot(x - p.x, z - p.z) < 0.5);
-      expect(mine.length).toBeGreaterThan(0);
-      for (const [x, z] of mine) expect((x - p.x) * Math.cos(p.yaw) + (z - p.z) * Math.sin(p.yaw)).toBeCloseTo(SIGNAL_SHAPE.HEAD_FRONT + 0.01, 4);
+      const mine = dark.filter(([x, z]) => Math.hypot(x - p.x, z - p.z) < 0.5);
+      expect(mine).toHaveLength(3 * LENS_VERTICES);
+      for (const [x, z] of mine) expect((x - p.x) * Math.cos(p.yaw) + (z - p.z) * Math.sin(p.yaw)).toBeCloseTo(SIGNAL_SHAPE.HEAD_FRONT + LENS_OUT.DARK, 4);
+    }
+    // a row per post: its foot, its yaw, its plan
+    expect(m.signals).toHaveLength(3 * SIGNAL_STRIDE);
+    for (let i = 0; i < m.signals.length; i += SIGNAL_STRIDE) {
+      expect(posts.some((p) => Math.hypot(p.x - m.signals[i], p.z - m.signals[i + 2]) < 1e-3 && Math.abs(p.yaw - m.signals[i + 3]) < 1e-4)).toBe(true);
+      expect([0b0011, 0b1100]).toContain(m.signals[i + 4]);
+    }
+    // the lit lenses by the clock: self-lit, over the dark ones (a hair further out), one or two a head
+    const aspects = new Uint8Array(3);
+    for (const t of [0, 13, 29, 44, 58]) {
+      signalAspects(m.signals, 1.7e9 + t, 12, 0, aspects);
+      const verts = new Float32Array(3 * MAX_LIT * LENS_VERTICES * 6), ramps = new Uint32Array(3 * MAX_LIT * LENS_VERTICES);
+      const n = litLenses(m.signals, aspects, verts, ramps);
+      expect(n).toBeGreaterThanOrEqual(3 * LENS_VERTICES);
+      for (let v = 0; v < n; v++) {
+        expect(ramps[v] & SELF_LIT_FLAG).not.toBe(0);
+        const p = posts.find((q) => Math.hypot(verts[v * 6] - q.x, verts[v * 6 + 2] - q.z) < 0.5)!;
+        expect((verts[v * 6] - p.x) * Math.cos(p.yaw) + (verts[v * 6 + 2] - p.z) * Math.sin(p.yaw)).toBeCloseTo(SIGNAL_SHAPE.HEAD_FRONT + LENS_OUT.LIT, 4);
+      }
     }
   });
   it('a crossing: yellow and white stripes across the carriageway, drawn over it; a footway over the shoulder to the kerb', () => {

@@ -191,9 +191,10 @@ export const LAMP_SHAPE = { HEIGHT: 8, ARM: 2, POLE_HALF: 0.12 } as const;
 /**
  * A traffic light, m: a post at the origin, the signal head on its top facing +x (the traffic it
  * stops): HEAD_BOTTOM to HEAD_TOP, its face HEAD_FRONT out along x, HEAD_HALF each side, a shallow
- * box; its lenses LENS_HALF each way, red at RED_Y, green at GREEN_Y (osm-mesher placeSignals)
+ * box; its lenses LENS_HALF each way, red at RED_Y, yellow at YELLOW_Y, green at GREEN_Y
+ * (osm-mesher placeSignals, traffic-signals.ts)
  */
-export const SIGNAL_SHAPE = { POLE_HALF: 0.07, HEAD_BOTTOM: 2.4, HEAD_TOP: 3.4, HEAD_HALF: 0.17, HEAD_FRONT: 0.12, LENS_HALF: 0.12, RED_Y: 3.18, GREEN_Y: 2.62 } as const;
+export const SIGNAL_SHAPE = { POLE_HALF: 0.07, HEAD_BOTTOM: 2.4, HEAD_TOP: 3.4, HEAD_HALF: 0.17, HEAD_FRONT: 0.12, LENS_HALF: 0.12, RED_Y: 3.18, YELLOW_Y: 2.9, GREEN_Y: 2.62 } as const;
 
 const TRUNK = 1;
 const CROWN = 0;

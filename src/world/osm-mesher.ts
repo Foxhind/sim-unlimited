@@ -1,11 +1,12 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, selfLit, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
-import { INSTANCE, LAMP_SHAPE, pushInstance, SIGNAL_SHAPE } from './props-mesher';
+import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
+import { LENS, LENS_OUT, LENS_RGB, lensCorners, lensY } from './traffic-signals';
 import { isLitPitch, pitchFrame } from './pitch-markings';
 export { PITCH_LIT_MIN_M2 } from './pitch-markings';
 export { FORK_TAPER_M, ROAD_EDGE, ROAD_MARK, ROAD_MARK_END_M, ROAD_TAPER_M, ROAD_U_BASE, TRACK_EDGE } from '../engine/palette';
@@ -130,9 +131,6 @@ export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
   return 0;
 }
 const LAMP_RAMP = RAMP.HULL_DARK;
-/** a traffic light's lit lens (a light source) */
-const SIGNAL_RED_RGB = colour(255, 45, 30);
-const SIGNAL_GREEN_RGB = colour(40, 255, 130);
 
 export interface OsmMeshData extends TerrainMeshData {
   /** road ribbons (highway=*) with their shoulders and railway tracks, drawn only near like the buildings */
@@ -141,6 +139,8 @@ export interface OsmMeshData extends TerrainMeshData {
   roadAttrs: Float32Array;
   /** street lamp posts: instances of INSTANCE.LAMP (props-mesher TREE_STRIDE), drawn with the trees */
   lampPosts: Float32Array;
+  /** the traffic lights (traffic-signals SIGNAL_STRIDE): their lenses lit each frame by their cycle */
+  signals: Float32Array;
   /**
    * water areas and river/canal ribbons, drawn after the drape without writing depth: whatever
    * comes after (roads first of all) always shows over the water
@@ -274,6 +274,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const pitchLines: number[] = [];
   const lamps: number[] = [];
   const lampPosts: number[] = [];
+  const signals: number[] = [];
   const { verts, ramps } = main;
 
   const enu = (lon: number, lat: number): [number, number] => {
@@ -1584,13 +1585,13 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
 
   /**
    * With the cover: the junctions' traffic lights in this tile (ground-cover signals), each a post
-   * on the ground facing its traffic, its lit lens on its head's face — red above, green below, a
-   * light source (self-lit) seen from the front only, as large as it is
+   * on the ground facing its traffic, its three lenses dark on its head's face — red above, yellow,
+   * green below; which are lit is the cycle's (traffic-signals.ts), drawn over them each frame from
+   * the light's row in `signals`
    */
   const placeSignals = (): void => {
     if (!cover || !tin) return;
     const world = latticeToWorld(tile, tin.grid), g = tin.grid;
-    const L = SIGNAL_SHAPE;
     for (const s of cover.signals) {
       // the neighbour tile's post
       if (s.at[0] < 0 || s.at[1] < 0 || s.at[0] >= g || s.at[1] >= g) continue;
@@ -1599,17 +1600,16 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const [fx, fz] = world(s.at[0] + s.facing[0] * 1e-3, s.at[1] + s.facing[1] * 1e-3), yaw = Math.atan2(fz - z, fx - x);
       const ll = enuToLatLon(center, x, -z, 0), y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
       pushInstance(lampPosts, x, y0, z, 1, LAMP_RAMP, INSTANCE.SIGNAL, yaw);
-      // the lens: a square on the face, a hair in front of it
-      const cx = Math.cos(yaw), cz = Math.sin(yaw), out = L.HEAD_FRONT + 0.01, h = L.LENS_HALF;
-      const y = y0 + (s.green ? L.GREEN_Y : L.RED_Y), px = x + cx * out, pz = z + cz * out;
-      const at = (side: number, up: number): Vtx => ({ x: px - cz * side * h, y: y + up * h, z: pz + cx * side * h });
-      const ramp = selfLit(s.green ? SIGNAL_GREEN_RGB : SIGNAL_RED_RGB);
-      const [a, b, c, d] = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
-      // both windings: whatever the side drawn
-      emitTri(a, b, c, ramp);
-      emitTri(a, c, d, ramp);
-      emitTri(a, c, b, ramp);
-      emitTri(a, d, c, ramp);
+      signals.push(x, y0, z, yaw, s.phases, s.shift, s.duty ? 1 : 0);
+      // the lenses unlit: squares on the face, a hair in front of it
+      for (const lens of [LENS.RED, LENS.YELLOW, LENS.GREEN]) {
+        const [a, b, c, d] = lensCorners(x, y0 + lensY(lens), z, yaw, LENS_OUT.DARK);
+        // both windings: whatever the side drawn
+        emitTri(a, b, c, LENS_RGB.DARK);
+        emitTri(a, c, d, LENS_RGB.DARK);
+        emitTri(a, c, b, LENS_RGB.DARK);
+        emitTri(a, d, c, LENS_RGB.DARK);
+      }
     }
   };
   placeSignals();
@@ -1649,6 +1649,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     pitchLines: new Float32Array(pitchLines),
     lamps: new Float32Array(lamps),
     lampPosts: new Float32Array(lampPosts),
+    signals: new Float32Array(signals),
     depthLevels: depthOf(main),
     roadDepthLevels: depthOf(roads),
     waterDepthLevels: depthOf(water),

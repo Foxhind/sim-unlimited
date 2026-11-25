@@ -59,9 +59,11 @@ export interface CachedMesh {
   wires?: ArrayBuffer;
   /** OSM tiles, night: lighthouses' flashes (lighthouse-mesher FLASH_STRIDE) */
   flashes?: ArrayBuffer;
+  /** OSM tiles: traffic lights (traffic-signals SIGNAL_STRIDE) */
+  signals?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes';
+type MeshBuffers = 'vertices' | 'ramps' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes' | 'signals';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
     (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
@@ -69,7 +71,7 @@ export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pi
     (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.rAttrs?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0) + (m.pitchLines?.byteLength ?? 0) +
     (m.wVertices?.byteLength ?? 0) + (m.wRamps?.byteLength ?? 0) +
-    (m.gVertices?.byteLength ?? 0) + (m.gRamps?.byteLength ?? 0) + (m.wires?.byteLength ?? 0) + (m.flashes?.byteLength ?? 0) +
+    (m.gVertices?.byteLength ?? 0) + (m.gRamps?.byteLength ?? 0) + (m.wires?.byteLength ?? 0) + (m.flashes?.byteLength ?? 0) + (m.signals?.byteLength ?? 0) +
     (m.lamps?.byteLength ?? 0);
 }
 

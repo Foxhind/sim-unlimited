@@ -6,6 +6,7 @@ import { CULL_MARGIN_M, frustumPlanes, slantTo, sphereInFrustum, type CameraWorl
 import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Tile } from './geodesy';
 import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
 import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
+import { LENS_VERTICES, litLenses, MAX_LIT, signalAspects, SIGNAL_STRIDE } from './traffic-signals';
 import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
@@ -53,6 +54,13 @@ interface TreeSet extends PropSet {
   vertexCount: number;
 }
 
+/** a world mesh rewritten while drawn: its vertex (pos + normal) and face colour buffers */
+interface LensSet {
+  mesh: Mesh;
+  vertices: WebGLBuffer;
+  ramps: WebGLBuffer;
+}
+
 interface OsmChunk {
   tile: Tile;
   key: string;
@@ -93,6 +101,13 @@ interface OsmChunk {
   /** night: the lighthouses' lights (lighthouse-mesher FLASH_STRIDE), and the points of those lit now, written each frame */
   flashData?: Float32Array;
   flashes?: PropSet;
+  /**
+   * the traffic lights (traffic-signals SIGNAL_STRIDE), the lenses lit of each as last written, and
+   * the lit lenses' faces: rewritten when any light changes
+   */
+  signalData?: Float32Array;
+  signalLit?: Uint8Array;
+  lenses?: LensSet;
   buffers: WebGLBuffer[];
   vaos: WebGLVertexArrayObject[];
   /** xyz: tile centre in the world; w: yaw of the tile frame (see frameYaw) */
@@ -126,6 +141,7 @@ interface MeshPayload {
   mastLines: ArrayBuffer;
   wires: ArrayBuffer;
   flashes: ArrayBuffer;
+  signals: ArrayBuffer;
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
   rAttrs: ArrayBuffer;
@@ -204,6 +220,9 @@ export class OsmManager {
   layers: OsmLayers = { ...ALL_OSM_LAYERS };
   /** the structure kinds drawn, a bit per kind (structure-kinds STRUCTURE); the game draws them all */
   structures = ALL_STRUCTURES;
+  /** the sim clock, epoch seconds, and the local mean solar hour (palette solarHour): the traffic lights' cycle */
+  simSeconds = 0;
+  localHour = 12;
   private readyFired = new Set<string>();
   private origin: LatLon;
   private queue = new RequestQueue(2);
@@ -235,7 +254,7 @@ export class OsmManager {
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
-            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires), flashes: buf(msg.flashes),
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires), flashes: buf(msg.flashes), signals: buf(msg.signals),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
@@ -402,6 +421,54 @@ export class OsmManager {
     return { vao, vertexCount: ramps.byteLength / 4 };
   }
 
+  /**
+   * A world mesh of room for `vertexCount` vertices, none drawn yet, its buffers written while drawn
+   * (the traffic lights' lit lenses)
+   */
+  private dynamicWorldMesh(chunk: OsmChunk, vertexCount: number): LensSet {
+    const gl = this.gl;
+    const vao = must(gl.createVertexArray(), 'osm dynamic VAO');
+    gl.bindVertexArray(vao);
+    const vb = must(gl.createBuffer(), 'osm dynamic vertices');
+    gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+    gl.bufferData(gl.ARRAY_BUFFER, vertexCount * 24, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    const rb = must(gl.createBuffer(), 'osm dynamic ramps');
+    gl.bindBuffer(gl.ARRAY_BUFFER, rb);
+    gl.bufferData(gl.ARRAY_BUFFER, vertexCount * 4, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribIPointer(2, 1, gl.UNSIGNED_INT, 4, 0);
+    gl.bindVertexArray(null);
+    chunk.buffers.push(vb, rb);
+    chunk.vaos.push(vao);
+    return { mesh: { vao, vertexCount: 0 }, vertices: vb, ramps: rb };
+  }
+
+  /** the lit lenses of a chunk, written when they change (litLenses) */
+  private lensVerts = new Float32Array(0);
+  private lensRamps = new Uint32Array(0);
+
+  /** a chunk's traffic lights by the clock: their lit lenses rewritten when any light changed */
+  private lightSignals(c: OsmChunk): void {
+    if (!c.signalData || !c.signalLit || !c.lenses) return;
+    if (!signalAspects(c.signalData, this.simSeconds, this.localHour, performance.now() / 1000, c.signalLit)) return;
+    const room = c.signalLit.length * MAX_LIT * LENS_VERTICES;
+    if (this.lensRamps.length < room) {
+      this.lensVerts = new Float32Array(room * 6);
+      this.lensRamps = new Uint32Array(room);
+    }
+    const n = litLenses(c.signalData, c.signalLit, this.lensVerts, this.lensRamps);
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, c.lenses.vertices);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.lensVerts.subarray(0, n * 6));
+    gl.bindBuffer(gl.ARRAY_BUFFER, c.lenses.ramps);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.lensRamps.subarray(0, n));
+    c.lenses.mesh.vertexCount = n;
+  }
+
   /** the lit flashes of a chunk, written each frame (litFlashes) */
   private flashOut = new Float32Array(0);
   private flashScratch(lights: number): Float32Array {
@@ -449,6 +516,14 @@ export class OsmManager {
       chunk.flashData = new Float32Array(data.flashes);
       // room for every light at once; litFlashes writes the lit ones each frame
       chunk.flashes = this.points(chunk, new ArrayBuffer((chunk.flashData.length / FLASH_STRIDE) * 16));
+    }
+    if (data.signals.byteLength > 0) {
+      chunk.signalData = new Float32Array(data.signals);
+      const lights = chunk.signalData.length / SIGNAL_STRIDE;
+      // none written yet: the first frame writes them all
+      chunk.signalLit = new Uint8Array(lights).fill(255);
+      // room for the most lit at once (red and yellow) of every light
+      chunk.lenses = this.dynamicWorldMesh(chunk, lights * MAX_LIT * LENS_VERTICES);
     }
     chunk.rmesh = this.worldMesh(chunk, data.rVertices, data.rRamps, data.rAttrs, data.rLevels);
     chunk.wmesh = this.worldMesh(chunk, data.wVertices, data.wRamps, undefined, data.wLevels);
@@ -516,6 +591,7 @@ export class OsmManager {
     chunk.bKinds = chunk.bParts = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
+    chunk.signalData = chunk.signalLit = chunk.lenses = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
   }
@@ -568,6 +644,18 @@ export class OsmManager {
       if (!L.areas) break;
       renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      // the traffic lights' lit lenses over their dark ones in the drape, as the drape draws them
+      if (c.mesh && c.lenses) {
+        this.lightSignals(c);
+        if (c.lenses.mesh.vertexCount > 0) {
+          // light sources: above white on XDR (renderer HDR_EMISSION.trafficLights)
+          renderer.selfLit = true;
+          renderer.selfLitGain = renderer.emission('trafficLights');
+          renderer.drawWorld(c.lenses.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+          renderer.selfLit = false;
+          renderer.selfLitGain = 1;
+        }
+      }
       renderer.speckle = false;
     }
     // water over every tile's drape; nothing overlaps it any more (the ground leaves it out), so it writes depth

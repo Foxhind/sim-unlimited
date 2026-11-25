@@ -18,6 +18,7 @@ import { isLitPitch as isLitPitchRing, pitchFrame } from './pitch-markings';
 import { bandPieces, junctionPieces, shoulderAt, junctionShape, MAX_TRIM_M, trimCorners, unionOutline, type JunctionArm, type JunctionShape } from './junctions';
 import { capSides, lineNetwork, painted, ribbonGeom, ringBand, ROUND_ENDS, trackSegs, type P2, type RibbonEnds, type RibbonGeom, type VertexAttr } from './ribbon-shapes';
 import { buildRoadLevels, coverLifted, type Lifted } from './road-levels';
+import { isMinorRoad, signalPlan, signalShift } from './traffic-signals';
 import { bridgeDecks, type RoadSurface } from './road-pull';
 import { BALLAST_RAMP, beltFilter, classifyArea, classifyLine, isBridge, isLitRoad, isOpenCarPark, isTunnel, landZone, LINK_RANK, roadRank, LIT_ROAD_GLOW, PITCH_GLOW, RAIL_ZONE_M, RAIL_ZONE_RAMP, isOnewayRoad, roadLayer, roadPriority, SHOULDER_RAMP, tieBreak, TOWN_ZONES, UNLIT_ROAD_GLOW, waterwayWidth, type AreaStyle } from './way-styles';
 
@@ -85,8 +86,12 @@ export interface GroundCover {
   junctionHold(line: OsmLine, at: LonLat): number | undefined;
 }
 
-/** a traffic light at a junction's approach: its post (lattice), the way its head faces (lattice, unit), its light */
-export interface JunctionSignal { at: P2; facing: P2; green: boolean }
+/**
+ * a traffic light at a junction's approach: its post (lattice), the way its head faces (lattice,
+ * unit), the slots of the cycle it is open in (a bit each), its junction's shift, whether it
+ * flashes yellow at night (traffic-signals.ts)
+ */
+export interface JunctionSignal { at: P2; facing: P2; phases: number; shift: number; duty: boolean }
 
 /** a floodlit pitch: its whole outline (the shape's source) is big enough (pitch-markings isLitPitch, as the mesh) */
 const isLitPitch = (source: CoverShape['source']): boolean =>
@@ -580,7 +585,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   /** the nodes mapped as traffic lights (highway=traffic_signals), and the lights the junctions there get */
   const signalNodes = new Set(data.points.filter((p) => p.tags.highway === 'traffic_signals').map((p) => nodeKey(p.at)));
   const signals: JunctionSignal[] = [];
-  const pendingSignals: { tries: P2[]; facing: P2; green: boolean }[] = [];
+  const pendingSignals: { tries: P2[]; facing: P2; phases: number; shift: number; duty: boolean }[] = [];
   {
     const carriageway = (l: OsmLine) => { const st = l.tags.highway ? classifyLine(l.tags) : undefined; return !!st && !st.path && !isTunnel(l.tags) && l.points.length >= 2; };
     const atNode = new Map<string, { line: OsmLine; i: number }[]>();
@@ -915,28 +920,35 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
    * A junction with a traffic light on one of its nodes: a post at each approach (an arm traffic
    * comes in on: not a one-way road leaving), at its stop line (the trim) beside the kerb on the
    * right of the traffic coming in, SIGNAL_SETBACK_M off the carriageway, its head facing that
-   * traffic. Green for the roads through it (or, with none, the senior road), red for the others.
+   * traffic. Its cycle (traffic-signals signalPlan) over the approaches, turned by the junction's
+   * place (its least node key: the same in every tile); flashing yellow at night where every road
+   * of the junction is minor. The plan is made before the posts find their places (or none).
    */
   const placeSignals = (j: Junction, corners: [P2, P2][]): void => {
     const prioOf = (l: OsmLine) => roadPriority(l.tags, classifyLine(l.tags)!.width);
-    const top = Math.max(...j.arms.map((a) => prioOf(a.line)));
-    j.arms.forEach((a, k) => {
+    const incoming = j.arms.map((a, k) => ({ a, k })).filter(({ a }) => {
       const ow = a.line.tags.oneway === '-1' ? -1 : isOnewayRoad(a.line.tags) ? 1 : 0;
       // a one-way road leaving the junction: along its drawing direction out (out 1, forward), or against it
-      if (ow !== 0 && ow === a.out) return;
+      return !(ow !== 0 && ow === a.out);
+    }).map(({ a, k }) => {
       const c = a.arm.c, i = Math.min(c.length - 1, 1);
       const ul = Math.hypot(c[i][0] - c[0][0], c[i][1] - c[0][1]) || 1, u: P2 = [(c[i][0] - c[0][0]) / ul, (c[i][1] - c[0][1]) / ul];
+      return { a, k, u };
+    });
+    const plan = signalPlan(incoming.map(({ a, u }) => ({ facing: u, prio: prioOf(a.line) })));
+    const shift = signalShift([...j.keys].sort()[0]);
+    const duty = [...j.arms.map((a) => a.line), ...j.inner.map((w) => w.line)].every((l) => isMinorRoad(l.tags));
+    incoming.forEach(({ k, u }, n) => {
       // the traffic comes in against u: its right is the arm's right looking out (corners[k][0]; the
       // lattice's y runs south, so that side is u turned by (u.y, −u.x))
       const kerb = corners[k][0], off = SIGNAL_SETBACK_M * latticePerMetre;
       const side: P2 = [u[1], -u[0]];
-      const green = j.through.size ? j.through.has(a.line) : prioOf(a.line) >= top - 1e-9;
       // where that is another road's carriageway (a median too narrow, a slip road beside it): further
       // out, or on its left (a median's island), else none (settled once every shape is in: settleSignals)
       const left = corners[k][1];
       const tries: P2[] = [1, 2, 4].map((f): P2 => [kerb[0] + side[0] * off * f, kerb[1] + side[1] * off * f])
         .concat([1, 2].map((f): P2 => [left[0] - side[0] * off * f, left[1] - side[1] * off * f]));
-      pendingSignals.push({ tries, facing: u, green });
+      pendingSignals.push({ tries, facing: u, phases: plan[n], shift, duty });
     });
   };
 
@@ -1303,7 +1315,7 @@ export function buildGroundCover(tile: Tile, grid: number, data: { lines: OsmLin
   // each traffic light's post at the first of its places off every carriageway
   for (const p of pendingSignals) {
     const at = p.tries.find(([x, y]) => { const si = find(x, y, -1); return si < 0 || shapes[triShape[si]].kind !== 'carriageway'; });
-    if (at) signals.push({ at, facing: p.facing, green: p.green });
+    if (at) signals.push({ at, facing: p.facing, phases: p.phases, shift: p.shift, duty: p.duty });
   }
 
   return {

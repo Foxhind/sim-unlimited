@@ -1065,6 +1065,8 @@ export const HDR_EMISSION = {
   sun: 128,
   /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours; lit windows on the walls) */
   cityLights: 48,
+  /** the traffic lights' lit lenses (osm-manager lightSignals): saturated colours, as the navigation lights */
+  trafficLights: 64,
   /** the sun's glints off a turning propeller */
   glint: 64,
 } as const;

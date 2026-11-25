@@ -1003,7 +1003,11 @@ function frame(now: number): void {
   renderer.nightGlow = lightsOn;
   // by day under a thunderstorm people turn the lights on: a few windows, nothing else
   const stormDay = !lightsOn && weatherInForce()?.thunder === true;
-  renderer.litShare = stormDay ? STORM_DAY_LIT : litShare(solarHour(simTime, sunLoc.lon));
+  const localHour = solarHour(simTime, sunLoc.lon);
+  renderer.litShare = stormDay ? STORM_DAY_LIT : litShare(localHour);
+  // the traffic lights' cycle: the sim clock, and their night duty by the local solar hour
+  osm.simSeconds = simTime.getTime() / 1000;
+  osm.localHour = localHour;
   renderer.time = now / 1000;
   renderer.originLat = chunks.origin.lat;
   renderer.season = seasonOf(simTime);
