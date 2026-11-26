@@ -1,5 +1,7 @@
 # sim-unlimited
 
+<img src="public/icon.svg" width="128" height="128" alt="sim-unlimited icon: a fighter climbing across a setting sun over the sea" />
+
 A browser flight simulator whose world is the real Earth, built on the fly from OpenStreetMap data and
 an elevation model. Take off anywhere and fly anywhere: tiles stream in and out as you fly, with no
 loading screens.
@@ -116,6 +118,7 @@ src/tools    Dev inspectors
 tools/       Blender build/rig scripts for the aircraft, data generators
 tiles/       PMTiles build profile and script
 assets/      Aircraft .blend sources, Unscii font
+public/      App icon: icon.svg is the source, the PNGs are rendered from it
 docs/        Design spec (TZ.md, in Russian) and design notes
 tests/       Vitest tests and fixtures
 ```
