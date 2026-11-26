@@ -5,7 +5,7 @@ import { Renderer, type BaseGround } from './engine/renderer';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, frameLighting, moonLightOn, seasonOf, litShare, solarHour, paletteAt, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, frameLighting, moonLightOn, seasonOf, litShare, solarHour, windowsOn, WINDOWS, paletteAt, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -1000,12 +1000,19 @@ function frame(now: number): void {
   }
   applyFlameColors(frameLut, now / 1000);
   renderer.beginFrame(flashing ? flashLut : frameLut, flashing ? FLASH_LIGHT : frameLight);
-  const lightsOn = sun.elevationDeg < 2;
+  const lightsOn = sun.elevationDeg < WINDOWS.ON_ELEVATION_DEG;
   renderer.nightGlow = lightsOn;
+  // the windows come on over about an hour either side of the lamps (palette.ts windowsOn), by
+  // the sun's climb or fall now
+  const sunRateDegH = (sunPosition(new Date(simTime.getTime() + 60000), sunLoc).elevationDeg - sun.elevationDeg) * 60;
+  const windowsOnNow = windowsOn(sun.elevationDeg, sunRateDegH);
   // by day under a thunderstorm people turn the lights on: a few windows, nothing else
   const stormDay = !lightsOn && weatherInForce()?.thunder === true;
   const localHour = solarHour(simTime, sunLoc.lon);
-  renderer.litShare = stormDay ? STORM_DAY_LIT : litShare(localHour);
+  renderer.litShare = Math.max(stormDay ? STORM_DAY_LIT : 0, litShare(localHour) * windowsOnNow);
+  renderer.litFade = stormDay ? 1 : windowsOnNow;
+  // before the dusk, after the dawn: the windows of the day's facades, near and far
+  const duskWindows = !lightsOn && windowsOnNow > 0;
   // the traffic lights' cycle: the sim clock, and their night duty by the local solar hour
   osm.simSeconds = simTime.getTime() / 1000;
   osm.localHour = localHour;
@@ -1025,8 +1032,8 @@ function frame(now: number): void {
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
-  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u, stormDay);
-  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM);
+  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u, stormDay || duskWindows, duskWindows);
+  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM, duskWindows);
   profiler.stage('облака');
   clouds.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
   renderer.rimWeight = rim.aircraft;

@@ -879,6 +879,12 @@ export const WINDOWS = {
   LIT_SHARE: 0.45,
   YELLOW_SHARE: 0.7,
   ALL_NIGHT_SHARE: 0.6,
+  /** the windows are half on as the sun crosses this, degrees (main.ts lightsOn: the street lamps) */
+  ON_ELEVATION_DEG: 2,
+  /** and come on over this many hours either side of it (windowsOn) */
+  ON_RAMP_H: 1,
+  /** the sun's climb or fall is taken as at least this, degrees an hour (a polar sun skims the horizon) */
+  ON_MIN_RATE_DEG_H: 1,
 } as const;
 /**
  * Colours of lit windows (sRGB), shared by the near facades (WORLD_FS) and the far building dots
@@ -978,6 +984,18 @@ export function litShare(hour: number): number {
     }
   }
   return WINDOWS.LIT_SHARE;
+}
+/**
+ * How far the windows are on, 0..1: none an ON_RAMP_H before the sun crosses ON_ELEVATION_DEG, half
+ * as it does, all an ON_RAMP_H after (eased), at dusk and, the other way round, at dawn. The hours
+ * from the crossing are its elevation's distance from ON_ELEVATION_DEG over its rate now
+ * (`rateDegH`, degrees an hour: < 0 setting), so the ramp lasts about as long at any latitude.
+ * Multiplies litShare(hour); the hospitals' ALL_NIGHT_SHARE and the grow lamps follow it too.
+ */
+export function windowsOn(elevationDeg: number, rateDegH: number): number {
+  const hoursIn = (WINDOWS.ON_ELEVATION_DEG - elevationDeg) / Math.max(Math.abs(rateDegH), WINDOWS.ON_MIN_RATE_DEG_H);
+  const x = Math.max(0, Math.min(1, (hoursIn + WINDOWS.ON_RAMP_H) / (2 * WINDOWS.ON_RAMP_H)));
+  return x * x * (3 - 2 * x);
 }
 /** the local solar hour at a longitude (no time zones: noon is when the sun is due south) */
 export function solarHour(time: Date, lonDeg: number): number {

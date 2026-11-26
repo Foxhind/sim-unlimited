@@ -161,6 +161,8 @@ export class Renderer {
   private dpr = 1;
   /** the share of windows lit at night now (palette.ts litShare by the local hour) */
   litShare: number = WINDOWS.LIT_SHARE;
+  /** how far the windows are on round dusk and dawn (palette.ts windowsOn), 0..1: the all-night ones with it */
+  litFade = 1;
   /** the facade cell width of the far window dots drawLights draws next (palette.ts FAR_WINDOWS; the far OSM ring sets its own) */
   windowCellM: number = FAR_WINDOWS.CELL_M;
   /** the fog range (metres) the far window dots drawLights draws next run into the haze over; none by default */
@@ -257,7 +259,7 @@ export class Renderer {
 
     const worldNames = [
       'uView', 'uProj', 'uOffset', 'uCamPos', 'uSunDir', 'uFogStart', 'uFogEnd', 'uHazeK', 'uGlow', 'uOriginLat', 'uSeason', 'uCoarse', 'uOrthoFar',
-      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uOutlined', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
+      'uLut', 'uLight', 'uHaze', 'uSat', 'uRim', 'uRimSteps', 'uRimColor', 'uTwoSided', 'uSelfLit', 'uOutlined', 'uEmit', 'uClear', 'uGloss', 'uWindows', 'uWinEmit', 'uLitShare', 'uLitFade', 'uSpeckle', ...WIRE_UNIFORMS, ...GLITTER_UNIFORMS, ...SUNLIGHT_UNIFORMS, ...SHADOW_UNIFORMS,
     ];
     const worldVariant = (v: WorldVariant) => {
       const prog = createProgram(gl, depthed(WORLD_VS), depthed(WORLD_FS, WORLD_VARIANTS[v]));
@@ -272,7 +274,7 @@ export class Renderer {
     ]);
     this.pointsProg = createProgram(gl, depthed(POINTS_VS), depthed(POINTS_FS));
     this.pointsU = uniformMap(gl, this.pointsProg, [
-      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd', 'uHazeK',
+      'uView', 'uProj', 'uOffset', 'uCamPos', 'uPointSize', 'uOn', 'uRound', 'uOrthoFar', 'uStackH', 'uPull', 'uLitShare', 'uLitFade', 'uFbH', 'uCell', 'uFogStart', 'uFogEnd', 'uHazeK',
       'uLut', 'uLight', 'uHaze', 'uSat', 'uEmit',
     ]);
     this.skyProg = createProgram(gl, FULLSCREEN_VS, SKY_FS);
@@ -869,6 +871,7 @@ export class Renderer {
     gl.uniform1i(u.uWindows, this.windows === 'lit' ? 2 : this.windows === 'glass' ? 1 : 0);
     gl.uniform1f(u.uWinEmit, this.emission('cityLights'));
     gl.uniform1f(u.uLitShare, this.litShare);
+    gl.uniform1f(u.uLitFade, this.litFade);
     gl.uniform1i(u.uSpeckle, this.speckle ? 1 : 0);
     // light sources and glints are not shaded
     this.setShadow(u, !this.selfLit && !this.additive);
@@ -964,6 +967,7 @@ export class Renderer {
     gl.uniform1i(this.pointsU.uOn, on ? 1 : 0);
     gl.uniform1f(this.pointsU.uEmit, this.emission('cityLights'));
     gl.uniform1f(this.pointsU.uLitShare, this.litShare);
+    gl.uniform1f(this.pointsU.uLitFade, this.litFade);
     this.setLight(this.pointsU);
     gl.bindVertexArray(vao);
     gl.drawArrays(mode === 'points' ? gl.POINTS : gl.LINES, 0, count);

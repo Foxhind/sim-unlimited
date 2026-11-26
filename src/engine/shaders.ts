@@ -822,7 +822,7 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
     }
   }
   // shops are lit more often than flats, mostly white; they close at night with the flats going dark
-  float open = allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)};
+  float open = allNight ? 0.85 * uLitFade : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)};
   bool lit = uWindows == 2 && r < open;
   vec3 shop = windowGlow(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay)));
   vec3 glass = paneGlass(c, seed, r, fog);
@@ -1015,9 +1015,9 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   // the wall round a door: no openings
   if (blind) return false;
   if (ground) return groundFloorAt(c, du, dv, k, cw, fh, uv, edge, seed, resid, allNight, r, fw, fog);
-  float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} : uLitShare;
+  float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} * uLitFade : uLitShare;
   // grow lamps: a window in 2000, on all night whatever the hour
-  bool grow = winRand(seed * 0x2c1b3c6du ^ winHash(uint(k) * 0x297a2d39u + uint(f) * 0x6c8e9cf5u + 101u)) < ${WINDOW_LIGHT.GROW_SHARE};
+  bool grow = winRand(seed * 0x2c1b3c6du ^ winHash(uint(k) * 0x297a2d39u + uint(f) * 0x6c8e9cf5u + 101u)) < ${WINDOW_LIGHT.GROW_SHARE} * uLitFade;
   bool lit = uWindows == 2 && (r < share || grow);
   vec3 lc = grow ? ${glslRgb(WINDOW_LIGHT.GROW)} : windowLightColour(r / max(share, 1e-6), allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
   vec3 light = windowGlow(mix(lc, uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay)));
@@ -1427,6 +1427,9 @@ uniform highp int uWindows;
 uniform float uWinEmit;
 // the share of windows lit now (renderer.litShare, palette.ts litShare by the local hour)
 uniform float uLitShare;
+// how far the windows are on round dusk and dawn (renderer.litFade, palette.ts windowsOn): the
+// all-night buildings and the grow lamps come on with it
+uniform float uLitFade;
 // 1: self-lit (flame, aircraft lights): alpha 0 tells the silhouette rim pass to leave it alone
 uniform float uSelfLit;
 // 1: the silhouette rim pass may light this (renderer.outlined: buildings and aircraft); 0: alpha 0, no rim
@@ -1634,6 +1637,8 @@ uniform vec2 uPull;
 uniform float uEmit;
 // the share of windows lit now (renderer.litShare): far building window dots go dark with it
 uniform float uLitShare;
+// how far the windows are on round dusk and dawn (renderer.litFade): the all-night ones' dots too
+uniform float uLitFade;
 // far window dots: the framebuffer height (pixels) and the width of a dot's facade cell (metres)
 uniform float uFbH;
 uniform float uCell;
@@ -1686,7 +1691,7 @@ void main() {
     float hLit = float(hx & 0xffffu) / 65536.0;
     float hKeep = float((hx >> 16u) & 0xffu) / 256.0 + 0.5 / 256.0;
     float hCol = float(((hx * 0x9e3779b9u) >> 8u) & 0xffffu) / 65536.0;
-    float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} : uLitShare;
+    float share = allNight ? ${WINDOWS.ALL_NIGHT_SHARE.toFixed(2)} * uLitFade : uLitShare;
     float cellPx = uCell * uProj[1][1] * 0.5 * uFbH / max(gl_Position.w, 1e-3);
     bool keep = cellPx >= 1.0 || hKeep < cellPx * cellPx;
     // the buildings likely in front of it along the view ray (FAR_WINDOWS.CANOPY_M, FREE_PATH_M)

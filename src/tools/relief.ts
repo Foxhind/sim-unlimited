@@ -6,7 +6,7 @@
  */
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import type { HdrBlocker } from '../engine/output-mode';
-import { BASE_LAND, frameLighting, litShare, moonLightOn, paletteAt, seasonOf, snowy, solarHour, sunColour, WINDOWS } from '../engine/palette';
+import { BASE_LAND, frameLighting, litShare, moonLightOn, paletteAt, seasonOf, snowy, solarHour, sunColour, windowsOn, WINDOWS } from '../engine/palette';
 import { rim, rimFrame } from '../engine/rim';
 import { Renderer } from '../engine/renderer';
 import { DEPTH_FAR, REVERSED_NEAR } from '../engine/shaders';
@@ -50,7 +50,12 @@ const SPAN_MAX_M = 180000;
 /** the lights' size in the simulator at its usual 1× HUD scale */
 const POINT_SIZE = 3;
 /** the lights are on while the sun is below this, degrees (main.ts lightsOn) */
-const LIGHTS_ON_SUN_DEG = 2;
+const LIGHTS_ON_SUN_DEG = WINDOWS.ON_ELEVATION_DEG;
+/**
+ * the sun's fall, degrees an hour, for the windows' dusk ramp (palette.ts windowsOn) when the sun
+ * is set by hand and has no clock: a mid-latitude sun near the horizon (Moscow 6-8, the equator 15)
+ */
+const HAND_SUN_RATE_DEG_H = -10;
 const EDGE_NAMES = ['север', 'юг', 'запад', 'восток'];
 /** tile outline by zoom, coarse to fine */
 /** the colour correction is kept between visits (this browser only) */
@@ -187,6 +192,10 @@ let palette = paletteAt(state.sunEl, CLEAR_SUNNY);
 let { lut, light } = frameLighting(palette, state.sunEl, CLEAR_SUNNY, CLOUD, 0);
 /** what the light was last worked out for */
 let lightKey = '';
+/** the share of windows lit by the hour (palette.ts litShare), before the dusk ramp */
+let hourShare: number = WINDOWS.LIT_SHARE;
+/** the sun's climb (> 0) or fall now, degrees an hour, for the dusk ramp */
+let sunRateDegH = HAND_SUN_RATE_DEG_H;
 let selected: Tile | null = null;
 
 /**
@@ -309,7 +318,8 @@ function updateLight(): void {
     vec3.copy(moonDir, moon.dir);
     state.sunEl = sun.elevationDeg;
     state.sunAz = ((Math.atan2(sun.dir[0], -sun.dir[2]) / D2R) + 360) % 360;
-    morning = sunPosition(new Date(t.getTime() + 60000), state.centre).elevationDeg > sun.elevationDeg;
+    sunRateDegH = (sunPosition(new Date(t.getTime() + 60000), state.centre).elevationDeg - sun.elevationDeg) * 60;
+    morning = sunRateDegH > 0;
     // as in the simulator: the faces' light leans from the sun to the moon as the sun goes down
     const sw = Math.max(0, Math.min(1, (sun.elevationDeg + 4) / 6));
     const mw = moonLightOn(sun.elevationDeg, moon.elevationDeg, moon.illumination);
@@ -317,7 +327,7 @@ function updateLight(): void {
     if (sw + mw < 1e-3) vec3.copy(lightDir, sunDir);
     else vec3.normalize(lightDir, vec3.scaleAndAdd(lightDir, vec3.scale(lightDir, sunDir, sw), moonDir, mw));
     renderer.season = seasonOf(t);
-    renderer.litShare = litShare(solarHour(t, state.centre.lon));
+    hourShare = litShare(solarHour(t, state.centre.lon));
     syncSun();
   } else {
     const el = state.sunEl * D2R, az = state.sunAz * D2R;
@@ -325,7 +335,8 @@ function updateLight(): void {
     vec3.copy(moonDir, NO_MOON);
     vec3.copy(lightDir, sunDir);
     renderer.season = 0;
-    renderer.litShare = WINDOWS.LIT_SHARE;
+    hourShare = WINDOWS.LIT_SHARE;
+    sunRateDegH = HAND_SUN_RATE_DEG_H;
   }
   palette = paletteAt(state.sunEl, CLEAR_SUNNY, morning);
   ({ lut, light } = frameLighting(palette, state.sunEl, CLEAR_SUNNY, CLOUD, moonLight));
@@ -364,9 +375,14 @@ function frame(now: number): void {
     farOsm.update(cam, view, proj, now, chunks.origin, farOsmTiles(cam.latLon, cam.alt, detailKeys), chunks.shownDetail);
   }
 
-  // the simulator's rule: the lights come on as the sun goes below LIGHTS_ON_SUN_DEG
+  // the simulator's rule: the lights come on as the sun goes below LIGHTS_ON_SUN_DEG, the windows
+  // over about an hour either side of it (palette.ts windowsOn; main.ts the same)
   const mode = $<HTMLSelectElement>('night').value;
   const night = mode === 'on' || (mode === 'auto' && state.sunEl < LIGHTS_ON_SUN_DEG);
+  const windowsFade = mode === 'on' ? 1 : mode === 'off' ? 0 : windowsOn(state.sunEl, sunRateDegH);
+  renderer.litShare = hourShare * windowsFade;
+  renderer.litFade = windowsFade;
+  const duskWindows = !night && windowsFade > 0;
   renderer.orthoFar = fly.on ? 0 : 2 * EYE_DISTANCE_M;
   renderer.originLat = chunks.origin.lat;
   renderer.nightGlow = night;
@@ -394,8 +410,8 @@ function frame(now: number): void {
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   if (osmOn) {
-    osm.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, night, POINT_SIZE * dpr);
-    farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr, fogStart, fogEnd);
+    osm.draw(renderer, view, proj, cam.pos, lightDir, fogStart, fogEnd, night, POINT_SIZE * dpr, duskWindows, duskWindows);
+    farOsm.draw(renderer, view, proj, cam.pos, night, POINT_SIZE * dpr, fogStart, fogEnd, duskWindows);
   }
   renderer.beginOverlay();
   renderer.resolve();

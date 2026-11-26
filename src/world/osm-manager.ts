@@ -646,8 +646,10 @@ export class OsmManager {
     fogEnd: number,
     lightsOn: boolean,
     pointSize: number,
-    /** some windows of the near facades are lit though it is day (a thunderstorm's gloom) */
+    /** some windows of the near facades are lit though it is day (a thunderstorm's gloom, the dusk) */
     dayWindows = false,
+    /** and of the far ones too: the dusk and the dawn (palette.ts windowsOn), as lit facades as by night */
+    farDayWindows = false,
   ): void {
     const L = this.layers;
     const lights = lightsOn && L.lights;
@@ -712,8 +714,9 @@ export class OsmManager {
       } else {
         // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one. By night the
         // same lit facades as near (the windows shader keeps sub-pixel panes, the walls hide what is
-        // behind them), so no border shows between near and far at night
-        if (lightsOn) {
+        // behind them), so no border shows between near and far at night; so too while the windows
+        // come on before the dusk, or go off after the dawn
+        if (lightsOn || farDayWindows) {
           renderer.windows = 'lit';
           renderer.rimWeight = houseRim;
           renderer.outlined = true;
