@@ -1,11 +1,11 @@
 import earcut from 'earcut';
-import { colour, colourOf, isMaterial, LIGHT, LUT_SIZE, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
+import { colour, colourOf, isMaterial, LUT_SIZE, streetLampValue, RAMP, rampGlowLevel, rampIndex, rgbOf, snowy, withGlow, type RGB } from '../engine/palette';
 import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
 import { buildBuildingMesh } from './building-mesher';
 import { clipTileData } from './clip';
-import { INSTANCE, LAMP_SHAPE, pushInstance } from './props-mesher';
+import { INSTANCE, LAMP_SHAPE, lampHead, pushInstance } from './props-mesher';
 import { LENS, LENS_OUT, LENS_RGB, lensCorners, lensY } from './traffic-signals';
 import { isLitPitch, pitchFrame } from './pitch-markings';
 export { PITCH_LIT_MIN_M2 } from './pitch-markings';
@@ -131,6 +131,13 @@ export function lampSide(tags: Record<string, string>): 1 | -1 | 0 {
   return 0;
 }
 const LAMP_RAMP = RAMP.HULL_DARK;
+/**
+ * the key of a row of lamps, its colour's (palette.ts streetLampValue): the street's name, else its
+ * ref, else all its tags (the data carries no way ids: our own tiles number their ways afresh)
+ */
+export function streetLampKey(tags: Record<string, string>): string {
+  return tags.name ?? tags.ref ?? Object.keys(tags).sort().map((k) => `${k}=${tags[k]}`).join(';');
+}
 
 export interface OsmMeshData extends TerrainMeshData {
   /** road ribbons (highway=*) with their shoulders and railway tracks, drawn only near like the buildings */
@@ -155,8 +162,9 @@ export interface OsmMeshData extends TerrainMeshData {
   roadLines: Float32Array;
   /** pitch markings, drawn near: 1 px GL line vertex pairs (x, y, z, palette index) on the terrain */
   pitchLines: Float32Array;
-  /** night: lamp heads at the ends of the lamp arms (x, y, z, palette index); far, the same points
-   *  stand in for the street-lit roads as a dotted line */
+  /** night: lamp lenses' centres under the lamp heads (x, y, z, palette.ts streetLampValue), one per
+   *  INSTANCE.LAMP of lampPosts in the same order; far, the same points stand in for the street-lit
+   *  roads as a dotted line */
   lamps: Float32Array;
   /**
    * per vertex of the drape, the roads and the water: its depth level (WORLD_VS aDepthLevel, 0 for
@@ -570,15 +578,20 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       if (lx < 0 || ly < 0 || lx >= g || ly >= g) continue; // the neighbour tile's pole
       const ll = enuToLatLon(center, fx, -fz, 0);
       const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0);
-      const cx = r.cx - fx, cz = r.cz - fz, cl = Math.hypot(cx, cz) || 1;
-      pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, Math.atan2(cz, cx));
-      lamps.push(fx + (cx / cl) * LAMP_SHAPE.ARM, y0 + LAMP_HEIGHT_M - 2 * LAMP_SHAPE.POLE_HALF - 0.1, fz + (cz / cl) * LAMP_SHAPE.ARM, LIGHT.STREET);
+      const yaw = Math.atan2(r.cz - fz, r.cx - fx);
+      pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, yaw);
+      const h = lampHead(fx, y0, fz, yaw);
+      lamps.push(h.x, h.y, h.z, streetLampValue(streetLampKey(area.tags)));
     }
   };
 
-  /** street lamps along a road: pole beside it, arm over it, a light at the arm's end */
-  const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0, lift?: Lift): void => {
+  /**
+   * street lamps along a road: pole beside it, arm over it, a light under the arm's head; all in the
+   * colour of the row (streetLampKey of its tags)
+   */
+  const placeLamps = (points: LonLat[], half: number, fixedSide: 1 | -1 | 0, tags: Record<string, string>, lift?: Lift): void => {
     const p = points.map(([lon, lat]) => enu(lon, lat));
+    const value = streetLampValue(streetLampKey(tags));
     let next = LAMP_SPACING_M / 2;
     let walked = 0;
     // side 1 is to the right of the drawing direction (z points south: walking east, +z is right)
@@ -596,12 +609,11 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
         const ll = enuToLatLon(center, fx, -fz, 0);
         // on a lifted road the lamp stands on the deck's edge
         const y0 = Math.max(sampleHeight(ll.lon, ll.lat), 0) + (lift ? lift({ x: ax + dx * t, z: az + dz * t }) : 0);
-        const top = y0 + LAMP_HEIGHT_M;
-        const r = LAMP_SHAPE.POLE_HALF;
         // the post, its arm turned back over the road
-        pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, Math.atan2(-nz, -nx));
-        const tx = fx - nx * LAMP_SHAPE.ARM, tz = fz - nz * LAMP_SHAPE.ARM;
-        lamps.push(tx, top - 2 * r - 0.1, tz, LIGHT.STREET);
+        const yaw = Math.atan2(-nz, -nx);
+        pushInstance(lampPosts, fx, y0, fz, 1, LAMP_RAMP, INSTANCE.LAMP, yaw);
+        const h = lampHead(fx, y0, fz, yaw);
+        lamps.push(h.x, h.y, h.z, value);
         if (!fixedSide) side = -side;
         next += LAMP_SPACING_M;
       }
@@ -1165,7 +1177,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
     const { half, road, lit, out, ramp } = look;
     // a tile's share of a line: its lift by the tags it shares with the whole way
     const lift: Lift | undefined = levels?.liftedTags(line.tags) ? (p) => levels.liftNear(line.tags, p.x, p.z) : undefined;
-    if (lit && !look.path) placeLamps(line.points, half, lampSide(line.tags), lift);
+    if (lit && !look.path) placeLamps(line.points, half, lampSide(line.tags), line.tags, lift);
 
     if (tin) {
       // far lines: roads but the minor ones, and railways

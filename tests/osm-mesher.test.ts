@@ -771,11 +771,12 @@ describe('roads and water as the terrain’s own faces', () => {
     // and for its railway: a way of the network since (railways by the roads' rules), its ground pulled to its bed
     // and for its bridge's parapets, closed at the slab's two cut ends (4 faces: 24 vertices more)
     // and for its roads' shoulders, narrowing with a road that narrows into its continuation (84 vertices more)
+    // and for its lamps' lights: under the heads of the raised arms, in the colour of their street
     expect(digest(buildOsmMesh(opts))).toEqual(GOLDEN_OSM_NO_COVER);
   });
 });
 
 const GOLDEN_OSM_NO_COVER = [
   7665, 3587145424, 2517069178, 18318, 1101202010, 3220254437, 495376912, 2685, 4088249153, 243433191, 570, 2770884446, 3865651733,
-  275609523, 1348067417, 3047867437, 2037975868,
+  275609523, 1348067417, 2585290415, 2037975868,
 ];

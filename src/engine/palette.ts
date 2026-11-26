@@ -964,6 +964,28 @@ export function windowLightColour(t: number, kMin: number = WINDOW_LIGHT.KELVIN_
   return kelvinRgb(kMin + u * (WINDOW_LIGHT.KELVIN_MAX - kMin));
 }
 /**
+ * Street lamps (osm-mesher placeLamps): a row of lamps shares one colour temperature, KELVIN_MIN to
+ * KELVIN_MAX of WINDOW_LIGHT by the last byte of a hash of its row's key (streetLampKey: the
+ * street's name), so the lamps of a street match in every tile it crosses. A lamp's point value is
+ * BASE + that byte (above every LUT index; POINTS_VS turns it into kelvinRgb and lets it shine).
+ */
+export const STREET_LAMP = { BASE: 1 << 20, LEVELS: 256 } as const;
+/** FNV-1a of a string's UTF-16 code units, its last byte */
+export function lastHashByte(key: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 0x01000193);
+  return h & 255;
+}
+/** the point value of a street lamp in the row of `key` */
+export function streetLampValue(key: string): number {
+  return STREET_LAMP.BASE + lastHashByte(key);
+}
+/** the colour of a street lamp of point value `value` (streetLampValue), as POINTS_VS draws it */
+export function streetLampRgb(value: number): RGB {
+  const u = (value - STREET_LAMP.BASE) / (STREET_LAMP.LEVELS - 1);
+  return kelvinRgb(WINDOW_LIGHT.KELVIN_MIN + u * (WINDOW_LIGHT.KELVIN_MAX - WINDOW_LIGHT.KELVIN_MIN));
+}
+/**
  * The share of windows lit by the local solar hour: [hour, share] keys, eased between them and round
  * midnight: the evening peak 19-21 h, a few left at 1 h, the fewest before dawn, people up at 7-8 h.
  */

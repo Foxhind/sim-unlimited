@@ -9,7 +9,7 @@ import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Ti
 import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
 import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
 import { LENS_VERTICES, litLenses, MAX_LIT, signalAspects, SIGNAL_STRIDE } from './traffic-signals';
-import { INSTANCE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
+import { INSTANCE, lampLenses, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
 import { ALL_STRUCTURES, shownRanges, STRUCTURE } from './structure-kinds';
@@ -80,6 +80,8 @@ interface OsmChunk {
   pitchLines?: PropSet;
   /** night: lamp heads near, and far the street-lit roads' dotted line */
   lamps?: PropSet;
+  /** night, near: the street lamps' lit lenses (props-mesher lampLenses), self-lit faces */
+  lampLenses?: Mesh;
   /** buildings, and their far stand-in dots */
   bmesh?: Mesh;
   /** the same buildings without their small parts (the same VAO, its first vertices): the far LOD */
@@ -547,6 +549,10 @@ export class OsmManager {
     chunk.roadLines = this.points(chunk, data.roadLines);
     chunk.pitchLines = this.points(chunk, data.pitchLines);
     chunk.lamps = this.points(chunk, data.lamps);
+    if (data.lamps.byteLength > 0) {
+      const lenses = lampLenses(new Float32Array(data.trees), new Float32Array(data.lamps));
+      chunk.lampLenses = this.worldMesh(chunk, lenses.vertices.buffer as ArrayBuffer, lenses.ramps.buffer as ArrayBuffer);
+    }
     if (data.trees.byteLength > 0) {
       // instances come sorted by type: one VAO per type, its instance attributes starting at the type's run
       const inst = new Float32Array(data.trees);
@@ -610,7 +616,7 @@ export class OsmManager {
     chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
     chunk.signalData = chunk.signalLit = chunk.lenses = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
-    chunk.roadLines = chunk.pitchLines = chunk.lamps = undefined;
+    chunk.roadLines = chunk.pitchLines = chunk.lamps = chunk.lampLenses = undefined;
   }
 
   /** a structure kind is drawn */
@@ -706,6 +712,14 @@ export class OsmManager {
           renderer.windows = 'off';
         }
         if (c.lamps && lights) {
+          // the lenses under the lamp heads; their points only where a lens is smaller (POINTS_VS)
+          if (c.lampLenses) {
+            renderer.selfLit = true;
+            renderer.selfLitGain = renderer.emission('cityLights');
+            renderer.drawWorld(c.lampLenses, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+            renderer.selfLit = false;
+            renderer.selfLitGain = 1;
+          }
           renderer.drawLights(c.lamps.vao, c.lamps.count, c.offset, view, proj, camPos, lampSize(pointSize), true);
         }
         if (c.roofLights && lights && buildingsOn) {

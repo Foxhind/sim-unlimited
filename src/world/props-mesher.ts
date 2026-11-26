@@ -1,4 +1,4 @@
-import { colourOf, GLOW_SHIFT, LIGHT, PAYLOAD_MASK, RAMP, rampIndex, snowy } from '../engine/palette';
+import { colourOf, GLOW_SHIFT, LIGHT, PAYLOAD_MASK, RAMP, rampIndex, selfLit, snowy, streetLampRgb } from '../engine/palette';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import { clipTileData } from './clip';
 import type { LonLat, OsmDetail, OsmLine, OsmTileData } from './osm-types';
@@ -174,11 +174,15 @@ class Shape {
   }
   /** an axis-aligned box (all six faces) */
   box(x0: number, y0: number, z0: number, x1: number, y1: number, z1: number, part: number): this {
-    const c: V3 = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
-    const v = (i: number): V3 => [i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0];
+    return this.hull((i) => [i & 1 ? x1 : x0, i & 2 ? y1 : y0, i & 4 ? z1 : z0], part);
+  }
+  /** a box of corners v(0..7), bit 0, 1, 2 picking one end of each of its three edge directions */
+  hull(v: (i: number) => V3, part: number): this {
+    const p = [0, 1, 2, 3, 4, 5, 6, 7].map(v);
+    const c: V3 = [0, 1, 2].map((k) => p.reduce((s, q) => s + q[k], 0) / 8) as V3;
     for (const [a, b, d, e] of [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]]) {
-      this.tri(v(a), v(b), v(d), part, c);
-      this.tri(v(a), v(d), v(e), part, c);
+      this.tri(p[a], p[b], p[d], part, c);
+      this.tri(p[a], p[d], p[e], part, c);
     }
     return this;
   }
@@ -186,8 +190,76 @@ class Shape {
 
 /** an outdoor air-conditioner unit, m: its back on the wall at x = 0, sticking out along +x */
 export const AC_SIZE = { DEPTH: 0.3, WIDTH: 0.8, HEIGHT: 0.55 } as const;
-/** a street lamp, m: pole at the origin, arm along +x at the top */
-export const LAMP_SHAPE = { HEIGHT: 8, ARM: 2, POLE_HALF: 0.12 } as const;
+/**
+ * A street lamp, m: a pole at the origin HEIGHT tall, POLE_HALF each way; at its top an arm ARM long
+ * (from the pole's axis) towards +x, raised TILT_DEG over the level, its last HEAD_LEN a lamp head
+ * HEAD_HALF each side and HEAD_DROP deeper under the arm. Under the head, a hair (LENS_OUT) off its
+ * face, the lens: LENS_LEN along the arm, LENS_HALF each side, ending LENS_TIP short of the tip —
+ * lit at night (lampLens), a light point at its centre farther away (lampHead).
+ */
+export const LAMP_SHAPE = {
+  HEIGHT: 8, ARM: 2.5, POLE_HALF: 0.12, TILT_DEG: 30,
+  HEAD_LEN: 0.8, HEAD_HALF: 0.17, HEAD_DROP: 0.05,
+  LENS_LEN: 0.6, LENS_HALF: 0.12, LENS_TIP: 0.08, LENS_OUT: 0.01,
+} as const;
+const LAMP_TILT = (LAMP_SHAPE.TILT_DEG * Math.PI) / 180;
+/** the arm's axis leaves the pole's axis this high */
+const LAMP_ARM_Y = LAMP_SHAPE.HEIGHT - LAMP_SHAPE.POLE_HALF;
+/**
+ * a point of the lamp mesh in the arm's frame: `s` along the arm from the pole's axis, `n` across it
+ * (up and back from the arm's axis), `w` sideways (+z)
+ */
+function lampArm(s: number, n: number, w: number): V3 {
+  const c = Math.cos(LAMP_TILT), sn = Math.sin(LAMP_TILT);
+  return [s * c - n * sn, LAMP_ARM_Y + s * sn + n * c, w];
+}
+/** the lens's centre and its corners in the mesh's frame (under the head, facing down and out) */
+const LAMP_LENS_N = -(LAMP_SHAPE.POLE_HALF + LAMP_SHAPE.HEAD_DROP + LAMP_SHAPE.LENS_OUT);
+const LAMP_LENS_S1 = LAMP_SHAPE.ARM - LAMP_SHAPE.LENS_TIP, LAMP_LENS_S0 = LAMP_LENS_S1 - LAMP_SHAPE.LENS_LEN;
+const LAMP_LENS: V3[] = [
+  lampArm(LAMP_LENS_S0, LAMP_LENS_N, -LAMP_SHAPE.LENS_HALF), lampArm(LAMP_LENS_S1, LAMP_LENS_N, -LAMP_SHAPE.LENS_HALF),
+  lampArm(LAMP_LENS_S1, LAMP_LENS_N, LAMP_SHAPE.LENS_HALF), lampArm(LAMP_LENS_S0, LAMP_LENS_N, LAMP_SHAPE.LENS_HALF),
+];
+const LAMP_LENS_CENTRE = lampArm((LAMP_LENS_S0 + LAMP_LENS_S1) / 2, LAMP_LENS_N, 0);
+/** a point of a lamp's mesh placed as its instance is (pushInstance: foot at x, y, z, +x towards yaw) */
+function placeLamp(p: V3, x: number, y: number, z: number, yaw: number): { x: number; y: number; z: number } {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  return { x: x + p[0] * c - p[2] * s, y: y + p[1], z: z + p[0] * s + p[2] * c };
+}
+/** the centre of the lens of a lamp standing at x, y, z, its arm towards yaw: where its light point is */
+export function lampHead(x: number, y: number, z: number, yaw: number): { x: number; y: number; z: number } {
+  return placeLamp(LAMP_LENS_CENTRE, x, y, z, yaw);
+}
+/** the four corners of that lamp's lens, in order round it */
+export function lampLens(x: number, y: number, z: number, yaw: number): { x: number; y: number; z: number }[] {
+  return LAMP_LENS.map((p) => placeLamp(p, x, y, z, yaw));
+}
+/**
+ * The lit lenses of a tile's street lamps as self-lit faces (pos + normal, a face colour per vertex:
+ * the world mesh's), both windings: the INSTANCE.LAMP instances of `instances` (TREE_STRIDE) in
+ * order, each with the light of the same rank in `lamps` (x, y, z, streetLampValue: osm-mesher)
+ */
+export function lampLenses(instances: Float32Array, lamps: Float32Array): { vertices: Float32Array; ramps: Uint32Array } {
+  const verts: number[] = [], ramps: number[] = [];
+  for (let i = 0, k = 0; i + TREE_STRIDE <= instances.length && k + 4 <= lamps.length; i += TREE_STRIDE) {
+    if (instances[i + 5] !== INSTANCE.LAMP) continue;
+    const ramp = selfLit(colourOf(streetLampRgb(lamps[k + 3])));
+    k += 4;
+    const [a, b, c, d] = lampLens(instances[i], instances[i + 1], instances[i + 2], instances[i + 7]);
+    const e1 = [b.x - a.x, b.y - a.y, b.z - a.z], e2 = [d.x - a.x, d.y - a.y, d.z - a.z];
+    const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    const len = Math.hypot(n[0], n[1], n[2]) || 1;
+    // facing down, to the road under it
+    const s = n[1] > 0 ? -1 / len : 1 / len;
+    for (const tri of [[a, b, c], [a, c, d], [a, c, b], [a, d, c]]) {
+      for (const p of tri) {
+        verts.push(p.x, p.y, p.z, n[0] * s, n[1] * s, n[2] * s);
+        ramps.push(ramp);
+      }
+    }
+  }
+  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps) };
+}
 /**
  * A traffic light, m: a post at the origin, the signal head on its top facing +x (the traffic it
  * stops): HEAD_BOTTOM to HEAD_TOP, its face HEAD_FRONT out along x, HEAD_HALF each side, a shallow
@@ -261,10 +333,12 @@ const SHAPES: Shape[] = [
   palm(),
   // INSTANCE.AC
   new Shape().box(0, 0, -AC_SIZE.WIDTH / 2, AC_SIZE.DEPTH, AC_SIZE.HEIGHT, AC_SIZE.WIDTH / 2, CROWN),
-  // INSTANCE.LAMP: pole and the arm over the road
+  // INSTANCE.LAMP: the pole, the arm raised over the road, the head at its end
   new Shape()
     .box(-LAMP_SHAPE.POLE_HALF, 0, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN)
-    .box(LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT - 2 * LAMP_SHAPE.POLE_HALF, -LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.ARM + LAMP_SHAPE.POLE_HALF, LAMP_SHAPE.HEIGHT, LAMP_SHAPE.POLE_HALF, CROWN),
+    .hull((i) => lampArm(i & 1 ? LAMP_SHAPE.ARM - LAMP_SHAPE.HEAD_LEN : 0, (i & 2 ? 1 : -1) * LAMP_SHAPE.POLE_HALF, (i & 4 ? 1 : -1) * LAMP_SHAPE.POLE_HALF), CROWN)
+    .hull((i) => lampArm(i & 1 ? LAMP_SHAPE.ARM : LAMP_SHAPE.ARM - LAMP_SHAPE.HEAD_LEN,
+      i & 2 ? LAMP_SHAPE.POLE_HALF : -LAMP_SHAPE.POLE_HALF - LAMP_SHAPE.HEAD_DROP, (i & 4 ? 1 : -1) * LAMP_SHAPE.HEAD_HALF), CROWN),
   // INSTANCE.SAILBOAT, INSTANCE.MOTORBOAT
   yacht(true),
   yacht(false),

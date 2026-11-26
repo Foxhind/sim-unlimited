@@ -5,9 +5,9 @@
  * log2(1 + w) / log2(1 + far) keeps the relative resolution ~1e-6 (centimetres at 10 km).
  * Must match the far plane of the projection (main.ts / camera.ts).
  */
-import { TREE_THIN } from '../world/props-mesher';
+import { LAMP_SHAPE, TREE_THIN } from '../world/props-mesher';
 import { ARCH_GLSL } from '../world/arch-styles';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, STREET_LAMP, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -1660,15 +1660,18 @@ void main() {
       ? wp + normalize(toEye(wp)) * (uPull.x + uPull.y * len)
       : uCamPos + ray * max(0.0, 1.0 - (uPull.x + uPull.y * len) / max(len, 1.0));
   }
-  // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue)
-  vColor = aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
+  // >= 0: a LUT index; < 0: -(RGB + 1), shaded like a lit face by daylight (palette.ts pointValue);
+  // from STREET_LAMP.BASE a street lamp's colour temperature (palette.ts streetLampRgb)
+  bool lamp = aIndex >= ${STREET_LAMP.BASE.toFixed(1)};
+  vColor = lamp ? kelvinRgb(mix(${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)}, ${WINDOW_LIGHT.KELVIN_MAX.toFixed(1)}, (aIndex - ${STREET_LAMP.BASE.toFixed(1)}) / ${(STREET_LAMP.LEVELS - 1).toFixed(1)}))
+    : aIndex >= 0.0 ? lutColor(uint(aIndex)) : shadeRgb(rgbOf(uint(-aIndex - 1.0)), ${POINT_STEP}u, 0u);
   // the air between: as over the faces round them (wires, mast stays, far roads
   // fade into the haze with the hill behind them)
   float fog = fogAt(rel, uCamPos.y);
   // light sources (windows, street lamps, beacons, runway lights) shine above white on XDR, and
   // through half the haze, as self-lit faces do (shadeColour)
-  bool emits = false, shines = false;
-  if (aIndex >= 0.0) {
+  bool emits = lamp, shines = lamp;
+  if (aIndex >= 0.0 && !lamp) {
     uint li = uint(aIndex);
     emits = (li >= ${LIGHT.TAXI_BLUE}u && li <= ${LIGHT.RED}u) || li == ${LIGHT.STREET}u || (li >= ${LIGHT.SEA_WHITE}u && li <= ${LIGHT.SEA_ORANGE}u);
     // the runway's edge, centre and threshold lights are steps of the emissive and HUD ramps
@@ -1681,6 +1684,11 @@ void main() {
   vLogW = logW(gl_Position);
   gl_Position.z = depthZ(gl_Position);
   gl_PointSize = uPointSize;
+  // a street lamp whose lens (props-mesher LAMP_SHAPE, drawn near: osm-manager) is larger on screen
+  // than its point: the lens alone
+  if (lamp && ${LAMP_SHAPE.LENS_LEN.toFixed(2)} * uProj[1][1] * 0.5 * uFbH / max(gl_Position.w, 1e-3) > uPointSize) {
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0;
+  }
   // a far facade cell of windows (palette.ts FAR_WINDOWS): the cell's size on screen; under a pixel
   // only about one cell per pixel is kept, and a kept cell is lit with the near facades' mean light
   if (aIndex == ${LIGHT.WINDOW_YELLOW}.0 || aIndex == ${LIGHT.WINDOW_WHITE}.0) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, type RGB,
+  applySunColors, buildLUT, FACADE, FACADE_BLIND, FACADE_PANORAMIC, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, GLOW_LEVELS, LIGHT, WINDOWS, LUT_SIZE, paletteAt, RAMP, rampGlowLevel, rampIndex, sunColour, withGlow, WINDOW_LIGHT, windowFade, windowLightColour, kelvinRgb, FAR_WINDOWS, FAR_WINDOW_LIT_FACTOR, STREET_LAMP, streetLampRgb, streetLampValue, type RGB,
 } from '../src/engine/palette';
 import { POINTS_FS, POINTS_VS, SKY_FS, TREE_VS, WORLD_FS, WORLD_VS } from '../src/engine/shaders';
 import { buildBuildingMesh, buildingNightLights, hasBalconies, hasPanoramicWindows, hasStorefronts, isLitBuilding, startYear, TALL_BUILDING_M, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
@@ -9,12 +9,12 @@ import {
   applyGlow, applyGlowToTrees, buildingCoverage, GLOW_FULL_COVERAGE, GLOW_MIN_COVERAGE, glowLevel,
 } from '../src/world/night-glow';
 import { farLightSize } from '../src/world/osm-manager';
-import { INSTANCE, LAMP_SHAPE, setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
+import { INSTANCE, LAMP_SHAPE, lampHead, setTreeColour, treeColour, TREE_STRIDE } from '../src/world/props-mesher';
 import { buildTerrainMesh } from '../src/world/terrain-mesher';
 import { buildTerrainTin, tinLocator } from '../src/world/terrain-tin';
 import { antennaHeight, beaconHeights, buildMasts, isAntenna, isMonopole } from '../src/world/mast-mesher';
 import { parseFilter } from '../src/world/osm-api';
-import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW, UNLIT_ROAD_GLOW } from '../src/world/osm-mesher';
+import { buildOsmMesh, isLitRoad, LAMP_HEIGHT_M, lampSide, LAMP_SPACING_M, LIT_ROAD_GLOW, streetLampKey, UNLIT_ROAD_GLOW } from '../src/world/osm-mesher';
 import { osmFilter } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
 import { townFixture, townMesh, vertexOfFace } from './roads-helpers';
@@ -599,20 +599,26 @@ describe('street lighting', () => {
     expect(dark.roads.vertexCount).toBeGreaterThan(0);
   });
 
-  it('lamps every LAMP_SPACING_M, sides alternating, heads over the road at lamp height', () => {
-    const m = road({ highway: 'primary' }); // 14 m wide, runs west to east
+  it('lamps every LAMP_SPACING_M, sides alternating, lenses over the road under the raised arm', () => {
+    const m = road({ highway: 'primary', name: 'Main Street' }); // 14 m wide, runs west to east
     const n = m.lamps.length / 4;
+    // the lens's centre from the pole's foot: out along the arm, up above the pole's top
+    const lens = lampHead(0, 0, 0, 0);
+    expect(lens.x).toBeGreaterThan(1.5);
+    expect(lens.x).toBeLessThan(LAMP_SHAPE.ARM);
+    expect(lens.z).toBeCloseTo(0, 6);
     const [ax] = latLonToEnu(c, c.lat, b.west + (b.east - b.west) * 0.2, 0);
     const [bx] = latLonToEnu(c, c.lat, b.west + (b.east - b.west) * 0.8, 0);
     expect(n).toBe(Math.floor((bx - ax - LAMP_SPACING_M / 2) / LAMP_SPACING_M) + 1);
     for (let i = 0; i < n; i++) {
       const [x, y, z, idx] = m.lamps.subarray(i * 4, i * 4 + 4);
-      expect(idx).toBe(LIGHT.STREET);
+      // one colour for the whole street
+      expect(idx).toBe(streetLampValue('Main Street'));
       if (i > 0) expect(x - m.lamps[(i - 1) * 4]).toBeCloseTo(LAMP_SPACING_M, 1);
-      expect(y).toBeGreaterThan(GROUND + LAMP_HEIGHT_M - 1);
-      expect(y).toBeLessThan(GROUND + LAMP_HEIGHT_M);
-      // pole 1 m beyond the 7 m half-width, arm 2 m back: the head 6 m from the axis
-      expect(Math.abs(z)).toBeCloseTo(6, 0);
+      expect(y).toBeCloseTo(GROUND + lens.y, 3);
+      expect(y).toBeGreaterThan(GROUND + LAMP_HEIGHT_M);
+      // pole 1 m beyond the 7 m half-width, the lens back over the road
+      expect(Math.abs(z)).toBeCloseTo(8 - lens.x, 1);
       if (i > 0) expect(Math.sign(z)).toBe(-Math.sign(m.lamps[(i - 1) * 4 + 2]));
     }
     // one post instance per head: foot on the ground beyond the road, its arm turned to reach the head
@@ -623,8 +629,8 @@ describe('street lighting', () => {
       expect(type).toBe(INSTANCE.LAMP);
       expect(scale).toBe(1);
       expect(py).toBeCloseTo(GROUND, 3);
-      expect(px + Math.cos(yaw) * LAMP_SHAPE.ARM).toBeCloseTo(hx, 3);
-      expect(pz + Math.sin(yaw) * LAMP_SHAPE.ARM).toBeCloseTo(hz, 3);
+      expect(lampHead(px, py, pz, yaw).x).toBeCloseTo(hx, 3);
+      expect(lampHead(px, py, pz, yaw).z).toBeCloseTo(hz, 3);
     }
     // the posts are no longer in the road mesh: nothing there stands above the road surface
     for (let i = 0; i < m.roads.vertexCount; i++) expect(m.roads.vertices[i * 6 + 1]).toBeLessThan(GROUND + 3);
@@ -640,8 +646,24 @@ describe('street lighting', () => {
     const right = zs(road({ highway: 'primary', oneway: 'yes' }));
     const left = zs(road({ highway: 'primary', oneway: '-1' }));
     expect(right.length).toBe(zs(road({ highway: 'primary' })).length);
-    // one carriageway, 7 m: the pole 1 m beyond its edge, the head 2 m back over it
-    for (const z of right) expect(z).toBeCloseTo(2.5, 0);
-    for (const z of left) expect(z).toBeCloseTo(-2.5, 0);
+    // one carriageway, 7 m: the pole 1 m beyond its edge, the lens back over it
+    const back = 4.5 - lampHead(0, 0, 0, 0).x;
+    for (const z of right) expect(z).toBeCloseTo(back, 1);
+    for (const z of left) expect(z).toBeCloseTo(-back, 1);
+  });
+
+  it("a street's lamps share a colour temperature by its name, else its ref, else its tags", () => {
+    expect(streetLampKey({ highway: 'primary', name: 'Tverskaya', ref: 'M1' })).toBe('Tverskaya');
+    expect(streetLampKey({ highway: 'primary', ref: 'M1' })).toBe('M1');
+    expect(streetLampKey({ lit: 'yes', highway: 'service' })).toBe(streetLampKey({ highway: 'service', lit: 'yes' }));
+    const values = ['A', 'B', 'Tverskaya', 'Arbat', 'Nevsky prospekt'].map(streetLampValue);
+    for (const v of values) {
+      expect(v - STREET_LAMP.BASE).toBeGreaterThanOrEqual(0);
+      expect(v - STREET_LAMP.BASE).toBeLessThan(STREET_LAMP.LEVELS);
+    }
+    expect(new Set(values).size).toBeGreaterThan(1);
+    // 2700 K at the warm end, 5000 K at the cool end, as the windows
+    expect(streetLampRgb(STREET_LAMP.BASE)).toEqual(kelvinRgb(WINDOW_LIGHT.KELVIN_MIN));
+    expect(streetLampRgb(STREET_LAMP.BASE + STREET_LAMP.LEVELS - 1)).toEqual(kelvinRgb(WINDOW_LIGHT.KELVIN_MAX));
   });
 });
