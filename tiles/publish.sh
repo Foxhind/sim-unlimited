@@ -52,12 +52,17 @@ sent=0
 k=0
 upload() { # <file> <content type>
   local f=$1 size
-  size=$(wc -c < "$f")
+  size=$(( $(wc -c < "$f") ))
   k=$(( k + 1 ))
   printf '[%d/%d] %s (%s), %s of %s sent\n' "$k" "${#files[@]}" "${f##*/}" "$(human "$size")" \
     "$(human "$sent")" "$(human "$total")" >&2
   aws s3 cp "$f" "$dest/${f##*/}" ${quiet[@]+"${quiet[@]}"} \
     --content-type "$2" --cache-control "$IMMUTABLE" >&2
+  # aws s3 cp has exited 0 against this endpoint with a multipart upload left unfinished and no object
+  # written, so the object's size in the bucket is what says the file is there
+  local key="tiles/$build/${f##*/}" got
+  got=$(aws s3api head-object --bucket "$BUCKET" --key "$key" --query ContentLength --output text 2>/dev/null) || got=none
+  [ "$got" = "$size" ] || { echo "upload of $f did not land: s3://$BUCKET/$key is $got bytes, expected $size" >&2; exit 1; }
   sent=$(( sent + size ))
 }
 
