@@ -19,6 +19,8 @@ export const DEPTH_FAR = 200000;
  * bright panel.
  */
 export const HDR_PEAK = 12;
+/** XDR gain of the city lights (renderer.ts HDR_EMISSION.cityLights; windowGlow takes it in SDR too) */
+export const CITY_LIGHTS_EMIT = 48;
 /** the projections' near plane, m (main.ts, camera.ts): reversed-Z depth is REVERSED_NEAR / w (LOG_DEPTH_FS) */
 export const REVERSED_NEAR = 0.5;
 /**
@@ -144,12 +146,14 @@ const EARTH_R = 6371000;
  * HDR_PEAK: the whole colour scales together and keeps its hue.
  */
 const EMIT_GLSL = `
+vec3 srgbToLinear(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 linearToSrgb(vec3 l) { return mix(l * 12.92, 1.055 * pow(l, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, l)); }
 vec3 emitLight(vec3 c, float g) {
   if (g == 1.0) return c;
-  vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+  vec3 lin = srgbToLinear(c);
   float top = max(max(lin.r, lin.g), max(lin.b, 1e-4));
   lin *= clamp(${HDR_PEAK.toFixed(2)} / top, 1.0, g);
-  return mix(lin * 12.92, 1.055 * pow(lin, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, lin));
+  return linearToSrgb(lin);
 }
 `;
 const COLOUR_GLSL = `${EMIT_GLSL}
@@ -713,6 +717,18 @@ vec3 windowLightColour(float t, float kMin) {
 float windowFade(float d) {
   return ${WINDOW_LIGHT.FADE_MIN.toFixed(3)} + ${(1 - WINDOW_LIGHT.FADE_MIN).toFixed(3)} / (1.0 + max(d, 0.0) / ${WINDOW_LIGHT.FADE_HALF_M.toFixed(1)});
 }
+/**
+ * A lit window's colour c at XDR gain g (uWinEmit / uEmit), dimmed by the distance fade.
+ * XDR: the gained light times the fade, which leaves a far window still above paper white. SDR
+ * (g 1): the same light the XDR canvas would get, brought down to paper white (hue kept) where it is
+ * above it, so the fade only shows where XDR too goes under white. Fading the plain SDR colour
+ * instead left far windows at about a tenth of paper white (and redder: the fade is on encoded values).
+ */
+vec3 windowGlow(vec3 c, float g, float fade) {
+  if (g != 1.0) return emitLight(c, g) * fade;
+  vec3 lin = srgbToLinear(emitLight(c, ${CITY_LIGHTS_EMIT.toFixed(1)}) * fade);
+  return linearToSrgb(lin / max(1.0, max(lin.r, max(lin.g, lin.b))));
+}
 `;
 
 /**
@@ -808,7 +824,7 @@ bool groundFloorAt(inout vec3 c, float du, float dv, float k, float cw, float fh
   // shops are lit more often than flats, mostly white; they close at night with the flats going dark
   float open = allNight ? 0.85 : 0.5 * uLitShare / ${WINDOWS.LIT_SHARE.toFixed(2)};
   bool lit = uWindows == 2 && r < open;
-  vec3 shop = emitLight(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));
+  vec3 shop = windowGlow(mix(windowLightColour(r / max(open, 1e-6), ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)}), uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay)));
   vec3 glass = paneGlass(c, seed, r, fog);
   if (winRand(seed * 5u + 11u) < (resid ? 0.15 : 0.4)) {
     // the whole floor glazed along the edge, mullions every half slot
@@ -1004,7 +1020,7 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   bool grow = winRand(seed * 0x2c1b3c6du ^ winHash(uint(k) * 0x297a2d39u + uint(f) * 0x6c8e9cf5u + 101u)) < ${WINDOW_LIGHT.GROW_SHARE};
   bool lit = uWindows == 2 && (r < share || grow);
   vec3 lc = grow ? ${glslRgb(WINDOW_LIGHT.GROW)} : windowLightColour(r / max(share, 1e-6), allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
-  vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));
+  vec3 light = windowGlow(mix(lc, uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay)));
   // the window's own style: the wall's, a whole floor refitted alike (any building), or one window
   // changed by its owner (residential only), so frames and glass vary up a wall and along it
   uint ws = seed;
@@ -1680,7 +1696,7 @@ void main() {
     // its colour (the WINDOW_LIGHT mix), above white on XDR like the near panes, dimmer the farther from the eye
     vec3 lc = windowLightColour(hCol, allNight ? ${WINDOW_LIGHT.KELVIN_COOL_MIN.toFixed(1)} : ${WINDOW_LIGHT.KELVIN_MIN.toFixed(1)});
     // half-way into the haze with the fog (WORLD_FS windowAt)
-    vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));
+    vColor = windowGlow(mix(lc, uHaze, 0.5 * fog), uEmit, windowFade(eyeDist(rel)));
   }
   if (uStackH > 0.0 && (gl_VertexID & 1) == 1) gl_Position.y += uPointSize * 2.0 / uStackH * gl_Position.w;
 }

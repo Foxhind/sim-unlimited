@@ -6,7 +6,7 @@ import { FAR_WINDOWS, LUT_ENTRIES, WINDOWS, type LightUniforms } from './palette
 import { NO_RIM, type RimFrame } from './rim';
 import { XdrTrigger } from './xdr-trigger';
 import { hdrBlocker, hdrDisplayQuery, outputMode, type HdrBlocker, type HdrConditions, type OutputMode } from './output-mode';
-import { AIR_HAZE, FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
+import { AIR_HAZE, CITY_LIGHTS_EMIT, FULLSCREEN_VS, POINTS_FS, POINTS_VS, PRECIP_FS, PRECIP_VS, RESOLVE_FS, SHADOW_FS, SHADOW_TREE_VS, SHADOW_VS, SKY_FS, STARS_FS, STARS_VS, TREE_VS, VEIL_FS, WORLD_FS, WORLD_POST_FS, WORLD_VS } from './shaders';
 
 export interface Mesh {
   vao: WebGLVertexArrayObject;
@@ -1158,7 +1158,7 @@ export const HDR_EMISSION = {
   /** the sun disc */
   sun: 128,
   /** window, street, beacon and runway lights (drawLights points and lines in the fixed LIGHT colours; lit windows on the walls) */
-  cityLights: 48,
+  cityLights: CITY_LIGHTS_EMIT,
   /** the traffic lights' lit lenses (osm-manager lightSignals): saturated colours, as the navigation lights */
   trafficLights: 64,
   /** the sun's glints off a turning propeller */

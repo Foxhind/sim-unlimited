@@ -336,10 +336,10 @@ describe('building night lights', () => {
     // as small as a near pane (one framebuffer pixel), not the far light size: no clipped over-bright pixels
     expect(POINTS_VS).toContain('gl_PointSize = clamp(cellPx, 1.0, ');
     // into the haze with the fog like the near panes
-    expect(POINTS_VS).toContain('vColor = emitLight(mix(lc, uHaze, 0.5 * fog), uEmit) * windowFade(eyeDist(rel));');
+    expect(POINTS_VS).toContain('vColor = windowGlow(mix(lc, uHaze, 0.5 * fog), uEmit, windowFade(eyeDist(rel)));');
     // fewer lit the more buildings likely stand in front along a low view ray (no walls hide them)
     expect(POINTS_VS).toContain(`float seen = 1.0 / (1.0 + run / ${FAR_WINDOWS.FREE_PATH_M.toFixed(1)});`);
-    expect(WORLD_FS).toContain('vec3 light = emitLight(mix(lc, uHaze, 0.5 * fog), uWinEmit) * windowFade(eyeDist(vRay));');
+    expect(WORLD_FS).toContain('vec3 light = windowGlow(mix(lc, uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay)));');
   });
 
   it(`buildings over ${TALL_BUILDING_M} m get red lights on the roof (near) and in the air at roof height (far)`, () => {
