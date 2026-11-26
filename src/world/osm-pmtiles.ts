@@ -138,6 +138,9 @@ export function pmtilesSetting(): string {
   return (import.meta.env?.VITE_PMTILES_URL as string | undefined) || DEFAULT_MANIFEST;
 }
 
+/** how long a failed opening of the archives stands before a tile asks again */
+const OPEN_RETRY_MS = 15000;
+
 interface Archive {
   url: string;
   tiles: Pmtiles;
@@ -147,6 +150,9 @@ interface Archive {
 /** our archives and their aerodrome indexes, shared by every tile of a worker */
 export class PmtilesOsm {
   private archives?: Promise<{ archive: Archive; bounds: TileBounds }[]>;
+  /** after the manifest or every archive failed: until then each tile fails with the same error, unasked */
+  private failedUntil = 0;
+  private failure?: unknown;
 
   constructor(private readonly setting = pmtilesSetting(), private readonly fetchImpl: typeof fetch = (...a) => fetch(...a)) {}
 
@@ -158,14 +164,29 @@ export class PmtilesOsm {
     return ((await res.json()) as string[]).map((u) => new URL(u, base).href);
   }
 
+  /**
+   * Each archive opens on its own: one the manifest lists but the bucket lacks (404) is left out for
+   * this page and the rest serve. Only when none opens does it fail; the next tile tries again after
+   * OPEN_RETRY_MS, not at once (every tile of every worker asked anew, hundreds of requests a second).
+   */
   private open() {
+    if (!this.archives && Date.now() < this.failedUntil) return Promise.reject(this.failure);
     this.archives ??= this.urls()
-      .then((urls) => Promise.all(urls.map(async (url) => {
-        const archive: Archive = { url, tiles: new Pmtiles(httpRange(url, this.fetchImpl)) };
-        return { archive, bounds: (await archive.tiles.header()).bounds };
-      })))
+      .then(async (urls) => {
+        const opened = await Promise.allSettled(urls.map(async (url) => {
+          const archive: Archive = { url, tiles: new Pmtiles(httpRange(url, this.fetchImpl)) };
+          return { archive, bounds: (await archive.tiles.header()).bounds };
+        }));
+        const failed = opened.filter((o): o is PromiseRejectedResult => o.status === 'rejected');
+        const ok = opened.flatMap((o) => (o.status === 'fulfilled' ? [o.value] : []));
+        if (urls.length && !ok.length) throw failed[0].reason;
+        for (const f of failed) console.warn('pmtiles: archive left out:', f.reason);
+        return ok;
+      })
       .catch((err) => {
         this.archives = undefined;
+        this.failure = err;
+        this.failedUntil = Date.now() + OPEN_RETRY_MS;
         throw err;
       });
     return this.archives;

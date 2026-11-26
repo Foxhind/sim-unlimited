@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { gzipSync } from 'node:zlib';
 import { PmtilesOsm, pmtilesToOverpass, type AerodromeIndex } from '../src/world/osm-pmtiles';
 import { parseOverpass } from '../src/world/overpass';
@@ -69,6 +69,38 @@ describe('our archives’ build', () => {
     const once = await new PmtilesOsm('a.pmtiles', served(archive(0))).stamp();
     expect(await new PmtilesOsm('a.pmtiles', served(archive(0))).stamp()).toBe(once);
     expect(await new PmtilesOsm('a.pmtiles', served(archive(1))).stamp()).not.toBe(once);
+  });
+  it('an archive the manifest lists but the bucket lacks is left out: the others serve, and it is not asked for again', async () => {
+    const asked: string[] = [];
+    const fetchImpl = (async (url: unknown, init?: { headers?: Record<string, string> }) => {
+      asked.push(String(url));
+      return String(url).startsWith('missing') ? new Response(null, { status: 404 }) : served(archive(0))(url as string, init);
+    }) as typeof fetch;
+    const osm = new PmtilesOsm('a.pmtiles,missing.pmtiles', fetchImpl);
+    expect(await osm.stamp()).toMatch(/^a\.pmtiles:/);
+    expect(await osm.stamp()).not.toContain('missing');
+    expect(await osm.fetchJson({ z: 14, x: 0, y: 0 })).toBeNull();
+    expect(asked.filter((u) => u.startsWith('missing'))).toHaveLength(1);
+  });
+  it('fails (to be retried) only when no archive opens', async () => {
+    const none = (async () => new Response(null, { status: 404 })) as unknown as typeof fetch;
+    await expect(new PmtilesOsm('a.pmtiles,b.pmtiles', none).stamp()).rejects.toThrow(/404/);
+  });
+  it('after a failed opening the next tiles fail at once, unasked, until the retry pause is over', async () => {
+    vi.useFakeTimers();
+    try {
+      let asked = 0;
+      const down = (async () => { asked++; return new Response(null, { status: 403 }); }) as unknown as typeof fetch;
+      const osm = new PmtilesOsm('tiles/index.json', down);
+      await expect(osm.fetchJson(TILE)).rejects.toThrow(/403/);
+      for (let i = 0; i < 20; i++) await expect(osm.fetchJson(TILE)).rejects.toThrow(/403/);
+      expect(asked).toBe(1);
+      vi.advanceTimersByTime(15001);
+      await expect(osm.fetchJson(TILE)).rejects.toThrow(/403/);
+      expect(asked).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
