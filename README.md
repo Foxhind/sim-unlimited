@@ -1,6 +1,9 @@
 # sim-unlimited
 
-<img src="public/icon.svg" width="128" height="128" alt="sim-unlimited icon: a fighter climbing across a setting sun over the sea" />
+<picture>
+  <source srcset="docs/icon-xdr.png" media="(dynamic-range: high)" />
+  <img src="public/icon.svg" width="128" height="128" alt="sim-unlimited icon: a fighter climbing across a setting sun over the sea" />
+</picture>
 
 A browser flight simulator whose world is the real Earth, built on the fly from OpenStreetMap data and
 an elevation model. Take off anywhere and fly anywhere: tiles stream in and out as you fly, with no
@@ -12,6 +15,11 @@ a vector HUD. It renders at the screen's native resolution on a custom WebGL2 en
 Aircraft: Cessna 150, F-16, Su-27, F-117, An-225. Also: an autopilot with autoland, NAV/ADF
 radios, time of day with sun, moon and stars, real or preset weather (clouds, rain, snow,
 thunderstorms).
+
+On an HDR screen (XDR on Apple displays) the simulator renders in extended range: the sun, aircraft
+lights, exhaust flames and city lights shine brighter than white. It is on by default (Settings → XDR)
+and falls back to SDR when the browser lacks HDR canvas support or the screen is not in HDR mode;
+the setting then says which.
 
 ## Requirements
 
@@ -119,7 +127,7 @@ tools/       Blender build/rig scripts for the aircraft, data generators
 tiles/       PMTiles build profile and script
 assets/      Aircraft .blend sources, Unscii font
 public/      App icon: icon.svg is the source, the PNGs are rendered from it
-docs/        Design spec (TZ.md, in Russian) and design notes
+docs/        Design spec (TZ.md, in Russian), design notes, the README's XDR icon
 tests/       Vitest tests and fixtures
 ```
 
