@@ -64,7 +64,7 @@ it('takes rivers, canals and streams as water ways, below every road, not a culv
 it('takes the railways by the roads\' rules: a bed of their ballast, senior to every road, weighted as a motorway', () => {
   // 55.80917, 37.94793: tracks on the raw DEM took every bump of it beside a road bridge's approach
   for (const r of ['rail', 'narrow_gauge', 'light_rail']) expect(isRailWay({ railway: r })).toBe(true);
-  for (const t of [{ railway: 'abandoned' }, { railway: 'platform' }, { highway: 'residential' }]) expect(isRailWay(t)).toBe(false);
+  for (const t of [{ railway: 'abandoned' }, { railway: 'platform' }, { highway: 'residential' }] as Record<string, string>[]) expect(isRailWay(t)).toBe(false);
   const net = buildRoadNet([road({ railway: 'rail' }, [[4, 4], [20, 4]]), road({ highway: 'motorway' }, [[4, 8], [20, 8]]), road({ railway: 'rail', tunnel: 'yes' }, [[4, 12], [20, 12]])]);
   expect(net.ways.map((w) => [w.half, w.band, w.weight, w.water, w.tunnel])).toEqual([[3, 40, 8000, false, false], [net.ways[1].half, 45, 8000, false, false], [3, 40, 8000, false, true]]);
   expect(net.ways[0].prio).toBeGreaterThan(net.ways[1].prio);

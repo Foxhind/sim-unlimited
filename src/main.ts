@@ -44,7 +44,7 @@ import { drawHud, type HudMode, type HudNav } from './flight/hud';
 import { loadSettings, saveSettings } from './ui/settings';
 import { Menu } from './ui/menu';
 import { AIRFIELDS, Minimap } from './ui/minimap';
-import { Telemetry, loadConsent, saveConsent } from './ui/telemetry';
+import { REPORT_URL, Telemetry, loadConsent, saveConsent } from './ui/telemetry';
 import { t } from './ui/i18n';
 
 interface Start {
@@ -103,7 +103,8 @@ const audio = new FlightAudio();
 audio.setMuted(!settings.sound);
 renderer.setMsaa(settings.msaa);
 renderer.setHdr(settings.hdr);
-let consent = loadConsent();
+// no report endpoint (a static build): nothing to consent to, never ask
+let consent = REPORT_URL ? loadConsent() : 'no';
 const telemetry = new Telemetry(() => consent === 'yes', renderer);
 
 const start = parseStart();

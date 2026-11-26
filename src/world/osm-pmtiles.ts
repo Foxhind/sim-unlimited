@@ -127,15 +127,15 @@ export function pmtilesToOverpass(mvt: Uint8Array | undefined, tile: Tile, index
   return { elements: out.elements };
 }
 
-/** the manifest tiles/build.sh writes: the archives' URLs, relative to it */
-const DEFAULT_MANIFEST = '/tiles/index.json';
+/** the manifest tiles/build.sh writes: the archives' URLs, relative to it (under the site's base path) */
+const DEFAULT_MANIFEST = `${import.meta.env?.BASE_URL ?? '/'}tiles/index.json`;
 
 /**
  * VITE_PMTILES_URL: archive URLs, comma-separated, or (default) a manifest .json listing them.
  * Each archive serves the tiles within its bounds; a regional build is one archive per extract.
  */
 export function pmtilesSetting(): string {
-  return (import.meta.env?.VITE_PMTILES_URL as string | undefined) ?? DEFAULT_MANIFEST;
+  return (import.meta.env?.VITE_PMTILES_URL as string | undefined) || DEFAULT_MANIFEST;
 }
 
 interface Archive {

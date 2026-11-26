@@ -2,6 +2,13 @@ import type { Renderer } from '../engine/renderer';
 
 const KEY = 'sim-unlimited-consent';
 
+/**
+ * where reports go: VITE_REPORT_URL, or our own /api/report in dev. Empty in a static build without
+ * an endpoint (GitHub Pages): telemetry is off and the consent screen is never shown.
+ */
+export const REPORT_URL: string =
+  (import.meta.env.VITE_REPORT_URL as string | undefined) || (import.meta.env.DEV ? '/api/report' : '');
+
 export type Consent = 'yes' | 'no' | null;
 
 export function loadConsent(): Consent {
@@ -22,7 +29,7 @@ export function saveConsent(allow: boolean): void {
 }
 
 /**
- * Q34: anonymous FPS/GPU/error reports to our own /api/report only.
+ * Q34: anonymous FPS/GPU/error reports to our own REPORT_URL only.
  * Nothing is sent unless the canvas consent screen was accepted.
  */
 export class Telemetry {
@@ -57,8 +64,8 @@ export class Telemetry {
     if (batch.length === 0) return;
     try {
       const body = JSON.stringify(batch);
-      if (navigator.sendBeacon?.('/api/report', body)) return;
-      void fetch('/api/report', { method: 'POST', body, keepalive: true }).catch(() => {});
+      if (navigator.sendBeacon?.(REPORT_URL, body)) return;
+      void fetch(REPORT_URL, { method: 'POST', body, keepalive: true }).catch(() => {});
     } catch {
       // offline: drop the batch
     }
