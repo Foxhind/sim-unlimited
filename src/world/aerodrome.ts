@@ -65,6 +65,11 @@ export interface Pad {
 /** what a pad is made from: an outline (lon/lat) and a stable key; an aerodrome's sizes unless given */
 export interface PadSource {
   key: string;
+  /**
+   * an aerodrome's outline, a runway outside any, or a sports ground: an aerodrome's or a runway's
+   * pad blends PAD_BLEND_M into its neighbours' relief, a pitch's PITCH_PAD.BLEND_M stays at home
+   */
+  kind: 'aerodrome' | 'runway' | 'pitch';
   pts: LonLat[];
   margin?: number;
   blend?: number;
@@ -152,6 +157,11 @@ function widenHull(hull: [number, number][], m: number, tol: number): [number, n
  * The pads of a tile's OSM: one per aerodrome outline (outer rings), one per runway that lies
  * outside every aerodrome outline (its centreline widened by half its width).
  */
+/** the pads of the OSM whose blend reaches the neighbouring tiles' relief: aerodromes and runways, not sports grounds */
+export function neighbourPads(data: { areas: ReadonlyArray<OsmArea>; lines: ReadonlyArray<OsmLine> }): PadSource[] {
+  return padSources(data).filter((s) => s.kind !== 'pitch');
+}
+
 export function padSources(data: { areas: ReadonlyArray<OsmArea>; lines: ReadonlyArray<OsmLine> }): PadSource[] {
   const out: PadSource[] = [];
   const outlines: { origin: LatLon; hull: [number, number][] }[] = [];
@@ -159,7 +169,7 @@ export function padSources(data: { areas: ReadonlyArray<OsmArea>; lines: Readonl
     if (a.tags.aeroway !== 'aerodrome') continue;
     const ring = a.rings[0];
     if (!ring || ring.length < 4) continue;
-    out.push({ key: `a${sameKey(ring)}`, pts: ring });
+    out.push({ key: `a${sameKey(ring)}`, kind: 'aerodrome', pts: ring });
     const origin = { lon: ring[0][0], lat: ring[0][1] };
     outlines.push({ origin, hull: convexHull(ring.map(([lon, lat]) => enu2(origin, lon, lat))) });
   }
@@ -186,7 +196,7 @@ export function padSources(data: { areas: ReadonlyArray<OsmArea>; lines: Readonl
         pts.push([ll.lon, ll.lat]);
       }
     }
-    out.push({ key: `r${sameKey(l.points)}`, pts });
+    out.push({ key: `r${sameKey(l.points)}`, kind: 'runway', pts });
   }
   // every sports ground on a level pad of its own
   for (const a of data.areas) {
@@ -198,7 +208,7 @@ export function padSources(data: { areas: ReadonlyArray<OsmArea>; lines: Readonl
     let area2 = 0;
     for (let k = 0; k + 1 < xy.length; k++) area2 += xy[k][0] * xy[k + 1][1] - xy[k + 1][0] * xy[k][1];
     if (Math.abs(area2) / 2 > PITCH_PAD.MAX_AREA_M2) continue;
-    out.push({ key: `p${sameKey(ring)}`, pts: ring, margin: PITCH_PAD.MARGIN_M, blend: PITCH_PAD.BLEND_M, maxGrade: PITCH_PAD.MAX_GRADE });
+    out.push({ key: `p${sameKey(ring)}`, kind: 'pitch', pts: ring, margin: PITCH_PAD.MARGIN_M, blend: PITCH_PAD.BLEND_M, maxGrade: PITCH_PAD.MAX_GRADE });
   }
   return out;
 }

@@ -19,7 +19,7 @@ vi.mock('../src/world/terrain-source', async (orig) => ({
   },
 }));
 
-const { applyPads, buildPad, isPitchGround, padDistance, padHeight, padSources, PAD_BLEND_M, PITCH_PAD } = await import('../src/world/aerodrome');
+const { applyPads, buildPad, isPitchGround, neighbourPads, padDistance, padHeight, padSources, PAD_BLEND_M, PITCH_PAD } = await import('../src/world/aerodrome');
 const { buildTerrainTin, tinSampler } = await import('../src/world/terrain-tin');
 
 const GRID = 48;
@@ -175,6 +175,10 @@ describe('aerodrome pads', () => {
     const pitch: OsmArea = { rings: [ring], tags: { leisure: 'pitch', sport: 'soccer' } };
     const srcs = padSources({ areas: [pitch], lines: [] });
     expect(srcs).toHaveLength(1);
+    // a pitch's pad stays within its tile: it rebuilds no neighbour (neighbourPads); an aerodrome's does
+    expect(srcs[0].kind).toBe('pitch');
+    expect(neighbourPads({ areas: [pitch], lines: [] })).toHaveLength(0);
+    expect(neighbourPads({ areas: [pitch, aerodrome()], lines: [] }).map((p) => p.kind)).toEqual(['aerodrome']);
     expect(srcs[0]).toMatchObject({ margin: PITCH_PAD.MARGIN_M, blend: PITCH_PAD.BLEND_M, maxGrade: PITCH_PAD.MAX_GRADE });
     const pad = (await buildPad(srcs[0]))!;
     expect(Math.hypot(pad.ge, pad.gn)).toBeCloseTo(PITCH_PAD.MAX_GRADE, 6);

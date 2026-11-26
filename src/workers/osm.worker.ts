@@ -26,7 +26,7 @@ import { loadTileDem } from '../world/terrain-source';
 import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
 import { canopyColour, greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
-import { applyPads, loadPads, padSources } from '../world/aerodrome';
+import { applyPads, loadPads, neighbourPads } from '../world/aerodrome';
 import { applyPeaks, groundPeaks, peaksOf } from '../world/peaks';
 import { DETAIL_Z, gridForZoom } from '../world/chunks';
 import { buildGroundCover, type GroundCover } from '../world/ground-cover';
@@ -149,9 +149,15 @@ const source = new OsmSource();
  * DEM sea in a tile without one (it becomes all land or all sea; see TinOptions.coast).
  */
 /** `runways`: aerodromes and runways — what puts terrain on a pad (see aerodrome.ts) */
+/**
+ * What of a tile's OSM reshapes the terrain beyond it: `runways`, its aerodromes and runways (their
+ * pads blend into the neighbours' relief, which the caller rebuilds round it, and they get an ILS);
+ * not its sports grounds, whose pads stay within the tile (counted, every OSM tile of a town centre
+ * rebuilt the terrain 2.5 km round: thousands of rebuilds while central Moscow loaded)
+ */
 function terrainFlags(data: Pick<OsmTileData, 'areas' | 'lines'>, lattice?: Float32Array): { runways: number; coast: boolean } {
   const demSea = lattice ? lattice.some((h) => h < COAST_LEVEL) : false;
-  return { runways: padSources(data).length, coast: coastlineWays(data.lines).length > 0 || demSea };
+  return { runways: neighbourPads(data).length, coast: coastlineWays(data.lines).length > 0 || demSea };
 }
 
 async function cachedTerrainFlags(tile: Tile): Promise<{ runways: number; coast: boolean }> {
