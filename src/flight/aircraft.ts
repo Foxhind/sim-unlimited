@@ -70,6 +70,18 @@ export interface CarryDef {
   offset: number;
 }
 
+/**
+ * One leg of the undercarriage: an oleo strut with its wheel(s), the bottom of the tyre as the model draws it
+ * with the gear down (mesh coordinates, x right, y up, z aft), standing on the ground under the aircraft's
+ * own weight. The flight model hangs a spring and a damper on each leg, so the airframe pitches and banks
+ * on its wheels and follows the ground under each of them.
+ */
+export interface GearLeg {
+  pos: V3;
+  /** the nose wheel: carries the steering, no brakes */
+  steer?: boolean;
+}
+
 export interface PartDef {
   id: PartId;
   /** outermost point, probed against terrain and buildings */
@@ -166,6 +178,8 @@ export interface AircraftConfig {
   cruiseSpeed: number;
   maxSpeed: number;
   gearHeight: number;
+  /** the undercarriage legs, measured on the model; the nose leg(s) marked `steer` */
+  gear: GearLeg[];
   /** max touchdown sink rate m/s and bank deg before crash */
   landingSinkLimit: number;
   landingBankLimit: number;
@@ -315,6 +329,7 @@ function fromModel(cfg: AircraftConfig): AircraftConfig {
     parts: cfg.parts.map((p) => ({ ...p, tip: rel(p.tip) })),
     nose: rel(cfg.nose),
     tail: rel(cfg.tail),
+    gear: cfg.gear.map((g) => ({ ...g, pos: rel(g.pos) })),
     view: cfg.view && { ...cfg.view, eye: rel(cfg.view.eye) },
   };
 }
@@ -372,6 +387,8 @@ export const SU27: AircraftConfig = fromModel({
   thrustAfterburner: 245000,
   cruiseSpeed: 250,
   maxSpeed: 690,
+  // wheels as drawn (MainWheel_L/R, NoseWheel in assets/models/su27.blend)
+  gear: [{ pos: [-2.1, -2.33, 2.0] }, { pos: [2.1, -2.33, 2.0] }, { pos: [0, -2.35, -3.9], steer: true }],
   gearHeight: 2.4,
   landingSinkLimit: 4.5,
   landingBankLimit: 12,
@@ -426,6 +443,7 @@ export const F117: AircraftConfig = fromModel({
   thrustAfterburner: 96000,
   cruiseSpeed: 240,
   maxSpeed: 310,
+  gear: [{ pos: [-1.6, -0.95, 1.4] }, { pos: [1.6, -0.95, 1.4] }, { pos: [0, -0.96, -5.4], steer: true }],
   gearHeight: 1.9,
   landingSinkLimit: 4.0,
   landingBankLimit: 10,
@@ -494,6 +512,12 @@ export const AN225: AircraftConfig = fromModel({
   cruiseSpeed: 190,
   maxSpeed: 236,
   // the tyres are 6.5 m below the model's origin
+  // seven struts a side under the fuselage blisters, a twin nose gear (MainGear_L1..R7, NoseGear_L/R)
+  gear: [
+    ...[-3.7, -1.88, -0.06, 1.76, 3.58, 5.4, 7.22].flatMap((z): GearLeg[] => [{ pos: [-4.42, -6.5, z] }, { pos: [4.42, -6.5, z] }]),
+    { pos: [-1.2, -6.5, -27.3], steer: true },
+    { pos: [1.2, -6.5, -27.3], steer: true },
+  ],
   gearHeight: 6.5,
   landingSinkLimit: 3.5,
   landingBankLimit: 7,
@@ -561,6 +585,7 @@ export const F16: AircraftConfig = fromModel({
   thrustAfterburner: 105700,
   cruiseSpeed: 240,
   maxSpeed: 590,
+  gear: [{ pos: [-1.18, -1.7, 0.4] }, { pos: [1.18, -1.7, 0.4] }, { pos: [0, -1.7, -3.6], steer: true }],
   gearHeight: 1.7,
   landingSinkLimit: 4.0,
   landingBankLimit: 12,
@@ -643,6 +668,8 @@ export const C150: AircraftConfig = fromModel({
   cruiseSpeed: 74,
   maxSpeed: 56,
   // the tyres are 1.255 m below the model's origin
+  // the spring-steel main legs and the nose strut, as the model draws them
+  gear: [{ pos: [-1.0, -1.25, 0.55] }, { pos: [1.0, -1.25, 0.55] }, { pos: [0, -1.25, -1.0], steer: true }],
   gearHeight: 1.255,
   landingSinkLimit: 3.0,
   landingBankLimit: 15,

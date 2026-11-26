@@ -43,6 +43,45 @@ const PITOT_LAG = 0.6;
 /** below this ground speed the flight path marker is caged at the boresight; it is fully free by PATH_FREE_SPEED, m/s */
 const PATH_CAGE_SPEED = 2;
 const PATH_FREE_SPEED = 8;
+/** an oleo strut's compression under the aircraft's weight at rest, m: the tyres then sit on the ground as drawn */
+const STRUT_STATIC = 0.15;
+/** compression beyond which the strut bottoms out, m */
+const STRUT_TRAVEL = 0.45;
+/** damping of a leg against its share of the mass, as a fraction of critical */
+const STRUT_DAMP = 0.7;
+/** rolling resistance and the tyre's side grip, as friction coefficients */
+const ROLL_MU = 0.015;
+const TYRE_MU = 0.8;
+/** slip speed over which a tyre's braking builds up, as a time: v / (g * this) is the share of full grip */
+const SLIP_LONG = 0.03;
+/** slip angle at which a tyre's side force peaks, rad; below SLIP_CRAWL m/s the slip counts as at that speed */
+const SLIP_ANGLE = 8 * D2R;
+const SLIP_CRAWL = 2;
+/**
+ * On the wheels the fly-by-wire's ground mode: the stick asks for an attitude, from the one the aircraft stands
+ * at (neutral: the nose wheel on the ground) up to GROUND_PITCH_MAX at full aft stick, reached at no more than
+ * GROUND_PITCH_RATE (derotating, GROUND_DEROTATE); proportional and integral gains on the pitch rate as in the
+ * air. The integral carries over at lift-off and touchdown, so the nose neither slams down nor leaps up when
+ * the wheels take or give the weight
+ */
+const GROUND_PITCH_MAX = 14 * D2R;
+const GROUND_PITCH_RATE = 5 * D2R;
+const GROUND_DEROTATE = 3 * D2R;
+const GROUND_ATT_GAIN = 1.5;
+const GROUND_KQ = 6;
+const GROUND_KI = 10;
+/**
+ * Nose wheel steering: full travel at a walk; faster, no more than turns the aircraft at STEER_ACCEL sideways
+ * at full pedal (the angle falls as 1/speed^2), so at take-off speeds the pedals mostly work the rudder
+ */
+const STEER_MAX = 45 * D2R;
+const STEER_ACCEL = 2.5;
+/** the legs look for the ground below this height of the centre of gravity, m */
+const GEAR_PROBE_AGL = 40;
+/** fuselage skids (nose, tail): stiffness as the depth that would carry the weight, friction, depth that is fatal */
+const SKID_STATIC = 0.05;
+const SKID_MU = 0.5;
+const SKID_FATAL = 0.6;
 
 export interface FlightControls {
   pitch: number; // -1 push .. +1 pull
@@ -61,9 +100,22 @@ export interface GroundContact {
   building: boolean;
 }
 
-export type GroundProbe = (pos: vec3) => GroundContact;
+/** the ground at a point; `surfaceOnly`: the height and water are wanted, not the buildings (a wheel's probe) */
+export type GroundProbe = (pos: vec3, surfaceOnly?: boolean) => GroundContact;
 
 const flatGround: GroundProbe = () => ({ height: 0, water: false, building: false });
+
+/** a leg of the undercarriage as the integrator uses it */
+interface Leg {
+  /** bottom of the tyre at rest, from the intact aircraft's centre of gravity */
+  x: number; y: number; z: number;
+  steer: boolean;
+  /** spring rate N/m and damping N·s/m */
+  k: number;
+  c: number;
+  /** compression now, m (0 = off the ground) */
+  comp: number;
+}
 
 export type DamageCause = 'overload' | 'flutter' | 'strike' | 'collision';
 
@@ -195,6 +247,10 @@ export class FlightModel {
   private rot = mat3.create();
   private tmpQ = quat.create();
   private tmpV = vec3.create();
+  private tmpP = vec3.create();
+  private tmpR = vec3.create();
+  private tmpN = vec3.create();
+  private readonly underWater: boolean[] = [];
   private acc = 0;
   private readonly air = newAirSample();
   private readonly surfs: Surf[];
@@ -216,6 +272,19 @@ export class FlightModel {
   private nz = 1;
   private flutter = 0;
   private probeTurn = 0;
+  /** the undercarriage legs, then the nose and tail skids */
+  private readonly legs: Leg[];
+  private readonly skids: Leg[];
+  /** nose to main wheels, m */
+  private readonly wheelbase: number;
+  /** the pitch the aircraft stands at on its wheels, rad */
+  private readonly restPitch: number;
+  /** friction coefficient of the wheel brakes, on the main legs */
+  private readonly brakeMu: number;
+  /** scratch for the ground under each contact point: x, ground height, z, then the point's own height */
+  private readonly under: Float64Array;
+  /** moment of the ground contact forces this step, body axes */
+  private readonly contactM = vec3.create();
 
   constructor(readonly cfg: AircraftConfig) {
     this.mass = cfg.mass;
@@ -273,6 +342,41 @@ export class FlightModel {
       for (const s of own) for (let i = 0; i < 3; i++) cm[i] += (s.pos[i] * s.area) / area;
       return { idx: PART_IDS.indexOf(p.id), tip: p.tip, maxLoad: p.maxLoad, mass: cfg.partMass[p.id] ?? 0, cm };
     });
+    // the weight splits between the nose and the main legs by where they stand fore and aft of the centre of
+    // gravity; each leg's spring carries its share at STRUT_STATIC
+    const W0 = cfg.mass * G0;
+    const nose = cfg.gear.filter((g) => g.steer);
+    const main = cfg.gear.filter((g) => !g.steer);
+    const avgZ = (ls: typeof cfg.gear): number => ls.reduce((a, g) => a + g.pos[2], 0) / Math.max(1, ls.length);
+    const zN = avgZ(nose), zM = avgZ(main);
+    this.wheelbase = Math.max(1, zM - zN);
+    const noseShare = nose.length && main.length && zM > zN ? clamp(zM / (zM - zN), 0.03, 0.5) : 0;
+    const mainShare = main.length ? 1 - noseShare : 0;
+    // the nose leg is damped against the aircraft pitching about its main wheels, not just its share of the
+    // weight: otherwise the nose drops through on the derotation and the aircraft wheelbarrows
+    const noseMass = (cfg.inertia[0] + cfg.mass * zM * zM) / this.wheelbase ** 2;
+    this.legs = cfg.gear.map((g) => {
+      const share = g.steer ? noseShare / nose.length : mainShare / main.length;
+      const k = (share * W0) / (STRUT_STATIC * (1 + 3 * (STRUT_STATIC / STRUT_TRAVEL) ** 3));
+      const m = g.steer ? Math.max(share * cfg.mass, noseMass / nose.length) : share * cfg.mass;
+      return { x: g.pos[0], y: g.pos[1] - STRUT_STATIC, z: g.pos[2], steer: !!g.steer, k, c: 2 * STRUT_DAMP * Math.sqrt(k * m), comp: 0 };
+    });
+    {
+      const avg = (ls: Leg[], k: 'y' | 'z'): number => ls.reduce((a, l) => a + l[k], 0) / ls.length;
+      const n = this.legs.filter((l) => l.steer), m = this.legs.filter((l) => !l.steer);
+      this.restPitch = n.length && m.length ? Math.atan2(avg(m, 'y') - avg(n, 'y'), avg(m, 'z') - avg(n, 'z')) : 0;
+    }
+    // the brakes give the config's deceleration with the weight on the main wheels
+    this.brakeMu = Math.min(1, cfg.brakeDecel / G0 / Math.max(mainShare, 0.5));
+    // the fuselage's ends: stiff, rough, and fatal when driven deep into the ground
+    const sk = (W0 * 0.5) / SKID_STATIC;
+    this.skids = [cfg.nose, cfg.tail].map((p) => ({ x: p[0], y: p[1], z: p[2], steer: false, k: sk, c: 2 * Math.sqrt(sk * cfg.mass * 0.5), comp: 0 }));
+    this.under = new Float64Array((this.legs.length + this.skids.length) * 4);
+  }
+
+  /** compression of each undercarriage leg, m, in the order of cfg.gear (0 = the wheel is off the ground) */
+  get gearCompression(): number[] {
+    return this.legs.map((l) => l.comp);
   }
 
   /** the drawing's origin as it now sits on the airframe: mesh coordinates of the current centre of gravity */
@@ -397,6 +501,7 @@ export class FlightModel {
     this.nz = 1;
     this.flutter = 0;
     this.touchdownTimer = 0;
+    for (const l of this.legs) l.comp = 0;
     this.indicatedSpeed = 0;
     this.airDataValid = false;
     this.pathAlphaDeg = 0;
@@ -421,13 +526,39 @@ export class FlightModel {
     this.onGround = false;
   }
 
-  spawnGround(position: vec3, headingDeg: number, groundHeight: number): void {
+  /**
+   * On its wheels at `position` (the height is the ground's, `groundHeight`). With `probe`, it stands on the
+   * ground as it is there: pitched and banked with the slope under its wheels, every leg at its static load.
+   */
+  spawnGround(position: vec3, headingDeg: number, groundHeight: number, probe?: GroundProbe): void {
     this.reset();
-    vec3.set(this.pos, position[0], groundHeight + this.cfg.gearHeight, position[2]);
-    attitudeQuat(this.quat, 0, headingDeg, 0);
+    // standing on its wheels: the pitch the nose and main legs give, the tyres on the ground as drawn
+    attitudeQuat(this.quat, this.restPitch * R2D, headingDeg, 0);
+    this.basis();
+    let R = this.rot;
+    let low = this.legs.length ? Infinity : -this.cfg.gearHeight;
+    for (const l of this.legs) low = Math.min(low, R[1] * l.x + R[4] * (l.y + STRUT_STATIC) + R[7] * l.z);
+    vec3.set(this.pos, position[0], groundHeight - low, position[2]);
+    if (probe && this.legs.length >= 3) {
+      this.probeUnder(probe);
+      const [nx, ny, nz] = this.groundPlane(this.tmpN);
+      const h = headingDeg * D2R;
+      const fx = Math.sin(h), fz = -Math.cos(h);
+      const along = -(nx * fx + nz * fz) / ny;
+      const across = -(nx * -fz + nz * fx) / ny;
+      attitudeQuat(this.quat, (this.restPitch + Math.atan(along)) * R2D, headingDeg, -Math.atan(across) * R2D);
+      this.basis();
+      R = this.rot;
+      // then down (or up) onto the ground under the legs
+      this.probeUnder(probe);
+      let gap = 0;
+      for (let i = 0; i < this.legs.length; i++) gap += this.under[i * 4 + 1] - this.under[i * 4 + 3];
+      this.pos[1] += gap / this.legs.length - STRUT_STATIC / Math.max(ny, 0.5);
+    }
     vec3.zero(this.vel);
     this.airspeed = 0;
     this.onGround = true;
+    for (const l of this.legs) l.comp = STRUT_STATIC;
   }
 
   /** Fixed-step accumulator; returns number of physics steps taken. */
@@ -558,8 +689,189 @@ export class FlightModel {
     a.yaw = go(a.yaw, yaw, SURFACE_RATE);
     a.flaps = go(a.flaps, c.flaps ? 1 : 0, 1 / FLAP_TIME);
     a.speedbrake = go(a.speedbrake, c.speedbrake ? 1 : 0, 1 / AIRBRAKE_TIME);
-    a.gear = go(a.gear, c.gearDown ? 1 : 0, 1 / GEAR_TIME);
+    // weight on the wheels locks the gear down whatever the lever says
+    a.gear = go(a.gear, c.gearDown || this.onGround ? 1 : 0, 1 / GEAR_TIME);
     this.snapActuators = false;
+  }
+
+  /** the ground under every contact point (legs, then skids) into `under`: x, ground height, z, the point's height */
+  private probeUnder(probe: GroundProbe): void {
+    const R = this.rot;
+    const U = this.under;
+    const legs = this.legs;
+    const r = this.tmpR;
+    for (let i = 0; i < legs.length + this.skids.length; i++) {
+      const l = i < legs.length ? legs[i] : this.skids[i - legs.length];
+      this.here(r, [l.x, l.y, l.z]);
+      const wx = this.pos[0] + R[0] * r[0] + R[3] * r[1] + R[6] * r[2];
+      const wy = this.pos[1] + R[1] * r[0] + R[4] * r[1] + R[7] * r[2];
+      const wz = this.pos[2] + R[2] * r[0] + R[5] * r[1] + R[8] * r[2];
+      const g = probe(vec3.set(this.tmpP, wx, wy, wz), true);
+      U[i * 4] = wx;
+      U[i * 4 + 1] = g.height;
+      U[i * 4 + 2] = wz;
+      U[i * 4 + 3] = wy;
+      this.underWater[i] = g.water;
+    }
+  }
+
+  /**
+   * The ground's slope: a plane through the ground under the wheels (least squares, from `under`), so the springs
+   * push square to it and the tyres roll along it; the aircraft runs down a slope with its brakes off. Its normal.
+   */
+  private groundPlane(out: vec3): vec3 {
+    const U = this.under;
+    const n = this.legs.length >= 3 ? this.legs.length : this.legs.length + this.skids.length;
+    vec3.set(out, 0, 1, 0);
+    let mx = 0, mz = 0, mh = 0;
+    for (let i = 0; i < n; i++) {
+      mx += U[i * 4];
+      mh += U[i * 4 + 1];
+      mz += U[i * 4 + 2];
+    }
+    mx /= n;
+    mz /= n;
+    mh /= n;
+    let sxx = 0, sxz = 0, szz = 0, sxh = 0, szh = 0;
+    for (let i = 0; i < n; i++) {
+      const dx = U[i * 4] - mx, dz = U[i * 4 + 2] - mz, dh = U[i * 4 + 1] - mh;
+      sxx += dx * dx;
+      sxz += dx * dz;
+      szz += dz * dz;
+      sxh += dx * dh;
+      szh += dz * dh;
+    }
+    const det = sxx * szz - sxz * sxz;
+    if (det > 1e-6 * (sxx + szz) ** 2) {
+      // (a step in the ground under one wheel, a cliff edge, is not a slope to stand on)
+      const a = clamp((sxh * szz - szh * sxz) / det, -0.5, 0.5);
+      const b = clamp((szh * sxx - sxh * sxz) / det, -0.5, 0.5);
+      const inv = 1 / Math.hypot(a, 1, b);
+      vec3.set(out, -a * inv, inv, -b * inv);
+    }
+    return out;
+  }
+
+  /**
+   * The wheels and the fuselage skids against the ground: each undercarriage leg is a spring and a damper
+   * standing on the ground under it, with a tyre that rolls along its own heading (the nose wheel steered by the
+   * pedals), grips sideways and brakes; the nose and tail touch as stiff, rough skids. The forces go into
+   * `accel` (world) and `contactM` (body moments). Returns whether any wheel carries weight.
+   */
+  private groundContact(c: FlightControls, probe: GroundProbe, gearOut: boolean, accel: vec3, bank: number): boolean {
+    const cfg = this.cfg;
+    const R = this.rot;
+    const U = this.under;
+    const legs = this.legs;
+    const pts = legs.length + this.skids.length;
+    const r = this.tmpR;
+    const water = this.underWater;
+    this.probeUnder(probe);
+    const [nx, ny, nz] = this.groundPlane(this.tmpN);
+    const M = this.contactM;
+    vec3.zero(M);
+    let fx = 0, fy = 0, fz = 0;
+    let wow = false;
+    let sink = 0;
+    const hs = Math.hypot(this.vel[0], this.vel[2]);
+    const steer = c.yaw * Math.min(STEER_MAX, (STEER_ACCEL * this.wheelbase) / Math.max(hs * hs, 1e-3));
+    const [wx, wy, wz] = this.omega;
+    for (let i = 0; i < pts; i++) {
+      const leg = i < legs.length;
+      const l = leg ? legs[i] : this.skids[i - legs.length];
+      if (leg && !gearOut) {
+        l.comp = 0;
+        continue;
+      }
+      // depth below the ground, square to it
+      const pen = (U[i * 4 + 1] - U[i * 4 + 3]) * ny;
+      if (pen <= 0) {
+        l.comp = 0;
+        continue;
+      }
+      if (water[i]) {
+        this.destroy('WATER IMPACT');
+        return false;
+      }
+      if (!leg && pen > SKID_FATAL) {
+        this.destroy('TERRAIN IMPACT');
+        return false;
+      }
+      // velocity of the point: the aircraft's, plus its rotation about the centre of gravity
+      const [rx, ry, rz] = this.here(r, [l.x, l.y, l.z]);
+      const bx = wy * rz - wz * ry, by = wz * rx - wx * rz, bz = wx * ry - wy * rx;
+      const vx = this.vel[0] + R[0] * bx + R[3] * by + R[6] * bz;
+      const vy = this.vel[1] + R[1] * bx + R[4] * by + R[7] * bz;
+      const vz = this.vel[2] + R[2] * bx + R[5] * by + R[8] * bz;
+      const vn = vx * nx + vy * ny + vz * nz;
+      if (leg && !this.onGround) sink = Math.max(sink, -vn);
+      // the strut: a gas spring that stiffens as it closes, and a damper; much stiffer still once it bottoms
+      // out. It pushes, never pulls
+      let N = leg ? l.k * pen * (1 + 3 * (pen / STRUT_TRAVEL) ** 3) - l.c * vn : l.k * pen - l.c * vn;
+      if (leg && pen > STRUT_TRAVEL) N += 10 * l.k * (pen - STRUT_TRAVEL);
+      N = Math.max(0, N);
+      l.comp = pen;
+      if (leg) wow = true;
+      // along the ground: the tyre rolls along its heading (the nose wheel's turned by the steering), grips sideways
+      const sa = leg && l.steer ? steer : 0;
+      const sx = Math.sin(sa), sz = -Math.cos(sa);
+      let ex = R[0] * sx + R[6] * sz, ey = R[1] * sx + R[7] * sz, ez = R[2] * sx + R[8] * sz;
+      const en = ex * nx + ey * ny + ez * nz;
+      ex -= en * nx;
+      ey -= en * ny;
+      ez -= en * nz;
+      const el = Math.hypot(ex, ey, ez) || 1;
+      ex /= el;
+      ey /= el;
+      ez /= el;
+      // the side direction: n x e
+      const qx = ny * ez - nz * ey, qy = nz * ex - nx * ez, qz = nx * ey - ny * ex;
+      const vl = vx * ex + vy * ey + vz * ez;
+      const vs = vx * qx + vy * qy + vz * qz;
+      let Fl: number, Fs: number;
+      if (leg) {
+        const mu = ROLL_MU + (c.brakes && !l.steer ? this.brakeMu : 0);
+        Fl = -N * clamp(vl / (G0 * SLIP_LONG), -mu, mu);
+        // the side force follows the slip angle (cornering), up to the tyre's grip
+        Fs = -N * TYRE_MU * clamp(vs / (Math.max(Math.abs(vl), SLIP_CRAWL) * SLIP_ANGLE), -1, 1);
+      } else {
+        // a skid scrapes the same whichever way it goes
+        const vt = Math.hypot(vl, vs);
+        const f = vt > 1e-6 ? (N * Math.min(SKID_MU, vt / (G0 * SLIP_LONG) * SKID_MU)) / vt : 0;
+        Fl = -f * vl;
+        Fs = -f * vs;
+      }
+      const Fx = nx * N + ex * Fl + qx * Fs;
+      const Fy = ny * N + ey * Fl + qy * Fs;
+      const Fz = nz * N + ez * Fl + qz * Fs;
+      fx += Fx;
+      fy += Fy;
+      fz += Fz;
+      // its moment about the centre of gravity, body axes
+      const gx = Fx * R[0] + Fy * R[1] + Fz * R[2];
+      const gy = Fx * R[3] + Fy * R[4] + Fz * R[5];
+      const gz = Fx * R[6] + Fy * R[7] + Fz * R[8];
+      M[0] += ry * gz - rz * gy;
+      M[1] += rz * gx - rx * gz;
+      M[2] += rx * gy - ry * gx;
+    }
+    if (wow && !this.onGround) {
+      // touchdown: too fast onto the wheels breaks them, too much bank puts a wingtip into the ground first
+      if (sink > cfg.landingSinkLimit) {
+        this.destroy('HARD IMPACT');
+        return false;
+      }
+      if (Math.abs(bank * R2D) > cfg.landingBankLimit || R[4] < 0) {
+        this.destroy('WINGTIP STRIKE');
+        return false;
+      }
+      this.touchdownSink = Math.max(sink, -this.vel[1]);
+      this.touchdownTimer = 2;
+    }
+    accel[0] += fx / this.mass;
+    accel[1] += fy / this.mass;
+    accel[2] += fz / this.mass;
+    return wow;
   }
 
   private step(dt: number, c: FlightControls, probe: GroundProbe, env: Air): void {
@@ -627,9 +939,22 @@ export class FlightModel {
     const fbwOn = !this.onGround && V > FBW_MIN_SPEED;
     if (!fbwOn) {
       P = c.pitch;
+      const ground = this.onGround ? smooth((V - 10) / (FBW_MIN_SPEED - 10)) : 0;
+      if (ground > 0) {
+        // ground mode, coming in with the airflow over the tail
+        const qf = Math.max(qbar, 400);
+        const theta = Math.asin(clamp(-R[7], -1, 1));
+        const want = this.restPitch + c.pitch * (c.pitch > 0 ? GROUND_PITCH_MAX : 2 * D2R);
+        const e = clamp(GROUND_ATT_GAIN * (want - theta), -GROUND_DEROTATE, GROUND_PITCH_RATE) - wx;
+        const raw = ((GROUND_KQ * e + this.fbwI) * this.inertia[0]) / (qf * this.pitchEff);
+        const Pg = clamp(raw, -1, 1);
+        if (Pg === raw || Math.sign(e) !== Math.sign(raw)) this.fbwI = clamp(this.fbwI + GROUND_KI * e * dt, -8, 8);
+        P = c.pitch + (Pg - c.pitch) * ground;
+      } else {
+        this.fbwI = 0;
+      }
       Rc = c.roll;
       Y = c.yaw;
-      this.fbwI = 0;
     } else {
       const f = cfg.fbw;
       const qf = Math.max(qbar, 400);
@@ -804,7 +1129,7 @@ export class FlightModel {
     const [Ix, Iy, Iz] = this.inertia;
     let aaX = (Mx + (Iy - Iz) * wy * wz) / Ix;
     let aaY = (My + (Iz - Ix) * wz * wx) / Iy;
-    const aaZ = (Mz + (Ix - Iy) * wx * wy) / Iz;
+    let aaZ = (Mz + (Ix - Iy) * wx * wy) / Iz;
 
     // ---- structure ---------------------------------------------------------------------------
     if (!this.onGround) {
@@ -829,55 +1154,24 @@ export class FlightModel {
     }
 
     // ---- ground and obstacles ------------------------------------------------------------------
-    const clearance = c.gearDown ? cfg.gearHeight : 0.5;
-    const groundY = contact.height + clearance;
-    const rightX = R[0], rightY = R[1], rightZ = R[2];
-
     if (contact.building) return this.destroy('BUILDING STRIKE');
-    if (this.onGround) {
+    const gearOut = this.actuators.gear > 0.99;
+    if (!gearOut && agl < 0.5) {
       if (contact.water) return this.destroy('WATER IMPACT');
-      if (!c.gearDown) return this.destroy('GEAR-UP LANDING');
-      // tires: vertical clamp, strong roll centering, pitch free to rotate within limits
-      accel[1] = Math.max(accel[1], 0);
-      this.omega[2] *= Math.max(0, 1 - 12 * dt);
-      const pitch = this.pitchDeg;
-      if (pitch < -0.5) this.omega[0] += (-0.5 - pitch) * D2R * 10;
-      if (pitch > 14) this.omega[0] -= (pitch - 14) * D2R * 10;
-      // gear holds the airframe level until the pilot rotates
-      const targetPitch = c.pitch > 0.15 ? Math.min(14, c.pitch * 14) : 0;
-      aaX = (targetPitch - pitch) * D2R * 60 - this.omega[0] * 11;
-      // rolling resistance + wheel brakes along horizontal motion
-      const hs = Math.hypot(this.vel[0], this.vel[2]);
-      if (hs > 0.01) {
-        const decel = Math.min(hs / dt, 0.3 + (c.brakes ? cfg.brakeDecel : 0));
-        accel[0] -= (this.vel[0] / hs) * decel;
-        accel[2] -= (this.vel[2] / hs) * decel;
-      }
-      // tire lateral grip: kill sideways slip
-      const latV = this.vel[0] * rightX + this.vel[1] * rightY + this.vel[2] * rightZ;
-      accel[0] -= rightX * latV * 6;
-      accel[1] -= rightY * latV * 6;
-      accel[2] -= rightZ * latV * 6;
-      // the wheels resist yaw; at a crawl they hold the heading against the wind altogether
-      const grip = clamp(1 - hs / 25, 0, 1);
-      aaY = aaY * (1 - grip) - this.omega[1] * (2 + 8 * grip);
-      // nosewheel steering at taxi speed
-      if (hs < 40) aaY += -c.yaw * 0.8 * Math.min(1, hs / 10);
-      if (this.pos[1] > groundY + 0.12 && this.vel[1] > 0.5) {
-        this.onGround = false; // rotated off the runway
-      }
-    } else if (this.pos[1] <= groundY && this.vel[1] <= 0.5) {
-      const sink = -this.vel[1];
-      if (contact.water) return this.destroy('WATER IMPACT');
-      if (!c.gearDown) return this.destroy('GEAR-UP LANDING');
-      if (sink > cfg.landingSinkLimit) return this.destroy('HARD IMPACT');
-      if (Math.abs(bank * R2D) > cfg.landingBankLimit || R[4] < 0) return this.destroy('WINGTIP STRIKE');
-      this.onGround = true;
-      // a bounce with residual upward velocity must not keep the airframe creeping up the runway
-      if (this.vel[1] > 0) this.vel[1] = 0;
-      this.touchdownSink = sink;
-      this.touchdownTimer = 2;
+      return this.destroy('GEAR-UP LANDING');
     }
+    let wow = false;
+    if (agl < GEAR_PROBE_AGL) {
+      wow = this.groundContact(c, probe, gearOut, accel, bank);
+      if (this.crashed) return;
+      // the moments of the wheels and skids on the ground, through the inertias
+      aaX += this.contactM[0] / Ix;
+      aaY += this.contactM[1] / Iy;
+      aaZ += this.contactM[2] / Iz;
+    } else {
+      for (const l of this.legs) l.comp = 0;
+    }
+    this.onGround = wow;
 
     // extremities against terrain and buildings: one point per step, only near the ground
     if (agl < TIP_PROBE_AGL && !this.crashed) {
@@ -890,7 +1184,8 @@ export class FlightModel {
         vec3.transformMat3(tip, tip, R);
         vec3.add(tip, tip, this.pos);
         const hit = probe(tip);
-        if (hit.building || tip[1] < hit.height - 0.2) {
+        // (the nose and tail ride on their skids: only driven deep into the ground are they fatal)
+        if (hit.building || tip[1] < hit.height - (slot ? 0.2 : SKID_FATAL + 0.4)) {
           if (!slot) return this.destroy(hit.building ? 'BUILDING STRIKE' : hit.water ? 'WATER IMPACT' : 'TERRAIN IMPACT');
           // the part is torn off; the blow takes a little speed and slews the aircraft round the contact
           const impulse = vec3.scale(vec3.create(), this.vel, -0.03 * this.mass);
@@ -902,10 +1197,6 @@ export class FlightModel {
     // ---- integration (semi-implicit Euler) -----------------------------------------------------
     vec3.scaleAndAdd(this.vel, this.vel, accel, dt);
     vec3.scaleAndAdd(this.pos, this.pos, this.vel, dt);
-    if (this.onGround) {
-      this.pos[1] = Math.max(this.pos[1], groundY);
-      if (this.vel[1] < 0) this.vel[1] = 0;
-    }
     this.omega[0] += aaX * dt;
     this.omega[1] += aaY * dt;
     this.omega[2] += aaZ * dt;
@@ -914,12 +1205,6 @@ export class FlightModel {
       quat.setAxisAngle(this.tmpQ, vec3.scale(this.tmpV, this.omega, 1 / w), w * dt);
       quat.multiply(this.quat, this.quat, this.tmpQ);
       quat.normalize(this.quat, this.quat);
-    }
-    if (this.onGround) {
-      // keep the airframe level in roll while rolling
-      const target = quat.create();
-      attitudeQuat(target, this.pitchDeg, this.headingDeg, 0);
-      quat.slerp(this.quat, this.quat, target, Math.min(1, 6 * dt));
     }
     if (this.debris.length > 0) this.stepDebris(dt);
   }

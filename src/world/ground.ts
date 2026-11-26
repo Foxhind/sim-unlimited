@@ -133,11 +133,12 @@ export class GroundProbe {
     return sampler ? sampler(lon, lat) : undefined;
   }
 
-  /** terrain + water + building contact for an ENU position relative to the current origin */
-  probe(pos: vec3): GroundContact {
+  /** terrain + water + building contact for an ENU position relative to the current origin (`surfaceOnly`: no buildings) */
+  probe(pos: vec3, surfaceOnly = false): GroundContact {
     const ll = enuToLatLon(this.origin(), pos[0], -pos[2], pos[1]);
     const height = this.heightAt(ll.lon, ll.lat) ?? 0;
     const contact: GroundContact = { height, water: height <= 0, building: false };
+    if (surfaceOnly) return contact;
     const cosLat = Math.cos((ll.lat * Math.PI) / 180);
     const center = tileForLatLon(ll.lat, ll.lon, 14);
     const n = 2 ** 14;

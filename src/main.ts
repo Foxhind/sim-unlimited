@@ -464,7 +464,7 @@ function spawn(): void {
   const groundH = Math.max(0, ground.heightAt(spawnAt.lon, spawnAt.lat) ?? 0);
   const [e, n] = latLonToEnu(chunks.origin, spawnAt.lat, spawnAt.lon, 0);
   if (start.alt === 0) {
-    model.spawnGround(vec3.fromValues(e, groundH + cfg.gearHeight, -n), spawnAt.hdg, groundH);
+    model.spawnGround(vec3.fromValues(e, groundH + cfg.gearHeight, -n), spawnAt.hdg, groundH, (p, surfaceOnly) => ground.probe(p, surfaceOnly));
   } else {
     const alt = start.alt ?? groundH + 1500;
     model.spawnAir(vec3.fromValues(e, alt, -n), spawnAt.hdg);
@@ -825,7 +825,7 @@ function frame(now: number): void {
       }
     }
     const damageBefore = model.damage.length;
-    model.update(dt, flight, (p) => ground.probe(p), air);
+    model.update(dt, flight, (p, surfaceOnly) => ground.probe(p, surfaceOnly), air);
     if (model.damage.length > damageBefore) {
       audio.touchdown(true); // the bang of a part letting go
     }

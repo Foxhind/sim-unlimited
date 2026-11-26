@@ -166,9 +166,10 @@ describe('flight model', () => {
     m.spawnGround(vec3.fromValues(0, 0, 0), 0, 0);
     run(m, 2, { throttle: 0.3, brakes: true });
     expect(m.speed).toBeLessThan(1);
-    run(m, 12, { throttle: 1 });
+    run(m, 7, { throttle: 1 });
     expect(m.speed).toBeGreaterThan(70);
-    expect(m.onGround).toBe(true);
+    expect(m.onGround).toBe(true); // stick neutral: the ground mode holds the nose wheel on the runway
+    expect(Math.abs(m.pitchDeg)).toBeLessThan(1);
     run(m, 6, { throttle: 1, pitch: 0.7 });
     expect(m.onGround).toBe(false);
     expect(m.pos[1]).toBeGreaterThan(SU27.gearHeight + 2);

@@ -146,7 +146,7 @@ describe('flight through moving air', () => {
       const air = new Air({ ...WEST_10, tempC, windMs: 0, gustMs: 0 });
       let rotated = false;
       for (let t = 0; t < 90 && m.pos[1] < 15; t += PHYSICS_STEP) {
-        if (m.airspeed > 95) rotated = true;
+        if (m.eas > 95) rotated = true; // Vr is an indicated speed: in thin air the wheels run faster to reach it
         m.update(PHYSICS_STEP, { ...idle, gearDown: true, throttle: 1, pitch: rotated ? 0.4 : 0 }, undefined, air);
       }
       expect(m.crashed).toBe(false);
