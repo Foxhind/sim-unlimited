@@ -35,14 +35,39 @@ build=$(( ${last:-0} + 1 ))
 dest="s3://$BUCKET/tiles/$build"
 echo "build $build -> $dest" >&2
 
+# Progress goes to stderr (stdout carries only the manifest URL): a [k/n] line per file with the share of
+# all bytes sent so far, and the aws CLI's own byte counter while a file uploads, when stderr is a terminal.
+if [ -t 2 ]; then quiet=(); else quiet=(--only-show-errors); fi
+human() { awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB", u); i = 1
+  while (b >= 1024 && i < 5) { b /= 1024; i++ } printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'; }
+files=()
+total=0
+for r in "${regions[@]}"; do
+  for f in "$OUT/$r.pmtiles" "$OUT/$r.aerodromes.json"; do
+    files+=("$f")
+    total=$(( total + $(wc -c < "$f") ))
+  done
+done
+sent=0
+k=0
+upload() { # <file> <content type>
+  local f=$1 size
+  size=$(wc -c < "$f")
+  k=$(( k + 1 ))
+  printf '[%d/%d] %s (%s), %s of %s sent\n' "$k" "${#files[@]}" "${f##*/}" "$(human "$size")" \
+    "$(human "$sent")" "$(human "$total")" >&2
+  aws s3 cp "$f" "$dest/${f##*/}" ${quiet[@]+"${quiet[@]}"} \
+    --content-type "$2" --cache-control "$IMMUTABLE" >&2
+  sent=$(( sent + size ))
+}
+
 names=()
 for r in "${regions[@]}"; do
-  aws s3 cp "$OUT/$r.pmtiles" "$dest/$r.pmtiles" --only-show-errors \
-    --content-type application/octet-stream --cache-control "$IMMUTABLE"
-  aws s3 cp "$OUT/$r.aerodromes.json" "$dest/$r.aerodromes.json" --only-show-errors \
-    --content-type application/json --cache-control "$IMMUTABLE"
+  upload "$OUT/$r.pmtiles" application/octet-stream
+  upload "$OUT/$r.aerodromes.json" application/json
   names+=("\"$r.pmtiles\"")
 done
+echo "uploaded $(human "$total") in ${#files[@]} files" >&2
 # the manifest goes last: it never lists an archive that is not there yet
 (IFS=,; echo "[${names[*]}]") | aws s3 cp - "$dest/index.json" --only-show-errors \
   --content-type application/json --cache-control "$IMMUTABLE"

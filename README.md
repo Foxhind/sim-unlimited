@@ -73,7 +73,9 @@ numbered build: `tiles/<N>/` with each `<region>.pmtiles`, `<region>.aerodromes.
 `N` is one more than the highest build already in the bucket, so a published build never changes and is
 served as immutable. `BUCKET` and `PUBLIC_URL` (where the bucket is publicly read) are required; the
 `aws` CLI takes credentials, region and endpoint the usual way (`AWS_PROFILE`, `AWS_REGION`,
-`AWS_ENDPOINT_URL`). The script prints the manifest URL to build the client with:
+`AWS_ENDPOINT_URL`). Progress goes to stderr: a `[k/n]` line per file with the bytes sent so far, and on a
+terminal the `aws` CLI's own counter while each file uploads. The script prints the manifest URL to build
+the client with:
 
 ```bash
 BUCKET=my-sim-tiles PUBLIC_URL=https://my-sim-tiles.s3.eu-central-1.amazonaws.com \
