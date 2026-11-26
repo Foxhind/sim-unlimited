@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FACADE_PROFILE_M, rgbOf } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
-import { buildBuildingMesh, buildingTags, wallRamp, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
+import { buildBuildingMesh, buildingHeights, buildingTags, wallRamp, WINDOW_ATTR_FLOATS } from '../src/world/building-mesher';
 import { ARCH_GLSL, ARCH_INFERRED_TAG, ARCH_PROFILES, archProfile, archRegion, BELT, inferArchitecture } from '../src/world/arch-styles';
 import { shareStyleInParts } from '../src/world/overpass';
 import type { OsmBuilding } from '../src/world/osm-types';
@@ -129,6 +129,60 @@ describe('architectural styles', () => {
     const out = shareStyleInParts([outline, part, own]);
     expect(out.find((b) => b.rings === part.rings)!.tags['building:architecture']).toBe('neo-gothic');
     expect(out.find((b) => b.rings === own.rings)!.tags['building:architecture']).toBe('modern');
+  });
+});
+
+describe('a crowning cornice clear of the top floor\'s windows', () => {
+  // [y, v, winH] of the windowed facade vertices
+  const facade = (m: ReturnType<typeof build>) => {
+    const out: { y: number; v: number; winH: number }[] = [];
+    for (let i = 0; i < m.vertexCount; i++) {
+      const h = m.windows[i * WINDOW_ATTR_FLOATS + 3];
+      if (h > 0) out.push({ y: m.vertices[i * 6 + 1], v: m.windows[i * WINDOW_ATTR_FLOATS + 1], winH: h % FACADE_PROFILE_M });
+    }
+    return out;
+  };
+  const top = (m: ReturnType<typeof build>) => {
+    let y = -Infinity;
+    for (let i = 0; i < m.vertexCount; i++) y = Math.max(y, m.vertices[i * 6 + 1]);
+    return y;
+  };
+
+  it('counted levels under a pitched roof: a frieze of the cornice\'s height on top of them', () => {
+    // eclectic: a cornice 0.7 m high, and of the 0.3 m of wall over the top windows' surrounds
+    // (0.55 × 3 + 1 + 0.34 up a floor of 3 m) 0.29 m lacking; ground 100, a plinth of 1 m, two floors of 3 m
+    const tags = { building: 'yes', 'building:levels': '2', 'building:architecture': 'eclectic', 'roof:shape': 'hipped', 'roof:height': '2' };
+    const m = build(tags);
+    const f = facade(m);
+    expect(f.length).toBeGreaterThan(0);
+    for (const { y, v, winH } of f) {
+      expect(winH).toBeCloseTo(6, 3);
+      expect(y - v).toBeCloseTo(101, 3);
+    }
+    // the wall: plinth, floors, frieze; the roof on top
+    expect(top(m)).toBeCloseTo(100 + 1 + 6 + 0.7 + 0.29 + 2, 3);
+    // the same floors as the plain building
+    const plain = build({ ...tags, 'building:architecture': 'none' });
+    for (const { winH } of facade(plain)) expect(winH).toBeCloseTo(6, 3);
+    expect(top(plain)).toBeCloseTo(100 + 1 + 6 + 2, 3);
+  });
+
+  it('a wall of a told height keeps its floors: the cornice shrinks to the wall above the windows', () => {
+    // a wall of 7 m: 6 m of windows, two floors; a frieze would leave one, and no wall is left over the
+    // windows for a cornice
+    const tags = { building: 'yes', height: '9', 'building:architecture': 'eclectic', 'roof:shape': 'hipped', 'roof:height': '2' };
+    const m = build(tags);
+    for (const { winH } of facade(m)) expect(winH).toBeCloseTo(6, 3);
+    expect(top(m)).toBeCloseTo(109, 3);
+    // the belt courses of the two floor lines only: no vertex of a small part in the top floor's upper half
+    for (const y of smallYs(m)) expect(y).toBeLessThan(1 + 3 + 1.5);
+  });
+
+  it('a flat roof: the technical floor holds the cornice, the wall no higher', () => {
+    const tags = { building: 'apartments', 'building:levels': '3', 'building:architecture': 'eclectic' };
+    const m = build(tags);
+    for (const { winH } of facade(m)) expect(winH).toBeCloseTo(9, 3);
+    expect(buildingHeights({ rings: [rect()], tags }).wall).toBeCloseTo(1 + 9 + 1.5, 6);
   });
 });
 

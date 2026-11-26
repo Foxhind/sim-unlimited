@@ -7,7 +7,7 @@ import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
 import { crossings, meshCrossings, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 import { KindRuns, structureKind } from './structure-kinds';
-import { ARCH_INFERRED_TAG, archProfile, BELT, inferArchitecture, paneHalfHeight, type ArchProfile } from './arch-styles';
+import { ARCH_INFERRED_TAG, archProfile, BELT, FRAME, inferArchitecture, paneHalfHeight, type ArchProfile } from './arch-styles';
 
 /** floats per vertex of BuildingMeshData.windows */
 export const WINDOW_ATTR_FLOATS = 5;
@@ -165,8 +165,12 @@ export function parseLength(v: string | undefined): number | undefined {
  * Facade zones of a building with windows (isLitBuilding, not a booth): a windowless plinth PLINTH_M
  * high on the ground, then the floors with windows, then under a flat roof a windowless technical
  * floor TECH_FLOOR_M high. A booth (footprint under BOOTH_MAX_AREA_M2) has no windows at all.
+ * Without a technical floor, a style's crowning cornice (arch-styles) takes a windowless frieze of its
+ * own height under the wall top (friezeHeight), so it does not cover the top floor's windows, and
+ * the top windows of a style keep TOP_GAP_M of plain wall over their surrounds (the ceiling is about
+ * at the eaves: a lintel and the wall plate lie between it and the opening).
  */
-export const FACADE_ZONES = { PLINTH_M: 1, TECH_FLOOR_M: 1.5, BOOTH_MAX_AREA_M2: 20 } as const;
+export const FACADE_ZONES = { PLINTH_M: 1, TECH_FLOOR_M: 1.5, BOOTH_MAX_AREA_M2: 20, TOP_GAP_M: 0.3 } as const;
 /** internal tag (not OSM): the footprint is a booth's (FACADE_ZONES.BOOTH_MAX_AREA_M2) */
 export const BOOTH_TAG = 'sim:booth';
 
@@ -189,6 +193,17 @@ function hasTechFloor(tags: Record<string, string>, shape: string): boolean {
   return shape === 'flat' && hasFacadeZones(tags) && !isBuildingPart(tags);
 }
 
+/**
+ * The frieze a style's crowning cornice sits on, on top of the floors with windows: the cornice's
+ * height, and what the top windows lack of TOP_GAP_M of wall over them (headroomLack), on a zoned building with no technical floor above its windows (that floor holds the cornice)
+ * and not a building:part (parts stack: hasTechFloor), else 0.
+ */
+function friezeHeight(tags: Record<string, string>, shape: string): number {
+  if (!hasFacadeZones(tags) || isBuildingPart(tags) || hasTechFloor(tags, shape)) return 0;
+  const arch = archProfile(tags);
+  return arch ? (arch.cornice?.h ?? 0) + headroomLack(arch, LEVEL_M) : 0;
+}
+
 /** facade levels of a building with no height, no building:levels and no footprint rule (withDefaultTags) */
 export const DEFAULT_LEVELS = 2;
 
@@ -206,7 +221,7 @@ const DEFAULT_PITCH_DEG = 30;
  * (FOOTPRINT_WALL_TAG, set by withDefaultTags for building=residential) plus that roof; else
  * DEFAULT_LEVELS (2) × 3 m plus that roof. Levels counted from tags (building:levels, the default) get
  * the facade zones added (hasFacadeZones): the plinth on the ground and, under a flat roof, the
- * technical floor, so the levels keep their full 3 m. A building:part counts its levels from the ground
+ * technical floor, else a styled building's frieze (friezeHeight), so the levels keep their full 3 m. A building:part counts its levels from the ground
  * like the parts around it, so every part lifts its levels by the plinth (its top always, its bottom
  * when building:min_level is above the ground) and none gets the technical floor (hasTechFloor): the
  * parts keep stacking without gaps or overlaps.
@@ -240,7 +255,7 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
       const zones = part
         ? FACADE_ZONES.PLINTH_M
         : hasFacadeZones(tags)
-          ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : 0)
+          ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : friezeHeight(tags, shape))
           : 0;
       height = (levels ?? DEFAULT_LEVELS) * LEVEL_M + zones + roof + flatRoofLevels;
     }
@@ -842,11 +857,22 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     // between the plinth and (under a flat roof) the technical floor (FACADE_ZONES)
     const zoned = hasFacadeZones(tags);
     const winBase = wallBase + (zoned && h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
-    const winH = wallTop - winBase - (roof.kind === 'flat' && hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : 0);
-    const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
+    const tech = roof.kind === 'flat' && hasTechFloor(tags, shape);
+    // in steps a float32 keeps under a style's profile (FACADE_PROFILE_M): the shader counts the same floors
+    let winH = Math.round((wallTop - winBase - (tech ? FACADE_ZONES.TECH_FLOOR_M : 0)) * 1024) / 1024;
     // an architectural style: its windows and wall paint (the profile rides on the wall height), its cornice and belts
     const arch = archProfile(tags);
     const profile = arch?.id ?? 0;
+    // a crowning cornice with no technical floor to sit on: a windowless frieze of its height under the
+    // wall top (computeHeights adds it to counted levels); where that would cost a floor (a wall of a
+    // told height, a building:part), the cornice shrinks to the wall left above the top windows
+    let corniceMax = Infinity;
+    if (arch && zoned && !tech && winH >= WINDOWS.MIN_WALL_M) {
+      const frieze = corniceHeight(arch, h.wall) + headroomLack(arch, LEVEL_M);
+      if (winH - frieze >= WINDOWS.MIN_WALL_M && facadeFloors(winH - frieze) === facadeFloors(winH)) winH = Math.round((winH - frieze) * 1024) / 1024;
+      else corniceMax = Math.max(0, wallAboveWindows(arch, winH / facadeFloors(winH)) - FACADE_ZONES.TOP_GAP_M);
+    }
+    const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges (none on a pre-1900 style), rare signs on the ground floor
     const balconies = windowed && hasBalconies(tags, winH) && (!arch || arch.balconies);
     // two floors: every window alike, one seed for the whole building (FACADE_UNIFORM)
@@ -890,7 +916,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
         }
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH, arch);
-      if (arch && !glassy) detail(() => styleBands(arch, [outer, ...holes], wallTop, h.wall, windowed ? winH : 0, winBase, wRamp));
+      if (arch && !glassy) detail(() => styleBands(arch, [outer, ...holes], wallTop, h.wall, windowed ? winH : 0, winBase, wRamp, corniceMax));
     }
 
     // ceiling under elevated parts (arches, bridges)
@@ -1234,13 +1260,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
 
   /**
    * A style's mouldings round the walls (rings: outer ccw, holes cw): the crowning cornice under the wall
-   * top (at most a fifth of the wall high) and belt courses at the window floors' lines (BELT), in the
+   * top (at most a fifth of the wall high and corniceMax; none under CORNICE_MIN_M) and belt courses at the window floors' lines (BELT), in the
    * style's trim colour or the wall's a little lighter.
    */
-  function styleBands(arch: ArchProfile, rings: XZ[][], wallTop: number, wallH: number, windowH: number, winBase: number, wRamp: number): void {
+  function styleBands(arch: ArchProfile, rings: XZ[][], wallTop: number, wallH: number, windowH: number, winBase: number, wRamp: number, corniceMax: number): void {
     const ramp = trimRamp(arch, wRamp);
-    if (arch.cornice && wallH >= PARAPET.MIN_WALL_M) {
-      const ch = Math.min(arch.cornice.h, 0.2 * wallH);
+    const ch = arch.cornice ? Math.min(corniceHeight(arch, wallH), corniceMax) : 0;
+    if (arch.cornice && wallH >= PARAPET.MIN_WALL_M && ch >= CORNICE_MIN_M) {
       for (const ring of rings) moulding(ring, wallTop - ch, wallTop, arch.cornice.out * (ch / arch.cornice.h), ramp, 0.45);
     }
     if (arch.belts && windowH > 0) {
@@ -1471,6 +1497,30 @@ export function isRuin(tags: Record<string, string>): boolean {
 }
 
 /** the floors WORLD_FS windowAt cuts a facade of this height into */
+/** a crowning cornice lower than this is not drawn */
+const CORNICE_MIN_M = 0.1;
+
+/** the height of a style's crowning cornice on a wall `wallH` high: at most a fifth of the wall */
+function corniceHeight(arch: ArchProfile, wallH: number): number {
+  return Math.min(arch.cornice?.h ?? 0, 0.2 * wallH);
+}
+
+/**
+ * The plain wall between the top of a style's window with its surround and the floor line above, on a
+ * floor `fh` high (WORLD_FS archWindow: the pane centred 0.55 of the floor up, a surround 0.14 wide,
+ * a cornice bar or keystone 0.2 over it, a reveal 0.12)
+ */
+function wallAboveWindows(arch: ArchProfile, fh: number): number {
+  const f = arch.window.frame;
+  const over = arch.varyFrames || f === FRAME.SANDRIK || f === FRAME.KEYSTONE ? 0.34 : f === FRAME.SURROUND ? 0.14 : f === FRAME.REVEAL ? 0.12 : 0;
+  return fh - (0.55 * fh + paneHalfHeight(arch, fh) + over);
+}
+
+/** what the windows of a style on a floor `fh` high lack of TOP_GAP_M of plain wall over their surrounds */
+function headroomLack(arch: ArchProfile, fh: number): number {
+  return Math.max(0, FACADE_ZONES.TOP_GAP_M - wallAboveWindows(arch, fh));
+}
+
 export function facadeFloors(winH: number): number {
   return Math.max(1, Math.floor(winH / WINDOWS.FLOOR_M));
 }
