@@ -56,6 +56,27 @@ JAVA=/path/to/jdk21/bin/java PLANETILER=/path/to/planetiler.jar tiles/build.sh
 
 Output goes to `tiles/data/out/` (git-ignored), which `npm run dev` serves at `/tiles`.
 
+### Publishing tiles
+
+`tiles/publish.sh [region ...]` uploads archives from `tiles/data/out/` (all of them by default) to S3 as a
+numbered build: `tiles/<N>/` with each `<region>.pmtiles`, `<region>.aerodromes.json` and an `index.json`.
+`N` is one more than the highest build already in the bucket, so a published build never changes and is
+served as immutable. `BUCKET` and `PUBLIC_URL` (where the bucket is publicly read) are required; the
+`aws` CLI takes credentials, region and endpoint the usual way (`AWS_PROFILE`, `AWS_REGION`,
+`AWS_ENDPOINT_URL`). The script prints the manifest URL to build the client with:
+
+```bash
+BUCKET=my-sim-tiles PUBLIC_URL=https://my-sim-tiles.s3.eu-central-1.amazonaws.com \
+  AWS_REGION=eu-central-1 tiles/publish.sh israel-and-palestine
+```
+
+```bash
+VITE_PMTILES_URL=https://my-sim-tiles.s3.eu-central-1.amazonaws.com/tiles/1/index.json npm run build
+```
+
+The bucket must allow public reads of `tiles/*`, answer single `Range` requests with 206, and have a CORS
+rule that allows `GET` with the `Range` header from the site's origin.
+
 ## Scripts
 
 | Command | What it does |
