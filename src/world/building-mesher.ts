@@ -17,6 +17,8 @@ export const WINDOW_ATTR_FLOATS = 5;
  * u metres along the wall edge from its start, v metres above the wall base, the edge's length,
  * the wall height (0: no windows on this face) and the edge's code: a 16-bit seed (which windows are
  * lit, which slots carry balconies) plus the FACADE style and flags (palette.ts FACADE_SEED_BITS).
+ * A face of a building with no windows (roof, plain wall) has all of them 0 but v: its height over
+ * the ground the building stands on, where WORLD_VS takes the climate that snows on the roof.
  */
 export interface BuildingMeshData extends TerrainMeshData {
   windows: Float32Array;
@@ -795,6 +797,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
   const smallKinds = new KindRuns();
   const coreFeet: number[] = [];
   const smallFeet: number[] = [];
+  /** a vertex from `from` on with no window attributes gets v = its height over `foot` (BuildingMeshData.windows) */
+  const markFoot = (buf: typeof core, from: number, foot: number): void => {
+    for (let v = from; v < buf.ramps.length; v++) {
+      const w = v * WINDOW_ATTR_FLOATS;
+      if (buf.win[w] === 0 && buf.win[w + 1] === 0 && buf.win[w + 2] === 0 && buf.win[w + 3] === 0 && buf.win[w + 4] === 0) {
+        buf.win[w + 1] = buf.verts[v * 6 + 1] - foot;
+      }
+    }
+  };
   const detail = <T>(make: () => T): T => {
     ({ verts, ramps, win } = small);
     try { return make(); } finally { ({ verts, ramps, win } = core); }
@@ -838,6 +849,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
 
     // the walls stand at the highest ground under the footprint (a plinth below, see PLINTH_MAX_M)
     const { base, low } = buildingFooting(outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
+    const coreStart = core.ramps.length, smallStart = small.ramps.length;
     const shape = roofShape(tags);
     const frame = roofFrame(outer, tags);
     // an L, a T or a courtyard: the roof follows the footprint's straight skeleton
@@ -961,6 +973,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // the frame is a small part: the far LOD draws the glass alone
       detail(() => glassFrame(outer, wallBase, wallTop, roof, creases, frame, rgbRamp([...GREENHOUSE.FRAME]), centroid, isCanopy));
     }
+    // the faces with no window attributes (roofs, rooftop plant, plain walls) carry their height over
+    // the ground the walls stand on: snow on the roof as on that ground (WORLD_VS climate at the foot)
+    markFoot(core, coreStart, base);
+    markFoot(small, smallStart, base);
   }
 
   /**

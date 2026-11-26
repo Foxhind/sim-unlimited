@@ -73,10 +73,13 @@ describe('snow and ice by climate', () => {
       expect(vs).not.toContain('uSnow');
       expect(vs).toContain(`bool snow = (packedRamp & ${SNOW_FLAG}u) != 0u && tempC <= ${CLIMATE.SNOW_C.toFixed(1)} && (!water || frozen);`);
       expect(vs).toContain(`uint ramp = snow ? ${MAT.SNOW}u : frozen ? (id == ${MAT.SEA}u ? ${MAT.SEA_ICE}u : ${MAT.ICE}u) : id;`);
-      expect(vs).toContain('float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));');
       // the snow flag must not leak into the glow level
       expect(vs).toMatch(/>> 24u\) & 7u/);
     }
+    // the climate at the foot: a tree's, a building face's over its ground (building-mesher windows v)
+    expect(TREE_VS).toContain('float tempC = climateTemp(toWorld(aInstPos));');
+    expect(WORLD_VS).toContain('float footY = aWinEdge == vec3(0.0) ? wp.y - aWinUV.y : wp.y;');
+    expect(WORLD_VS).toContain('float tempC = climateTemp(vec3(wp.x, footY + (d * d) / (2.0 * 6371000.0), wp.z));');
     // frozen water is not drawn as water (no waves, glints, glitter)
     expect(WORLD_VS).toContain('bool open = water && !frozenWater(aRamp, tempC);');
     expect(WORLD_VS).toContain('vWater = open ? 1.0 : 0.0;');

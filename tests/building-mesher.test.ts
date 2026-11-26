@@ -286,6 +286,21 @@ describe('facade zones', () => {
   });
 });
 
+describe('the foot of a roof', () => {
+  it('faces without windows carry their height over the ground the building stands on', () => {
+    const m = build([{ rings: [rect()], tags: { building: 'apartments', 'building:levels': '5' } }]);
+    let roofs = 0;
+    for (let i = 0; i < m.vertexCount; i++) {
+      const a = m.windows.subarray(i * 5, i * 5 + 5);
+      if (a[2] !== 0 || a[3] !== 0 || a[4] !== 0 || a[0] !== 0) continue;
+      // ground 100: the shader takes the climate at y - v
+      expect(m.vertices[i * 6 + 1] - a[1]).toBeCloseTo(100, 3);
+      if (m.vertices[i * 6 + 4] > 0.99 && m.vertices[i * 6 + 1] > 110) roofs++;
+    }
+    expect(roofs).toBeGreaterThan(0);
+  });
+});
+
 describe('parseLength', () => {
   it('parses meters, feet and feet-inches', () => {
     expect(parseLength('12')).toBe(12);

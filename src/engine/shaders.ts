@@ -1372,7 +1372,10 @@ void main() {
   if (uTwoSided == 1 && dot(n, toEye(wp)) < 0.0) n = -n;
   vec4 light = sceneLight(n, wp.y + (d * d) / (2.0 * 6371000.0));
   float fog = fogAt(rel, uCamPos.y);
-  float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
+  // the climate at the foot of the face: a building's face without windows (aWinEdge 0) carries its
+  // height over the building's ground in aWinUV.y, so its roof takes snow as that ground does
+  float footY = aWinEdge == vec3(0.0) ? wp.y - aWinUV.y : wp.y;
+  float tempC = climateTemp(vec3(wp.x, footY + (d * d) / (2.0 * 6371000.0), wp.z));
   uint id = aRamp & ${PAYLOAD_MASK}u;
   bool water = (aRamp & ${MATERIAL_FLAG}u) != 0u && (id == ${MAT.WATER}u || id == ${MAT.SEA}u);
   bool open = water && !frozenWater(aRamp, tempC);
@@ -1593,7 +1596,9 @@ void main() {
   float fog = fogAt(rel, uCamPos.y);
   uint packed = (uint(aInstFlags) << 24u) | uint(aInstSR.y);
   if (aPart > 0.5) packed = (packed & ${GLOW_LEVEL_MASK << GLOW_SHIFT}u) | ${TREE_TRUNK_RAMP}u;
-  float tempC = climateTemp(vec3(wp.x, wp.y + (d * d) / (2.0 * 6371000.0), wp.z));
+  // the climate at the tree's foot: the whole tree takes snow as the ground under it does, not its
+  // crown alone where the snow line runs between the two
+  float tempC = climateTemp(toWorld(aInstPos));
   vColor = min(shadeColour(packed, light.a * 11.0, fog, light.rgb, hazeAt(rel), tempC) + rimLight(n, wp, fog), 1.0);
   vec4 shade = sceneShade(n);
   vShade = uShadowOn > 0.5 && light.a > shade.a ? shadeColour(packed, shade.a * 11.0, fog, shade.rgb, hazeAt(rel), tempC) : vColor;
