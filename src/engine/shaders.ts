@@ -739,7 +739,8 @@ float windowFade(float d) {
  * edge's ends, pilaster strips between the window columns) and archWindow the windows (the head: flat,
  * segmental, round, pointed, horseshoe or a ribbon along the floor; a surround, a cornice bar over it or a
  * keystone, a dark reveal; T, 6/6, transom or strip glazing). A styled facade keeps its ground floor's
- * windows unless it has shop windows (FACADE_SHOPS). Fine lines show only where they are about a pixel wide or more.
+ * windows unless it has shop windows (FACADE_SHOPS); its balconies stand on the plain wall, the style's
+ * paint not showing through them. Fine lines show only where they are about a pixel wide or more.
  * Returns true on a lit pane.
  */
 const WINDOW_GLSL = `${WINDOW_LIGHT_GLSL}
@@ -967,6 +968,8 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   float f = floor(uv.y / fh);
   float slots = max(1.0, floor(edge.x / ${WINDOWS.SPACING_M.toFixed(1)}));
   float cw = edge.x / slots;
+  // the wall before its style's paint: what a balcony's parapet and glazing stand in front of
+  vec3 plain = c;
   if (prof > 0u) archWall(c, prof, uv, edge.x, fh, cw, slots, fw, fog);
   if (uv.y < 0.0 || f >= floors) return false;
   float k = clamp(floor(uv.x / cw), 0.0, slots - 1.0);
@@ -1012,6 +1015,8 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   if (style > 0u && f >= 1.0 && winRand(seed * 31u + uint(k) * 0x9e3779b9u) < 0.6) {
     float bw = min(max(min(1.5, 0.42 * cw), 0.6 * fw.x), 0.47 * cw);
     if (abs(du) > bw || dv < 0.04 * fh || dv > 0.92 * fh) return false;
+    // a balcony hides the wall behind it: no rusticated courses, quoins or pilaster strips through its glazing
+    c = plain;
     float rail = 0.04 * fh + 0.36 * fh;
     if (dv < rail) {
       // the parapet: a lighter panel under glazing, a darker railing on an open balcony
