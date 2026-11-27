@@ -242,8 +242,21 @@ export function isBuildingPart(tags: Record<string, string>): boolean {
  * would push it into the part above.
  */
 function hasTechFloor(tags: Record<string, string>, shape: string): boolean {
-  return shape === 'flat' && hasFacadeZones(tags) && !isBuildingPart(tags);
+  return shape === 'flat' && hasFacadeZones(tags) && !isBuildingPart(tags) && !isCarPark(tags) && SMALL_WALL_M[tags.building] === undefined;
 }
+
+/** a multi-storey car park: open decks (FACADE.OPEN_DECKS) from the ground up, no plinth nor technical floor */
+export function isCarPark(tags: Record<string, string>): boolean {
+  const type = tags['building:part'] || tags.building;
+  return type === 'parking' || (type !== undefined && type !== 'no' && tags.parking === 'multi-storey');
+}
+
+/**
+ * Small buildings of one storey, their walls without height or levels told (instead of DEFAULT_LEVELS
+ * with a plinth and a technical floor): a kiosk, a pavilion, a shipping container, a boathouse, a
+ * covered footbridge, public toilets.
+ */
+export const SMALL_WALL_M: Record<string, number> = { kiosk: 2.8, pavilion: 3.5, container: 2.6, boathouse: 4, bridge: 3.5, toilets: 3 };
 
 /**
  * The frieze a style's crowning cornice sits on, on top of the floors with windows: the cornice's
@@ -304,7 +317,9 @@ export function computeHeights(tags: Record<string, string>, run?: number): { mi
     const footprintWall = parseLength(tags[FOOTPRINT_WALL_TAG]);
     if (footprintWall !== undefined && levels === undefined) height = footprintWall + roof + flatRoofLevels;
     else {
-      const zones = part
+      const zones = isCarPark(tags)
+        ? 0
+        : part
         ? FACADE_ZONES.PLINTH_M
         : hasFacadeZones(tags)
           ? (min < 0.5 ? FACADE_ZONES.PLINTH_M : 0) + (hasTechFloor(tags, shape) ? FACADE_ZONES.TECH_FLOOR_M : friezeHeight(tags, shape))
@@ -373,7 +388,7 @@ const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
  */
 const HOUSE_ROOFS: Record<string, string> = {
   house: 'hipped', detached: 'hipped', semidetached_house: 'hipped', bungalow: 'hipped', terrace: 'gabled',
-  farm: 'hipped', cabin: 'gabled',
+  farm: 'hipped', cabin: 'gabled', boathouse: 'gabled',
 };
 /**
  * Farm buildings (FARM_TYPES): without height or levels one storey — a barn BARN_WALL_M of blank wall,
@@ -429,6 +444,7 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
     else if (FARM_TYPES.has(tags.building)) out[FOOTPRINT_WALL_TAG] = String(FACADE_ZONES.PLINTH_M + LEVEL_M);
     else if (tags.building === 'cabin') out[FOOTPRINT_WALL_TAG] = String(LEVEL_M);
     else if (tags.building === 'static_caravan') out[FOOTPRINT_WALL_TAG] = String(FARM.CARAVAN_WALL_M);
+    else if (SMALL_WALL_M[tags.building] !== undefined) out[FOOTPRINT_WALL_TAG] = String(SMALL_WALL_M[tags.building]);
   }
   // half the farm buildings of no told material are wooden (a draw decorrelated from the colour's: wallRamp)
   const type = tags['building:part'] || tags.building;
@@ -1127,7 +1143,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     // windows on the facades of buildings people live or work in, below the roof (not in gables)
     // between the plinth and (under a flat roof) the technical floor (FACADE_ZONES)
     const zoned = hasFacadeZones(tags);
-    const winBase = wallBase + (zoned && h.min < 0.5 ? FACADE_ZONES.PLINTH_M : 0);
+    const carPark = isCarPark(tags);
+    const winBase = wallBase + (zoned && h.min < 0.5 && !carPark ? FACADE_ZONES.PLINTH_M : 0);
     const tech = roof.kind === 'flat' && hasTechFloor(tags, shape);
     // in steps a float32 keeps under a style's profile (FACADE_PROFILE_M): the shader counts the same floors
     let winH = Math.round((wallTop - winBase - (tech ? FACADE_ZONES.TECH_FLOOR_M : 0)) * 1024) / 1024;
@@ -1145,12 +1162,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
     const windowed = zoned && winH >= WINDOWS.MIN_WALL_M;
     // residential: balconies on some edges (none on a pre-1900 style), rare signs on the ground floor
-    const balconies = windowed && hasBalconies(tags, winH) && (!arch || arch.balconies);
+    const balconies = windowed && !carPark && hasBalconies(tags, winH) && (!arch || arch.balconies);
     // two floors: every window alike, one seed for the whole building (FACADE_UNIFORM)
-    const uniform = windowed && facadeFloors(winH) === 2;
+    const uniform = windowed && !carPark && facadeFloors(winH) === 2;
     const uniformSeed = uniform ? Math.floor(styleSeed(b) * (1 << FACADE_SEED_BITS)) : -1;
     // hospitals and supermarkets keep their lights on all night
-    const flags = (isAllNight(tags) ? FACADE_ALL_NIGHT : 0)
+    // a car park's decks: its edges' FACADE style (edgeCode leaves 0 there off a residential building)
+    const flags = carPark ? FACADE.OPEN_DECKS * (1 << FACADE_SEED_BITS) : (isAllNight(tags) ? FACADE_ALL_NIGHT : 0)
       + (uniform ? FACADE_UNIFORM : 0)
       + ((uniform && hasShopFloor(tags)) || hasStorefronts(tags) ? FACADE_SHOPS : 0)
       + ((arch ? arch.panoramic : hasPanoramicWindows(tags, styleSeed(b))) ? FACADE_PANORAMIC : 0);
@@ -1953,6 +1971,8 @@ const UNLIT_TYPES = new Set([
   'gasometer', 'bunker_silo', 'reservoir_covered', 'slurry_tank', 'digester', 'hangar', 'minaret', 'container', 'tent',
   // a temple's generated bell tower and domes' drums (temples.ts)
   'bell_tower', 'dome',
+  // a tower (a lookout, a bell or a clock tower), a park pavilion, a boathouse
+  'tower', 'pavilion', 'boathouse',
 ]);
 /** structures mapped as buildings (man_made) that have no windows: chimneys, towers, tanks, silos */
 const UNLIT_MAN_MADE = new Set([

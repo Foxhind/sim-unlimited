@@ -32,11 +32,14 @@ import {
   pastelColour,
   roofRamp,
   wallRamp,
+  isCarPark,
+  isLitBuilding,
+  SMALL_WALL_M,
 } from '../src/world/building-mesher';
 import type { OsmBuilding } from '../src/world/osm-types';
 import { roundProfile } from '../src/world/roof-shapes';
 import { AC_SIZE, INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
-import { WINDOWS } from '../src/engine/palette';
+import { FACADE, FACADE_SEED_BITS, WINDOWS } from '../src/engine/palette';
 
 const TILE: Tile = { z: 14, x: 8800, y: 5500 };
 
@@ -316,6 +319,38 @@ describe('facade zones', () => {
     expect(buildingTags(booth)[BOOTH_TAG]).toBe('yes');
     expect(facade(build([booth]))).toHaveLength(0);
     expect(buildingHeights(booth).wall).toBe(3); // a booth of building=yes is an outbuilding (OUTBUILDING)
+  });
+});
+
+describe('car parks and small buildings', () => {
+  const facade = (m: ReturnType<typeof build>) =>
+    Array.from({ length: m.vertexCount }, (_, i) => ({ y: m.vertices[i * 6 + 1], a: Array.from(m.windows.subarray(i * 5, i * 5 + 5)) }))
+      .filter((p) => p.a[3] > 0);
+  it('a multi-storey car park: open decks from the ground up, no plinth nor technical floor', () => {
+    expect(isCarPark({ building: 'parking' })).toBe(true);
+    expect(isCarPark({ building: 'yes', amenity: 'parking', parking: 'multi-storey' })).toBe(true);
+    expect(isCarPark({ building: 'yes', amenity: 'parking' })).toBe(false);
+    const park = { rings: [rect()], tags: { building: 'parking', 'building:levels': '4' } };
+    expect(buildingHeights(park).wall).toBeCloseTo(12, 4);
+    const f = facade(build([park]));
+    expect(f.length).toBeGreaterThan(0);
+    for (const { y, a: [, v, , winH, code] } of f) {
+      expect(winH).toBeCloseTo(12, 4);
+      expect(y - v).toBeCloseTo(100, 3);
+      expect((code >> FACADE_SEED_BITS) & 3).toBe(FACADE.OPEN_DECKS);
+    }
+  });
+  it('a kiosk, a pavilion, a container, a boathouse, a footbridge, toilets: one storey without height or levels', () => {
+    for (const [type, wall] of Object.entries(SMALL_WALL_M)) {
+      const h = buildingHeights({ rings: [rect(0.00005, 0.00004)], tags: { building: type } });
+      expect(h.wall, type).toBeCloseTo(wall, 4);
+    }
+    // a told one keeps its height
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'pavilion', height: '7' } }).wall).toBeCloseTo(7, 4);
+  });
+  it('a tower, a pavilion, a boathouse have no lit windows', () => {
+    for (const building of ['tower', 'pavilion', 'boathouse', 'kiosk']) expect(isLitBuilding({ building }), building).toBe(false);
+    expect(isLitBuilding({ building: 'bridge' })).toBe(true);
   });
 });
 

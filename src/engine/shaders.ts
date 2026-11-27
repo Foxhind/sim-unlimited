@@ -7,7 +7,7 @@
  */
 import { LAMP_SHAPE, TREE_THIN } from '../world/props-mesher';
 import { ARCH_GLSL } from '../world/arch-styles';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, STREET_LAMP, FAR_WINDOW_LIT_FACTOR, WOOD_FLAG, BOARDS, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, STREET_LAMP, FAR_WINDOW_LIT_FACTOR, WOOD_FLAG, BOARDS, DECKS, FACADE, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -975,6 +975,22 @@ bool archWindow(inout vec3 c, uint prof, float du, float dv, float fh, float cw,
   c = glass;
   return false;
 }
+/** an open deck of a car park (palette DECKS); true where its lamps light it */
+bool deckAt(inout vec3 c, float x, float dv, float fh, float len, vec2 fw, float fog) {
+  float sill = ${DECKS.SILL.toFixed(2)} * fh, head = fh - ${DECKS.SLAB_M.toFixed(2)};
+  if (dv < sill || dv > head) return false;
+  float bay = len / max(1.0, ceil(len / ${DECKS.SPACING_M.toFixed(1)}));
+  if (abs(fract(x / bay + 0.5) - 0.5) * bay < max(0.5 * ${DECKS.POST_M.toFixed(2)}, 0.5 * fw.x)) return false;
+  if (uWindows == 2 && uLitFade > 0.0) {
+    // the lamps under the ceiling: brightest there, dimmer down to the parapet
+    float k = ${DECKS.LAMP.toFixed(2)} * mix(${DECKS.LAMP_LOW.toFixed(2)}, 1.0, smoothstep(sill, head, dv)) * uLitFade;
+    // (windowGlow brings a window's colour to full brightness: the lamps' dimmer light scales its result)
+    c = windowGlow(mix(${glslRgb(DECKS.LAMP_RGB)}, uHaze, 0.5 * fog), uWinEmit, windowFade(eyeDist(vRay))) * k;
+    return true;
+  }
+  c *= mix(vec3(${DECKS.SHADE.toFixed(2)}), vec3(1.0), fog);
+  return false;
+}
 bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   // the style above the wall height (FACADE_PROFILE_M)
   uint prof = uint(edge.y / ${FACADE_PROFILE_M.toFixed(1)});
@@ -999,6 +1015,8 @@ bool windowAt(inout vec3 c, vec2 uv, vec3 edge, vec2 fw, float fog) {
   bool pano = (code & ${FACADE_PANORAMIC}u) != 0u;
   float du = uv.x - (k + 0.5) * cw;
   float dv = uv.y - f * fh;
+  // a car park: open decks all along, every floor alike
+  if (style == ${FACADE.OPEN_DECKS}u) return blind ? false : deckAt(c, uv.x, dv, fh, edge.x, fw, fog);
   // the edges of a uniform building share its seed: which windows are lit differs by the edge's length
   uint litSeed = alike ? seed ^ winHash(uint(edge.x * 16.0) + 0x3c6eu) : seed;
   float r = winRand(litSeed ^ winHash(uint(k) + winHash(uint(f) * 7919u)));

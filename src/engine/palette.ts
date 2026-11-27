@@ -1036,7 +1036,14 @@ export function solarHour(time: Date, lonDeg: number): number {
   return (((utc + lonDeg / 15) % 24) + 24) % 24;
 }
 /** facade styles of a wall edge (WORLD_FS windowAt): plain windows, glazed or open balconies */
-export const FACADE = { WINDOWS: 0, GLAZED_BALCONIES: 1, OPEN_BALCONIES: 2 } as const;
+export const FACADE = { WINDOWS: 0, GLAZED_BALCONIES: 1, OPEN_BALCONIES: 2, OPEN_DECKS: 3 } as const;
+/**
+ * The open decks of a multi-storey car park (FACADE.OPEN_DECKS, WORLD_FS deckAt): a floor's slab edge and
+ * parapet up to SILL of its height, the dark deck (SHADE of the wall) behind the opening up to SLAB_M
+ * under the next floor, posts SPACING_M apart at most, POST_M wide. At night its ceiling lamps light every
+ * opening alike, LAMP of a window's glow under the ceiling, LAMP_LOW of that at the parapet, in LAMP_RGB (cool LED).
+ */
+export const DECKS = { SILL: 0.36, SLAB_M: 0.35, SHADE: 0.2, SPACING_M: 7.5, POST_M: 0.45, LAMP: 0.6, LAMP_LOW: 0.4, LAMP_RGB: [226, 234, 246] as RGB } as const;
 /**
  * A wall edge's code (building-mesher BuildingMeshData.windows), an integer below 2^24 (exact in a
  * float): FACADE_SEED_BITS of seed, the FACADE style in the next two bits, then the flags.
