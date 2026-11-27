@@ -99,7 +99,7 @@ export function straightSkeleton(rings: XZ[][]): Skeleton | undefined {
     const det = A[0] * B[1] - A[1] * B[0];
     let v: XZ = [0, 0];
     let spike = false;
-    if (Math.abs(det) < 1e-9) {
+    if (Math.abs(det) < 1e-6) {
       if (A[0] * B[0] + A[1] * B[1] > 0) v = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
       else spike = true;
     } else {
