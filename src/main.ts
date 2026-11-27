@@ -10,7 +10,8 @@ import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
 import { ChunkManager, type CameraWorld } from './world/chunks';
-import { HOUSE_RADIUS_M, OsmManager } from './world/osm-manager';
+import { OsmManager } from './world/osm-manager';
+import { detail, detailFor, setDetail } from './world/detail';
 import { FarOsmManager } from './world/far-osm-manager';
 import { farOsmTiles, OPENFREEMAP_ATTRIBUTION } from './world/far-osm';
 import { enuToLatLon, latLonToEnu, tileCenter, tileForLatLon, type LatLon, type Tile } from './world/geodesy';
@@ -554,6 +555,7 @@ if (import.meta.env.DEV) {
     get palette() { return palette; },
     get consent() { return consent; },
     respawn,
+    detail,
   };
 }
 
@@ -567,6 +569,8 @@ const camActions: [Action, CameraMode][] = [
 /** the touch controls (ui/touch.ts), shown on a touch screen while flying */
 const touch = new TouchControls();
 const coarsePointer = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+/** a finger is the only pointer (a phone, a tablet without a trackpad): the shorter detail profile */
+const touchOnly = coarsePointer && !matchMedia('(any-pointer: fine)').matches;
 /** shown: always, never, or (auto) on a touch screen until a key or a gamepad is used */
 function touchShown(): boolean {
   if (settings.touchControls !== 'auto') return settings.touchControls === 'on';
@@ -769,6 +773,7 @@ function frame(now: number): void {
   proj[9] = (-2 * viewShift) / renderer.height;
 
   presetNow = state === 'menu' ? menu.config.weather : start.weather;
+  setDetail(detailFor(settings.detail, touchOnly));
   input.pollPads();
   const fingers = touchOn ? touch.update(input.touches, controls.throttle) : undefined;
   let flight: FlightControls = controls.update(dt, input, settings, canvas.clientWidth, canvas.clientHeight, fingers);
@@ -1091,7 +1096,7 @@ function frame(now: number): void {
   }
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
-  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, HOUSE_RADIUS_M);
+  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, detail.houseRadiusM);
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');

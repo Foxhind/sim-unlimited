@@ -10,9 +10,10 @@ import { decodeMvt, ringArea, type MvtLayer } from './mvt';
 import type { LonLat, OsmBuilding } from './osm-types';
 import { FAR_WINDOWS, rampIndex, RAMP } from '../engine/palette';
 import type { HeightSampler } from './terrain-source';
+import { detail as detailProfile, FULL_DETAIL } from './detail';
 
-/** OSM is drawn (as dots and lines) out to this slant distance; within DETAIL_RADIUS_M the detailed tiles take over */
-export const FAR_OSM_RADIUS_M = 21000;
+/** OSM is drawn (as dots and lines) out to this slant distance (the full profile's: detail.ts); within DETAIL_RADIUS_M the detailed tiles take over */
+export const FAR_OSM_RADIUS_M = FULL_DETAIL.farOsmRadiusM;
 export const FAR_OSM_Z = 14;
 /** bump when what a far tile is built from or into changes (cached far tiles are rebuilt) */
 export const FAR_OSM_SCHEMA = 3;
@@ -154,7 +155,8 @@ export function openFreeMapTemplate(fetchImpl: typeof fetch = fetch): Promise<st
  * distance of the camera, except the detailed tiles (`detail`: their z/x/y keys), which draw their own OSM.
  */
 export function farOsmTiles(cam: LatLon, alt: number, detail: ReadonlySet<string>): Tile[] {
-  const r = Math.sqrt(Math.max(0, FAR_OSM_RADIUS_M ** 2 - alt ** 2));
+  const R = detailProfile.farOsmRadiusM;
+  const r = Math.sqrt(Math.max(0, R ** 2 - alt ** 2));
   if (r === 0) return [];
   const dLat = r / 111320;
   const dLon = dLat / Math.max(0.2, Math.cos((cam.lat * Math.PI) / 180));
@@ -167,7 +169,7 @@ export function farOsmTiles(cam: LatLon, alt: number, detail: ReadonlySet<string
       if (detail.has(`${t.z}/${t.x}/${t.y}`)) continue;
       const bb = tileBounds(t);
       const [e, n] = latLonToEnu(cam, Math.max(bb.south, Math.min(bb.north, cam.lat)), Math.max(bb.west, Math.min(bb.east, cam.lon)), 0);
-      if (Math.hypot(e, n, alt) < FAR_OSM_RADIUS_M) out.push(t);
+      if (Math.hypot(e, n, alt) < R) out.push(t);
     }
   }
   return out;

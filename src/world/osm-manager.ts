@@ -1,4 +1,5 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
+import { detail, FULL_DETAIL } from './detail';
 import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
 import { osmSourceMode } from './osm-source';
 import type { Mesh, Renderer } from '../engine/renderer';
@@ -23,21 +24,19 @@ const SHADOW_TREE_TEXEL_M = 1.5;
 /** how far the relief may stand above or below the shadow box's ground, m (drawShadows) */
 const SHADOW_RELIEF_M = 1500;
 
-export const HOUSE_RADIUS_M = 3500;
+export const HOUSE_RADIUS_M = FULL_DETAIL.houseRadiusM;
 /** the drape (areas and covers on the terrain's faces) is drawn within this slant of the eye, m (draw) */
-export const DRAPE_RADIUS_M = HOUSE_RADIUS_M;
+export const DRAPE_RADIUS_M = FULL_DETAIL.drapeRadiusM;
 /**
  * Building LOD: a tile whose nearest buildings are farther than this (slant, m) draws them without
  * their small parts (parapets, roof plant, doors, masts: building-mesher coreVertexCount), each a
  * pixel or two from here on.
  */
-export const BUILDING_DETAIL_M = 1500;
+export const BUILDING_DETAIL_M = FULL_DETAIL.buildingDetailM;
 /**
  * Prop LOD: wall air conditioners (0.8 m) and lamp posts (0.24 m thick) on a tile whose nearest
  * point is farther than this (slant, m) are not drawn: under a pixel from there on.
  */
-/** power line conductors are drawn within this slant distance of a tile's nearest part, m */
-const WIRE_RADIUS_M = 4000;
 /** a lighthouse's flash drawn this much larger than a beacon */
 const FLASH_SIZE = 2;
 const PROP_DETAIL_M: Partial<Record<number, number>> ={ [INSTANCE.AC]: 1000, [INSTANCE.LAMP]: 1500, [INSTANCE.SIGNAL]: 1000 };
@@ -102,7 +101,7 @@ interface OsmChunk {
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
   mastLines?: PropSet;
-  /** power line conductors: 1 px GL lines within WIRE_RADIUS_M */
+  /** power line conductors: 1 px GL lines within detail.wireRadiusM (detail.ts) */
   wires?: PropSet;
   /** night: the lighthouses' lights (lighthouse-mesher FLASH_STRIDE), and the points of those lit now, written each frame */
   flashData?: Float32Array;
@@ -671,7 +670,7 @@ export class OsmManager {
       // roads and water among them) and the drape adds only what the TIN's budget left out (its loose
       // shapes). The frame is bound by vertices over a town: central Moscow 27 → 23.4 ms, 0.1 % of
       // the pixels changed, by the horizon
-      if (slantTo(c, camPos) >= DRAPE_RADIUS_M) continue;
+      if (slantTo(c, camPos) >= detail.drapeRadiusM) continue;
       renderer.speckle = true;
       if (c.mesh) renderer.drawWorld(c.mesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
       // the traffic lights' lit lenses over their dark ones in the drape, as the drape draws them
@@ -696,11 +695,11 @@ export class OsmManager {
       const dx = camPos[0] - c.centerEnu[0];
       const dz = camPos[2] - c.centerEnu[2];
       const slant = slantTo(c, camPos);
-      if (slant < HOUSE_RADIUS_M) {
+      if (slant < detail.houseRadiusM) {
         if (c.rmesh && L.roads) renderer.drawWorld(c.rmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
         // pitch markings: 1 px white paint, pulled a hair toward the eye off the pitch under them
         if (c.pitchLines && L.roads) renderer.drawLights(c.pitchLines.vao, c.pitchLines.count, c.offset, view, proj, camPos, 1, true, 'lines', false, PITCH_LINE_PULL);
-        const houses = this.houseParts(c, slant - c.radius * 0.71 < BUILDING_DETAIL_M);
+        const houses = this.houseParts(c, slant - c.radius * 0.71 < detail.buildingDetailM);
         if (houses.length) {
           // windows on the facades: glass by day, about a third of them lit at night (no window points near)
           renderer.windows = lightsOn || dayWindows ? 'lit' : 'glass';
@@ -772,12 +771,12 @@ export class OsmManager {
       }
       // power line conductors: thin, near and middle distance only (far they are less than a pixel)
       // (and the lifts' ropes)
-      if (c.wires && slant - c.radius * 0.71 < WIRE_RADIUS_M && (this.shows(STRUCTURE.POWER) || this.shows(STRUCTURE.LIFT))) {
+      if (c.wires && slant - c.radius * 0.71 < detail.wireRadiusM && (this.shows(STRUCTURE.POWER) || this.shows(STRUCTURE.LIFT))) {
         renderer.drawLights(c.wires.vao, c.wires.count, c.offset, view, proj, camPos, 1, true, 'lines');
       }
       if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
         for (const t of c.trees) {
-          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
+          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type)) continue;
           const n = thinned(t, c, camPos);
           renderer.drawTrees(t.vao, n, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, t.type >= TREE_TYPES ? 0 : t.count);
         }
@@ -793,7 +792,7 @@ export class OsmManager {
     for (const c of this.renderList) {
       if (!c.gmesh || !buildingsOn) continue;
       const slant = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2], camPos[1]);
-      if (slant < HOUSE_RADIUS_M) renderer.drawWorld(c.gmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
+      if (slant < detail.houseRadiusM) renderer.drawWorld(c.gmesh, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd);
     }
     renderer.opacity = 1;
     renderer.gloss = 0;
@@ -815,7 +814,7 @@ export class OsmManager {
       if (!trees || !c.trees) continue;
       const slant = slantTo(c, camPos) - c.radius * 0.71;
       for (const t of c.trees) {
-        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) || !this.showsProp(t.type)) continue;
+        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type)) continue;
         const n = thinned(t, c, camPos);
         renderer.shadowTrees(t.vao, n, t.first, t.vertexCount, c.offset, t.type >= TREE_TYPES ? 0 : t.count);
       }

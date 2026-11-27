@@ -52,6 +52,15 @@ const PRESETS: Preset[] = [
     query: 'clouds=20&temp=-20',
     view: { sunEl: 2, camYaw: 0, camPitch: 18, camDist: 70, pitch: 0, roll: 30, hdg: -20 },
   },
+  {
+    // the heaviest frame we know: the detail profiles (world/detail.ts) are measured here
+    id: 'moscow',
+    name: 'Центр Москвы с 600 м (нагрузка)',
+    at: { lat: 55.752, lon: 37.6175 },
+    alt: 600,
+    query: 'clouds=0',
+    view: { sunEl: 20, camYaw: 180, camPitch: 12, camDist: 60, pitch: -5, roll: 0, hdg: 90 },
+  },
 ];
 
 const STORE_RIM = 'rimLab.rim';

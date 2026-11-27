@@ -126,6 +126,12 @@ held upright they take a band across the bottom and the view's centre rises abov
 clear of the notch and the home bar. Settings › Touch controls: auto (on a touch screen until a key
 or a gamepad is used), on, off.
 
+A phone also builds and draws less of the world in detail (`src/world/detail.ts`): OSM meshes
+within 4 km instead of 7, buildings and roads within 2.5 km instead of 3.5, the far dots out to
+14 km instead of 21. Over central Moscow that halves the detailed tiles and the far ones and cuts the
+draw calls by about 40 %. Settings › Detail range: auto (the phone profile where a finger is the
+only pointer), full, phone.
+
 **Gamepads and joysticks.** A gamepad the browser knows (Xbox, PlayStation): left stick pitch and
 roll (pull back to climb), right stick rudder, RT/LT throttle, A brakes, B speed brake, X gear,
 Y flaps, LB/RB rudder, Back map size, Start pause, L3 autopilot, R3 HUD mode, D-pad camera /

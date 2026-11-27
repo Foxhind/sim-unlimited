@@ -16,6 +16,7 @@ import {
   type LatLon,
   type Tile,
 } from './geodesy';
+import { detail as detailProfile, FULL_DETAIL } from './detail';
 
 export const MIN_Z = 8;
 export const MAX_Z = 14;
@@ -27,9 +28,10 @@ const UNLOAD_DELAY_MS = 10000;
 const RETRY_DELAY_MS = 5000;
 /**
  * Two tile variants: coarse terrain without OSM (z8–z13 by distance) and detailed z14 terrain
- * with OSM, used within this slant distance of the camera.
+ * with OSM, used within this slant distance of the camera (the full profile's: detail.ts sets it at
+ * run time, shorter on a phone).
  */
-export const DETAIL_RADIUS_M = 7000;
+export const DETAIL_RADIUS_M = FULL_DETAIL.detailRadiusM;
 export const DETAIL_Z = 14;
 
 /** Work-lattice resolution on which terrain contours are traced (not the mesh density). */
@@ -74,7 +76,7 @@ export function selectLeaves(cam: LatLon, alt: number, lookahead?: LatLon): Tile
       lon: Math.max(b.west, Math.min(b.east, p.lon)),
     });
     const dn = lookahead ? Math.min(near(cam), near(lookahead)) : near(cam);
-    const detail = Math.hypot(dn, alt) < DETAIL_RADIUS_M;
+    const detail = Math.hypot(dn, alt) < detailProfile.detailRadiusM;
     if (detail ? t.z < DETAIL_Z : t.z < DETAIL_Z - 1 && metric < size * LOD_FACTOR) {
       for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
         visit({ z: t.z + 1, x: (t.x * 2 + dx) % (2 ** (t.z + 1)), y: t.y * 2 + dy });

@@ -2,6 +2,8 @@ export type Units = 'metric' | 'imperial';
 export type Lang = 'en' | 'ru' | 'ua';
 /** the on-screen stick, lever and buttons: on a touch screen by itself, always, or never */
 export type TouchMode = 'auto' | 'on' | 'off';
+/** how far the world is detailed (world/detail.ts): a phone's shorter profile by itself, or either always */
+export type DetailSetting = 'auto' | 'full' | 'phone';
 
 /** a gamepad / joystick axis driving pitch, roll, yaw or the throttle (flight/gamepad.ts) */
 export interface PadAxisSetting {
@@ -25,6 +27,7 @@ export interface Settings {
   /** role (roll, pitch, yaw, throttle) → axis overrides; null unassigns the role's default axis */
   padAxes: Partial<Record<'roll' | 'pitch' | 'yaw' | 'throttle', PadAxisSetting | null>>;
   touchControls: TouchMode;
+  detail: DetailSetting;
 }
 
 const KEY = 'sim-unlimited-settings';
@@ -37,7 +40,7 @@ export function defaultLang(): Lang {
 }
 
 export function defaultSettings(): Settings {
-  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, msaa: false, hdr: true, bindings: {}, padBindings: {}, padAxes: {}, touchControls: 'auto' };
+  return { units: 'metric', lang: defaultLang(), mouseJoystick: false, sound: true, msaa: false, hdr: true, bindings: {}, padBindings: {}, padAxes: {}, touchControls: 'auto', detail: 'auto' };
 }
 
 export function loadSettings(): Settings {

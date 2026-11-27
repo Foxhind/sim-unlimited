@@ -492,6 +492,7 @@ export class Menu {
     toggle('units', [[t(L, 'metric'), s.units === 'metric'], [t(L, 'imperial'), s.units === 'imperial']], (i) => { s.units = i === 0 ? 'metric' : 'imperial'; });
     toggle('language', [['EN', L === 'en'], ['RU', L === 'ru'], ['UA', L === 'ua']], (i) => { s.lang = (['en', 'ru', 'ua'] as const)[i]; });
     toggle('touchControls', [[t(L, 'auto'), s.touchControls === 'auto'], [t(L, 'on'), s.touchControls === 'on'], [t(L, 'off'), s.touchControls === 'off']], (i) => { s.touchControls = (['auto', 'on', 'off'] as const)[i]; });
+    toggle('detail', [[t(L, 'auto'), s.detail === 'auto'], [t(L, 'detailFull'), s.detail === 'full'], [t(L, 'detailPhone'), s.detail === 'phone']], (i) => { s.detail = (['auto', 'full', 'phone'] as const)[i]; });
     onOff('mouseJoystick', () => s.mouseJoystick, (v) => { s.mouseJoystick = v; });
     onOff('sound', () => s.sound, (v) => { s.sound = v; });
     onOff('msaa', () => s.msaa, (v) => { s.msaa = v; });
