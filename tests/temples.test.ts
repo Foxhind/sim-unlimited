@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { colourOf } from '../src/engine/palette';
 import { tileCenter, type Tile } from '../src/world/geodesy';
-import { buildBuildingMesh, buildingTags, computeHeights } from '../src/world/building-mesher';
+import { buildBuildingMesh, buildingTags, computeHeights, styleSeed, wallRamp } from '../src/world/building-mesher';
+import { ARCH_INFERRED_TAG } from '../src/world/arch-styles';
 import { minaretSites } from '../src/world/minaret-mesher';
 import { parseOverpass, type OverpassJson } from '../src/world/overpass';
 import { FINIAL, FINIAL_TAG, faithOf, finialTris, FOOTING_TAG, orthodoxLand, qiblaAxis, TEMPLE } from '../src/world/temples';
@@ -82,6 +83,17 @@ describe('a place of worship mapped as a bare outline is built in its tradition'
     // the body is still drawn: its parts are generated, not mapped
     expect(bs).toContain(body);
   });
+  it('its parts are walled as the body: the style its start_date suggests is the whole temple’s', () => {
+    for (const start_date of ['1890', '1785', '2005']) {
+      const bs = parse({ nodes: rectNodes(MOSCOW, 30, 14), tags: { building: 'church', start_date } });
+      const body = bs.find((b) => b.tags.building === 'church')!;
+      expect(partsOf(bs).length).toBeGreaterThan(1);
+      for (const p of partsOf(bs)) {
+        expect(buildingTags(p)[ARCH_INFERRED_TAG], start_date).toBe(buildingTags(body)[ARCH_INFERRED_TAG]);
+        expect(wallRamp(buildingTags(p), styleSeed(p)), start_date).toBe(wallRamp(buildingTags(body), styleSeed(body)));
+      }
+    }
+  });
   it('a large one gets five domes; a chapel one small dome and no tower', () => {
     const large = partsOf(parse({ nodes: rectNodes(MOSCOW, 40, 24), tags: { building: 'cathedral' } }));
     expect(large.filter((p) => p.tags['roof:shape'] === 'onion')).toHaveLength(5);
@@ -138,6 +150,22 @@ describe('a place of worship mapped as a bare outline is built in its tradition'
 });
 
 describe('a place of worship mapped in detail is drawn as mapped, its symbols added', () => {
+  it('its parts are walled alike unless OSM colours one: a plain building tagged a place of worship too', () => {
+    const bs = parse(
+      { nodes: rectNodes(MOSCOW, 30, 14), tags: { building: 'yes', amenity: 'place_of_worship', religion: 'christian', start_date: '1890' } },
+      { nodes: rectNodes(MOSCOW, 20, 12, 4), tags: { 'building:part': 'yes', height: '10' } },
+      { nodes: rectNodes(MOSCOW, 6, 6, -11), tags: { 'building:part': 'tower', height: '30' } },
+      { nodes: rectNodes(MOSCOW, 5, 5, 4), tags: { 'building:part': 'dome', min_height: '10', height: '16' } },
+      { nodes: rectNodes(MOSCOW, 3, 3, 12), tags: { 'building:part': 'apse', height: '8', 'building:colour': 'white' } },
+    );
+    const parts = partsOf(bs);
+    expect(parts).toHaveLength(4);
+    const walls = parts.map((p) => wallRamp(buildingTags(p), styleSeed(p)));
+    expect(buildingTags(parts[0])[ARCH_INFERRED_TAG]).toMatch(/^(pseudo-russian|neo-byzantine)$/);
+    const coloured = parts.findIndex((p) => p.tags['building:colour'] === 'white');
+    expect(new Set(walls.filter((_, i) => i !== coloured)).size).toBe(1);
+    expect(walls[coloured]).not.toBe(walls[(coloured + 1) % 4]);
+  });
   it('three parts or more: the parts as they are, a cross on the domes and the spire, none on the rest', () => {
     const bs = parse(
       { nodes: rectNodes(MOSCOW, 30, 14), tags: { building: 'church' } },

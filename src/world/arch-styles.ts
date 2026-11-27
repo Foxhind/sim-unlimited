@@ -1,4 +1,5 @@
 import type { RGB } from '../engine/palette';
+import { STYLE_TYPE_TAG } from './osm-types';
 
 /**
  * Architectural styles (OSM building:architecture) as the facade elements the generator draws:
@@ -374,10 +375,13 @@ export function inferArchitecture(tags: Record<string, string>, lon: number, lat
   if (tags['building:architecture']) return undefined;
   const year = Number(tags.start_date?.match(/\d{4}/)?.[0]);
   if (!Number.isFinite(year)) return undefined;
-  const type = tags['building:part'] && tags['building:part'] !== 'yes' ? tags['building:part'] : tags.building;
+  // a part of a building: the building's type (STYLE_TYPE_TAG), so its parts are drawn in its style
+  const type = tags[STYLE_TYPE_TAG] || (tags['building:part'] && tags['building:part'] !== 'yes' ? tags['building:part'] : tags.building);
   const region = archRegion(lon, lat);
   let eras: Era[];
-  if (SACRED_TYPES.has(type) || (type === 'yes' && tags.amenity === 'place_of_worship')) eras = SACRED_ERAS[region];
+  // a place of worship tagged on a plain building, or a part of one (its religion is its outline's: overpass SHARED_STYLE_KEYS)
+  const worship = tags.amenity === 'place_of_worship' || (tags['building:part'] !== undefined && tags.religion !== undefined);
+  if (SACRED_TYPES.has(type) || (worship && (type === 'yes' || !TOWN_TYPES.has(type)))) eras = SACRED_ERAS[region];
   else if (TOWN_TYPES.has(type)) {
     const levels = Number(tags['building:levels']), height = parseFloat(tags.height);
     // a building=yes or residential of unknown size may be a shed: only with its levels or height told
