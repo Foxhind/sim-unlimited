@@ -82,7 +82,8 @@ export function climateTemperature(latDeg: number, heightM: number, season = 0):
  *   bit 27       SNOW_FLAG;
  *   bit 28       MATERIAL_FLAG;
  *   bit 29       SELF_LIT_FLAG: an RGB colour that is a light source (aircraft lights), drawn at full
- *                strength whatever the sun or night, and only half as hazed by the fog.
+ *                strength whatever the sun or night, and only half as hazed by the fog;
+ *   bit 30       WOOD_FLAG: a face of wooden boards (WORLD_FS draws them: BOARDS).
  * Any RGB colour is allowed: it is lit, fogged and tinted for the time of day in the shader by the
  * same stepped law as the material ramps (shadeColour), not snapped to a palette.
  */
@@ -92,6 +93,16 @@ export const GLOW_LEVEL_MASK = 7;
 export const SNOW_FLAG = 1 << 27;
 export const MATERIAL_FLAG = 1 << 28;
 export const SELF_LIT_FLAG = 1 << 29;
+export const WOOD_FLAG = 1 << 30;
+/**
+ * Wooden boards on a face flagged WOOD_FLAG (building:material / roof:material wood, timber, log):
+ * horizontal boards M high by the height over the wall's base, on walls and on roofs steeper than
+ * MAX_UP (a normal's up share: not on a flat roof). The bottom SEAM of each board (a share of it, at
+ * least a pixel) is the shadow under the overlap, SEAM_SHADE of the colour; each board's tone is
+ * ±TONE off the face's. Where a board is under FADE_PX[1] pixels high the boards fade out, gone at
+ * FADE_PX[0], so no moiré shows far away.
+ */
+export const BOARDS = { M: 0.2, SEAM: 0.14, SEAM_SHADE: 0.7, TONE: 0.06, MAX_UP: 0.97, FADE_PX: [3, 6] } as const;
 
 /** an RGB face colour that shines by itself (a light source) */
 export function selfLit(packed: number): number {

@@ -7,7 +7,7 @@
  */
 import { LAMP_SHAPE, TREE_THIN } from '../world/props-mesher';
 import { ARCH_GLSL } from '../world/arch-styles';
-import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, STREET_LAMP, FAR_WINDOW_LIT_FACTOR, type RGB } from './palette';
+import { CLIMATE, FLAME_STEP, SUN_TAU, GLOW_LEVEL_MASK, GLOW_LEVELS, GLOW_SHIFT, GLOW_STEP_BASE, LIGHT, LUT_SIZE, MAT, MATERIAL_FLAG, OVERLAY_LUT_BASE, PAYLOAD_MASK, POINT_STEP, SELF_LIT_FLAG, SKY_BANDS, SNOW_FLAG, TREE_TRUNK_RAMP, WINDOWS, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, ROAD_EDGE, ROAD_EDGE_OFF, ROAD_MARK, ROAD_U_BASE, TRACK_EDGE, WINDOW_LIGHT, FAR_WINDOWS, STREET_LAMP, FAR_WINDOW_LIT_FACTOR, WOOD_FLAG, BOARDS, type RGB } from './palette';
 
 export const DEPTH_FAR = 200000;
 /**
@@ -1308,6 +1308,25 @@ precision mediump float;
 void main() {}
 `;
 
+/**
+ * Wooden boards (palette.ts BOARDS) at height y over the wall's base (the facade's v), fwy its change
+ * per pixel: each board a tone of its own, the seam at its bottom darker; fading out where a board
+ * gets too few pixels high, and into the fog.
+ */
+const BOARDS_GLSL = `
+vec3 boardsAt(vec3 c, float y, float fwy, float fog) {
+  float px = ${BOARDS.M.toFixed(3)} / max(fwy, 1e-6);
+  float show = smoothstep(${BOARDS.FADE_PX[0].toFixed(1)}, ${BOARDS.FADE_PX[1].toFixed(1)}, px) * (1.0 - fog);
+  if (show <= 0.0) return c;
+  float k = y / ${BOARDS.M.toFixed(3)};
+  float board = floor(k);
+  float tone = 1.0 + (fract(sin(board * 12.9898) * 43758.5453) - 0.5) * ${(2 * BOARDS.TONE).toFixed(3)};
+  // the seam: the board's bottom share, a pixel at least
+  float seam = fract(k) < max(${BOARDS.SEAM.toFixed(3)}, 1.0 / px) ? ${BOARDS.SEAM_SHADE.toFixed(3)} : 1.0;
+  return mix(c, min(c * tone * seam, vec3(1.0)), show);
+}
+`;
+
 export const WORLD_VS = `#version 300 es
 precision highp float;
 layout(location=0) in vec3 aPos;
@@ -1342,6 +1361,8 @@ out vec3 vHaze;
 out vec3 vRay;
 out vec2 vWinUV;
 flat out vec3 vWinEdge;
+// 1: a face of wooden boards (WOOD_FLAG), drawn by WORLD_FS boardsAt
+flat out float vWood;
 // buildings with windows: a near-white RGB face shaded in this face's light (glow level kept), for
 // what the facade paints in its own colours (WORLD_FS windowAt: the signs)
 flat out vec3 vRef;
@@ -1361,6 +1382,7 @@ void main() {
   vBary = vec3(corner == 0, corner == 1, corner == 2);
   vWinUV = aWinUV;
   vWinEdge = aWinEdge;
+  vWood = (aRamp & ${WOOD_FLAG}u) != 0u ? 1.0 : 0.0;
   vec3 wp = toWorld(aPos);
   if ((int(aMorph.y) & uCoarse) != 0) wp.y += aMorph.x;
   vec3 rel = wp - uCamPos;
@@ -1419,6 +1441,7 @@ in vec3 vHaze;
 in vec3 vRay;
 in vec2 vWinUV;
 flat in vec3 vWinEdge;
+flat in float vWood;
 flat in vec3 vRef;
 uniform vec3 uSunDir;
 // windows on building facades (renderer.windows): 0 none, 1 glass, 2 glass with some lit (night)
@@ -1461,7 +1484,7 @@ uniform vec4 uDirect;
 uniform sampler2D uLut;
 vec3 lutColor(uint i) { return texelFetch(uLut, ivec2(int(i & 255u), int(i >> 8u)), 0).rgb; }
 out vec4 oColor;
-${LOG_DEPTH_FS}${EYE_GLSL}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}
+${LOG_DEPTH_FS}${EYE_GLSL}${GLITTER_GLSL}${WATER_GLSL}${EMIT_GLSL}${WINDOW_GLSL}${TRACK_GLSL}${ROAD_MARK_GLSL}${SHADOW_RECEIVE_FS}${BOARDS_GLSL}
 void main() {
   writeLogDepth();
   // in a cast shadow the face keeps only the sky's light (vShade), at its edge the penumbra's
@@ -1505,6 +1528,8 @@ void main() {
   }
 #endif
 #ifndef NO_WINDOWS
+  // wooden boards on walls and pitched roofs, under the windows
+  if (vWood > 0.5 && abs(gWinN.y) < ${BOARDS.MAX_UP}) c = boardsAt(c, vWinUV.y, winFw.y, fogAt(vRay, uCamPos.y));
   if (uWindows > 0 && vWinEdge.y > 0.0) {
     float fog = fogAt(vRay, uCamPos.y);
     // a lit window is a light source: alpha 0 keeps the silhouette rim pass off it
@@ -1563,9 +1588,10 @@ flat out vec3 vColor;
 out float vLogW;
 flat out float vWater;
 out vec3 vRay;
-// no windows on trees (WORLD_FS reads them)
+// no windows or boards on trees (WORLD_FS reads them)
 out vec2 vWinUV;
 flat out vec3 vWinEdge;
+flat out float vWood;
 flat out vec3 vRef;
 out vec3 vBary;
 ${GLOW_VS}${EYE_GLSL}${RIM_GLSL}${SHADOW_RECEIVE_VS}${TREE_THIN_GLSL}
@@ -1580,6 +1606,7 @@ void main() {
   vBary = vec3(corner == 0, corner == 1, corner == 2);
   vWinUV = vec2(0.0);
   vWinEdge = vec3(0.0);
+  vWood = 0.0;
   vRef = vec3(0.0);
   float cy = cos(aInstYaw), sy = sin(aInstYaw);
   vec3 lp = vec3(cy * aPos.x - sy * aPos.z, aPos.y, sy * aPos.x + cy * aPos.z) * thin.xyx;

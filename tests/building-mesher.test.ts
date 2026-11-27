@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { colour, isMaterial, rgbOf, SNOW_FLAG } from '../src/engine/palette';
+import { colour, isMaterial, rgbOf, SNOW_FLAG, WOOD_FLAG } from '../src/engine/palette';
 import { tileBounds, type Tile } from '../src/world/geodesy';
 import {
   buildBuildingMesh,
@@ -153,6 +153,21 @@ describe('parapet', () => {
     expect(Math.min(...upAt(m, 110).filter((x) => x > maxX - 1))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
     expect(Math.max(...upAt(m, 110 - PARAPET.HEIGHT_M))).toBeCloseTo(maxX - PARAPET.WIDTH_M, 3);
     expect(m.windows.length / 5).toBe(m.vertexCount);
+  });
+
+  it('one storey (a shed, a garage, an outbuilding) has its flat roof on the walls, no parapet; a one-level shop keeps it', () => {
+    const small = rect(0.00006, 0.00005);
+    const cases: Record<string, string>[] = [{ building: 'shed' }, { building: 'garages' }, { building: 'garage' }, { building: 'yes' }, { building: 'industrial', height: '3' }];
+    for (const tags of cases) {
+      const m = build([{ rings: [tags.building === 'yes' ? rect(0.00004, 0.00003) : small], tags }]);
+      // the top of the whole mesh (a garage's doors stand out of its east wall: not edgeTop)
+      const top = Math.max(...ys(m));
+      // the roof is the top: nothing up there sits PARAPET.HEIGHT_M under it
+      expect(upAt(m, top - PARAPET.HEIGHT_M)).toHaveLength(0);
+      expect(upAt(m, top).length).toBeGreaterThan(0);
+    }
+    const shop = build([{ rings: [small], tags: { building: 'retail', 'building:levels': '1' } }]);
+    expect(upAt(shop, Math.max(...ys(shop)) - PARAPET.HEIGHT_M).length).toBeGreaterThan(0);
   });
 
   it('a chimney is open: a 50 cm rim, a soot-black shaft, its floor sunk 80% of the wall', () => {
@@ -782,5 +797,38 @@ describe('houses, sheds and carports', () => {
     // no wall faces: every normal is up or down
     for (let i = 0; i < m.vertexCount; i++) expect(Math.abs(m.vertices[i * 6 + 4])).toBeGreaterThan(0.9);
     expect(m.vertexCount).toBeGreaterThan(0);
+  });
+});
+
+describe('wood', () => {
+  const wood = (ramp: number) => (ramp & WOOD_FLAG) !== 0;
+
+  it('wooden walls and roofs are boards (WOOD_FLAG) in shades that vary by building', () => {
+    const shades = new Set<number>();
+    for (let i = 0; i < 40; i++) {
+      const w = wallRamp({ building: 'house', 'building:material': 'wood' }, i / 40);
+      expect(wood(w)).toBe(true);
+      shades.add(w & 0xffffff);
+    }
+    expect(shades.size).toBeGreaterThanOrEqual(4);
+    for (const m of ['timber', 'log', 'Wood;stone']) expect(wood(wallRamp({ building: 'house', 'building:material': m }))).toBe(true);
+    expect(wood(roofRamp({ building: 'house', 'roof:material': 'wood' }, 0.3))).toBe(true);
+    // a wooden wall says nothing of the roof, and other materials are no boards
+    expect(wood(roofRamp({ building: 'house', 'building:material': 'wood' }, 0.3))).toBe(false);
+    for (const m of ['brick', 'timber_framing', 'stone']) expect(wood(wallRamp({ building: 'house', 'building:material': m }))).toBe(false);
+    expect(wood(wallRamp({ building: 'house' }))).toBe(false);
+  });
+
+  it('a painted wooden house keeps its colour and its boards', () => {
+    const w = wallRamp({ building: 'house', 'building:material': 'wood', 'building:colour': '#336699' });
+    expect(wood(w)).toBe(true);
+    expect(w & 0xffffff).toBe(wallRamp({ building: 'house', 'building:colour': '#336699' }));
+  });
+
+  it('the flag reaches the mesh: wall faces of a wooden building carry it', () => {
+    const m = build([{ rings: [rect(0.0001, 0.00008)], tags: { building: 'house', 'building:material': 'wood', 'building:levels': '1' } }]);
+    let flagged = 0;
+    for (let i = 0; i < m.vertexCount; i++) if (wood(m.ramps[i]) && Math.abs(m.vertices[i * 6 + 4]) < 0.1) flagged++;
+    expect(flagged).toBeGreaterThan(0);
   });
 });

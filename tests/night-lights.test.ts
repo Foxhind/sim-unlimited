@@ -154,6 +154,11 @@ describe('building night lights', () => {
     expect(windowed({ building: 'industrial', man_made: 'chimney', height: '250' })).toBe(false);
     for (const man_made of ['tower', 'water_tower', 'silo', 'storage_tank']) expect(isLitBuilding({ building: 'yes', man_made })).toBe(false);
     expect(isLitBuilding({ building: 'chimney' })).toBe(false);
+    // nothing in them has windows: tanks and silos, hangars, minarets, containers, tents
+    for (const building of ['gasometer', 'bunker_silo', 'reservoir_covered', 'slurry_tank', 'digester', 'hangar', 'minaret', 'container', 'tent']) {
+      expect(isLitBuilding({ building })).toBe(false);
+    }
+    expect(isLitBuilding({ building: 'yes', 'building:part': 'minaret' })).toBe(false);
     expect(isLitBuilding({ building: 'industrial', man_made: 'works' })).toBe(true);
   });
 

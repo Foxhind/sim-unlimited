@@ -1,5 +1,5 @@
 import earcut from 'earcut';
-import { climateTemperature, colour, colourOf, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, FAR_WINDOWS, isMaterial, LIGHT, pointValue, rgbOf, snowy, WINDOWS, type RGB } from '../engine/palette';
+import { climateTemperature, colour, colourOf, WOOD_FLAG, FACADE, FACADE_ALL_NIGHT, FACADE_BLIND, FACADE_PANORAMIC, FACADE_PROFILE_M, FACADE_RESIDENTIAL, FACADE_SEED_BITS, FACADE_SHOPS, FACADE_UNIFORM, FAR_WINDOWS, isMaterial, LIGHT, pointValue, rgbOf, snowy, WINDOWS, type RGB } from '../engine/palette';
 import { enuToLatLon, latLonToEnu, tileCenter, type Tile } from './geodesy';
 import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmBuilding, type OsmPoint } from './osm-types';
 import type { HeightSampler } from './terrain-source';
@@ -101,9 +101,10 @@ const ENTRANCE_SNAP_M = 1.5;
 /**
  * Parapet along the edges of a flat roof, inside the building's height (the roof is HEIGHT_M under the
  * wall top): width inward from the wall face, height; only on a footprint whose sides are at least
- * MIN_SIDE_M and a facade at least MIN_WALL_M tall.
+ * MIN_SIDE_M and a facade at least MIN_WALL_M tall, and over ONE_STOREY_M: a one-storey shed, garage
+ * or outbuilding (SHED, GARAGES, OUTBUILDING) has its roof straight on the walls.
  */
-export const PARAPET = { WIDTH_M: 0.2, HEIGHT_M: 0.5, MIN_SIDE_M: 2, MIN_WALL_M: 2.5 } as const;
+export const PARAPET = { WIDTH_M: 0.2, HEIGHT_M: 0.5, MIN_SIDE_M: 2, MIN_WALL_M: 2.5, ONE_STOREY_M: 3 } as const;
 /**
  * A chimney (man_made=chimney, building=chimney) is open at the top: a rim WALL_M thick like a
  * parapet, the shaft inside it soot-black (SOOT) and its floor sunk DEPTH (a share of the wall) below
@@ -516,6 +517,16 @@ export function buildingHeights(b: OsmBuilding): Readonly<{ min: number; wall: n
   return h;
 }
 
+/**
+ * Wood (building:material / roof:material, WOOD_FLAG: boards in WORLD_FS): one of these shades per
+ * building by its seed — fresh pine, brown, dark stain, weathered, silvered grey; logs darker.
+ */
+const WOOD_SHADES: Record<string, RGB[]> = {
+  wood: [[176, 132, 84], [150, 110, 70], [118, 84, 54], [134, 118, 98], [150, 146, 136]],
+  timber: [[176, 132, 84], [150, 110, 70], [118, 84, 54], [134, 118, 98], [150, 146, 136]],
+  log: [[150, 106, 64], [130, 92, 56], [104, 72, 46], [120, 106, 88]],
+};
+
 /** typical colour of an OSM material value (building:material / roof:material) */
 const MATERIAL_RGB: Record<string, RGB> = {
   brick: [156, 88, 64], concrete: [150, 150, 150], cement: [150, 150, 150], cement_block: [150, 150, 150],
@@ -524,7 +535,7 @@ const MATERIAL_RGB: Record<string, RGB> = {
   tile: [168, 104, 80], tiles: [168, 104, 80], roof_tiles: [168, 104, 80], clay: [168, 104, 80],
   slate: [72, 76, 84], stone: [150, 140, 125], sandstone: [190, 165, 120], limestone: [200, 190, 165],
   granite: [130, 126, 124], marble: [215, 212, 206],
-  wood: [150, 110, 70], timber: [150, 110, 70], timber_framing: [200, 185, 150], log: [130, 92, 56],
+  timber_framing: [200, 185, 150],
   plaster: [210, 195, 160], stucco: [210, 195, 160], render: [210, 195, 160], mud: [150, 120, 90],
   thatch: [160, 130, 80], reed: [160, 130, 80], bitumen: [60, 62, 66], tar_paper: [60, 62, 66],
   asphalt: [70, 72, 76], eternit: [140, 140, 140], asbestos: [140, 140, 140], plastic: [180, 180, 180],
@@ -658,12 +669,16 @@ export function pastelColour(c: RGB): RGB {
  * Ramp of the first usable colour among the colour tags (a CSS name muted, a hex or rgb() value
  * as tagged unless too saturated: pastelColour), else of the material's colour.
  */
-function taggedRamp(tags: Record<string, string>, colourKeys: string[], materialKey: string): number | undefined {
+function taggedRamp(tags: Record<string, string>, colourKeys: string[], materialKey: string, t: number): number | undefined {
+  const mat = tags[materialKey]?.split(';')[0].trim().toLowerCase();
+  const wood = mat ? WOOD_SHADES[mat] : undefined;
+  // boards whatever the colour: a painted wooden house is still boards
+  const boards = (ramp: number) => (wood ? (ramp | WOOD_FLAG) >>> 0 : ramp);
   for (const k of colourKeys) {
     const c = parseColor(tags[k]);
-    if (c) return isNamedColor(tags[k]) ? mutedRamp(c) : rgbRamp(pastelColour(c));
+    if (c) return boards(isNamedColor(tags[k]) ? mutedRamp(c) : rgbRamp(pastelColour(c)));
   }
-  const mat = tags[materialKey]?.split(';')[0].trim().toLowerCase();
+  if (wood) return boards(rgbRamp(wood[Math.min(wood.length - 1, Math.floor(t * wood.length))]));
   return mat && MATERIAL_RGB[mat] ? rgbRamp(MATERIAL_RGB[mat]) : undefined;
 }
 
@@ -674,12 +689,12 @@ function taggedRamp(tags: Record<string, string>, colourKeys: string[], material
  * as tagged unless too saturated (pastelColour); a CSS colour name as a muted shade of it.
  */
 export function wallRamp(tags: Record<string, string>, seed = 0.5): number {
-  const tagged = taggedRamp(tags, ['building:colour', 'building:color', 'colour', 'color'], 'building:material');
+  const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
+  const tagged = taggedRamp(tags, ['building:colour', 'building:color', 'colour', 'color'], 'building:material', t);
   if (tagged !== undefined) return tagged;
   // the parts of one building: one palette (overpass shareStyleInParts)
   const type = tags[STYLE_TYPE_TAG] || tags['building:part'] || tags.building || 'yes';
   if (type === 'greenhouse') return rgbRamp([...GREENHOUSE.GLASS]);
-  const t = (seed * 104729 + 0.5) % 1; // a draw decorrelated from the roof's (roofRamp)
   // a building of an architectural style: that style's colours
   return rgbRamp(pickWeighted(archProfile(tags)?.walls ?? wallPalette(type), t));
 }
@@ -740,7 +755,7 @@ function greyRamp(c: RGB): number {
  * more of the low-rise pitched roofs, pale concrete for the rest.
  */
 export function roofRamp(tags: Record<string, string>, seed = 0.5, latDeg?: number): number {
-  const tagged = taggedRamp(tags, ['roof:colour', 'roof:color'], 'roof:material');
+  const tagged = taggedRamp(tags, ['roof:colour', 'roof:color'], 'roof:material', (seed * 7919) % 1);
   if (tagged !== undefined) return tagged;
   if (isGlasshouse(tags)) return rgbRamp([...GREENHOUSE.GLASS]);
   const flat = isFlatRoof(tags);
@@ -1034,7 +1049,8 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       // a flat roof holds snow in winter
       // a parapet along the edges, the roof sunk behind it (not on a canopy or a too small building)
       const bb = bbox(outer);
-      const withParapet = !canopy && !glassy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
+      const withParapet = !canopy && !glassy && h.wall >= PARAPET.MIN_WALL_M && h.wall > PARAPET.ONE_STOREY_M + 0.01
+        && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
       if (withParapet && isChimney(tags)) {
         const soot = rgbRamp(CHIMNEY.SOOT);
         const floorY = wallTop - CHIMNEY.DEPTH * h.wall;
@@ -1709,11 +1725,16 @@ export function isAllNight(tags: Record<string, string>): boolean {
     || tags.shop === 'supermarket' || tags.shop === 'hypermarket';
 }
 
-/** buildings that nobody lives or works in stay dark at night */
+/**
+ * Buildings with no windows (blank walls, no facade zones) that stay dark at night: nobody lives or
+ * works in them, or what they are for has no windows — tanks and silos, a hangar's doors and blank
+ * walls, a minaret's shaft, a container, a tent.
+ */
 const UNLIT_TYPES = new Set([
   'garage', 'garages', 'carport', 'shed', 'hut', 'cabin', 'roof', 'barn', 'greenhouse', 'storage_tank',
   'silo', 'transformer_tower', 'service', 'ruins', 'construction', 'bunker', 'kiosk', 'toilets',
   'chimney', 'water_tower', 'cooling_tower',
+  'gasometer', 'bunker_silo', 'reservoir_covered', 'slurry_tank', 'digester', 'hangar', 'minaret', 'container', 'tent',
 ]);
 /** structures mapped as buildings (man_made) that have no windows: chimneys, towers, tanks, silos */
 const UNLIT_MAN_MADE = new Set([
