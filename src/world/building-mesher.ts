@@ -8,6 +8,7 @@ import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
 import { crossings, meshCrossings, roundProfile, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 import { KindRuns, structureKind } from './structure-kinds';
 import { ARCH_INFERRED_TAG, archProfile, BELT, FRAME, inferArchitecture, paneHalfHeight, type ArchProfile } from './arch-styles';
+import { FINIAL, FINIAL_TAG, finialTris, FOOTING_TAG, qiblaAxis, type FinialKind } from './temples';
 
 /** floats per vertex of BuildingMeshData.windows */
 export const WINDOW_ATTR_FLOATS = 5;
@@ -1098,7 +1099,9 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const holes = b.rings.slice(1).map((r) => normalizeRing(dedupe(r.map(toXZ)), false)).filter((r) => r.length >= 3);
 
     // the walls stand at the highest ground under the footprint (a plinth below, see PLINTH_MAX_M)
-    const { base, low } = buildingFooting(outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
+    // (a temple's generated part: on the ground of the whole temple, temples.ts)
+    const footing = tags[FOOTING_TAG]?.split(' ').map((p) => p.split(',').map(Number) as LonLat);
+    const { base, low } = buildingFooting(footing ?? outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
     const coreStart = core.ramps.length, smallStart = small.ramps.length;
     const shape = roofShape(tags);
     // a hangar's door wall (HANGAR), chosen first: an arch turns its end to it
@@ -1239,6 +1242,23 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       planarRoof(outer, holes, wallTop, roof.field, creases, rRamp);
     }
 
+    // a cross or a crescent on a dome, a spire or a tent, or on the west gable of a church with neither (temples.ts)
+    const fin = tags[FINIAL_TAG] as FinialKind | undefined;
+    if (fin) {
+      const r = Math.max(...outer.map((p) => Math.hypot(p[0] - centroid[0], p[1] - centroid[1])));
+      const axis: XZ = fin === 'crescent' ? qiblaAxis(outerLL[0][0], outerLL[0][1]) : [0, 1];
+      const size = (k: number, max: number) => Math.min(max, Math.max(FINIAL.MIN_M, k));
+      if (roof.kind === 'radial' || (roof.kind === 'fan' && h.roof >= FINIAL.SPIRE_RISE * r)) {
+        detail(() => finial(fin, [centroid[0], wallTop + h.roof, centroid[1]], size(FINIAL.SIZE * r, FINIAL.MAX_M), axis));
+      } else if (shape === 'gabled' && !skeleton && !isBuildingPart(tags) && fin !== 'crescent') {
+        // the ridge's west end, a little in from the gable
+        const end = frame.u[0] <= 0 ? 1 : -1;
+        const d = frame.halfU - FINIAL.INSET_M;
+        const at: V3 = [frame.origin[0] + frame.u[0] * end * d, wallTop + h.roof, frame.origin[1] + frame.u[1] * end * d];
+        detail(() => finial(fin, at, size(FINIAL.GABLE * frame.halfV, FINIAL.GABLE_MAX_M), frame.v));
+      }
+    }
+
     if (glassy) {
       ({ verts, ramps, win } = core);
       // the frame is a small part: the far LOD draws the glass alone
@@ -1371,6 +1391,18 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       for (const cell of cells) {
         const lifted = cell.map((p): V3 => [p[0], wallTop + field(p), p[1]]);
         for (let k = 1; k + 1 < lifted.length; k++) emitTri(lifted[0], lifted[k], lifted[k + 1], ramp, true);
+      }
+    }
+  }
+
+  /** a finial (temples.ts finialTris), gilded */
+  function finial(kind: FinialKind, apex: V3, size: number, axis: XZ): void {
+    const ramp = rgbRamp(FINIAL.RGB);
+    for (const [a, b, c, n] of finialTris(kind, apex, size, axis)) {
+      for (const p of [a, b, c]) {
+        verts.push(p[0], p[1], p[2], n[0], n[1], n[2]);
+        ramps.push(ramp);
+        win.push(0, 0, 0, 0, 0);
       }
     }
   }
@@ -1919,6 +1951,8 @@ const UNLIT_TYPES = new Set([
   'silo', 'transformer_tower', 'service', 'ruins', 'construction', 'bunker', 'kiosk', 'toilets',
   'chimney', 'water_tower', 'cooling_tower',
   'gasometer', 'bunker_silo', 'reservoir_covered', 'slurry_tank', 'digester', 'hangar', 'minaret', 'container', 'tent',
+  // a temple's generated bell tower and domes' drums (temples.ts)
+  'bell_tower', 'dome',
 ]);
 /** structures mapped as buildings (man_made) that have no windows: chimneys, towers, tanks, silos */
 const UNLIT_MAN_MADE = new Set([

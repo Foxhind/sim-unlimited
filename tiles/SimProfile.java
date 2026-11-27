@@ -96,6 +96,8 @@ public class SimProfile implements Profile {
     "service", "tracktype", "amenity", "parking", "junction", "sport", "shop", "healthcare", "trees", "ele", "religion", "power", "voltage", "indoor", "historic", "ruins", "aerialway", "tomb", "barrier", "material", "wall", "genus", "species", "taxon", "fence_type",
     // pedestrian crossings: their nodes and the crossing ways (ground-cover zebras)
     "crossing", "footway", "cycleway",
+    // a place of worship's denomination: an Orthodox or a Western church (temples.ts faithOf)
+    "denomination",
     // the year a building was built (building-mesher hasPanoramicWindows, arch-styles inferArchitecture;
     // amenity=place_of_worship there too)
     "start_date");

@@ -2,6 +2,7 @@ import { tileBounds, type Tile, type TileBounds } from './geodesy';
 import { cliffBands } from './cliffs';
 import { isAntenna } from './mast-mesher';
 import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmArea, type OsmBuilding, type OsmDetail, type OsmLine, type OsmPoint, type OsmTileData } from './osm-types';
+import { expandTemples, FOOTING_TAG } from './temples';
 
 /** the drawn roads and paths (osm-mesher classifyLine), as an Overpass statement without its bbox */
 export const ROAD_SELECTOR = 'way["highway"~"^((motorway|trunk|primary|secondary|tertiary)(_link)?|residential|unclassified|road|living_street|service|track|pedestrian|busway|raceway|footway|path|cycleway|bridleway|steps)$"]';
@@ -337,7 +338,9 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
   }
   // each cliff's face: a band of bare rock on its low side (cliffs.ts)
   areas.push(...cliffBands(lines));
-  return { areas, lines, points, buildings: hideOutlinesWithParts(shareStyleInParts(buildings, partGroup, groupStyle)) };
+  // places of worship: as mapped (their symbols added), or built from a bare outline (temples.ts)
+  const styled = shareStyleInParts(buildings, partGroup, groupStyle);
+  return { areas, lines, points, buildings: hideOutlinesWithParts(expandTemples(styled, partOwners(styled))) };
 }
 
 const isPart = (b: OsmBuilding) => b.tags['building:part'] !== undefined && b.tags['building:part'] !== 'no';
@@ -352,6 +355,8 @@ export const SHARED_STYLE_KEYS = [
   ['building:architecture'],
   // the year a style is inferred from (arch-styles inferArchitecture), also of shop and panoramic windows
   ['start_date'],
+  // a place of worship's faith: its domes' and spires' symbols (temples.ts)
+  ['religion', 'denomination'],
 ] as const;
 
 /** the vertex mean of a ring, or a vertex nudged toward it when that falls outside (a concave ring) */
@@ -375,7 +380,8 @@ function partOwners(buildings: OsmBuilding[]): Map<OsmBuilding, OsmBuilding[]> {
   const CELL = 0.001;
   const grid = new Map<string, { part: OsmBuilding; probe: LonLat }[]>();
   for (const p of buildings) {
-    if (!isPart(p) || !p.rings[0]?.length) continue;
+    // a temple's generated parts stand in its body, which they do not hide (temples.ts)
+    if (!isPart(p) || !p.rings[0]?.length || p.tags[FOOTING_TAG] !== undefined) continue;
     const probe = probeOf(p.rings[0]);
     const key = `${Math.floor(probe[0] / CELL)},${Math.floor(probe[1] / CELL)}`;
     const list = grid.get(key);

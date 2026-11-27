@@ -221,7 +221,7 @@ describe('parseOverpass buildings', () => {
         { type: 'node', id: 20, lat: 2, lon: 2 },
         { type: 'node', id: 21, lat: 2, lon: 3 },
         { type: 'node', id: 22, lat: 3, lon: 3 },
-        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'church', height: '20' } },
+        { type: 'way', id: 10, nodes: [1, 2, 3, 4, 1], tags: { building: 'yes', height: '20' } },
         { type: 'way', id: 11, nodes: [1, 5, 6, 4, 1], tags: { 'building:part': 'yes', height: '30' } },
         { type: 'way', id: 12, nodes: [5, 2, 3, 6, 5], tags: { 'building:part': 'yes', height: '15' } },
         // a building elsewhere keeps its outline
