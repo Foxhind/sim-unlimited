@@ -11,6 +11,11 @@ import {
   footprintHeight,
   GARAGES,
   garageDoors,
+  ARCHED_TAG,
+  archDirection,
+  archDoorHeight,
+  HANGAR,
+  hangarDoorEdge,
   CARPORT_M,
   SHED,
   withDefaultTags,
@@ -28,6 +33,7 @@ import {
   wallRamp,
 } from '../src/world/building-mesher';
 import type { OsmBuilding } from '../src/world/osm-types';
+import { roundProfile } from '../src/world/roof-shapes';
 import { AC_SIZE, INSTANCE, TREE_STRIDE } from '../src/world/props-mesher';
 import { WINDOWS } from '../src/engine/palette';
 
@@ -830,5 +836,138 @@ describe('wood', () => {
     let flagged = 0;
     for (let i = 0; i < m.vertexCount; i++) if (wood(m.ramps[i]) && Math.abs(m.vertices[i * 6 + 4]) < 0.1) flagged++;
     expect(flagged).toBeGreaterThan(0);
+  });
+});
+
+describe('hangars', () => {
+  // ~ 36 × 22 m: the arch spans the short side
+  const ring = () => rect(0.00024, 0.0001);
+  const b = tileBounds(TILE);
+  const lat = (b.south + b.north) / 2;
+  const span = 0.0002 * 111320;
+  const hangar = (tags: Record<string, string>): OsmBuilding => ({ rings: [ring()], tags: { building: 'hangar', ...tags } });
+
+  it('without its shape or heights: an arch from the ground, half its span high, whatever its levels', () => {
+    for (const tags of [{}, { 'building:levels': '2' }] as Record<string, string>[]) {
+      const t = buildingTags(hangar(tags));
+      expect(t['roof:shape']).toBe('round');
+      expect(t[ARCHED_TAG]).toBe('yes');
+      const h = buildingHeights(hangar(tags));
+      expect(h.wall).toBeCloseTo(0, 6);
+      expect(h.roof).toBeCloseTo(span / 2, 0);
+    }
+    expect(Math.cos((lat * Math.PI) / 180) * 0.00048 * 111320).toBeGreaterThan(span); // the long side is the other
+  });
+
+  it('with only its height or only its roof:height: an arch that high', () => {
+    expect(buildingHeights(hangar({ height: '14' }))).toMatchObject({ wall: 0, roof: 14 });
+    expect(buildingHeights(hangar({ 'roof:height': '9', 'building:levels': '1' }))).toMatchObject({ wall: 0, roof: 9 });
+  });
+
+  it('its roof:shape, or both heights, told: Simple 3D Buildings as tagged; a part is never an arch', () => {
+    const flat = buildingTags(hangar({ 'roof:shape': 'flat', 'building:levels': '1' }));
+    expect(flat[ARCHED_TAG]).toBeUndefined();
+    expect(flat['roof:shape']).toBe('flat');
+    // S3DB: no shape is flat, and a flat roof has no roof:height
+    expect(buildingHeights(hangar({ height: '15', 'roof:height': '5' }))).toMatchObject({ wall: 15, roof: 0 });
+    expect(buildingHeights(hangar({ height: '15', 'roof:height': '5', 'roof:shape': 'gabled' }))).toMatchObject({ wall: 10, roof: 5 });
+    expect(buildingTags({ rings: [ring()], tags: { building: 'yes', 'building:part': 'hangar' } })[ARCHED_TAG]).toBeUndefined();
+  });
+
+  it("an arch's vault is the colour of its body", () => {
+    const t = buildingTags(hangar({}));
+    expect(roofRamp(t, 0.37, lat)).toBe(wallRamp(t, 0.37));
+    expect(roofRamp(buildingTags(hangar({ 'roof:colour': '#aa0000' })), 0.37, lat)).not.toBe(wallRamp(t, 0.37));
+  });
+
+  // 40 × 20 m, ridge along x; edges: 0 north (z = 0), 1 east, 2 south, 3 west
+  const box: [number, number][] = [[0, 0], [40, 0], [40, 20], [0, 20]];
+  const ridge: [number, number] = [1, 0];
+  const area = (x0: number, z0: number, x1: number, z1: number): [number, number][] => [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
+
+  it('the door wall faces the apron (the longest that does), else a taxiway, a road; else an end of the arch or the longest wall', () => {
+    // apron east of it: the east end, arched or not
+    expect(hangarDoorEdge(box, ridge, true, [area(40, -30, 120, 50)], [], [])).toBe(1);
+    expect(hangarDoorEdge(box, ridge, false, [area(40, -30, 120, 50)], [], [])).toBe(1);
+    // an apron round the south-east corner: both walls face it, the long south one wins
+    expect(hangarDoorEdge(box, ridge, true, [area(10, 5, 120, 80)], [], [])).toBe(2);
+    // no apron: a taxiway west, then a road north
+    expect(hangarDoorEdge(box, ridge, true, [], [[[-30, -50], [-30, 80]]], [[[-50, -10], [90, -10]]])).toBe(3);
+    expect(hangarDoorEdge(box, ridge, true, [], [], [[[-50, -10], [90, -10]]])).toBe(0);
+    // nothing near: the arch's first end, the box's longest wall
+    expect(hangarDoorEdge(box, ridge, true, [], [], [])).toBe(1);
+    expect([0, 2]).toContain(hangarDoorEdge(box, ridge, false, [], [], []));
+  });
+
+  it('an arch turns its ridge square to the door wall', () => {
+    // roof-shapes roofDirection: [sin r, -cos r]; the ridge is square to it, along the wall's normal
+    for (const i of [0, 1, 2, 3]) {
+      const r = (Number(archDirection(box, i)) * Math.PI) / 180;
+      const d = [Math.sin(r), -Math.cos(r)];
+      const p = box[i], q = box[(i + 1) % 4];
+      const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      expect(d[0] * (q[0] - p[0]) / len + d[1] * (q[1] - p[1]) / len).toBeCloseTo(1, 6);
+    }
+  });
+
+  it("the arch's chords: the half ellipse at their ends, under it between them", () => {
+    expect(roundProfile(0)).toBeCloseTo(1, 9);
+    expect(roundProfile(1)).toBeCloseTo(0, 9);
+    expect(roundProfile(0.5)).toBeCloseTo(Math.sqrt(0.75), 9);
+    expect(roundProfile(0.6)).toBeLessThan(Math.sqrt(1 - 0.36));
+  });
+
+  it('a door and its frame fit under the chords, ARCH_GAP_M below them, for any span and height', () => {
+    for (const span of [12, 22, 40, 52, 73]) {
+      for (const arch of [6, 11, 16, 30]) {
+        const width = span * HANGAR.ARCH_DOOR_W;
+        const h = archDoorHeight(span, arch, width);
+        expect(h).toBeLessThanOrEqual(arch * HANGAR.ARCH_DOOR_H + 1e-9);
+        // the frame's outer top corner, and its middle
+        const corner = (width / 2 + HANGAR.DOOR_FRAME_M) / (span / 2);
+        expect(h + HANGAR.DOOR_FRAME_M + HANGAR.ARCH_GAP_M).toBeLessThanOrEqual(arch * roundProfile(corner) + 1e-9);
+      }
+    }
+    // a low arch: the chords and the frame, not the share, set it
+    expect(archDoorHeight(12, 3, 12 * HANGAR.ARCH_DOOR_W)).toBeLessThan(3 * HANGAR.ARCH_DOOR_H);
+  });
+
+  it('a wide hangar is no taller than ARCH_MAX_M (a flattened arch); a told height stands', () => {
+    const wide: OsmBuilding = { rings: [rect(0.0006, 0.0003)], tags: { building: 'hangar' } }; // ~ 90 × 67 m
+    expect(buildingHeights(wide)).toMatchObject({ wall: 0, roof: HANGAR.ARCH_MAX_M });
+    expect(buildingHeights({ ...wide, tags: { building: 'hangar', height: '30' } }).roof).toBe(30);
+  });
+
+  it('the mesh: an arch as high as half its narrow side, its door end facing the apron, turned for it', () => {
+    const c = [(b.west + b.east) / 2, lat];
+    const apronEast: [number, number][] = [[c[0] + 0.00024, lat - 0.0006], [c[0] + 0.003, lat - 0.0006], [c[0] + 0.003, lat + 0.0006], [c[0] + 0.00024, lat + 0.0006]];
+    const m = buildBuildingMesh({ tile: TILE, buildings: [hangar({})], sampleHeight: () => 100, aprons: [apronEast] });
+    expect(Math.max(...ys(m))).toBeCloseTo(100 + span / 2, 0);
+    // the door's faces (the small parts) look east (+x)
+    let east = 0, other = 0;
+    for (let i = m.coreVertexCount; i < m.vertexCount; i++) {
+      if (m.vertices[i * 6 + 3] > 0.9) east++;
+      else if (Math.abs(m.vertices[i * 6 + 4]) < 0.1) other++;
+    }
+    expect(east).toBeGreaterThan(0);
+    expect(other).toBe(0);
+    // an apron along its long north side: the arch turns, its door there, still half the narrow side high
+    const apronNorth: [number, number][] = [[c[0] - 0.001, lat + 0.0001], [c[0] + 0.001, lat + 0.0001], [c[0] + 0.001, lat + 0.001], [c[0] - 0.001, lat + 0.001]];
+    const t = buildBuildingMesh({ tile: TILE, buildings: [hangar({})], sampleHeight: () => 100, aprons: [apronNorth] });
+    expect(Math.max(...ys(t))).toBeCloseTo(100 + span / 2, 0);
+    let north = 0, rest = 0;
+    for (let i = t.coreVertexCount; i < t.vertexCount; i++) {
+      if (t.vertices[i * 6 + 5] < -0.9) north++;
+      else if (Math.abs(t.vertices[i * 6 + 4]) < 0.1) rest++;
+    }
+    expect(north).toBeGreaterThan(0);
+    expect(rest).toBe(0);
+    // turned, the vault runs north-south: the top of the arch is over the whole north wall's middle line
+    let ridgeLen = 0;
+    const top = Math.max(...ys(t));
+    const xs: number[] = [], zs: number[] = [];
+    for (let i = 0; i < t.coreVertexCount; i++) if (t.vertices[i * 6 + 1] > top - 0.3) { xs.push(t.vertices[i * 6]); zs.push(t.vertices[i * 6 + 2]); }
+    ridgeLen = Math.max(...zs) - Math.min(...zs);
+    expect(ridgeLen).toBeGreaterThan(Math.max(...xs) - Math.min(...xs));
   });
 });

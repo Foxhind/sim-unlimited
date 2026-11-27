@@ -146,6 +146,21 @@ export function roofFrame(outer: XZ[], tags: Record<string, string>): RoofFrame 
   return best;
 }
 
+/** a round roof (barrel vault) is this many chords of its half ellipse across the building */
+export const ROUND_CHORDS = 8;
+/**
+ * The height of a round roof's chords as a share of its height, at `t` of the half span from the
+ * middle (0..1): under the half ellipse between the chords' ends, as roofModel draws it.
+ */
+export function roundProfile(t: number): number {
+  const v = Math.min(1, Math.abs(t));
+  const step = 2 / ROUND_CHORDS;
+  const k = Math.min(ROUND_CHORDS - 1, Math.floor((v + 1) / step));
+  const v0 = -1 + k * step, v1 = v0 + step;
+  const y = (x: number) => Math.sqrt(Math.max(0, 1 - x * x));
+  return y(v0) + ((y(v1) - y(v0)) * (v - v0)) / step;
+}
+
 /** horizontal run a roof:angle rises over: across the whole footprint for a skillion, half of it otherwise */
 export function roofRun(shape: string, frame: RoofFrame): number {
   return shape === 'skillion' ? frame.halfV * 2 : frame.halfV;
@@ -239,8 +254,8 @@ export function roofModel(shape: string, frame: RoofFrame, H: number, outer: XZ[
       return done(ps, min(ps));
     }
     case 'round': {
-      // a barrel vault: chords of the half ellipse across the building
-      const n = 8, ps: Plane[] = [];
+      // a barrel vault: ROUND_CHORDS chords of the half ellipse across the building (roundProfile)
+      const n = ROUND_CHORDS, ps: Plane[] = [];
       const y = (v: number) => H * Math.sqrt(Math.max(0, 1 - (v / W) ** 2));
       for (let k = 0; k < n; k++) {
         const v0 = -W + (2 * W * k) / n, v1 = -W + (2 * W * (k + 1)) / n;

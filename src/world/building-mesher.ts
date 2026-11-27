@@ -5,7 +5,7 @@ import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmBuilding, type OsmPo
 import type { HeightSampler } from './terrain-source';
 import type { TerrainMeshData } from './terrain-mesher';
 import { AC_SIZE, INSTANCE, pushInstance } from './props-mesher';
-import { crossings, meshCrossings, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
+import { crossings, meshCrossings, roundProfile, roofBreaks, roofCreases, roofField, roofFrame, roofModel, roofRun, roofShape, roofSkeleton, skeletonRoof, splitConvex, type Plane, type RoofFrame, type RoofModel, type XZ } from './roof-shapes';
 import { KindRuns, structureKind } from './structure-kinds';
 import { ARCH_INFERRED_TAG, archProfile, BELT, FRAME, inferArchitecture, paneHalfHeight, type ArchProfile } from './arch-styles';
 
@@ -80,6 +80,9 @@ export interface BuildingMeshOptions {
   points?: OsmPoint[];
   /** the roads with a carriageway (road-net isCarriageway): a garage's doors face the nearest (garageDoors) */
   roads?: LonLat[][];
+  /** aprons' outlines and taxiways: a hangar's doors face them (hangarDoor) */
+  aprons?: LonLat[][];
+  taxiways?: LonLat[][];
 }
 
 /** a wall edge at least this long may carry balconies (one slot of WINDOWS.SPACING_M) */
@@ -130,6 +133,38 @@ export const GARAGES = { WALL_M: 2.8, BOX_M: 3.3, DOOR_W: 2.5, DOOR_H: 2.2, LONG
 const GARAGE_TYPES = new Set(['garage', 'garages']);
 /** a garage door's paint, picked per door by its hash: grey, green, brown, blue-grey, rust */
 const GARAGE_LEAF_RGB: RGB[] = [GARAGE_DOOR_RGB, [74, 96, 72], [104, 78, 58], [92, 104, 116], [126, 74, 52]];
+/**
+ * building=hangar (not a part): Simple 3D Buildings as tagged when OSM gives its roof:shape, or both
+ * its height and roof:height; else an arch from the ground (ARCHED_TAG): roof:shape round over a wall
+ * of nothing, as high as its height or roof:height, without either half its narrow side but at most
+ * ARCH_MAX_M (a half circle, flattened over a wide one: a hangar for two aircraft).
+ * Its door (hangarDoorEdge) is on the wall that faces the apron or a taxiway (APRON_REACH_M), else a
+ * road (GARAGES.ROAD_REACH_M) — the longest of those that do; an arch turns so that wall is its end
+ * (its span along it). Facing nothing: an arch's door is in an end, a box's on its longest wall.
+ * The door: ARCH_DOOR_W of the end's width and ARCH_DOOR_H of the arch's height, but under the
+ * arch's chords (roof-shapes roundProfile) above its frame's outer edge, ARCH_GAP_M below them
+ * (archDoorHeight); BOX_DOOR of a box's wall length and height; a frame DOOR_FRAME_M wide round
+ * sliding panels PANEL_M wide.
+ */
+export const HANGAR = {
+  ARCH_MAX_M: 16, APRON_REACH_M: 150, APRON_PROBE_M: 5, ARCH_DOOR_W: 0.6, ARCH_DOOR_H: 0.7, ARCH_GAP_M: 0.2,
+  BOX_DOOR_W: 0.8, BOX_DOOR_H: 0.85, DOOR_FRAME_M: 0.25, MIN_EDGE_M: 8, PANEL_M: 5,
+} as const;
+
+/**
+ * The height of a door `width` wide in the middle of an arch's end `span` wide and `arch` high
+ * (HANGAR): ARCH_DOOR_H of the arch, lowered so its frame stays ARCH_GAP_M under the chords.
+ */
+export function archDoorHeight(span: number, arch: number, width: number): number {
+  const half = span / 2;
+  const edge = (width / 2 + HANGAR.DOOR_FRAME_M) / half;
+  const room = arch * roundProfile(edge) - HANGAR.DOOR_FRAME_M - HANGAR.ARCH_GAP_M;
+  return Math.max(0, Math.min(arch * HANGAR.ARCH_DOOR_H, room));
+}
+/** internal tag (not OSM): the hangar is an arch from the ground (HANGAR) */
+export const ARCHED_TAG = 'sim:arched';
+const HANGAR_DOOR_RGB: RGB = [132, 136, 140];
+const HANGAR_SEAM_RGB: RGB = [92, 96, 100];
 /** standoff of the door layers from the wall (window cover, frame, leaf), so the depth test keeps the order */
 const DOOR_LAYERS_M = [0.03, 0.06, 0.09];
 
@@ -389,7 +424,107 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
   }
   if (tags.building === 'greenhouse' && !isPart) greenhouseDefaults(tags, out, levels);
   if (GARAGE_TYPES.has(tags.building) && untold && !isPart) out[FOOTPRINT_WALL_TAG] = String(GARAGES.WALL_M);
+  if (tags.building === 'hangar' && !isPart && isArchedHangar(tags)) {
+    // the arch is the building: no wall under it, its levels mean nothing to its shape
+    const min = parseLength(tags.min_height) ?? 0;
+    const height = parseLength(tags.height);
+    const told = height !== undefined ? height - min : parseLength(tags['roof:height']);
+    for (const k of ['height', 'building:levels', 'roof:levels', 'roof:height', 'roof:angle']) delete out[k];
+    out['roof:shape'] = 'round';
+    out[FOOTPRINT_WALL_TAG] = '0';
+    out[ARCHED_TAG] = 'yes';
+    // without a height: half the narrow side, at most ARCH_MAX_M (whichever way the arch turns: hangarDoorEdge)
+    const half = outer && outer.length >= 3 ? roofFrame(outer, tags).halfV : undefined;
+    const arch = told !== undefined && told > 0 ? told : half !== undefined ? Math.min(HANGAR.ARCH_MAX_M, half) : undefined;
+    if (arch !== undefined) out['roof:height'] = String(arch);
+  }
   return out;
+}
+
+/** the aprons' outlines and the taxiways of OSM data, for hangarDoor (BuildingMeshOptions aprons, taxiways) */
+export function hangarTargets(areas: { rings: LonLat[][]; tags: Record<string, string> }[], lines: { points: LonLat[]; tags: Record<string, string> }[]): { aprons: LonLat[][]; taxiways: LonLat[][] } {
+  const aprons = areas.filter((a) => a.tags.aeroway === 'apron' && a.rings[0]?.length).map((a) => a.rings[0]);
+  for (const l of lines) if (l.tags.aeroway === 'apron' && l.points.length >= 4) aprons.push(l.points);
+  const taxiways = lines.filter((l) => l.tags.aeroway === 'taxiway' || l.tags.aeroway === 'taxilane').map((l) => l.points);
+  return { aprons, taxiways };
+}
+
+/** a hangar drawn as an arch: OSM gives neither its roof:shape nor both its height and roof:height (HANGAR) */
+export function isArchedHangar(tags: Record<string, string>): boolean {
+  if (tags['roof:shape'] !== undefined) return false;
+  return parseLength(tags.height) === undefined || parseLength(tags['roof:height']) === undefined;
+}
+
+/**
+ * The wall edge of `outer` (ccw: (dz, -dx) outward) among those `ok` takes that faces the targets:
+ * a probe PROBE_M out of its middle inside an area (an apron), else the nearest line (a taxiway, a
+ * road) within `reach` in front of it. Undefined when nothing faces any edge.
+ */
+function facingEdge(outer: XZ[], ok: (i: number, len: number) => boolean, areas: XZ[][], lines: XZ[][], reach: number, probe = HANGAR.APRON_PROBE_M): number | undefined {
+  let best: { edge: number; d: number; len: number } | undefined;
+  for (let i = 0; i < outer.length; i++) {
+    const p = outer[i], q = outer[(i + 1) % outer.length];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    if (!ok(i, len)) continue;
+    const m: XZ = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+    const n: XZ = [(q[1] - p[1]) / len, -(q[0] - p[0]) / len];
+    const out: XZ = [m[0] + n[0] * probe, m[1] + n[1] * probe];
+    if (areas.some((r) => inRing(out, r))) {
+      // onto the area: the longest such wall (a hangar for two aircraft opens its long side)
+      if (!best || best.d > 0 || len > best.len) best = { edge: i, d: 0, len };
+      continue;
+    }
+    for (const line of lines) {
+      for (let k = 0; k + 1 < line.length; k++) {
+        const c = closestOnSegment(m, line[k], line[k + 1]);
+        const d = Math.hypot(c[0] - m[0], c[1] - m[1]);
+        // outside the wall: in front of it, not behind the building
+        if (d > reach || (c[0] - m[0]) * n[0] + (c[1] - m[1]) * n[1] <= 0.5) continue;
+        if (!best || d < best.d) best = { edge: i, d, len };
+      }
+    }
+  }
+  return best?.edge;
+}
+
+function inRing(p: XZ, ring: XZ[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, zi] = ring[i], [xj, zj] = ring[j];
+    if ((zi > p[1]) !== (zj > p[1]) && p[0] < ((xj - xi) * (p[1] - zi)) / (zj - zi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * The wall of a hangar's door (HANGAR): of MIN_EDGE_M or more, facing the apron or a taxiway, else a
+ * road; facing nothing, an arch's first end (an edge across `ridge`, the untold ridge), a box's
+ * longest wall. Undefined when no wall is long enough.
+ */
+export function hangarDoorEdge(outer: XZ[], ridge: XZ, arched: boolean, aprons: XZ[][], taxiways: XZ[][], roads: XZ[][]): number | undefined {
+  const lens = outer.map((p, i) => {
+    const q = outer[(i + 1) % outer.length];
+    return Math.hypot(q[0] - p[0], q[1] - p[1]);
+  });
+  const ok = (_: number, len: number): boolean => len >= HANGAR.MIN_EDGE_M;
+  const facing = facingEdge(outer, ok, aprons, taxiways, HANGAR.APRON_REACH_M) ?? facingEdge(outer, ok, [], roads, GARAGES.ROAD_REACH_M);
+  if (facing !== undefined) return facing;
+  let edge: number | undefined;
+  for (let i = 0; i < outer.length; i++) {
+    if (!ok(i, lens[i])) continue;
+    const p = outer[i], q = outer[(i + 1) % outer.length];
+    const end = Math.abs(((q[0] - p[0]) * ridge[0] + (q[1] - p[1]) * ridge[1]) / lens[i]) < 0.3;
+    if (arched ? end && edge === undefined : edge === undefined || lens[i] > lens[edge]) edge = i;
+  }
+  return edge;
+}
+
+/** roof:direction (degrees) that turns an arch's ridge square to edge `i` of `outer` (its span along it) */
+export function archDirection(outer: XZ[], i: number): string {
+  const p = outer[i], q = outer[(i + 1) % outer.length];
+  // roof-shapes roofDirection: [sin r, -cos r], the ridge square to it; the edge's own direction
+  const deg = (Math.atan2(q[0] - p[0], -(q[1] - p[1])) * 180) / Math.PI;
+  return String(((deg % 360) + 360) % 360);
 }
 
 /**
@@ -405,26 +540,9 @@ export function garageDoors(outer: XZ[], roads: XZ[][], row: boolean): { edge: n
   });
   const longest = Math.max(0, ...lens);
   const minLen = Math.max(GARAGES.DOOR_W + 0.6, row ? longest * GARAGES.LONG_SHARE : 0);
-  let best: { edge: number; d: number } | undefined;
   let fallback: number | undefined;
-  for (let i = 0; i < outer.length; i++) {
-    const len = lens[i];
-    if (len < minLen) continue;
-    if (fallback === undefined || len > lens[fallback]) fallback = i;
-    const p = outer[i], q = outer[(i + 1) % outer.length];
-    const m: XZ = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
-    const n: XZ = [(q[1] - p[1]) / len, -(q[0] - p[0]) / len];
-    for (const road of roads) {
-      for (let k = 0; k + 1 < road.length; k++) {
-        const c = closestOnSegment(m, road[k], road[k + 1]);
-        const d = Math.hypot(c[0] - m[0], c[1] - m[1]);
-        // outside the wall: in front of it, not behind the building
-        if (d > GARAGES.ROAD_REACH_M || (c[0] - m[0]) * n[0] + (c[1] - m[1]) * n[1] <= 0.5) continue;
-        if (!best || d < best.d) best = { edge: i, d };
-      }
-    }
-  }
-  const edge = best?.edge ?? fallback;
+  for (let i = 0; i < outer.length; i++) if (lens[i] >= minLen && (fallback === undefined || lens[i] > lens[fallback])) fallback = i;
+  const edge = facingEdge(outer, (_, len) => len >= minLen, [], roads, GARAGES.ROAD_REACH_M) ?? fallback;
   if (edge === undefined) return undefined;
   const len = lens[edge];
   const boxes = Math.max(1, Math.floor(len / GARAGES.BOX_M));
@@ -757,6 +875,8 @@ function greyRamp(c: RGB): number {
 export function roofRamp(tags: Record<string, string>, seed = 0.5, latDeg?: number): number {
   const tagged = taggedRamp(tags, ['roof:colour', 'roof:color'], 'roof:material', (seed * 7919) % 1);
   if (tagged !== undefined) return tagged;
+  // an arched hangar's vault is its body: the walls' colour (wallRamp, same seed)
+  if (tags[ARCHED_TAG] === 'yes') return wallRamp(tags, seed);
   if (isGlasshouse(tags)) return rgbRamp([...GREENHOUSE.GLASS]);
   const flat = isFlatRoof(tags);
   const h = computeHeights(tags);
@@ -918,10 +1038,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     return [e, -n];
   };
   const entrances = entranceGrid((opts.points ?? []).filter((p) => p.tags.entrance !== undefined && p.tags.entrance !== 'no'), toXZ, sampleHeight);
-  const roadsXZ = (opts.roads ?? []).map((r) => {
+  const boxed = (lines: LonLat[][] | undefined) => (lines ?? []).map((r) => {
     const pts = r.map(toXZ);
     return { pts, box: bbox(pts) };
   });
+  const roadsXZ = boxed(opts.roads);
+  const apronsXZ = boxed(opts.aprons);
+  const taxiwaysXZ = boxed(opts.taxiways);
   const emitTri = (a: V3, b: V3, c: V3, ramp: number, up: boolean): void => {
     const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
     const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
@@ -957,7 +1080,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const { base, low } = buildingFooting(outer.map(([x, z]) => { const ll = enuToLatLon(center, x, -z, 0); return [ll.lon, ll.lat] as LonLat; }), sampleHeight);
     const coreStart = core.ramps.length, smallStart = small.ramps.length;
     const shape = roofShape(tags);
-    const frame = roofFrame(outer, tags);
+    // a hangar's door wall (HANGAR), chosen first: an arch turns its end to it
+    const hangar = tags.building === 'hangar' && !isBuildingPart(tags) && !entrances.near(bbox(outer), ENTRANCE_SNAP_M).length;
+    const archedHangar = hangar && tags[ARCHED_TAG] === 'yes';
+    const doorEdge = hangar ? hangarDoorEdge(outer, roofFrame(outer, tags).u, archedHangar, ...hangarTargetsNear(bbox(outer))) : undefined;
+    const frame = archedHangar && doorEdge !== undefined
+      ? roofFrame(outer, { ...tags, 'roof:direction': archDirection(outer, doorEdge) })
+      : roofFrame(outer, tags);
     // an L, a T or a courtyard: the roof follows the footprint's straight skeleton
     const skeleton = roofSkeleton(shape, frame, outer, holes);
     const h = computeHeights(tags, skeleton?.tMax ?? roofRun(shape, frame));
@@ -1037,6 +1166,15 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
         if (!mapped.length && GARAGE_TYPES.has(tags.building) && !isBuildingPart(tags)) {
           detail(() => garageRow(outer, tags.building === 'garages', wallBase, wallTop));
         }
+      }
+      // a hangar's door (an arch has no wall: it stands in its end)
+      if (doorEdge !== undefined && h.min < 0.5 && (archedHangar || h.wall >= 2.4)) {
+        // an arch's end spans the frame across its ridge (2 halfV), whatever the edge's own length
+        const share = archedHangar ? HANGAR.ARCH_DOOR_W : HANGAR.BOX_DOOR_W;
+        const p = outer[doorEdge], q = outer[(doorEdge + 1) % outer.length];
+        const width = Math.hypot(q[0] - p[0], q[1] - p[1]) * share;
+        const height = archedHangar ? archDoorHeight(2 * frame.halfV, h.roof, Math.min(width, 2 * frame.halfV * share)) : h.wall * HANGAR.BOX_DOOR_H;
+        detail(() => hangarDoor(outer, doorEdge, wallBase, height, share));
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH, arch);
       if (arch && !glassy) detail(() => styleBands(arch, [outer, ...holes], wallTop, h.wall, windowed ? winH : 0, winBase, wRamp, corniceMax));
@@ -1316,10 +1454,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
   }
 
-  /** the roads near a box (garageDoors), in tile-centre metres */
-  function roadsNear(b: ReturnType<typeof bbox>, pad: number): XZ[][] {
+  /** the lines (roads by default) near a box (garageDoors, hangarDoor), in tile-centre metres */
+  function roadsNear(b: ReturnType<typeof bbox>, pad: number, lines = roadsXZ): XZ[][] {
     const out: XZ[][] = [];
-    for (const r of roadsXZ) {
+    for (const r of lines) {
       const rb = r.box;
       if (rb.maxX >= b.minX - pad && rb.minX <= b.maxX + pad && rb.maxZ >= b.minZ - pad && rb.minZ <= b.maxZ + pad) out.push(r.pts);
     }
@@ -1344,6 +1482,31 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       wallRect(p, dir, n, u - w / 2 - 0.08, u + w / 2 + 0.08, y0, top + 0.08, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
       const leaf = row ? GARAGE_LEAF_RGB[Math.floor(hash01(x, y0, z) * GARAGE_LEAF_RGB.length)] : GARAGE_DOOR_RGB;
       wallRect(p, dir, n, u - w / 2, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
+    }
+  }
+
+  /** the aprons, taxiways and roads near a box, for hangarDoorEdge */
+  function hangarTargetsNear(b: ReturnType<typeof bbox>): [XZ[][], XZ[][], XZ[][]] {
+    return [roadsNear(b, HANGAR.APRON_REACH_M, apronsXZ), roadsNear(b, HANGAR.APRON_REACH_M, taxiwaysXZ), roadsNear(b, GARAGES.ROAD_REACH_M)];
+  }
+
+  /** a hangar's door in the middle of edge `edge`, `share` of its length wide and `height` high: a frame, sliding panels with seams */
+  function hangarDoor(outer: XZ[], edge: number, wallBase: number, height: number, share: number): void {
+    if (height < 2) return;
+    const p = outer[edge], q = outer[(edge + 1) % outer.length];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const dir: XZ = [(q[0] - p[0]) / len, (q[1] - p[1]) / len];
+    const n: XZ = [dir[1], -dir[0]];
+    const at = { width: len * share };
+    const u0 = len / 2 - at.width / 2, u1 = len / 2 + at.width / 2, top = wallBase + height;
+    const f = HANGAR.DOOR_FRAME_M;
+    wallRect(p, dir, n, u0 - f, u1 + f, wallBase, top + f, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
+    wallRect(p, dir, n, u0, u1, wallBase, top, DOOR_LAYERS_M[2], rgbRamp(HANGAR_DOOR_RGB));
+    // the seams between the sliding panels
+    const panels = Math.max(2, Math.round(at.width / HANGAR.PANEL_M));
+    for (let k = 1; k < panels; k++) {
+      const u = u0 + (at.width * k) / panels;
+      wallRect(p, dir, n, u - 0.06, u + 0.06, wallBase, top, DOOR_LAYERS_M[2] + 0.01, rgbRamp(HANGAR_SEAM_RGB));
     }
   }
 
