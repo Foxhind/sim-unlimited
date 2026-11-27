@@ -18,6 +18,7 @@ import {
   hangarDoorEdge,
   CARPORT_M,
   SHED,
+  FARM,
   withDefaultTags,
   GREENHOUSE,
   lineInside,
@@ -89,8 +90,8 @@ describe('default height and roof', () => {
   });
 
   it('other types without height/levels: 2 floors (plus the plinth and the technical floor), whatever the footprint', () => {
-    // flat roofs: 1 m plinth + 2 × 3 m + 1.5 m technical floor; a barn has no facade zones
-    for (const [building, wall] of [['yes', 8.5], ['house', 8.5], ['industrial', 8.5], ['barn', 6]] as const) {
+    // flat roofs: 1 m plinth + 2 × 3 m + 1.5 m technical floor; a service building has no facade zones
+    for (const [building, wall] of [['yes', 8.5], ['house', 8.5], ['industrial', 8.5], ['service', 6]] as const) {
       const b: OsmBuilding = { rings: [rect()], tags: { building } };
       expect(buildingTags(b)['sim:footprint_wall']).toBeUndefined();
       expect(buildingHeights(b).wall).toBe(wall);
@@ -969,5 +970,55 @@ describe('hangars', () => {
     for (let i = 0; i < t.coreVertexCount; i++) if (t.vertices[i * 6 + 1] > top - 0.3) { xs.push(t.vertices[i * 6]); zs.push(t.vertices[i * 6 + 2]); }
     ridgeLen = Math.max(...zs) - Math.min(...zs);
     expect(ridgeLen).toBeGreaterThan(Math.max(...xs) - Math.min(...xs));
+  });
+});
+
+describe('farm buildings', () => {
+  const big = () => rect(); // ~ 63 × 67 m: over HIPPED_DEFAULT_MAX_AREA_M2
+  const small = () => rect(0.0001, 0.00006);
+
+  it('one storey under a gabled roof at any size: a barn of blank wall, the others a plinth and a floor', () => {
+    for (const ring of [small(), big()]) {
+      for (const building of ['barn', 'farm_auxiliary', 'cowshed', 'stable', 'sty']) {
+        const b: OsmBuilding = { rings: [ring], tags: { building } };
+        expect(buildingTags(b)['roof:shape']).toBe('gabled');
+        expect(buildingHeights(b).wall).toBeCloseTo(building === 'barn' ? FARM.BARN_WALL_M : FACADE_ZONES.PLINTH_M + 3);
+        expect(buildingHeights(b).roof).toBeGreaterThan(0);
+      }
+    }
+    // told shapes and levels stand
+    expect(buildingTags({ rings: [small()], tags: { building: 'barn', 'roof:shape': 'flat' } })['roof:shape']).toBe('flat');
+    expect(buildingHeights({ rings: [small()], tags: { building: 'cowshed', 'building:levels': '2', 'roof:shape': 'flat' } }).wall).toBeGreaterThan(6);
+  });
+
+  it('half of them are wooden when no material is told; a told material, other types and no seed: never', () => {
+    let wooden = 0;
+    const n = 400;
+    for (let i = 0; i < n; i++) {
+      const t = withDefaultTags({ building: 'barn' }, undefined, i / n + 0.0007);
+      if (t['building:material'] === 'wood') wooden++;
+      // the same seed, the same answer
+      expect(withDefaultTags({ building: 'barn' }, undefined, i / n + 0.0007)['building:material']).toBe(t['building:material']);
+    }
+    expect(wooden / n).toBeGreaterThan(0.4);
+    expect(wooden / n).toBeLessThan(0.6);
+    for (let i = 0; i < 50; i++) {
+      expect(withDefaultTags({ building: 'cowshed', 'building:material': 'brick' }, undefined, i / 50)['building:material']).toBe('brick');
+      expect(withDefaultTags({ building: 'house' }, undefined, i / 50)['building:material']).toBeUndefined();
+    }
+    expect(withDefaultTags({ building: 'barn' }, undefined)['building:material']).toBeUndefined();
+    // a wooden one is drawn as boards
+    const seeds = Array.from({ length: 40 }, (_, i) => i / 40);
+    expect(seeds.some((sd) => (wallRamp(withDefaultTags({ building: 'stable' }, undefined, sd), sd) & WOOD_FLAG) !== 0)).toBe(true);
+  });
+
+  it('a farmhouse is a house; a cabin one storey under a gabled roof; a static caravan low and flat', () => {
+    expect(buildingTags({ rings: [small()], tags: { building: 'farm' } })['roof:shape']).toBe('hipped');
+    const cabin: OsmBuilding = { rings: [small()], tags: { building: 'cabin' } };
+    expect(buildingTags(cabin)['roof:shape']).toBe('gabled');
+    expect(buildingHeights(cabin).wall).toBeCloseTo(3);
+    const caravan: OsmBuilding = { rings: [small()], tags: { building: 'static_caravan' } };
+    expect(buildingTags(caravan)['roof:shape']).toBeUndefined();
+    expect(buildingHeights(caravan)).toMatchObject({ wall: FARM.CARAVAN_WALL_M, roof: 0 });
   });
 });

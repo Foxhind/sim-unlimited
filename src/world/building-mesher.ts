@@ -372,7 +372,17 @@ const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
  */
 const HOUSE_ROOFS: Record<string, string> = {
   house: 'hipped', detached: 'hipped', semidetached_house: 'hipped', bungalow: 'hipped', terrace: 'gabled',
+  farm: 'hipped', cabin: 'gabled',
 };
+/**
+ * Farm buildings (FARM_TYPES): without height or levels one storey — a barn BARN_WALL_M of blank wall,
+ * the others their plinth and one level of windows — under a gabled roof whatever their size (the
+ * roof's default height is capped: computeHeights defaultRoofHeight); without building:material,
+ * WOOD_SHARE of them are wooden (by the building's seed: withDefaultTags). A cabin is one storey, a
+ * static caravan CARAVAN_WALL_M under a flat roof.
+ */
+export const FARM = { BARN_WALL_M: 4.5, WOOD_SHARE: 0.5, CARAVAN_WALL_M: 2.6 } as const;
+const FARM_TYPES = new Set(['barn', 'farm_auxiliary', 'cowshed', 'stable', 'sty']);
 /** a shed or hut without height or levels: one low storey, WALL_M of wall under a flat roof */
 export const SHED = { WALL_M: 2.5 } as const;
 const SHED_TYPES = new Set(['shed', 'hut']);
@@ -397,7 +407,7 @@ export const HIPPED_DEFAULT_MAX_AREA_M2 = 1000;
  * default, up to 12 m) with a footprint up to HIPPED_DEFAULT_MAX_AREA_M2 gets a `hipped` roof; larger
  * footprints, every other type and building:part areas stay flat.
  */
-export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | undefined): Record<string, string> {
+export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | undefined, seed?: number): Record<string, string> {
   const out = { ...tags };
   const levels = parseLength(tags['building:levels']);
   const area = outer && outer.length >= 3 ? Math.abs(ringAreaXZ(outer)) : undefined;
@@ -414,9 +424,20 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
     if (tags.building === 'bungalow') out[FOOTPRINT_WALL_TAG] = String(FACADE_ZONES.PLINTH_M + LEVEL_M);
     else if (SHED_TYPES.has(tags.building)) out[FOOTPRINT_WALL_TAG] = String(SHED.WALL_M);
     else if (tags.building === 'carport') out[FOOTPRINT_WALL_TAG] = String(CARPORT_M);
+    else if (tags.building === 'barn') out[FOOTPRINT_WALL_TAG] = String(FARM.BARN_WALL_M);
+    else if (FARM_TYPES.has(tags.building)) out[FOOTPRINT_WALL_TAG] = String(FACADE_ZONES.PLINTH_M + LEVEL_M);
+    else if (tags.building === 'cabin') out[FOOTPRINT_WALL_TAG] = String(LEVEL_M);
+    else if (tags.building === 'static_caravan') out[FOOTPRINT_WALL_TAG] = String(FARM.CARAVAN_WALL_M);
   }
-  const small = area === undefined || area <= HIPPED_DEFAULT_MAX_AREA_M2;
-  const pitched = HIPPED_DEFAULT_TYPES.has(tags.building) ? 'hipped' : HOUSE_ROOFS[tags.building];
+  // half the farm buildings of no told material are wooden (a draw decorrelated from the colour's: wallRamp)
+  const type = tags['building:part'] || tags.building;
+  if (FARM_TYPES.has(type) && tags['building:material'] === undefined && seed !== undefined && (seed * 7907 + 0.31) % 1 < FARM.WOOD_SHARE) {
+    out['building:material'] = 'wood';
+  }
+  // a farm building is gabled at any size; the rest only up to HIPPED_DEFAULT_MAX_AREA_M2
+  const farm = FARM_TYPES.has(tags.building);
+  const small = farm || area === undefined || area <= HIPPED_DEFAULT_MAX_AREA_M2;
+  const pitched = farm ? 'gabled' : HIPPED_DEFAULT_TYPES.has(tags.building) ? 'hipped' : HOUSE_ROOFS[tags.building];
   if (out['roof:shape'] === undefined && !isPart && small && pitched) {
     const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
       ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
@@ -608,7 +629,7 @@ export function buildingTags(b: OsmBuilding): Record<string, string> {
   let t = defaultTagsCache.get(b);
   if (!t) {
     const ring = b.rings[0];
-    t = withDefaultTags(b.tags, ring && ring.length >= 3 ? localXZ(ring) : undefined);
+    t = withDefaultTags(b.tags, ring && ring.length >= 3 ? localXZ(ring) : undefined, styleSeed(b));
     const style = ring?.length ? inferArchitecture(b.tags, ring[0][0], ring[0][1], styleSeed(b)) : undefined;
     if (style) t[ARCH_INFERRED_TAG] = style;
     defaultTagsCache.set(b, t);
