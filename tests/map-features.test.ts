@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { RetryableError } from '../src/engine/queue';
 import {
-  featureName, featureTiles, KIND_PRIORITY, mapFeatureQuery, mapLevelForSpan, MapFeatureSource, parseMapFeatures,
-  type FeatureStore,
+  featureName, KIND_PRIORITY, mapLevelForSpan, MapFeatureSource, parseMapFeatures, shownAt,
 } from '../src/world/map-features';
 import type { OverpassJson } from '../src/world/overpass';
 
@@ -39,89 +37,78 @@ describe('map features', () => {
     expect(featureName(town, 'ru')).toBe('Mainz');
   });
 
-  it('the flight map asks for villages and every airfield, the start-screen map for towns and ICAO airfields', () => {
+  it('the flight map shows villages and every airfield, the start-screen map towns and ICAO airfields', () => {
     expect(mapLevelForSpan(40000)).toBe('local');
     expect(mapLevelForSpan(500000)).toBe('region');
-    const tile = { z: 10, x: 536, y: 346 };
-    const local = mapFeatureQuery(tile, 'local');
-    expect(local).toContain('city|town|village');
-    expect(local).toContain('aerodrome|heliport');
-    expect(local).toContain('out center tags');
-    const region = mapFeatureQuery({ z: 7, x: 67, y: 43 }, 'region');
-    expect(region).not.toContain('village');
-    expect(region).toContain('["icao"]');
-    // a 40 km box at 50° N needs a few z10 tiles
-    const tiles = featureTiles({ lat: 50.1, lon: 8.66 }, 0.18, 0.28, 'local');
-    expect(tiles.every((t) => t.z === 10)).toBe(true);
-    expect(tiles.length).toBeGreaterThanOrEqual(4);
-    expect(tiles.length).toBeLessThanOrEqual(12);
+    const f = parseMapFeatures(json);
+    expect(f.filter((x) => shownAt(x, 'local'))).toHaveLength(7);
+    expect(f.filter((x) => shownAt(x, 'region')).map((x) => x.code ?? x.names.name))
+      .toEqual(['Frankfurt am Main', 'Mainz', 'EDDF', 'EDFE']);
     expect(KIND_PRIORITY.city).toBeLessThan(KIND_PRIORITY.village);
   });
 
-  it('source: cache first, Overpass once per tile, one request at a time, retry after a failure', async () => {
-    const saved = new Map<string, string>();
-    const store: FeatureStore = { get: async (k) => saved.get(k), put: async (k, v) => { saved.set(k, v); } };
+  it('source: the prepared places.json of the archives over the box, once each, retried after a failure', async () => {
+    const box = { west: 8, south: 49.9, east: 9, north: 50.5 };
+    const located: unknown[] = [];
+    const locate = async (b: unknown) => {
+      located.push(b);
+      return ['https://x/a.places.json'];
+    };
     let calls = 0;
     let fail = true;
-    const fetchQuery = async () => {
+    const fetchImpl = (async () => {
       calls++;
-      if (fail) throw new RetryableError(1000, 'busy');
-      return JSON.stringify(json);
-    };
-    const src = new MapFeatureSource(store, fetchQuery);
-    const tile = { z: 10, x: 536, y: 346 };
+      if (fail) return new Response('', { status: 503 });
+      return new Response(JSON.stringify(json));
+    }) as typeof fetch;
+    const src = new MapFeatureSource(locate, fetchImpl);
     const settle = () => new Promise((r) => setTimeout(r, 0));
-
-    expect(src.features([tile], 'local', 0)).toEqual([]);
-    await settle();
-    expect(calls).toBe(1);
-    // failed: not asked again before the retry time
-    src.features([tile], 'local', 1000);
-    await settle();
-    expect(calls).toBe(1);
-    fail = false;
-    src.features([tile], 'local', Date.now() + 120000);
-    await settle();
-    await settle();
-    expect(calls).toBe(2);
-    expect(src.version).toBe(1);
-    expect(src.features([tile], 'local')).toHaveLength(7);
-    expect(saved.size).toBe(1);
-
-    // a fresh source reads the cached tile without Overpass
-    const again = new MapFeatureSource(store, fetchQuery);
-    again.features([tile], 'local');
-    await settle();
-    await settle();
-    expect(calls).toBe(2);
-    expect(again.features([tile], 'local')).toHaveLength(7);
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(src.features(box, 'local', 0)).toEqual([]);
+      await settle();
+      expect(located).toHaveLength(1);
+      src.features(box, 'local', 0);
+      await settle();
+      await settle();
+      expect(calls).toBe(1);
+      // failed: not asked again before the retry time; the same box is not located again
+      src.features(box, 'local', 1000);
+      await settle();
+      expect(calls).toBe(1);
+      expect(located).toHaveLength(1);
+      fail = false;
+      src.features(box, 'local', Date.now() + 120000);
+      await settle();
+      await settle();
+      expect(calls).toBe(2);
+      expect(src.features(box, 'local')).toHaveLength(7);
+      // features outside the box are left out; the file is not fetched again
+      expect(src.features({ west: 8.6, south: 50.1, east: 8.7, north: 50.2 }, 'local')).toHaveLength(2);
+      await settle();
+      expect(calls).toBe(2);
+    } finally {
+      console.warn = warn;
+    }
   });
-});
 
-describe('map feature queue', () => {
-  it('fetches the tile asked for last first and drops tiles no map wants any more', async () => {
-    const asked: string[] = [];
-    let release: () => void = () => {};
-    const store: FeatureStore = { get: async () => undefined, put: async () => {} };
-    const fetchQuery = (q: string) => {
-      asked.push(q);
-      return new Promise<string>((r) => { release = () => r('{"elements":[]}'); });
-    };
-    const src = new MapFeatureSource(store, fetchQuery);
+  it('an archive without places.json (404) is not asked for again', async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+    const src = new MapFeatureSource(async () => ['https://x/old.places.json'], fetchImpl);
+    const box = { west: 0, south: 0, east: 1, north: 1 };
     const settle = () => new Promise((r) => setTimeout(r, 0));
-    const t = (x: number) => ({ z: 10, x, y: 346 });
-    src.features([t(1)], 'local', 0); // in flight
+    src.features(box, 'local');
     await settle();
-    src.features([t(2), t(3)], 'local', 100); // flown past: never asked again
-    src.features([t(4)], 'local', 10000);
-    release();
+    src.features(box, 'local');
     await settle();
     await settle();
-    expect(asked).toHaveLength(2);
-    expect(asked[1]).toBe(mapFeatureQuery(t(4), 'local'));
-    release();
+    src.features(box, 'local', Date.now() + 1e9);
     await settle();
-    await settle();
-    expect(asked).toHaveLength(2);
+    expect(calls).toBe(1);
   });
 });

@@ -5,7 +5,7 @@ import { Renderer, type BaseGround } from './engine/renderer';
 import { DEPTH_FAR } from './engine/shaders';
 import { FontRenderer, HUD_AMBER, HUD_GREEN, HUD_WHITE, parseHex } from './engine/font';
 import { VectorRenderer } from './engine/vector';
-import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, applyFlameColors, frameLighting, moonLightOn, seasonOf, litShare, solarHour, windowsOn, WINDOWS, paletteAt, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
+import { BASE_LAND, FLASH_LIGHT, LUT_ENTRIES, RAMP, rampIndex, applyFlameColors, frameLighting, moonLightOn, seasonOf, litShare, solarHour, windowsOn, WINDOWS, paletteAt, type PaletteParams, shadeColour, snowy, sunColour, sunniness } from './engine/palette';
 import { NO_RIM, rim, rimFrame, rimLab } from './engine/rim';
 import { profiler } from './engine/profiler';
 import { Input } from './engine/input';
@@ -573,6 +573,16 @@ const flightMap = new Minimap();
 /** flight map ranges the zoom key steps through */
 const FLIGHT_MAP_SPANS_M = [10000, 20000, 40000, 80000];
 let mapSpanIdx = 2;
+/** Tab steps through: the map in the corner, full screen over the scene, full screen with the scene showing through */
+const MAP_MODES = ['corner', 'full', 'clear'] as const;
+let mapMode: (typeof MAP_MODES)[number] = 'corner';
+/** the full-screen map: its own terrain grid (finer, the screen's shape), the same place names */
+const fullMap = new Minimap();
+fullMap.rows = 160;
+/** the full-screen map shows this many times the corner map's span (top to bottom) */
+const FULL_MAP_SPAN_SCALE = 2;
+/** behind the opaque full-screen map's margins: the HUD's dark (overlay row: daylight HULL_DARK) */
+const MAP_BACKDROP = rampIndex(RAMP.HULL_DARK, 0);
 let landingField: (typeof AIRFIELDS)[number] | null = null;
 /** the ILS the autoland flies, when it found one */
 let landingIls: Navaid | null = null;
@@ -647,6 +657,7 @@ function updateNav(now: number): HudNav {
   if (controls.justPressed('adfTune')) adf = nextStation(adf, ['NDB']);
   if (controls.justPressed('hudMode')) hudMode = hudMode === 'NAV' ? 'APP' : 'NAV';
   if (controls.justPressed('mapZoom')) mapSpanIdx = (mapSpanIdx + 1) % FLIGHT_MAP_SPANS_M.length;
+  if (controls.justPressed('mapMode')) mapMode = MAP_MODES[(MAP_MODES.indexOf(mapMode) + 1) % MAP_MODES.length];
   if (nav1 && nav1.kind !== 'ILS') obs = (((obs + controls.knob('crsInc') - controls.knob('crsDec')) % 360) + 360) % 360;
 
   // NAV1 and the approach: the ILS threshold's height comes from the terrain once it has loaded
@@ -1086,24 +1097,47 @@ function frame(now: number): void {
   profiler.stage('HUD, меню, карта');
   const pad = 8 * u;
   if (spawned && state === 'flying' && rimLab.hud) {
-    drawHud(font, vectors, renderer.width, renderer.height, u, {
+    // the opaque full-screen map covers the HUD: it is not drawn under it
+    if (mapMode !== 'full') drawHud(font, vectors, renderer.width, renderer.height, u, {
       model, controls: flight, camera: rig.mode, units: settings.units, now: now / 1000, soundOn: settings.sound,
       autopilot: apOn ? { ...autopilot.targets, mode: autopilot.landing ?? undefined, lateral: autopilot.lateral } : null,
       hudMode, nav: hudNav, fovYDeg: 60,
       weather: { data: weatherInForce(), tempC: weather.tempOverride ?? weatherInForce()?.tempC },
       time: simTime,
     });
-    // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading
-    const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
-    const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
+    // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading;
+    // Tab puts it over the whole screen, opaque or with the scene showing through
     const own = enuToLatLon(chunks.origin, model.pos[0], -model.pos[2], 0);
     flightMap.lang = settings.lang;
     const span = FLIGHT_MAP_SPANS_M[mapSpanIdx];
+    // the corner map keeps following while hidden: the radio stations come from its aerodromes
     flightMap.follow(own, span);
-    flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
     const tuned = new Set([nav1?.id, adf?.id, landingIls?.id].filter((x): x is string => !!x));
-    flightMap.drawNav(vectors, font, pad, mapY, mapSize, u, navDb.all(), tuned, own);
-    font.text(`N  ${span / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
+    if (mapMode === 'corner') {
+      const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
+      const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
+      flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
+      flightMap.drawNav(vectors, font, pad, mapY, mapSize, u, navDb.all(), tuned, own);
+      font.text(`N  ${span / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
+    } else {
+      // the HUD (when drawn) goes under the map's symbols and labels
+      vectors.flush();
+      font.flush();
+      // the whole screen but the margins: below the HUD's two top-left rows (aircraft, HUD mode), above
+      // the attribution row (and in dev the stats row over it)
+      const mapY = pad + 40 * u;
+      const mapW = renderer.width - 2 * pad;
+      const mapH = renderer.height - mapY - pad - (import.meta.env.DEV ? 38 : 20) * u;
+      const fullSpan = span * FULL_MAP_SPAN_SCALE;
+      fullMap.lang = settings.lang;
+      fullMap.opaque = mapMode === 'full';
+      fullMap.aspect = mapW / mapH;
+      fullMap.follow(own, fullSpan);
+      if (mapMode === 'full') vectors.fillRect(0, 0, renderer.width, renderer.height, MAP_BACKDROP);
+      fullMap.draw(vectors, font, pad, mapY, mapW, u, own, model.headingDeg);
+      fullMap.drawNav(vectors, font, pad, mapY, mapW, u, navDb.all(), tuned, own);
+      font.text(`N  ${fullSpan / 1000} KM`, pad + 4 * u, mapY + 4 * u, u, HUD_GREEN);
+    }
   }
   if (!spawned && state === 'loading') {
     const msg = t(settings.lang, 'loading');

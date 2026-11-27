@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publishes built archives from tiles/data/out to S3 as build <N>: s3://$BUCKET/tiles/<N>/ gets each
-# <region>.pmtiles + <region>.aerodromes.json and an index.json listing them. N is one more than the
+# <region>.pmtiles + <region>.aerodromes.json + <region>.places.json and an index.json listing them. N is one more than the
 # highest build already in the bucket, so a build's files never change: a page that read an archive's
 # header keeps reading the same bytes, and the files are cached as immutable.
 #   BUCKET=<bucket> PUBLIC_URL=<url the bucket is read at> tiles/publish.sh [region ...]
@@ -23,7 +23,7 @@ else
   while IFS= read -r r; do regions+=("$r"); done < <(tr -d '[]"' < "$OUT/index.json" | tr ',' '\n' | sed 's/\.pmtiles$//')
 fi
 for r in "${regions[@]}"; do
-  for f in "$OUT/$r.pmtiles" "$OUT/$r.aerodromes.json"; do
+  for f in "$OUT/$r.pmtiles" "$OUT/$r.aerodromes.json" "$OUT/$r.places.json"; do
     [ -f "$f" ] || { echo "missing $f" >&2; exit 1; }
   done
 done
@@ -43,7 +43,7 @@ human() { awk -v b="$1" 'BEGIN { split("B KiB MiB GiB TiB", u); i = 1
 files=()
 total=0
 for r in "${regions[@]}"; do
-  for f in "$OUT/$r.pmtiles" "$OUT/$r.aerodromes.json"; do
+  for f in "$OUT/$r.pmtiles" "$OUT/$r.aerodromes.json" "$OUT/$r.places.json"; do
     files+=("$f")
     total=$(( total + $(wc -c < "$f") ))
   done
@@ -70,6 +70,7 @@ names=()
 for r in "${regions[@]}"; do
   upload "$OUT/$r.pmtiles" application/octet-stream
   upload "$OUT/$r.aerodromes.json" application/json
+  upload "$OUT/$r.places.json" application/json
   names+=("\"$r.pmtiles\"")
 done
 echo "uploaded $(human "$total") in ${#files[@]} files" >&2

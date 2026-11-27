@@ -219,6 +219,12 @@ export class PmtilesOsm {
     return parts.join('|');
   }
 
+  /** the map's prepared names (`<archive>.places.json`, tiles/SimProfile.java) of the archives that meet a box */
+  async placesUrls(box: TileBounds): Promise<string[]> {
+    const archives = await this.open();
+    return archives.filter((a) => meets(box, a.bounds)).map((a) => a.archive.url.replace(/\.pmtiles$/, '') + '.places.json');
+  }
+
   async fetchJson(tile: Tile): Promise<string | null> {
     const archives = await this.open();
     const b = tileBounds(tile);

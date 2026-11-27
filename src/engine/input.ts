@@ -17,7 +17,8 @@ export class Input {
       this.keys.add(e.code);
       if (!e.repeat) this.presses.add(e.code);
       this.lastKey = e.code;
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+      // Tab is the flight map's size, not a focus move
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Tab'].includes(e.code)) {
         e.preventDefault();
       }
     });

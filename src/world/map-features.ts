@@ -1,5 +1,3 @@
-import { RetryableError } from '../engine/queue';
-import { tileBounds, tileForLatLon, type LatLon, type Tile } from './geodesy';
 import type { OverpassJson } from './overpass';
 
 /** what the minimap marks: settlements by size, airfields by kind */
@@ -13,15 +11,15 @@ export interface MapFeature {
   names: Record<string, string>;
   /** ICAO (or IATA, local) code of an airfield */
   code?: string;
+  /** the airfield has an ICAO code (the start-screen map shows only those) */
+  icao?: boolean;
 }
 
 /**
- * Two levels of detail: 'local' (z10 tiles, ~25–40 km) for the flight map — villages, every
- * aerodrome and heliport; 'region' (z7 tiles, ~200–300 km) for the start-screen map — cities and
- * towns, aerodromes with an ICAO code.
+ * Two levels of detail: 'local' for the flight map (spans up to LOCAL_MAX_SPAN_M) — villages, every
+ * aerodrome and heliport; 'region' for the start-screen map — cities and towns, aerodromes with an ICAO code.
  */
 export type MapLevel = 'local' | 'region';
-export const MAP_LEVEL_ZOOM: Record<MapLevel, number> = { local: 10, region: 7 };
 /** map spans up to this use the local level */
 export const LOCAL_MAX_SPAN_M = 80000;
 
@@ -29,17 +27,10 @@ export function mapLevelForSpan(spanM: number): MapLevel {
   return spanM <= LOCAL_MAX_SPAN_M ? 'local' : 'region';
 }
 
-const FILTERS: Record<MapLevel, string> = {
-  local: `node["place"~"^(city|town|village)$"]; nwr["aeroway"~"^(aerodrome|heliport)$"];`,
-  region: `node["place"~"^(city|town)$"]; nwr["aeroway"="aerodrome"]["icao"];`,
-};
-
-/** bump when a filter changes (cached tiles lack what it newly selects) */
-export const MAP_FEATURES_SCHEMA = 1;
-
-export function mapFeatureQuery(tile: Tile, level: MapLevel): string {
-  const b = tileBounds(tile);
-  return `[out:json][timeout:25][bbox:${b.south},${b.west},${b.north},${b.east}];(${FILTERS[level]});out center tags;`;
+/** what a level shows */
+export function shownAt(f: MapFeature, level: MapLevel): boolean {
+  if (level === 'local') return true;
+  return f.kind === 'city' || f.kind === 'town' || ((f.kind === 'airport' || f.kind === 'airfield') && !!f.icao);
 }
 
 type Element = { type: string; lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: Record<string, string> };
@@ -52,7 +43,7 @@ function airfieldKind(tags: Record<string, string>): MapFeatureKind {
   return 'airfield';
 }
 
-/** Overpass `out center tags` JSON → map features (ways and relations at their centre) */
+/** Overpass-shaped JSON (`<archive>.places.json`, tiles/SimProfile.java) → map features (ways at their centre) */
 export function parseMapFeatures(json: OverpassJson): MapFeature[] {
   const out: MapFeature[] = [];
   for (const raw of json.elements as unknown as Element[]) {
@@ -67,7 +58,8 @@ export function parseMapFeatures(json: OverpassJson): MapFeature[] {
     else if (tags.place === 'city' || tags.place === 'town' || tags.place === 'village') kind = tags.place;
     if (!kind) continue;
     const code = tags.icao || tags.iata || tags['local_ref'] || tags.ref;
-    out.push({ kind, lat, lon, names, ...(code && kind !== 'city' && kind !== 'town' && kind !== 'village' ? { code } : {}) });
+    const field = kind !== 'city' && kind !== 'town' && kind !== 'village';
+    out.push({ kind, lat, lon, names, ...(code && field ? { code } : {}), ...(field && tags.icao ? { icao: true } : {}) });
   }
   return out;
 }
@@ -81,110 +73,97 @@ export function featureName(f: MapFeature, lang: string): string {
 /** draw and label priority: lower first */
 export const KIND_PRIORITY: Record<MapFeatureKind, number> = { city: 0, airport: 1, town: 2, airfield: 3, village: 4, heliport: 5 };
 
-/** tiles of `level` covering a box around `center` */
-export function featureTiles(center: LatLon, halfLat: number, halfLon: number, level: MapLevel): Tile[] {
-  const z = MAP_LEVEL_ZOOM[level];
-  const t0 = tileForLatLon(center.lat + halfLat, center.lon - halfLon, z);
-  const t1 = tileForLatLon(center.lat - halfLat, center.lon + halfLon, z);
-  const tiles: Tile[] = [];
-  for (let x = t0.x; x <= t1.x; x++) for (let y = t0.y; y <= t1.y; y++) tiles.push({ z, x, y });
-  return tiles;
+/** the box a map shows */
+export interface MapBox {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
 }
 
-export interface FeatureStore {
-  get(key: string): Promise<string | undefined>;
-  put(key: string, json: string): Promise<void>;
-}
+/** where the prepared names lie: the archives' `<base>.places.json` URLs whose bounds meet a box */
+export type PlacesLocator = (box: MapBox) => Promise<string[]>;
 
-/** after a failed fetch, a tile is not asked for again for this long */
+/** after a failed fetch, a file is not asked for again for this long */
 const RETRY_MS = 30000;
-/** a queued tile no map asked for in this long (flown past, map closed) is dropped */
-const STALE_MS = 5000;
 
 /**
- * Map features per tile: memory, then the IndexedDB cache, then Overpass, one request at a time
- * (the flight map asks for a handful of tiles; Overpass is shared with the scenery), the tile a map
- * asked for most recently first; tiles left behind are dropped. A failed tile is retried after RETRY_MS. `version` changes whenever a tile arrives, so maps know to redraw.
+ * Map features from the prepared `<archive>.places.json` files that come with our PMTiles archives
+ * (tiles/SimProfile.java), one whole file per archive, kept in memory. No Overpass: outside every
+ * archive the map has no names. Missing files are fetched in the background; `version` changes
+ * whenever one arrives, so maps know to redraw.
  */
 export class MapFeatureSource {
   version = 0;
-  private tiles = new Map<string, MapFeature[]>();
+  private files = new Map<string, MapFeature[]>();
+  private loading = new Set<string>();
   private retryAt = new Map<string, number>();
-  /** tiles waiting for a fetch, with when a map last asked for them */
-  private queue = new Map<string, { tile: Tile; level: MapLevel; wanted: number }>();
-  private busy = false;
-  /** the time of the latest request (staleness is measured on the callers' clock) */
-  private clock = 0;
+  /** the URLs for the box asked last (the locator answers asynchronously) */
+  private urls: string[] = [];
+  private lastBox?: MapBox;
+  private locating = false;
 
   constructor(
-    private readonly store: FeatureStore,
-    private readonly fetchQuery: (query: string) => Promise<string>,
-    private readonly maxTiles = 64,
+    private readonly locate: PlacesLocator,
+    private readonly fetchImpl: typeof fetch = (...a) => fetch(...a),
   ) {}
 
-  static key(tile: Tile, level: MapLevel): string {
-    return `mapf/${level}/${tile.z}/${tile.x}/${tile.y}/${MAP_FEATURES_SCHEMA}`;
-  }
-
-  /** features of the tiles loaded so far (missing tiles are queued, not waited for) */
-  features(tiles: Tile[], level: MapLevel, now = Date.now()): MapFeature[] {
+  /** features of the files loaded so far inside `box` (missing files are fetched, not waited for) */
+  features(box: MapBox, level: MapLevel, now = Date.now()): MapFeature[] {
+    this.relocate(box);
     const out: MapFeature[] = [];
-    this.clock = now;
-    for (const tile of tiles) {
-      const key = MapFeatureSource.key(tile, level);
-      const hit = this.tiles.get(key);
-      if (hit) {
-        out.push(...hit);
+    for (const url of this.urls) {
+      const hit = this.files.get(url);
+      if (!hit) {
+        this.load(url, now);
         continue;
       }
-      const queued = this.queue.get(key);
-      if (queued) {
-        queued.wanted = now;
-        continue;
+      for (const f of hit) {
+        if (f.lat >= box.south && f.lat <= box.north && f.lon >= box.west && f.lon <= box.east && shownAt(f, level)) out.push(f);
       }
-      if ((this.retryAt.get(key) ?? 0) > now) continue;
-      this.queue.set(key, { tile, level, wanted: now });
     }
-    void this.pump();
     return out;
   }
 
-  /** the most recently wanted queued tile; tiles no map asked for lately are dropped */
-  private next(now: number): { key: string; tile: Tile; level: MapLevel } | undefined {
-    let best: { key: string; tile: Tile; level: MapLevel; wanted: number } | undefined;
-    for (const [key, q] of this.queue) {
-      if (now - q.wanted > STALE_MS) {
-        this.queue.delete(key);
-        continue;
-      }
-      if (!best || q.wanted > best.wanted) best = { key, ...q };
-    }
-    if (best) this.queue.delete(best.key);
-    return best;
+  private relocate(box: MapBox): void {
+    const b = this.lastBox;
+    if (this.locating || (b && b.west === box.west && b.south === box.south && b.east === box.east && b.north === box.north)) return;
+    this.locating = true;
+    this.lastBox = box;
+    this.locate(box)
+      .then((urls) => {
+        if (urls.join() !== this.urls.join()) {
+          this.urls = urls;
+          this.version++;
+        }
+      })
+      .catch(() => {
+        this.lastBox = undefined; // ask again on the next frame
+      })
+      .finally(() => {
+        this.locating = false;
+      });
   }
 
-  private async pump(): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
-    try {
-      for (let job = this.next(this.clock); job; job = this.next(this.clock)) {
-        const { key, tile, level } = job;
-        try {
-          let json = await this.store.get(key).catch(() => undefined);
-          if (json === undefined) {
-            json = await this.fetchQuery(mapFeatureQuery(tile, level));
-            await this.store.put(key, json).catch(() => undefined);
-          }
-          this.tiles.set(key, parseMapFeatures(JSON.parse(json) as OverpassJson));
-          this.retryAt.delete(key);
-          if (this.tiles.size > this.maxTiles) this.tiles.delete(this.tiles.keys().next().value!);
-          this.version++;
-        } catch (err) {
-          this.retryAt.set(key, Date.now() + (err instanceof RetryableError ? Math.max(err.retryMs, RETRY_MS) : RETRY_MS * 4));
+  private load(url: string, now: number): void {
+    if (this.loading.has(url) || (this.retryAt.get(url) ?? 0) > now) return;
+    this.loading.add(url);
+    this.fetchImpl(url)
+      .then(async (r) => {
+        if (r.status === 404) {
+          // an archive built before places.json existed: there is nothing to ask for again on this page
+          this.retryAt.set(url, Infinity);
+          return;
         }
-      }
-    } finally {
-      this.busy = false;
-    }
+        if (!r.ok) throw new Error(`map places ${url}: ${r.status}`);
+        this.files.set(url, parseMapFeatures((await r.json()) as OverpassJson));
+        this.retryAt.delete(url);
+        this.version++;
+      })
+      .catch((err) => {
+        console.warn('map places:', err);
+        this.retryAt.set(url, Date.now() + RETRY_MS);
+      })
+      .finally(() => this.loading.delete(url));
   }
 }

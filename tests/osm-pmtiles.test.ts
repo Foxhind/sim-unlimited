@@ -82,6 +82,12 @@ describe('our archives’ build', () => {
     expect(await osm.fetchJson({ z: 14, x: 0, y: 0 })).toBeNull();
     expect(asked.filter((u) => u.startsWith('missing'))).toHaveLength(1);
   });
+  it('the map’s prepared names: the places.json beside each archive whose bounds meet the box', async () => {
+    // the minimal archive's header bounds are all zero: a point at 0°, 0°
+    const osm = new PmtilesOsm('https://x/t/a.pmtiles', served(archive(0)));
+    expect(await osm.placesUrls({ west: -1, south: -1, east: 1, north: 1 })).toEqual(['https://x/t/a.places.json']);
+    expect(await osm.placesUrls({ west: 10, south: 40, east: 11, north: 41 })).toEqual([]);
+  });
   it('fails (to be retried) only when no archive opens', async () => {
     const none = (async () => new Response(null, { status: 404 })) as unknown as typeof fetch;
     await expect(new PmtilesOsm('a.pmtiles,b.pmtiles', none).stamp()).rejects.toThrow(/404/);

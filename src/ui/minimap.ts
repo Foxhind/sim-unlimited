@@ -4,10 +4,9 @@ import { RAMP, rampIndex } from '../engine/palette';
 import { tileForLatLon, type LatLon, type Tile } from '../world/geodesy';
 import { decodePngToSampler, fetchTerrariumPng, type HeightSampler } from '../world/terrain-source';
 import {
-  featureName, featureTiles, KIND_PRIORITY, mapLevelForSpan, MapFeatureSource, type MapFeature, type MapLevel,
+  featureName, KIND_PRIORITY, mapLevelForSpan, MapFeatureSource, type MapBox, type MapFeature, type MapLevel,
 } from '../world/map-features';
-import { fetchOverpassQuery } from '../world/osm-source';
-import { getOsmRaw, putOsmRaw } from '../world/tile-cache';
+import { PmtilesOsm } from '../world/osm-pmtiles';
 import { offsetLatLon, type Navaid } from '../flight/navaids';
 
 /** Q22: fixed reference airfields until the M6 global index. */
@@ -20,18 +19,16 @@ export const AIRFIELDS = [
   { icao: 'LOWI', name: 'INNSBRUCK', lat: 47.2603, lon: 11.3439, hdg: 261, rwyLat: 47.26161, rwyLon: 11.35703 },
 ] as const;
 
-const N = 96; // map cells per side
+/** map cells down the map (the start-screen and corner maps) */
+const N = 96;
 
-/** settlements and airfields for every map, cached with the raw OSM in IndexedDB */
+/** settlements and airfields for every map: the prepared places.json beside our PMTiles archives */
 let sharedFeatures: MapFeatureSource | undefined;
 function defaultFeatureSource(): MapFeatureSource {
-  sharedFeatures ??= new MapFeatureSource(
-    {
-      get: async (key) => (await getOsmRaw(key))?.json,
-      put: (key, json) => putOsmRaw({ key, ts: Date.now(), json }),
-    },
-    fetchOverpassQuery,
-  );
+  if (!sharedFeatures) {
+    const archives = new PmtilesOsm();
+    sharedFeatures = new MapFeatureSource((box) => archives.placesUrls(box));
+  }
   return sharedFeatures;
 }
 
@@ -52,11 +49,26 @@ const MISSING = -99999;
 
 /**
  * Q32: minimap — Terrarium z3–z8 heights quantized to the terrain palette, coastline from the
- * DEM water mask, settlements and airfields from OSM (map-features.ts), the reference airfields.
+ * DEM water mask, settlements and airfields from the prepared places.json (map-features.ts), the reference airfields.
  */
 export class Minimap {
   center: LatLon = { lat: 47.2603, lon: 11.3439 };
   spanM = 500000;
+  /** cells down the map; across it, as many as the aspect needs */
+  rows = N;
+  private _aspect = 1;
+  /** width / height of the drawn rect: 1 a square, the screen's for the full-screen flight map */
+  get aspect(): number {
+    return this._aspect;
+  }
+  set aspect(a: number) {
+    if (Math.abs(a - this._aspect) < 1e-3) return;
+    this._aspect = a;
+    this.dirty = true;
+  }
+  /** false: no terrain under the symbols, the scene shows through (the transparent full-screen map) */
+  opaque = true;
+  private cols = N;
   private heights = new Float32Array(N * N).fill(MISSING);
   private colors = new Uint8Array(N * N);
   private dataVersion = 0;
@@ -67,7 +79,7 @@ export class Minimap {
   private tiles: Tile[] = [];
   private dirty = true;
   private featureLevel: MapLevel = 'region';
-  private featureTiles: Tile[] = [];
+  private featureBox: MapBox = { west: 0, south: 0, east: 0, north: 0 };
   /** UI language for place names */
   lang = 'en';
 
@@ -80,12 +92,25 @@ export class Minimap {
     this.dirty = true;
   }
 
+  /** half the shown box in degrees: spanM is the height, the width follows the aspect */
+  private halves(): { halfLat: number; halfLon: number } {
+    const latRad = (this.center.lat * Math.PI) / 180;
+    const halfLat = this.spanM / 2 / 111320;
+    return { halfLat, halfLon: (halfLat * this.aspect) / Math.max(0.2, Math.cos(latRad)) };
+  }
+
   private layout(): void {
     const latRad = (this.center.lat * Math.PI) / 180;
     const worldM = 40075016 * Math.cos(latRad);
-    this.zoom = Math.max(3, Math.min(8, Math.round(Math.log2((worldM * 2.5) / this.spanM))));
-    const halfLat = this.spanM / 2 / 111320;
-    const halfLon = halfLat / Math.max(0.2, Math.cos(latRad));
+    const cols = Math.max(1, Math.round(this.rows * this.aspect));
+    if (cols !== this.cols || this.heights.length !== this.rows * cols) {
+      this.cols = cols;
+      this.heights = new Float32Array(this.rows * cols);
+      this.colors = new Uint8Array(this.rows * cols);
+    }
+    // tiles about as fine as the cells: the wider of the two spans sets the zoom
+    this.zoom = Math.max(3, Math.min(8, Math.round(Math.log2((worldM * 2.5 * (this.rows / N)) / (this.spanM * Math.max(1, this.aspect))))));
+    const { halfLat, halfLon } = this.halves();
     const t0 = tileForLatLon(this.center.lat + halfLat, this.center.lon - halfLon, this.zoom);
     const t1 = tileForLatLon(this.center.lat - halfLat, this.center.lon + halfLon, this.zoom);
     this.tiles = [];
@@ -96,7 +121,10 @@ export class Minimap {
     this.sampledVersion = -1;
     for (const t of this.tiles) void this.load(t);
     this.featureLevel = mapLevelForSpan(this.spanM);
-    this.featureTiles = featureTiles(this.center, halfLat, halfLon, this.featureLevel);
+    this.featureBox = {
+      west: this.center.lon - halfLon, east: this.center.lon + halfLon,
+      south: this.center.lat - halfLat, north: this.center.lat + halfLat,
+    };
     this.dirty = false;
   }
 
@@ -121,35 +149,34 @@ export class Minimap {
   }
 
   private cellLatLon(col: number, row: number): LatLon {
-    const latRad = (this.center.lat * Math.PI) / 180;
-    const halfLat = this.spanM / 2 / 111320;
-    const halfLon = halfLat / Math.max(0.2, Math.cos(latRad));
+    const { halfLat, halfLon } = this.halves();
     return {
-      lat: this.center.lat + halfLat - ((row + 0.5) / N) * halfLat * 2,
-      lon: this.center.lon - halfLon + ((col + 0.5) / N) * halfLon * 2,
+      lat: this.center.lat + halfLat - ((row + 0.5) / this.rows) * halfLat * 2,
+      lon: this.center.lon - halfLon + ((col + 0.5) / this.cols) * halfLon * 2,
     };
   }
 
   private sample(): void {
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
+    const R = this.rows, C = this.cols;
+    for (let row = 0; row < R; row++) {
+      for (let col = 0; col < C; col++) {
         const ll = this.cellLatLon(col, row);
         const t = tileForLatLon(ll.lat, ll.lon, this.zoom);
         const s = this.samplers.get(`${t.z}/${t.x}/${t.y}`);
-        this.heights[row * N + col] = s ? s(ll.lon, ll.lat) : MISSING;
+        this.heights[row * C + col] = s ? s(ll.lon, ll.lat) : MISSING;
       }
     }
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
-        const h = this.heights[row * N + col];
+    for (let row = 0; row < R; row++) {
+      for (let col = 0; col < C; col++) {
+        const h = this.heights[row * C + col];
         let shore = false;
         if (h <= 0 && h !== MISSING) {
           for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
             const c2 = col + dc, r2 = row + dr;
-            if (c2 >= 0 && c2 < N && r2 >= 0 && r2 < N && this.heights[r2 * N + c2] > 0) { shore = true; break; }
+            if (c2 >= 0 && c2 < C && r2 >= 0 && r2 < R && this.heights[r2 * C + c2] > 0) { shore = true; break; }
           }
         }
-        this.colors[row * N + col] = this.color(h, shore);
+        this.colors[row * C + col] = this.color(h, shore);
       }
     }
   }
@@ -164,20 +191,23 @@ export class Minimap {
     return rampIndex(RAMP.SNOW, 10);
   }
 
-  /** Returns the map rect so callers can hit-test clicks. */
+  /** The map in the rect at (x, y), `size` wide and size / aspect high. */
   draw(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number, marker?: LatLon, markerHdgDeg?: number): void {
     if (this.dirty) this.layout();
-    if (this.sampledVersion !== this.dataVersion) {
+    if (this.opaque && this.sampledVersion !== this.dataVersion) {
       this.sample();
       this.sampledVersion = this.dataVersion;
     }
-    const cell = size / N;
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
-        vec.fillRect(x + col * cell, y + row * cell, Math.ceil(cell), Math.ceil(cell), this.colors[row * N + col]);
+    const h = size / this.aspect;
+    if (this.opaque) {
+      const cw = size / this.cols, ch = h / this.rows;
+      for (let row = 0; row < this.rows; row++) {
+        for (let col = 0; col < this.cols; col++) {
+          vec.fillRect(x + col * cw, y + row * ch, Math.ceil(cw), Math.ceil(ch), this.colors[row * this.cols + col]);
+        }
       }
     }
-    vec.rect(x, y, size, size, Math.max(1, u), HUD_GREEN);
+    vec.rect(x, y, size, h, Math.max(1, u), HUD_GREEN);
     this.drawFeatures(vec, font, x, y, size, u);
     if (marker) {
       const p = this.project(marker, x, y, size);
@@ -197,7 +227,7 @@ export class Minimap {
    * Labels go right of the symbol (left near the edge), most important first, never overlapping.
    */
   private drawFeatures(vec: VectorRenderer, font: FontRenderer, x: number, y: number, size: number, u: number): void {
-    const feats: MapFeature[] = this.features.features(this.featureTiles, this.featureLevel)
+    const feats: MapFeature[] = this.features.features(this.featureBox, this.featureLevel)
       .slice()
       .sort((a, b) => KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind]);
     const refCodes = new Set<string>(AIRFIELDS.map((a) => a.icao));
@@ -208,7 +238,7 @@ export class Minimap {
     const place = (text: string, px: number, py: number, r: number, index: number, prio: number): void => {
       if (!text) return;
       const ty = Math.round(py - lineH / 2);
-      if (ty < y + u || ty + lineH > y + size - u) return;
+      if (ty < y + u || ty + lineH > y + size / this.aspect - u) return;
       // right of the symbol, else left of it; a long name is cut to the room on that side
       const right = px + r + 2 * u, left = px - r - 2 * u;
       for (const side of ['right', 'left'] as const) {
@@ -301,19 +331,17 @@ export class Minimap {
   }
 
   private project(ll: LatLon, x: number, y: number, size: number): [number, number] | null {
-    const latRad = (this.center.lat * Math.PI) / 180;
-    const halfLat = this.spanM / 2 / 111320;
-    const halfLon = halfLat / Math.max(0.2, Math.cos(latRad));
+    const { halfLat, halfLon } = this.halves();
     const fx = (ll.lon - (this.center.lon - halfLon)) / (halfLon * 2);
     const fy = ((this.center.lat + halfLat) - ll.lat) / (halfLat * 2);
     if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
-    return [x + fx * size, y + fy * size];
+    return [x + fx * size, y + (fy * size) / this.aspect];
   }
 
   /** aerodromes the map has loaded for its current view (the flight map feeds the radio stations from them) */
   airfields(): Array<{ kind: string; lat: number; lon: number; code?: string; name?: string }> {
     if (this.dirty) return [];
-    return this.features.features(this.featureTiles, this.featureLevel)
+    return this.features.features(this.featureBox, this.featureLevel)
       .filter((f) => f.kind === 'airport' || f.kind === 'airfield')
       .map((f) => ({ kind: f.kind, lat: f.lat, lon: f.lon, code: f.code, name: featureName(f, 'en') || undefined }));
   }
@@ -372,11 +400,9 @@ export class Minimap {
   /** Q29: click the map to pick an arbitrary start point. */
   pick(px: number, py: number, x: number, y: number, size: number): LatLon | null {
     const fx = (px - x) / size;
-    const fy = (py - y) / size;
+    const fy = ((py - y) * this.aspect) / size;
     if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
-    const latRad = (this.center.lat * Math.PI) / 180;
-    const halfLat = this.spanM / 2 / 111320;
-    const halfLon = halfLat / Math.max(0.2, Math.cos(latRad));
+    const { halfLat, halfLon } = this.halves();
     return {
       lat: this.center.lat + halfLat - fy * halfLat * 2,
       lon: this.center.lon - halfLon + fx * halfLon * 2,

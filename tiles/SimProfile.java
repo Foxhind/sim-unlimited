@@ -18,6 +18,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.regex.Pattern;
 import org.locationtech.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Envelope;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.geom.Polygon;
@@ -31,6 +32,10 @@ import org.locationtech.jts.geom.Polygon;
  * centrelines are not in the tiles: they go whole and unquantised to `<output>.aerodromes.json`,
  * because a tile's pads are built from aerodromes up to AERODROME_REACH_DEG away and keyed by their
  * exact geometry (src/world/aerodrome.ts), which clipped tile copies would break.
+ *
+ * The map's settlements (place=city|town|village nodes) and aerodromes and heliports (at the centre of
+ * their bounding box, as Overpass `out center` puts them) with their names go to `<output>.places.json`
+ * as Overpass-shaped elements, which src/world/map-features.ts reads with parseMapFeatures.
  *
  * Run (Java 21+):
  *   java -Xmx8g -cp planetiler.jar tiles/SimProfile.java --osm=austria.osm.pbf --output=out/austria.pmtiles
@@ -100,7 +105,15 @@ public class SimProfile implements Profile {
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
 
+  /** what the map draws (map-features.ts): settlements by size, aerodromes and heliports */
+  static final Pattern PLACE = Pattern.compile("^(city|town|village)$");
+  static final Pattern MAP_AEROWAY = Pattern.compile("^(aerodrome|heliport)$");
+  /** the tags map-features.ts reads: kind, code, and the names in the UI languages (en, ru, ua) */
+  static final String[] PLACE_KEYS = {"place", "aeroway", "icao", "iata", "local_ref", "ref", "aerodrome", "aerodrome:type",
+    "name", "name:en", "name:ru", "name:uk"};
+
   final ConcurrentLinkedQueue<Map<String, Object>> aerodromes = new ConcurrentLinkedQueue<>();
+  final ConcurrentLinkedQueue<Map<String, Object>> places = new ConcurrentLinkedQueue<>();
   final ConcurrentLinkedQueue<Map<String, Object>> runways = new ConcurrentLinkedQueue<>();
 
   static String s(SourceFeature f, String k) {
@@ -207,6 +220,7 @@ public class SimProfile implements Profile {
     if (f.id() == Long.getLong("sim.debug", -1L)) {
       System.err.printf("DEBUG %d point=%s line=%s polygon=%s tags=%s wanted=%s%n", f.id(), f.isPoint(), f.canBeLine(), f.canBePolygon(), f.tags(), wayWanted(f));
     }
+    collectPlace(f);
     if (f.isPoint()) {
       if (nodeWanted(f)) withTags(fc.point("points"), keptTags(f)).setBufferPixels(BUILDING_BUFFER_PX);
       return;
@@ -240,6 +254,31 @@ public class SimProfile implements Profile {
     } else if (!relation) {
       withTags(fc.line("lines"), tags).setBufferPixels(REACH_BUFFER_PX);
     }
+  }
+
+  /** a settlement node or an aerodrome / heliport (any geometry, at its bbox centre) for `<output>.places.json` */
+  void collectPlace(SourceFeature f) {
+    boolean settlement = f.isPoint() && find(PLACE, s(f, "place"));
+    if (!settlement && !find(MAP_AEROWAY, s(f, "aeroway"))) return;
+    Coordinate c;
+    try {
+      Geometry g = f.latLonGeometry();
+      if (f.isPoint()) c = g.getCoordinate();
+      else {
+        Envelope e = g.getEnvelopeInternal();
+        c = e.isNull() ? null : e.centre();
+      }
+    } catch (Exception e) {
+      return; // broken geometry: Overpass gives it no centre either
+    }
+    if (c == null) return;
+    Map<String, Object> tags = new TreeMap<>();
+    for (String k : PLACE_KEYS) {
+      String v = s(f, k);
+      if (v != null) tags.put(k, v);
+    }
+    // an aerodrome node tagged place=* too stays an aerodrome (map-features.ts reads aeroway first)
+    places.add(Map.of("type", f.isPoint() ? "node" : "way", "lat", Math.round(c.y * 1e6) / 1e6, "lon", Math.round(c.x * 1e6) / 1e6, "tags", tags));
   }
 
   static List<List<double[]>> rings(Polygon p) {
@@ -291,6 +330,8 @@ public class SimProfile implements Profile {
         json(w, l.get(i));
       }
       w.write(']');
+    } else if (v instanceof Double d) {
+      w.write(num(d));
     } else if (v instanceof double[] d) {
       w.write('[' + num(d[0]) + ',' + num(d[1]) + ']');
     } else {
@@ -316,6 +357,12 @@ public class SimProfile implements Profile {
     }
   }
 
+  void writePlaces(Path path) throws IOException {
+    try (Writer w = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+      json(w, Map.of("elements", new ArrayList<>(places)));
+    }
+  }
+
   public static void main(String[] argv) throws Exception {
     Arguments args = Arguments.fromArgsOrConfigFile(argv).orElse(Arguments.of(Map.of("minzoom", "14", "maxzoom", "14")));
     Path osm = args.file("osm", "OSM .osm.pbf extract", null);
@@ -326,5 +373,8 @@ public class SimProfile implements Profile {
     Path index = Path.of(output.toString().replaceFirst("\\.pmtiles$", "") + ".aerodromes.json");
     profile.writeIndex(index);
     System.out.printf("aerodrome index: %d aerodromes, %d runways → %s%n", profile.aerodromes.size(), profile.runways.size(), index);
+    Path placesPath = Path.of(output.toString().replaceFirst("\\.pmtiles$", "") + ".places.json");
+    profile.writePlaces(placesPath);
+    System.out.printf("map places: %d → %s%n", profile.places.size(), placesPath);
   }
 }

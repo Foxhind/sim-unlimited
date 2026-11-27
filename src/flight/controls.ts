@@ -8,7 +8,7 @@ export type Action =
   | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget'
   // autopilot selectors, radios, HUD mode, flight map
   | 'hdgDec' | 'hdgInc' | 'altDec' | 'altInc' | 'spdDec' | 'spdInc' | 'crsDec' | 'crsInc'
-  | 'apNav' | 'navTune' | 'adfTune' | 'hudMode' | 'mapZoom';
+  | 'apNav' | 'navTune' | 'adfTune' | 'hudMode' | 'mapZoom' | 'mapMode';
 
 /** selector knobs: one step per press, then repeating while held (Shift makes a step ten times bigger) */
 export const KNOB_ACTIONS = ['hdgDec', 'hdgInc', 'altDec', 'altInc', 'spdDec', 'spdInc', 'crsDec', 'crsInc'] as const;
@@ -55,6 +55,8 @@ export const DEFAULT_BINDINGS: Record<Action, string> = {
   adfTune: 'KeyY',
   hudMode: 'KeyH',
   mapZoom: 'KeyK',
+  /** the flight map: in the corner, full screen opaque, full screen see-through */
+  mapMode: 'Tab',
 };
 
 const clamp1 = (v: number): number => Math.max(-1, Math.min(1, v));
@@ -169,7 +171,7 @@ export class Controls {
     edge('flaps');
     if (this.edges.has('gear') && !this.gearFixed && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
     if (this.edges.has('flaps') && this.toggleAllowed('flaps')) this.flaps = !this.flaps;
-    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom'] as Action[]) {
+    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom', 'mapMode'] as Action[]) {
       edge(a);
     }
     this.knobSteps.clear();

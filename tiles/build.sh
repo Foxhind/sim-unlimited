@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # M6 prototype: one archive per .osm.pbf extract in tiles/data/osm, built with tiles/SimProfile.java:
-#   tiles/data/out/<region>.pmtiles + <region>.aerodromes.json, and tiles/data/out/index.json listing the
+#   tiles/data/out/<region>.pmtiles + <region>.aerodromes.json + <region>.places.json (the map's
+#   settlements and aerodromes with their names), and tiles/data/out/index.json listing the
 #   archives (the client's default manifest, see src/world/osm-pmtiles.ts).
 #   JAVA=<jdk21>/bin/java PLANETILER=<planetiler.jar> HEAP=8g tiles/build.sh [extra planetiler args]
 # Defaults: the first JDK 21 under tiles/data/jdk, tiles/data/bin/planetiler.jar.
