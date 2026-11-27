@@ -72,6 +72,18 @@ const en = {
   gear: 'GEAR', flaps: 'FLAPS', brakes: 'BRAKES', speedbrake: 'SPEEDBRAKE',
   pause: 'PAUSE', mute: 'SOUND', camCockpit: 'CAM COCKPIT', camOrbit: 'CAM ORBIT', camChase: 'CAM CHASE',
   camFlyby: 'CAM FLYBY', camTower: 'CAM TOWER', camTarget: 'CAM TARGET',
+  camNext: 'CAM NEXT', autopilot: 'AUTOPILOT', autoland: 'AUTOLAND', mapMode: 'MAP SIZE', hudMode: 'HUD NAV/APP',
+  // touch controls (ui/touch.ts): short, a button is 9 letters wide
+  touchBrake: 'BRAKE', touchSpdBrk: 'SPD BRK', touchAp: 'AP', touchLand: 'LAND', touchCam: 'CAM', touchMap: 'MAP',
+  touchHud: 'HUD', touchPause: 'PAUSE', touchRudL: '<R', touchRudR: 'R>',
+  touchControls: 'TOUCH CONTROLS', auto: 'AUTO',
+  keyboard: 'KEYBOARD', gamepad: 'GAMEPAD',
+  padNone: 'NO GAMEPAD YET: PRESS A BUTTON ON IT',
+  padAxes: 'AXES', axisRoll: 'ROLL', axisPitch: 'PITCH', axisYaw: 'RUDDER', axisThrottle: 'THROTTLE', invert: 'INV',
+  moveAxis: 'MOVE THE AXIS...  ESC / TAP: NONE',
+  helpTouch: 'LEFT THUMB: STICK   RIGHT THUMB: THROTTLE   SWIPE: LOOK AROUND',
+  helpPad: 'GAMEPAD: STICKS FLY  TRIGGERS THROTTLE  X GEAR  Y FLAPS  START PAUSE',
+  pickOnMapTouch: 'TAP THE MAP TO PICK A START POINT',
 };
 
 export type StringKey = keyof typeof en;
@@ -147,6 +159,17 @@ const ru: Record<StringKey, string> = {
   gear: 'ШАССИ', flaps: 'ЗАКРЫЛКИ', brakes: 'ТОРМОЗА', speedbrake: 'ЩИТКИ',
   pause: 'ПАУЗА', mute: 'ЗВУК', camCockpit: 'КАМ. КАБИНА', camOrbit: 'КАМ. ОРБИТА', camChase: 'КАМ. ПОГОНЯ',
   camFlyby: 'КАМ. ПРОЛЁТ', camTower: 'КАМ. ВЫШКА', camTarget: 'КАМ. ЦЕЛЬ',
+  camNext: 'КАМ. СЛЕД.', autopilot: 'АВТОПИЛОТ', autoland: 'АВТОПОСАДКА', mapMode: 'РАЗМЕР КАРТЫ', hudMode: 'HUD НАВ/ПОС',
+  touchBrake: 'ТОРМОЗ', touchSpdBrk: 'ЩИТКИ', touchAp: 'АП', touchLand: 'ПОСАДКА', touchCam: 'КАМЕРА', touchMap: 'КАРТА',
+  touchHud: 'HUD', touchPause: 'ПАУЗА', touchRudL: '<Р', touchRudR: 'Р>',
+  touchControls: 'СЕНСОРНОЕ УПРАВЛЕНИЕ', auto: 'АВТО',
+  keyboard: 'КЛАВИАТУРА', gamepad: 'ГЕЙМПАД',
+  padNone: 'ГЕЙМПАДА НЕТ: НАЖМИТЕ НА НЁМ КНОПКУ',
+  padAxes: 'ОСИ', axisRoll: 'КРЕН', axisPitch: 'ТАНГАЖ', axisYaw: 'РУЛЬ', axisThrottle: 'ТЯГА', invert: 'ИНВ',
+  moveAxis: 'ПОДВИГАЙТЕ ОСЬ...  ESC / ТАП: НЕТ',
+  helpTouch: 'ЛЕВЫЙ ПАЛЕЦ: РУЧКА   ПРАВЫЙ: ТЯГА   СВАЙП: ОБЗОР',
+  helpPad: 'ГЕЙМПАД: СТИКИ РУЛИ  КУРКИ ТЯГА  X ШАССИ  Y ЗАКРЫЛКИ  START ПАУЗА',
+  pickOnMapTouch: 'КОСНИТЕСЬ КАРТЫ, ЧТОБЫ ВЫБРАТЬ ТОЧКУ СТАРТА',
 };
 
 const ua: Record<StringKey, string> = {
@@ -220,6 +243,17 @@ const ua: Record<StringKey, string> = {
   gear: 'ШАСІ', flaps: 'ЗАКРИЛКИ', brakes: 'ГАЛЬМА', speedbrake: 'ЩИТКИ',
   pause: 'ПАУЗА', mute: 'ЗВУК', camCockpit: 'КАМ. КАБІНА', camOrbit: 'КАМ. ОРБІТА', camChase: 'КАМ. ПОГОНЯ',
   camFlyby: 'КАМ. ПРОЛІТ', camTower: 'КАМ. ВЕЖА', camTarget: 'КАМ. ЦІЛЬ',
+  camNext: 'КАМ. НАСТ.', autopilot: 'АВТОПІЛОТ', autoland: 'АВТОПОСАДКА', mapMode: 'РОЗМІР МАПИ', hudMode: 'HUD НАВ/ПОС',
+  touchBrake: 'ГАЛЬМО', touchSpdBrk: 'ЩИТКИ', touchAp: 'АП', touchLand: 'ПОСАДКА', touchCam: 'КАМЕРА', touchMap: 'МАПА',
+  touchHud: 'HUD', touchPause: 'ПАУЗА', touchRudL: '<К', touchRudR: 'К>',
+  touchControls: 'СЕНСОРНЕ КЕРУВАННЯ', auto: 'АВТО',
+  keyboard: 'КЛАВІАТУРА', gamepad: 'ГЕЙМПАД',
+  padNone: 'ГЕЙМПАДА НЕМАЄ: НАТИСНІТЬ НА НЬОМУ КНОПКУ',
+  padAxes: 'ОСІ', axisRoll: 'КРЕН', axisPitch: 'ТАНГАЖ', axisYaw: 'КЕРМО', axisThrottle: 'ТЯГА', invert: 'ІНВ',
+  moveAxis: 'ПОВОРУШІТЬ ВІССЮ...  ESC / ТАП: НЕМАЄ',
+  helpTouch: 'ЛІВИЙ ПАЛЕЦЬ: РУЧКА   ПРАВИЙ: ТЯГА   СВАЙП: ОГЛЯД',
+  helpPad: 'ГЕЙМПАД: СТІКИ КЕРМУЮТЬ  КУРКИ ТЯГА  X ШАСІ  Y ЗАКРИЛКИ  START ПАУЗА',
+  pickOnMapTouch: 'ТОРКНІТЬСЯ МАПИ, ЩОБ ОБРАТИ ТОЧКУ СТАРТУ',
 };
 
 const DICTS: Record<Lang, Record<StringKey, string>> = { en, ru, ua };

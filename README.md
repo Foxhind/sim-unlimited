@@ -112,9 +112,26 @@ Dev-only pages: `relief.html` (relief inspector), `inspector.html` (terrain insp
 | F1–F6 | Cameras |
 | P, U, L | Autopilot, NAV/HDG, autoland |
 | K | Map |
+| C | Next camera |
 | Esc | Pause menu |
 
 Keys can be rebound in Settings.
+
+**Touch screens.** On a phone or tablet the sim shows its own controls while flying: a stick
+under the left thumb (it centres where the finger goes down; pull it down to raise the nose), a
+throttle lever under the right thumb (slide it), rudder beside the lever and the buttons for gear,
+flaps, brakes, speed brake, autopilot, autoland, camera, map, HUD mode and pause. A swipe elsewhere
+looks around in the outside views, a pinch zooms. Held sideways the controls stand at the sides;
+held upright they take a band across the bottom and the view's centre rises above it. The HUD keeps
+clear of the notch and the home bar. Settings › Touch controls: auto (on a touch screen until a key
+or a gamepad is used), on, off.
+
+**Gamepads and joysticks.** A gamepad the browser knows (Xbox, PlayStation): left stick pitch and
+roll (pull back to climb), right stick rudder, RT/LT throttle, A brakes, B speed brake, X gear,
+Y flaps, LB/RB rudder, Back map size, Start pause, L3 autopilot, R3 HUD mode, D-pad camera /
+cockpit / autoland / NAV-HDG. A joystick or HOTAS flies on its X/Y axes at once; its twist and
+throttle lever are assigned in Settings › Gamepad (tap the axis, move it); every axis can be
+reversed and every button rebound there.
 
 ## Repository layout
 

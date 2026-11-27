@@ -46,6 +46,7 @@ import { Menu } from './ui/menu';
 import { AIRFIELDS, Minimap } from './ui/minimap';
 import { REPORT_URL, Telemetry, loadConsent, saveConsent } from './ui/telemetry';
 import { t } from './ui/i18n';
+import { NO_INSETS, TouchControls, type Insets } from './ui/touch';
 
 interface Start {
   latLon: LatLon;
@@ -380,6 +381,9 @@ const towerPos = vec3.create();
 const unlock = (): void => audio.unlock();
 window.addEventListener('keydown', unlock);
 window.addEventListener('mousedown', unlock);
+// a touch screen sends no mouse events (input.ts takes the touches): sound starts on a finger
+window.addEventListener('pointerup', unlock);
+window.addEventListener('touchend', unlock);
 
 /** where the aircraft is put: the start point, or for a ground start the nearest OSM runway's takeoff end */
 const spawnAt = { lat: start.latLon.lat, lon: start.latLon.lon, hdg: start.hdg };
@@ -560,6 +564,37 @@ const camActions: [Action, CameraMode][] = [
   ['camFlyby', 'flyby'], ['camTower', 'tower'], ['camTarget', 'target'],
 ];
 
+/** the touch controls (ui/touch.ts), shown on a touch screen while flying */
+const touch = new TouchControls();
+const coarsePointer = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+/** shown: always, never, or (auto) on a touch screen until a key or a gamepad is used */
+function touchShown(): boolean {
+  if (settings.touchControls !== 'auto') return settings.touchControls === 'on';
+  return input.device === 'touch' || (coarsePointer && input.device !== 'keyboard' && input.device !== 'pad');
+}
+input.claimTouch = (x, y) => (touchShown() && state === 'flying' && menu.screen === 'none' ? touch.claim(x, y) : null);
+
+/** the screen's notch and home bar, device px: env(safe-area-inset-*) as an invisible element's padding */
+const safeProbe = document.createElement('div');
+safeProbe.style.cssText = 'position:fixed;left:0;top:0;visibility:hidden;pointer-events:none;' +
+  'padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)';
+document.body.appendChild(safeProbe);
+function safeInsets(): Insets {
+  const cs = getComputedStyle(safeProbe);
+  const k = renderer.width / Math.max(1, canvas.clientWidth);
+  const px = (v: string): number => Math.round((parseFloat(v) || 0) * k);
+  return { l: px(cs.paddingLeft), t: px(cs.paddingTop), r: px(cs.paddingRight), b: px(cs.paddingBottom) };
+}
+let insets: Insets = NO_INSETS;
+const ATTRIBUTION = `© OpenStreetMap contributors · ${OPENFREEMAP_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
+/** the data credits along the bottom: one row, or on a narrow screen a row per source (bottom row first) */
+function attribution(u: number): string[] {
+  const room = renderer.width - 16 * u - insets.l - insets.r;
+  return font.measure(ATTRIBUTION, u) <= room ? [ATTRIBUTION] : ATTRIBUTION.split(' · ').reverse();
+}
+let insetsKey = '';
+const CAM_ORDER: CameraMode[] = ['cockpit', 'chase', 'orbit', 'flyby', 'tower', 'target'];
+
 let last = performance.now();
 const autopilot = new Autopilot();
 /** beyond the ground probe's few kilometres the autopilot still needs the terrain: coarse DEM tiles */
@@ -722,8 +757,21 @@ function frame(now: number): void {
   font.setScreenSize(renderer.width, renderer.height);
   vectors.setScreenSize(renderer.width, renderer.height);
 
+  const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  const sizeKey = `${renderer.width}x${renderer.height}`;
+  if (sizeKey !== insetsKey) { insetsKey = sizeKey; insets = safeInsets(); }
+  const touchOn = touchShown() && state === 'flying' && menu.screen === 'none';
+  const attrLines = attribution(u);
+  touch.setLayout(renderer.width, renderer.height, u, canvas.clientWidth, insets, attrLines.length);
+  // a band of touch controls across the bottom (a phone held upright): the view's centre is raised to
+  // the middle of what is left, an off-centre projection, so the horizon and the conformal HUD sit there
+  const viewShift = touchOn ? touch.layout.reserve.bottom / 2 : 0;
+  proj[9] = (-2 * viewShift) / renderer.height;
+
   presetNow = state === 'menu' ? menu.config.weather : start.weather;
-  let flight: FlightControls = controls.update(dt, input, settings, canvas.clientWidth, canvas.clientHeight);
+  input.pollPads();
+  const fingers = touchOn ? touch.update(input.touches, controls.throttle) : undefined;
+  let flight: FlightControls = controls.update(dt, input, settings, canvas.clientWidth, canvas.clientHeight, fingers);
   if (controls.justPressed('autopilot') && state === 'flying') {
     apOn = !apOn;
     if (apOn) autopilot.engage(model);
@@ -797,6 +845,9 @@ function frame(now: number): void {
   }
   for (const [action, mode] of camActions) {
     if (controls.justPressed(action) && state === 'flying') rig.setMode(mode, model);
+  }
+  if (controls.justPressed('camNext') && state === 'flying') {
+    rig.setMode(CAM_ORDER[(CAM_ORDER.indexOf(rig.mode) + 1) % CAM_ORDER.length], model);
   }
   if (controls.justPressed('pause') && spawned && (state === 'flying' || state === 'paused')) {
     if (menu.screen === 'settings') menu.screen = 'pause';
@@ -887,6 +938,8 @@ function frame(now: number): void {
 
   let view: mat4;
   let camPos: vec3;
+  // a drag over a menu scrolls it (a long one on a short screen) rather than swinging the view
+  menu.takeScroll(input);
   if (state === 'menu') {
     // slow orbit over the start area as a live backdrop for the menus
     const a = now * 0.00004;
@@ -991,7 +1044,6 @@ function frame(now: number): void {
     menu.clockText = `${hh} UTC  SUN ${Math.round(sun.elevationDeg)}\u00B0  MOON ${Math.round(moon.illumination * 100)}% ${Math.round(moon.elevationDeg)}\u00B0`;
   }
   const flashing = state === 'crashed' && now - crashTime < 150;
-  const u = Math.max(1, Math.round(window.devicePixelRatio || 1));
   profiler.stage('тени');
   if (renderer.beginShadows(camPos, baseGround(camPos[1]).y, view, sunDir)) {
     chunks.drawShadows(renderer);
@@ -1096,6 +1148,7 @@ function frame(now: number): void {
   }
   profiler.stage('HUD, меню, карта');
   const pad = 8 * u;
+  const reserve = touchOn ? touch.layout.reserve : { right: 0, bottom: 0, left: 0 };
   if (spawned && state === 'flying' && rimLab.hud) {
     // the opaque full-screen map covers the HUD: it is not drawn under it
     if (mapMode !== 'full') drawHud(font, vectors, renderer.width, renderer.height, u, {
@@ -1104,6 +1157,7 @@ function frame(now: number): void {
       hudMode, nav: hudNav, fovYDeg: 60,
       weather: { data: weatherInForce(), tempC: weather.tempOverride ?? weatherInForce()?.tempC },
       time: simTime,
+      layout: { inset: insets, reserve, boresightY: renderer.height / 2 - viewShift },
     });
     // simple north-up minimap, bottom-left: terrain, reference airfields, own aircraft with heading;
     // Tab puts it over the whole screen, opaque or with the scene showing through
@@ -1115,36 +1169,59 @@ function frame(now: number): void {
     const tuned = new Set([nav1?.id, adf?.id, landingIls?.id].filter((x): x is string => !!x));
     if (mapMode === 'corner') {
       const mapSize = Math.round(Math.min(renderer.width, renderer.height) * 0.22);
-      const mapY = renderer.height - 68 * u - mapSize; // above the HUD throttle line at h - 60u
-      flightMap.draw(vectors, font, pad, mapY, mapSize, u, own, model.headingDeg);
-      flightMap.drawNav(vectors, font, pad, mapY, mapSize, u, navDb.all(), tuned, own);
-      font.text(`N  ${span / 1000} KM`, pad, mapY - 18 * u, u, HUD_GREEN);
+      const mapX = pad + insets.l;
+      // above the HUD throttle line at h - 60u; with the touch controls' left column (a phone held
+      // sideways) the stick has that corner: under the HUD's two top-left rows instead
+      const mapY = reserve.left > 0
+        ? insets.t + pad + 58 * u
+        : renderer.height - insets.b - reserve.bottom - 68 * u - mapSize;
+      flightMap.draw(vectors, font, mapX, mapY, mapSize, u, own, model.headingDeg);
+      flightMap.drawNav(vectors, font, mapX, mapY, mapSize, u, navDb.all(), tuned, own);
+      font.text(`N  ${span / 1000} KM`, mapX, mapY - 18 * u, u, HUD_GREEN);
     } else {
       // the HUD (when drawn) goes under the map's symbols and labels
       vectors.flush();
       font.flush();
       // the whole screen but the margins: below the HUD's two top-left rows (aircraft, HUD mode), above
       // the attribution row (and in dev the stats row over it)
-      const mapY = pad + 40 * u;
-      const mapW = renderer.width - 2 * pad;
-      const mapH = renderer.height - mapY - pad - (import.meta.env.DEV ? 38 : 20) * u;
+      const mapY = insets.t + pad + 40 * u;
+      const mapW = renderer.width - 2 * pad - insets.l - insets.r;
+      const mapH = renderer.height - insets.b - mapY - pad - (import.meta.env.DEV ? 38 : 20) * u;
       const fullSpan = span * FULL_MAP_SPAN_SCALE;
       fullMap.lang = settings.lang;
       fullMap.opaque = mapMode === 'full';
       fullMap.aspect = mapW / mapH;
       fullMap.follow(own, fullSpan);
       if (mapMode === 'full') vectors.fillRect(0, 0, renderer.width, renderer.height, MAP_BACKDROP);
-      fullMap.draw(vectors, font, pad, mapY, mapW, u, own, model.headingDeg);
-      fullMap.drawNav(vectors, font, pad, mapY, mapW, u, navDb.all(), tuned, own);
-      font.text(`N  ${fullSpan / 1000} KM`, pad + 4 * u, mapY + 4 * u, u, HUD_GREEN);
+      fullMap.draw(vectors, font, pad + insets.l, mapY, mapW, u, own, model.headingDeg);
+      fullMap.drawNav(vectors, font, pad + insets.l, mapY, mapW, u, navDb.all(), tuned, own);
+      font.text(`N  ${fullSpan / 1000} KM`, pad + insets.l + 4 * u, mapY + 4 * u, u, HUD_GREEN);
     }
+  }
+  if (spawned && touchOn) {
+    // the touch controls over the HUD and the map
+    vectors.flush();
+    font.flush();
+    const lit = new Set<Action>();
+    if (flight.gearDown) lit.add('gear');
+    if (flight.flaps) lit.add('flaps');
+    if (apOn) lit.add('autopilot');
+    if (autopilot.landing) lit.add('autoland');
+    if (flight.speedbrake) lit.add('speedbrake');
+    if (flight.brakes) lit.add('brakes');
+    if (mapMode !== 'corner') lit.add('mapMode');
+    if (hudMode === 'APP') lit.add('hudMode');
+    touch.draw(vectors, font, u, settings.lang, flight.throttle, lit, input.touches, cfg.thrustAfterburner > cfg.thrustDry ? 0.85 : undefined);
   }
   if (!spawned && state === 'loading') {
     const msg = t(settings.lang, 'loading');
-    font.text(msg, (renderer.width - font.measure(msg, u * 2)) / 2, renderer.height / 2, u * 2, HUD_AMBER);
+    // double size, unless that is wider than a phone held upright
+    const ms = font.measure(msg, u * 2) <= renderer.width - 2 * pad ? u * 2 : u;
+    font.text(msg, (renderer.width - font.measure(msg, ms)) / 2, renderer.height / 2, ms, HUD_AMBER);
   }
   if (menu.screen !== 'none') {
-    menu.draw(renderer.width, renderer.height, u, canvas.clientWidth, canvas.clientHeight, input, spawned ? camWorld.latLon : undefined);
+    menu.footRows = attrLines.length + (import.meta.env.DEV ? 1 : 0);
+    menu.draw(renderer.width, renderer.height, u, canvas.clientWidth, canvas.clientHeight, input, spawned ? camWorld.latLon : undefined, insets, controls);
   }
   if (import.meta.env.DEV && rimLab.hud) {
     const st = chunks.stats;
@@ -1152,12 +1229,13 @@ function frame(now: number): void {
     const fs = farOsm.stats;
     font.text(
       `FPS ${Math.round(fpsAvg)}  DRAW ${st.drawCalls + os.drawCalls + farOsm.drawCalls + clouds.drawCalls}  BUF ${st.gpuBuffers}  OSM ERR ${os.errors}  FAR ${fs.ready}/${fs.chunks}  ${state.toUpperCase()}`,
-      // a row above the attribution (which fills the bottom row) and below the throttle readout
-      pad, renderer.height - pad - 34 * u, u, HUD_GREEN,
+      // a row above the attribution (which fills the bottom row or rows) and below the throttle readout
+      pad + insets.l, renderer.height - pad - insets.b - (16 + 18 * attrLines.length) * u, u, HUD_GREEN,
     );
   }
-  const attr = `© OpenStreetMap contributors · ${OPENFREEMAP_ATTRIBUTION} · ${WEATHER_ATTRIBUTION}`;
-  font.text(attr, renderer.width - font.measure(attr, u) - pad, renderer.height - pad - 16 * u, u, HUD_GREEN);
+  attrLines.forEach((line, i) => {
+    font.text(line, renderer.width - font.measure(line, u) - pad - insets.r, renderer.height - pad - insets.b - (16 + i * 18) * u, u, HUD_GREEN);
+  });
   font.flush();
   vectors.flush();
   profiler.stage('вывод на экран');

@@ -1,11 +1,13 @@
 import type { FlightControls } from './model';
 import type { Settings } from '../ui/settings';
+import { DEFAULT_PAD_BINDINGS, PadReader } from './gamepad';
+import type { PadState } from '../engine/input';
 
 export type Action =
   | 'pitchUp' | 'pitchDown' | 'rollLeft' | 'rollRight' | 'yawLeft' | 'yawRight'
   | 'throttleUp' | 'throttleDown' | 'gear' | 'flaps' | 'brakes' | 'speedbrake'
   | 'pause' | 'mute' | 'restart' | 'newPoint' | 'autopilot' | 'autoland'
-  | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget'
+  | 'camCockpit' | 'camOrbit' | 'camChase' | 'camFlyby' | 'camTower' | 'camTarget' | 'camNext'
   // autopilot selectors, radios, HUD mode, flight map
   | 'hdgDec' | 'hdgInc' | 'altDec' | 'altInc' | 'spdDec' | 'spdInc' | 'crsDec' | 'crsInc'
   | 'apNav' | 'navTune' | 'adfTune' | 'hudMode' | 'mapZoom' | 'mapMode';
@@ -42,6 +44,8 @@ export const DEFAULT_BINDINGS: Record<Action, string> = {
   camFlyby: 'F4',
   camTower: 'F5',
   camTarget: 'F6',
+  /** the next camera in turn: the touch controls' and the gamepad's one camera button */
+  camNext: 'KeyC',
   hdgDec: 'BracketLeft',
   hdgInc: 'BracketRight',
   altDec: 'Minus',
@@ -63,9 +67,6 @@ const clamp1 = (v: number): number => Math.max(-1, Math.min(1, v));
 
 /** Gear/flaps ignore repeat toggles inside this window: switch bounce and double taps. */
 export const TOGGLE_LOCKOUT_S = 0.35;
-/** Gamepad button hysteresis: analog triggers/worn buttons hovering near 0.5 must not chatter. */
-const PAD_PRESS = 0.6;
-const PAD_RELEASE = 0.3;
 
 /** Minimal input surface Controls needs; the real Input implements it. */
 export interface ControlInput {
@@ -73,6 +74,21 @@ export interface ControlInput {
   readonly mouseY: number;
   down(code: string): boolean;
   consumePresses(): Set<string>;
+  /** how far a code is held 0..1 (an analog trigger); absent: held = 1 */
+  value?(code: string): number;
+  /** the gamepad this frame (Input.pollPads), absent or null without one */
+  readonly pad?: PadState | null;
+}
+
+/** controls from an on-screen source (the touch controls): analog axes, held and pressed actions */
+export interface ExtraControls {
+  pitch: number;
+  roll: number;
+  yaw: number;
+  /** the throttle lever's position while a finger holds it, else null */
+  throttle: number | null;
+  held: ReadonlySet<Action>;
+  presses: ReadonlySet<Action>;
 }
 
 export class Controls {
@@ -82,7 +98,7 @@ export class Controls {
   gearFixed = false;
   flaps = false;
   private edges = new Set<Action>();
-  private padHeld: boolean[] = [];
+  private pad = new PadReader();
   private clock = 0;
   private lastToggle: Partial<Record<'gear' | 'flaps', number>> = {};
   private axes = { pitch: 0, roll: 0, yaw: 0 };
@@ -92,6 +108,11 @@ export class Controls {
 
   binding(action: Action, settings: Settings): string {
     return settings.bindings[action] ?? DEFAULT_BINDINGS[action];
+  }
+
+  /** the gamepad button (or axis half) of an action: "Pad:B3", or '' when it has none */
+  padBinding(action: Action, settings: Settings): string {
+    return settings.padBindings[action] ?? DEFAULT_PAD_BINDINGS[action] ?? '';
   }
 
   justPressed(action: Action): boolean {
@@ -116,44 +137,32 @@ export class Controls {
     return true;
   }
 
-  update(dt: number, input: ControlInput, settings: Settings, canvasW: number, canvasH: number): FlightControls {
+  update(dt: number, input: ControlInput, settings: Settings, canvasW: number, canvasH: number, extra?: ExtraControls): FlightControls {
     this.edges.clear();
     this.clock += dt;
-    const down = (a: Action): boolean => input.down(this.binding(a, settings));
+    const codes = (a: Action): string[] => {
+      const p = this.padBinding(a, settings);
+      return p ? [this.binding(a, settings), p] : [this.binding(a, settings)];
+    };
+    const down = (a: Action): boolean => codes(a).some((c) => input.down(c)) || (extra?.held.has(a) ?? false);
+    /** 0..1: an analog trigger bound to the action gives its travel, a key or button 1 */
+    const amount = (a: Action): number => {
+      let v = extra?.held.has(a) ? 1 : 0;
+      for (const c of codes(a)) v = Math.max(v, input.value ? input.value(c) : input.down(c) ? 1 : 0);
+      return v;
+    };
     // edges come from keydown events, not from polling: a tap shorter than a frame still counts once
     const presses = input.consumePresses();
+    const pressed = (a: Action): boolean => codes(a).some((c) => presses.has(c)) || (extra?.presses.has(a) ?? false);
     const edge = (a: Action): void => {
-      if (presses.has(this.binding(a, settings))) this.edges.add(a);
+      if (pressed(a)) this.edges.add(a);
     };
 
-    // gamepad: stick pitch/roll, bumpers yaw, A/B throttle, X gear, Y flaps, Start pause
-    let padPitch = 0, padRoll = 0, padYaw = 0, padThr = 0;
-    const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : [];
-    const pad = Array.from(pads).find((p) => p && p.connected);
-    if (pad) {
-      const dz = (v: number): number => (Math.abs(v) < 0.12 ? 0 : v);
-      padRoll = dz(pad.axes[0] ?? 0);
-      padPitch = -dz(pad.axes[1] ?? 0);
-      padYaw = (pad.buttons[5]?.pressed ? 1 : 0) - (pad.buttons[4]?.pressed ? 1 : 0);
-      padThr = (pad.buttons[0]?.pressed ? 1 : 0) - (pad.buttons[1]?.pressed ? 1 : 0);
-      const held = pad.buttons.map((b, i) => {
-        const v = b.value || (b.pressed ? 1 : 0);
-        return this.padHeld[i] ? v > PAD_RELEASE : v > PAD_PRESS;
-      });
-      const rose = (i: number): boolean => (held[i] ?? false) && !(this.padHeld[i] ?? false);
-      if (rose(2)) this.edges.add('gear');
-      if (rose(3)) this.edges.add('flaps');
-      if (rose(9)) this.edges.add('pause');
-      if (rose(12)) this.edges.add('camChase');
-      if (rose(13)) this.edges.add('camCockpit');
-      this.padHeld = held;
-    } else {
-      this.padHeld = [];
-    }
+    const pad = this.pad.read(input.pad ?? null, settings.padAxes);
 
-    let pitch = (down('pitchUp') ? 1 : 0) - (down('pitchDown') ? 1 : 0) + padPitch;
-    let roll = (down('rollRight') ? 1 : 0) - (down('rollLeft') ? 1 : 0) + padRoll;
-    let yaw = (down('yawRight') ? 1 : 0) - (down('yawLeft') ? 1 : 0) + padYaw;
+    let pitch = (down('pitchUp') ? 1 : 0) - (down('pitchDown') ? 1 : 0) + pad.pitch + (extra?.pitch ?? 0);
+    let roll = (down('rollRight') ? 1 : 0) - (down('rollLeft') ? 1 : 0) + pad.roll + (extra?.roll ?? 0);
+    const yaw = amount('yawRight') - amount('yawLeft') + pad.yaw + (extra?.yaw ?? 0);
 
     if (settings.mouseJoystick) {
       roll = clamp1(input.mouseX / (canvasW * 0.35));
@@ -166,21 +175,24 @@ export class Controls {
     this.axes.roll += (clamp1(roll) - this.axes.roll) * k;
     this.axes.yaw += (clamp1(yaw) - this.axes.yaw) * k;
 
-    this.throttle = Math.max(0, Math.min(1, this.throttle + ((down('throttleUp') ? 1 : 0) - (down('throttleDown') ? 1 : 0) + padThr) * 0.55 * dt));
+    this.throttle = Math.max(0, Math.min(1, this.throttle + (amount('throttleUp') - amount('throttleDown')) * 0.55 * dt));
+    // a lever (the touch one while held, a joystick's when it moves) sets the throttle outright
+    const lever = extra?.throttle ?? pad.throttle;
+    if (lever !== null) this.throttle = lever;
     edge('gear');
     edge('flaps');
     if (this.edges.has('gear') && !this.gearFixed && this.toggleAllowed('gear')) this.gearDown = !this.gearDown;
     if (this.edges.has('flaps') && this.toggleAllowed('flaps')) this.flaps = !this.flaps;
-    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom', 'mapMode'] as Action[]) {
+    for (const a of ['pause', 'mute', 'restart', 'newPoint', 'autopilot', 'autoland', 'camCockpit', 'camOrbit', 'camChase', 'camFlyby', 'camTower', 'camTarget', 'camNext', 'speedbrake', 'apNav', 'navTune', 'adfTune', 'hudMode', 'mapZoom', 'mapMode'] as Action[]) {
       edge(a);
     }
     this.knobSteps.clear();
     const big = input.down('ShiftLeft') || input.down('ShiftRight') ? 10 : 1;
     for (const a of KNOB_ACTIONS) {
-      const pressed = presses.has(this.binding(a, settings));
-      let n = pressed ? 1 : 0;
-      if (down(a) || pressed) {
-        const held = (this.knobHeld.get(a) ?? -KNOB_DELAY_S) + (pressed ? 0 : dt);
+      const tapped = pressed(a);
+      let n = tapped ? 1 : 0;
+      if (down(a) || tapped) {
+        const held = (this.knobHeld.get(a) ?? -KNOB_DELAY_S) + (tapped ? 0 : dt);
         if (held > 0) {
           n += Math.floor(held / KNOB_RATE_S);
           this.knobHeld.set(a, held % KNOB_RATE_S);
@@ -196,7 +208,7 @@ export class Controls {
       throttle: this.throttle,
       gearDown: this.gearDown,
       flaps: this.flaps,
-      brakes: down('brakes') || (pad?.buttons[6]?.pressed ?? false),
+      brakes: down('brakes'),
       speedbrake: down('speedbrake'),
     };
   }

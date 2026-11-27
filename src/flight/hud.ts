@@ -126,7 +126,27 @@ export interface HudState {
   weather?: { data?: Weather; tempC?: number };
   /** the sim's date and time, shown top right above the weather */
   time?: Date;
+  /** a phone's screen: the notch to keep clear of and the touch controls' room (absent: none) */
+  layout?: HudLayout;
 }
+
+/**
+ * What the HUD keeps clear of, device px. inset: the screen's unsafe edges (notch, rounded corners,
+ * home bar). reserve: the touch controls — a column on the right below the top rows, a band across
+ * the bottom, a column on the left beside the bottom-left corner.
+ */
+export interface HudLayout {
+  inset: { l: number; t: number; r: number; b: number };
+  reserve: { right: number; bottom: number; left: number; low?: { y: number; right: number } };
+  /** where the camera's axis meets the screen when its projection is shifted off centre (main.ts), px */
+  boresightY?: number;
+}
+
+/** what the right column leaves below low.y (only the lever stands there): low.right */
+const NO_LAYOUT: HudLayout = { inset: { l: 0, t: 0, r: 0, b: 0 }, reserve: { right: 0, bottom: 0, left: 0 } };
+
+/** narrower than this many text units the top rows cannot share a line: the centre line goes under them */
+const NARROW_UNITS = 640;
 
 /** the sim date and time in UTC, as aviation keeps it: "21.11.2026 08:45:07Z" */
 export function clockLine(d: Date): string {
@@ -190,15 +210,16 @@ function drawAlerts(font: FontRenderer, w: number, y: number, u: number, st: Hud
   if (lost) font.text(lost, (w - font.measure(lost, u)) / 2, y + 38 * u, u, HUD_AMBER);
 }
 
-/** right-aligned weather block from y down */
-function drawWeather(font: FontRenderer, w: number, y: number, u: number, st: HudState, lang: 'ru' | 'en'): void {
+/** right-aligned weather block from y down, its right edge at `right` */
+function drawWeather(font: FontRenderer, right: number, y: number, u: number, st: HudState, lang: 'ru' | 'en'): number {
   const lines = [
     ...(st.time ? [clockLine(st.time)] : []),
     ...(st.weather ? weatherLines(st.weather.data, st.weather.tempC, st.units, lang) : []),
   ];
   lines.forEach((line, i) => {
-    font.text(line, w - font.measure(line, u) - 8 * u, y + i * 18 * u, u, HUD_GREEN);
+    font.text(line, right - font.measure(line, u), y + i * 18 * u, u, HUD_GREEN);
   });
+  return lines.length;
 }
 
 const TMP_Q = quat.create();
@@ -324,6 +345,14 @@ export function drawHud(
   const green = HUD_GREEN;
   const amber = HUD_AMBER;
   const lw = Math.max(1, u);
+  const { inset, reserve } = st.layout ?? NO_LAYOUT;
+  /** margins: the edges and the notch */
+  const ml = 8 * u + inset.l;
+  const mr = 8 * u + inset.r;
+  const mt = 8 * u + inset.t;
+  /** the bottom the HUD's lower rows stand on: above the home bar and the touch controls' band */
+  const hb = h - inset.b - reserve.bottom;
+  const narrow = w / u < NARROW_UNITS;
 
   // Q28: external cameras carry only a minimal data line
   if (camera !== 'cockpit') {
@@ -331,11 +360,12 @@ export function drawHud(
       `V ${Math.round(speedValue(model.indicatedSpeed, units))} ${speedUnit(units)}   ` +
       `H ${Math.round(altValue(model.pos[1], units))} ${altUnit(units)}   ` +
       `${L.hdg} ${String(Math.round(model.headingDeg) % 360).padStart(3, '0')}`;
-    font.text(line, (w - font.measure(line, u)) / 2, 8 * u, u, green);
     const name = `${cfg.name}  [${camera.toUpperCase()}]`;
-    font.text(name, 8 * u, 8 * u, u, amber);
+    font.text(name, ml, mt, u, amber);
+    const rows = drawWeather(font, w - mr, mt, u, st, cfg.hudLang);
+    // on a narrow screen the data line goes under the corners' rows
+    font.text(line, (w - font.measure(line, u)) / 2, narrow ? mt + Math.max(2, rows + 1) * 18 * u : mt, u, green);
     drawAlerts(font, w, h * 0.2, u, st, L);
-    drawWeather(font, w, 8 * u, u, st, cfg.hudLang);
     return;
   }
 
@@ -344,7 +374,8 @@ export function drawHud(
   const cx = w / 2;
   // APP is conformal with the cockpit camera: boresight at the screen centre, perspective scale
   const f = h / 2 / Math.tan(((st.fovYDeg ?? 60) / 2) * D2R);
-  const cy = app ? h / 2 : h * 0.46;
+  // NAV: a little above the middle of what the touch controls leave; APP: the boresight, conformal
+  const cy = app ? (st.layout?.boresightY ?? h / 2) : inset.t + (hb - inset.t) * 0.46;
   const pxPerDeg = 5 * u;
   /** screen offset of an angle from the boresight */
   const ang = app ? (deg: number): number => f * Math.tan(Math.max(-80, Math.min(80, deg)) * D2R) : (deg: number): number => deg * pxPerDeg;
@@ -442,8 +473,17 @@ export function drawHud(
   const tapeY = cy - 20 * u;
   const tapeW = 96 * u;
   const tapeH = 40 * u;
-  const leftX = cx - Math.min(w, h) * 0.34 - tapeW;
-  const rightX = cx + Math.min(w, h) * 0.34;
+  // either side of the attitude display, but on the screen and clear of the touch controls' columns
+  const leftX = Math.max(ml + reserve.left, cx - Math.min(w, h) * 0.34 - tapeW);
+  const rightX = Math.min(w - mr - reserve.right - tapeW, cx + Math.min(w, h) * 0.34);
+  /**
+   * A line under the altitude box at y: from the box, or moved left as far as it must to stay on
+   * screen and clear of the touch controls (below low.y only the lever's narrower column is theirs)
+   */
+  const rightText = (line: string, y: number, scale = u): number => {
+    const keep = reserve.low && y >= reserve.low.y ? reserve.low.right : reserve.right;
+    return Math.min(rightX, w - mr - keep - font.measure(line, scale));
+  };
   const spd = Math.round(speedValue(model.indicatedSpeed, units));
   const alt = Math.round(altValue(model.pos[1], units));
   vec.rect(leftX, tapeY, tapeW, tapeH, lw, green);
@@ -468,24 +508,26 @@ export function drawHud(
   font.text(aoa, leftX, tapeY - 22 * u, u, green);
 
   // under the speed box: the approach speed in APP; under the altitude box: radio altitude in APP, then the radios
-  let navY = tapeY + tapeH + 28 * u;
+  // (a narrow screen has no room beside or under the attitude display: top left, under the HUD mode)
+  let navY = narrow ? mt + 40 * u : tapeY + tapeH + 28 * u;
+  const navX = (line: string, scale = u): number => (narrow ? ml : rightText(line, navY, scale));
   if (app && nav) {
     const va = `${L.vapp} ${Math.round(speedValue(asIndicated(nav.vapp, model), units))}`;
     font.text(va, leftX, tapeY + tapeH + 28 * u, u, green);
     if (nav.ra < 760) {
       const ra = `${L.ra} ${Math.round(altValue(Math.max(0, nav.ra), units))}`;
-      font.text(ra, rightX, navY, u * (nav.ra < 150 ? 2 : 1), nav.ra < DH_M ? amber : green);
+      font.text(ra, navX(ra, u * (nav.ra < 150 ? 2 : 1)), navY, u * (nav.ra < 150 ? 2 : 1), nav.ra < DH_M ? amber : green);
       navY += (nav.ra < 150 ? 36 : 18) * u;
     }
   }
   for (const line of navLines(st, cfg.hudLang)) {
-    font.text(line.text, rightX, navY, u, line.warn ? amber : green);
+    font.text(line.text, navX(line.text), navY, u, line.warn ? amber : green);
     navY += 18 * u;
   }
 
   // heading strip (bottom center)
   const stripW = Math.min(w * 0.4, 360 * u);
-  const stripY = h - 74 * u;
+  const stripY = hb - 74 * u;
   const hdg = model.headingDeg;
   vec.line(cx - stripW / 2, stripY, cx + stripW / 2, stripY, lw, green);
   for (let d = -40; d <= 40; d += 5) {
@@ -516,9 +558,9 @@ export function drawHud(
   }
 
   // corners: identity and HUD mode, power, configuration
-  font.text(`${cfg.name}`, 8 * u, 8 * u, u, amber);
-  font.text(`HUD ${app ? L.hudApp : L.hudNav}`, 8 * u, 26 * u, u, green);
-  font.text(`${L.thr} ${Math.round(controls.throttle * 100)}%`, 8 * u, h - 60 * u, u, green);
+  font.text(`${cfg.name}`, ml, mt, u, amber);
+  font.text(`HUD ${app ? L.hudApp : L.hudNav}`, ml, mt + 18 * u, u, green);
+  font.text(`${L.thr} ${Math.round(controls.throttle * 100)}%`, ml + reserve.left, hb - 60 * u, u, green);
   const abOn = cfg.thrustAfterburner > cfg.thrustDry && controls.throttle > 0.85;
   const config: string[] = [];
   config.push(`${L.gear} ${controls.gearDown ? 'DOWN' : 'UP'}`);
@@ -527,12 +569,14 @@ export function drawHud(
   if (controls.speedbrake) config.push(L.speedbrake);
   if (abOn) config.push(L.ab);
   config.forEach((line, i) => {
-    font.text(line, w - font.measure(line, u) - 8 * u, h - 60 * u - i * 18 * u, u, i === 0 ? green : amber);
+    font.text(line, w - mr - reserve.right - font.measure(line, u), hb - 60 * u - i * 18 * u, u, i === 0 ? green : amber);
   });
+  font.text(st.soundOn ? 'M SOUND ON' : 'M SOUND OFF', w - font.measure('M SOUND OFF', u) - mr, mt, u, green);
+  const rows = 1 + drawWeather(font, w - mr, mt + 18 * u, u, st, cfg.hudLang);
+  // the flight modes, top centre; on a narrow screen under the corners' rows (the radios' on the left)
   const fma = fmaText(st, cfg.hudLang);
-  if (fma) font.text(fma, (w - font.measure(fma, u)) / 2, 8 * u, u, amber);
-  font.text(st.soundOn ? 'M SOUND ON' : 'M SOUND OFF', w - font.measure('M SOUND OFF', u) - 8 * u, 8 * u, u, green);
-  drawWeather(font, w, 8 * u + 18 * u, u, st, cfg.hudLang);
+  const below = Math.max(mt + rows * 18 * u, narrow ? navY : 0);
+  if (fma) font.text(fma, (w - font.measure(fma, u)) / 2, narrow ? below + 8 * u : mt, u, amber);
 
   // warnings
   drawAlerts(font, w, h * 0.16, u, st, L);
