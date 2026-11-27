@@ -17,6 +17,8 @@ import { buildTombs } from '../world/tomb-mesher';
 import { buildWalls } from '../world/wall-mesher';
 import { buildStadiums } from '../world/stadium-mesher';
 import { buildDams } from '../world/dam-mesher';
+import { buildCranes } from '../world/crane-mesher';
+import { buildDocks } from '../world/dock-mesher';
 import { buildMinarets, isMappedMinaret, minaretSites } from '../world/minaret-mesher';
 import { buildPower } from '../world/power-mesher';
 import { OsmSource, osmRawKey, osmSourceMode, terrainMeshKey } from '../world/osm-source';
@@ -38,8 +40,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged; 115: welded meshes drawn by their index (weld.ts); 116: a building's faces without windows carry their height over its ground (snow on roofs as on the ground); 117: power supports as 1 px lines too (poleLines: a phone's simple props)
-export const OSM_MESH_SCHEMA = 117;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged; 115: welded meshes drawn by their index (weld.ts); 116: a building's faces without windows carry their height over its ground (snow on roofs as on the ground); 117: power supports as 1 px lines too (poleLines: a phone's simple props); 118: cranes (crane-mesher), dry and floating docks (dock-mesher), buoys (lighthouse-mesher)
+export const OSM_MESH_SCHEMA = 118;
 
 export interface OsmRequest {
   type: 'osm';
@@ -306,10 +308,13 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const stadiums = buildStadiums(tile, data.areas, drape);
     // and the dams and weirs (dam-mesher.ts) from the whole lines
     const dams = buildDams(tile, data.lines, drape);
+    // and the cranes (crane-mesher.ts), their booms over the whole fetch's water; the dry and floating docks (dock-mesher.ts)
+    const cranes = buildCranes(tile, data.points, data.lines, data.areas, drape);
+    const docks = buildDocks(tile, data.areas, drape);
     // each part of the solids with its structure kind (structure-kinds), in this order
     const parts = [
       [mesh.bridges, STRUCTURE.BRIDGE], [piers, STRUCTURE.PIER], [minarets, STRUCTURE.MINARET], [power, STRUCTURE.POWER],
-      [ruins, STRUCTURE.RUINS], [lifts, STRUCTURE.LIFT], [lighthouses, STRUCTURE.LIGHTHOUSE], [tombs, STRUCTURE.TOMB], [walls, STRUCTURE.WALL], [stadiums, STRUCTURE.STADIUM], [dams, STRUCTURE.DAM],
+      [ruins, STRUCTURE.RUINS], [lifts, STRUCTURE.LIFT], [lighthouses, STRUCTURE.LIGHTHOUSE], [tombs, STRUCTURE.TOMB], [walls, STRUCTURE.WALL], [stadiums, STRUCTURE.STADIUM], [dams, STRUCTURE.DAM], [cranes, STRUCTURE.CRANE], [docks, STRUCTURE.DOCK],
     ] as const;
     const solid = {
       vertices: parts.map(([p]) => p.vertices).reduce(concatF32),
@@ -397,7 +402,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       // instances sorted by type: trees, then air conditioners, then lamp posts (props-mesher INSTANCE)
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
-      beacons: masts.beacons.slice().buffer, mastLines: concatF32(masts.lines, minarets.lines).buffer as ArrayBuffer,
+      beacons: concatF32(masts.beacons, cranes.beacons).buffer as ArrayBuffer, mastLines: [masts.lines, minarets.lines, cranes.lines].reduce(concatF32).buffer as ArrayBuffer,
       poleLines: power.lines.slice().buffer,
       rVertices: ribbons.streams[0], rRamps: ribbons.streams[1], rAttrs: ribbons.streams[2], rIndex: ribbons.index,
       wVertices: water.streams[0], wRamps: water.streams[1], wIndex: water.index,

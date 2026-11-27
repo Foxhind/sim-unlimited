@@ -18,6 +18,7 @@
 import { classifyLine, isTunnel, roadLayer } from './osm-mesher';
 import type { LonLat, OsmArea, OsmLine } from './osm-types';
 import type { RoadSurface } from './road-pull';
+import { isWetDock } from './way-styles';
 
 /** a road or railway under a bridge: the deck this far over it; and a level of a stack of bridges */
 export const LEVEL_M = 6;
@@ -238,7 +239,7 @@ export function buildRoadLevels(
     }
   }
   const water = areas
-    .filter((a) => a.tags.natural === 'water' || a.tags.waterway === 'riverbank' || a.tags.waterway === 'river' || a.tags.waterway === 'canal')
+    .filter((a) => a.tags.natural === 'water' || a.tags.waterway === 'riverbank' || a.tags.waterway === 'river' || a.tags.waterway === 'canal' || isWetDock(a.tags))
     .map((a) => {
       const rings = a.rings.filter((r) => r.length >= 3).map((r) => r.map(toXZ));
       let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;

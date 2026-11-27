@@ -30,7 +30,7 @@ export const STRUCTURE = {
   RUINS: 11,
   /** cable cars and chair lifts: pylons, stations, cabins (aerialway-mesher); their ropes too */
   LIFT: 12,
-  /** lighthouses and the sea's lights (lighthouse-mesher); their flashes too */
+  /** lighthouses, the sea's lights and buoys (lighthouse-mesher); their flashes too */
   LIGHTHOUSE: 13,
   /** tombs: rock-cut fronts, sarcophagi, pillar tombs (tomb-mesher) */
   TOMB: 14,
@@ -40,9 +40,13 @@ export const STRUCTURE = {
   STADIUM: 16,
   /** dams and weirs (dam-mesher) */
   DAM: 17,
+  /** cranes: tower, portal, container and jib cranes (crane-mesher) */
+  CRANE: 18,
+  /** dry and floating docks (dock-mesher) */
+  DOCK: 19,
 } as const;
 export type StructureKind = (typeof STRUCTURE)[keyof typeof STRUCTURE];
-export const STRUCTURE_KINDS = 18;
+export const STRUCTURE_KINDS = 20;
 /** every kind shown */
 export const ALL_STRUCTURES = (1 << STRUCTURE_KINDS) - 1;
 
@@ -60,11 +64,13 @@ export const STRUCTURE_LABELS: Record<StructureKind, string> = {
   [STRUCTURE.POWER]: 'ЛЭП: опоры и провода',
   [STRUCTURE.RUINS]: 'руины',
   [STRUCTURE.LIFT]: 'канатные дороги и подъёмники',
-  [STRUCTURE.LIGHTHOUSE]: 'маяки и огни',
+  [STRUCTURE.LIGHTHOUSE]: 'маяки, огни и бакены',
   [STRUCTURE.TOMB]: 'гробницы (tomb=*)',
   [STRUCTURE.WALL]: 'стены и заборы (wall, retaining_wall, city_wall, fence)',
   [STRUCTURE.STADIUM]: 'трибуны стадионов',
   [STRUCTURE.DAM]: 'плотины и водосливы',
+  [STRUCTURE.CRANE]: 'краны (crane)',
+  [STRUCTURE.DOCK]: 'сухие и плавучие доки',
 };
 
 const TOWERS = new Set(['tower', 'water_tower', 'cooling_tower', 'transformer_tower']);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { LIGHT as LUT_LIGHT } from '../src/engine/palette';
 import { tileCenter, type Tile } from '../src/world/geodesy';
-import { buildLighthouses, FLASH_STRIDE, flashTimes, inSector, LIGHTHOUSE, lightSites, litFlashes, seamarkLight } from '../src/world/lighthouse-mesher';
+import { buildLighthouses, buoyLook, FLASH_STRIDE, flashTimes, inSector, LIGHTHOUSE, lightSites, litFlashes, seamarkLight } from '../src/world/lighthouse-mesher';
 import type { LonLat, OsmPoint } from '../src/world/osm-types';
 import { overpassQuery, parseOverpass } from '../src/world/overpass';
 
@@ -153,7 +153,7 @@ describe('fetching the lights', () => {
   it('lighthouses, beacons and the charted lights, near', () => {
     const q = overpassQuery(TILE, 'full');
     expect(q).toContain('node["man_made"~"^(lighthouse|beacon)$"]');
-    expect(q).toContain('node["seamark:type"~"^(light_major|light_minor|beacon_)"]');
+    expect(q).toContain('node["seamark:type"~"^(light_major|light_minor|beacon_|buoy_)"]');
   });
 
   it('a charted light is a point; a lighthouse mapped by its outline stands at its middle, not as a house', () => {
@@ -164,5 +164,46 @@ describe('fetching the lights', () => {
     ] });
     expect(d.points.map((p) => p.tags['seamark:type'] ?? p.tags.man_made).sort()).toEqual(['light_minor', 'lighthouse']);
     expect(d.buildings).toHaveLength(0);
+  });
+});
+
+describe('buoys', () => {
+  it('their look as charted; untagged, their kind’s: a port can, a starboard cone, a cardinal’s bands and cones', () => {
+    expect(buoyLook({ 'seamark:type': 'buoy_lateral', 'seamark:buoy_lateral:category': 'port' })).toEqual({ shape: 'can', colours: ['red'], vertical: false });
+    expect(buoyLook({ 'seamark:type': 'buoy_lateral', 'seamark:buoy_lateral:category': 'starboard' })?.shape).toBe('conical');
+    const north = buoyLook({ 'seamark:type': 'buoy_cardinal', 'seamark:buoy_cardinal:category': 'north' });
+    expect(north).toEqual({ shape: 'pillar', colours: ['black', 'yellow'], vertical: false, topmark: { shape: '2 cones up', colour: 'black' } });
+    expect(buoyLook({ 'seamark:type': 'buoy_safe_water' })?.vertical).toBe(true);
+    expect(buoyLook({ 'seamark:type': 'buoy_special_purpose', 'seamark:buoy_special_purpose:shape': 'spar', 'seamark:buoy_special_purpose:colour': 'yellow' })).toEqual({ shape: 'spar', colours: ['yellow'], vertical: false });
+    expect(buoyLook({ 'seamark:type': 'light_minor' })).toBeUndefined();
+  });
+
+  it('a channel’s pair a few metres apart are two buoys; a buoy floats at the sea, its light over its topmark', () => {
+    const port: OsmPoint = { at: at(0, 0), tags: { 'seamark:type': 'buoy_lateral', 'seamark:buoy_lateral:category': 'port', 'seamark:light:colour': 'red', 'seamark:light:character': 'Fl' } };
+    const stbd: OsmPoint = { at: at(15, 0), tags: { 'seamark:type': 'buoy_lateral', 'seamark:buoy_lateral:category': 'starboard', 'seamark:light:colour': 'green', 'seamark:light:character': 'Fl' } };
+    expect(lightSites([port, stbd])).toHaveLength(2);
+    const m = buildLighthouses(TILE, [port, stbd], () => -3);
+    expect(m.flashes.length).toBe(2 * FLASH_STRIDE);
+    const ys: number[] = [];
+    for (let i = 1; i < m.vertices.length; i += 6) ys.push(m.vertices[i]);
+    // on the sea (0), not on the sea floor under it; no taller than a conical buoy
+    expect(Math.min(...ys)).toBeGreaterThan(-1);
+    expect(Math.max(...ys)).toBeLessThan(3);
+    expect(m.flashes[1]).toBeGreaterThan(1);
+  });
+
+  it('a cardinal buoy’s faces are wound outward, its topmark over its body', () => {
+    const west: OsmPoint = { at: at(0, 0), tags: { 'seamark:type': 'buoy_cardinal', 'seamark:buoy_cardinal:category': 'west' } };
+    const v = buildLighthouses(TILE, [west], () => 0).vertices;
+    let top = 0;
+    for (let t = 0; t < v.length; t += 18) {
+      const a = [v[t], v[t + 1], v[t + 2]], b = [v[t + 6], v[t + 7], v[t + 8]], d = [v[t + 12], v[t + 13], v[t + 14]];
+      top = Math.max(top, a[1], b[1], d[1]);
+      const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], e2 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      if (Math.hypot(n[0], n[1], n[2]) < 1e-9) continue;
+      expect(n[0] * v[t + 3] + n[1] * v[t + 4] + n[2] * v[t + 5]).toBeGreaterThan(0);
+    }
+    expect(top).toBeGreaterThan(3.6 + 0.35);
   });
 });

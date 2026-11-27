@@ -78,6 +78,26 @@ export function isOpenPool(tags: Record<string, string>): boolean {
   return loc !== 'indoor' && loc !== 'roof' && loc !== 'rooftop' && loc !== 'underground';
 }
 
+export type DockKind = 'dry' | 'floating' | 'wet';
+
+/** a dock's kind (waterway=dock): a dry dock, a floating one, else a wet or tidal basin */
+export function dockKind(tags: Record<string, string>): DockKind | undefined {
+  if (tags.waterway !== 'dock') return undefined;
+  if (tags.dock === 'drydock' || tags.dock === 'dry') return 'dry';
+  if (tags.dock === 'floating') return 'floating';
+  return 'wet';
+}
+
+/** a dock that is water: any but a dry dock (a floating one floats on it) */
+export function isWetDock(tags: Record<string, string>): boolean {
+  const k = dockKind(tags);
+  return k === 'wet' || k === 'floating';
+}
+
+/** a dry dock's floor: wet dark concrete (dock-mesher stands its coping and keel blocks on it) */
+export const DRY_DOCK_RGB: RGB = [96, 98, 100];
+export const DRY_DOCK_BIAS = 0.7;
+
 export function classifyArea(tags: Record<string, string>, styles: AreaStyles): AreaStyle | undefined {
   /** open ground (fields, parks, beaches...): snow covers it in winter */
   const ground = (ramp: number, bias: number, kind: AreaKind): AreaStyle => ({ ramp: snowy(ramp), bias, water: false, filter: styles[kind] });
@@ -86,9 +106,10 @@ export function classifyArea(tags: Record<string, string>, styles: AreaStyles): 
   const leisure = tags.leisure;
   const aeroway = tags.aeroway;
   const waterway = tags.waterway;
-  if (natural === 'water' || waterway === 'riverbank' || waterway === 'river' || waterway === 'canal') {
+  if (natural === 'water' || waterway === 'riverbank' || waterway === 'river' || waterway === 'canal' || isWetDock(tags)) {
     return { ramp: RAMP.WATER, bias: 0.3, water: true };
   }
+  if (dockKind(tags) === 'dry') return { ramp: colourOf(DRY_DOCK_RGB), bias: DRY_DOCK_BIAS, water: false };
   if (aeroway === 'runway' || aeroway === 'taxiway' || aeroway === 'apron' || aeroway === 'helipad') {
     // on the aerodrome's flat pad (aerodrome.ts): a hair above it, where the aircraft's wheels are
     return { ramp: RAMP.ASPHALT, bias: AEROWAY_AREA_BIAS, water: false };

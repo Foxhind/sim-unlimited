@@ -2,6 +2,7 @@ import { colourOf, LIGHT, type RGB } from '../engine/palette';
 import { parseLength } from './building-mesher';
 import { latLonToEnu, tileBounds, tileCenter, type Tile } from './geodesy';
 import type { LonLat, OsmPoint } from './osm-types';
+import { pushPrism } from './mast-mesher';
 import type { HeightSampler } from './terrain-source';
 
 /**
@@ -11,11 +12,16 @@ import type { HeightSampler } from './terrain-source';
  * sequence; the first of a sectored light's). A lighthouse and its light are often two nodes a few
  * metres apart: the nodes within MERGE_M are one site. The light stands at its seamark height over
  * the sea where that is over the ground (the tower reaches up to it), else on a tower of its kind.
+ *
+ * Buoys (seamark:type=buoy_*) float on the water in their shape and colours as charted
+ * (seamark:buoy_*:shape, colour, colour_pattern), their topmark on top (seamark:topmark:*; a
+ * cardinal's and an isolated danger's by their kind when untagged), their light over it. A buoy is a
+ * site of its own: a channel's pair often lie closer than MERGE_M.
  */
 export const LIGHTHOUSE = {
   MERGE_M: 40,
   /** a tower's height without the light's: a lighthouse's, a harbour light's post */
-  TOWER_M: { lighthouse: 14, post: 6, cardinal: 5 } as Record<SiteKind, number>,
+  TOWER_M: { lighthouse: 14, post: 6, cardinal: 5, buoy: 0 } as Record<SiteKind, number>,
   /** the tower reaches its light's height within these */
   MIN_M: 3,
   MAX_M: 40,
@@ -48,7 +54,96 @@ export const LIGHTHOUSE = {
   MAX_SECTORS: 6,
 } as const;
 
-export type SiteKind = 'lighthouse' | 'post' | 'cardinal';
+export type SiteKind = 'lighthouse' | 'post' | 'cardinal' | 'buoy';
+
+/**
+ * A buoy's float above the water, by its shape (metres): its radius at the waterline and at the top,
+ * its height; a pillar's and a super-buoy's body on the float (radius at its foot and top, height)
+ */
+export const BUOY = {
+  can: { R0: 0.75, R1: 0.75, H: 1.4 },
+  barrel: { R0: 0.7, R1: 0.7, H: 0.8 },
+  conical: { R0: 0.85, R1: 0.12, H: 2 },
+  spherical: { R0: 0.9, R1: 0.9, H: 1.6 },
+  pillar: { R0: 1.2, R1: 1.2, H: 0.6, BODY: [0.55, 0.35, 3] as [number, number, number] },
+  spar: { R0: 0.2, R1: 0.15, H: 4 },
+  'super-buoy': { R0: 2.5, R1: 2.5, H: 1.5, BODY: [0.6, 0.4, 2] as [number, number, number] },
+  /** the float's part under the water, a topmark's size and its staff */
+  SINK_M: 0.3,
+  TOPMARK_M: 0.35,
+  STAFF_M: 0.35,
+  /** the chart's colours */
+  RGB: {
+    black: [30, 30, 32], yellow: [226, 188, 40], red: [190, 44, 40], green: [40, 150, 70], white: [232, 230, 222],
+    orange: [226, 120, 36], blue: [40, 80, 170], grey: [130, 132, 134], brown: [110, 70, 40],
+  } as Record<string, RGB>,
+} as const;
+
+export const BUOY_SHAPES = ['can', 'barrel', 'conical', 'spherical', 'pillar', 'spar', 'super-buoy'] as const;
+export type BuoyShape = (typeof BUOY_SHAPES)[number];
+
+export interface BuoyLook {
+  shape: BuoyShape;
+  /** top first */
+  colours: string[];
+  /** horizontal bands, or vertical stripes round it */
+  vertical: boolean;
+  topmark?: { shape: string; colour: string };
+}
+
+/** a cardinal buoy's colours (top first) and topmark by its quadrant */
+const CARDINAL: Record<string, [string, string]> = {
+  north: ['black;yellow', '2 cones up'],
+  south: ['yellow;black', '2 cones down'],
+  east: ['black;yellow;black', '2 cones base together'],
+  west: ['yellow;black;yellow', '2 cones point together'],
+};
+
+/** a buoy's shape, colours and topmark as charted, its kind's where not */
+export function buoyLook(tags: Record<string, string>): BuoyLook | undefined {
+  const st = tags['seamark:type'] ?? '';
+  if (!st.startsWith('buoy_')) return undefined;
+  const p = `seamark:${st}:`;
+  const category = tags[p + 'category'] ?? '';
+  let shape = tags[p + 'shape'];
+  let colour = tags[p + 'colour'];
+  let pattern = tags[p + 'colour_pattern'];
+  let topShape = tags['seamark:topmark:shape'];
+  let topColour = tags['seamark:topmark:colour'];
+  if (st === 'buoy_lateral') {
+    const port = category.includes('port');
+    shape ??= port ? 'can' : 'conical';
+    colour ??= port ? 'red' : 'green';
+  } else if (st === 'buoy_cardinal') {
+    const c = CARDINAL[category];
+    shape ??= 'pillar';
+    colour ??= c?.[0] ?? 'black;yellow';
+    pattern ??= 'horizontal';
+    topShape ??= c?.[1];
+    topColour ??= 'black';
+  } else if (st === 'buoy_isolated_danger') {
+    shape ??= 'pillar';
+    colour ??= 'black;red;black';
+    pattern ??= 'horizontal';
+    topShape ??= '2 spheres';
+    topColour ??= 'black';
+  } else if (st === 'buoy_safe_water') {
+    shape ??= 'spherical';
+    colour ??= 'red;white';
+    pattern ??= 'vertical';
+  } else {
+    shape ??= 'can';
+    colour ??= 'yellow';
+  }
+  const known = (v: string): v is BuoyShape => (BUOY_SHAPES as readonly string[]).includes(v);
+  const colours = colour.split(';').map((c) => c.trim()).filter((c) => c in BUOY.RGB);
+  return {
+    shape: known(shape) ? shape : 'pillar',
+    colours: colours.length ? colours : ['yellow'],
+    vertical: pattern === 'vertical',
+    ...(topShape ? { topmark: { shape: topShape, colour: (topColour ?? colours[0] ?? 'black').split(';')[0].trim() } } : {}),
+  };
+}
 
 /**
  * per light: x, y, z, colour (LIGHT.SEA_*), period s, flash count, then MAX_FLASHES × (start, end) s,
@@ -140,13 +235,14 @@ export function inSector(b: number, start: number, end: number): boolean {
 
 function isSite(tags: Record<string, string>): boolean {
   const st = tags['seamark:type'] ?? '';
-  return tags.man_made === 'lighthouse' || tags.man_made === 'beacon' || st === 'light_major' || st === 'light_minor' || st.startsWith('beacon_') || seamarkLight(tags) !== undefined;
+  return tags.man_made === 'lighthouse' || tags.man_made === 'beacon' || st === 'light_major' || st === 'light_minor' || st.startsWith('beacon_') || st.startsWith('buoy_') || seamarkLight(tags) !== undefined;
 }
 
 function siteKind(tags: Record<string, string>): SiteKind {
   const st = tags['seamark:type'] ?? '';
   if (tags.man_made === 'lighthouse' || st === 'light_major') return 'lighthouse';
   if (st === 'beacon_cardinal') return 'cardinal';
+  if (st.startsWith('buoy_')) return 'buoy';
   return 'post';
 }
 
@@ -160,7 +256,9 @@ export function lightSites(points: ReadonlyArray<OsmPoint>): { at: LonLat; tags:
   // the lighthouses first, so a site's structure is theirs and its place the tower's
   const list = points.filter((p) => isSite(p.tags)).sort((a, b) => (siteKind(a.tags) === 'lighthouse' ? 0 : 1) - (siteKind(b.tags) === 'lighthouse' ? 0 : 1) || a.at[0] - b.at[0] || a.at[1] - b.at[1]);
   for (const p of list) {
-    const s = sites.find((x) => near(x.at, p.at));
+    // a buoy stands alone, and no light joins one
+    const buoy = siteKind(p.tags) === 'buoy';
+    const s = buoy ? undefined : sites.find((x) => siteKind(x.tags) !== 'buoy' && near(x.at, p.at));
     if (s) {
       // the light from whichever node charts it; the tower's own tags kept
       for (const [k, v] of Object.entries(p.tags)) if (s.tags[k] === undefined) s.tags[k] = v;
@@ -194,11 +292,12 @@ export function buildLighthouses(tile: Tile, points: ReadonlyArray<OsmPoint>, sa
     ramps.push(ramp, ramp, ramp);
   };
   /** a SIDES-sided frustum from y0 (radius r0) to y1 (r1), closed at both ends; a cone when r1 is 0 */
-  const frustum = (x: number, z: number, y0: number, y1: number, r0: number, r1: number, ramp: number) => {
+  const frustum = (x: number, z: number, y0: number, y1: number, r0: number, r1: number, paint: number | ((side: number) => number)) => {
     const S = LIGHTHOUSE.SIDES;
     const at = (k: number, y: number, r: number): V3 => [x + Math.cos((2 * Math.PI * k) / S) * r, y, z + Math.sin((2 * Math.PI * k) / S) * r];
     const slope = (r0 - r1) / Math.max(1e-6, y1 - y0);
     for (let k = 0; k < S; k++) {
+      const ramp = typeof paint === 'number' ? paint : paint(k);
       const m = (2 * Math.PI * (k + 0.5)) / S;
       const n: V3 = [Math.cos(m), slope, Math.sin(m)];
       const l = Math.hypot(n[0], n[1], n[2]);
@@ -210,6 +309,77 @@ export function buildLighthouses(tile: Tile, points: ReadonlyArray<OsmPoint>, sa
       if (r1 > 0) tri([x, y1, z], b1, b0, [0, 1, 0], ramp);
       tri([x, y0, z], a0, a1, [0, -1, 0], ramp);
     }
+  };
+
+  /** a buoy floating at g in its look; the height its light stands at */
+  const buoy = (x: number, z: number, g: number, look: BuoyLook): number => {
+    const B = BUOY;
+    const paints = look.colours.map((c) => colourOf(B.RGB[c]));
+    /** a frustum in the buoy's colours: bands top first between `top` and `foot`, or stripes round it */
+    const painted = (y0: number, y1: number, r0: number, r1: number, top: number, foot: number) => {
+      if (look.vertical || paints.length === 1) {
+        frustum(x, z, y0, y1, r0, r1, (k) => paints[k % paints.length]);
+        return;
+      }
+      const n = paints.length;
+      for (let i = 0; i < n; i++) {
+        const b1 = top - ((top - foot) * i) / n, b0 = top - ((top - foot) * (i + 1)) / n;
+        const lo = Math.max(y0, b0), hi = Math.min(y1, b1);
+        if (hi <= lo) continue;
+        const r = (y: number) => r0 + ((r1 - r0) * (y - y0)) / Math.max(1e-6, y1 - y0);
+        frustum(x, z, lo, hi, r(lo), r(hi), paints[i]);
+      }
+    };
+    const s = B[look.shape];
+    const y0 = g - B.SINK_M;
+    let top: number;
+    if (look.shape === 'spherical') {
+      // three bands of a ball
+      const R = s.R0, c = g + s.H / 2 - B.SINK_M;
+      painted(y0, c - R * 0.4, R * 0.75, R, c + R, y0);
+      painted(c - R * 0.4, c + R * 0.4, R, R, c + R, y0);
+      painted(c + R * 0.4, c + R, R, R * 0.45, c + R, y0);
+      top = c + R;
+    } else if ('BODY' in s) {
+      // the float in the bottom colour, the body in the bands
+      const [br0, br1, bh] = s.BODY;
+      frustum(x, z, y0, g + s.H, s.R0, s.R1, paints[paints.length - 1]);
+      painted(g + s.H, g + s.H + bh, br0, br1, g + s.H + bh, g + s.H);
+      top = g + s.H + bh;
+    } else {
+      painted(y0, g + s.H, s.R0, s.R1, g + s.H, y0);
+      top = g + s.H;
+    }
+    const tm = look.topmark;
+    if (tm) {
+      const T = B.TOPMARK_M, ramp = colourOf(B.RGB[tm.colour] ?? B.RGB.black);
+      frustum(x, z, top, top + B.STAFF_M, 0.05, 0.05, ramp);
+      const t = top + B.STAFF_M;
+      const up = (y: number) => frustum(x, z, y, y + T * 1.6, T, 0, ramp);
+      const down = (y: number) => frustum(x, z, y, y + T * 1.6, 0, T, ramp);
+      const ball = (y: number) => { frustum(x, z, y, y + T, T * 0.5, T, ramp); frustum(x, z, y + T, y + 2 * T, T, T * 0.5, ramp); };
+      const sh = tm.shape;
+      if (sh === '2 cones up') { up(t); up(t + T * 2); top = t + T * 3.6; }
+      else if (sh === '2 cones down') { down(t); down(t + T * 2); top = t + T * 3.6; }
+      else if (sh === '2 cones base together') { down(t); up(t + T * 1.6); top = t + T * 3.2; }
+      else if (sh === '2 cones point together') { up(t); down(t + T * 1.6); top = t + T * 3.2; }
+      else if (sh === '2 spheres') { ball(t); ball(t + 2.4 * T); top = t + 4.4 * T; }
+      else if (sh === 'sphere') { ball(t); top = t + 2 * T; }
+      else if (sh === 'cylinder' || sh === 'can') { frustum(x, z, t, t + T * 2, T * 0.8, T * 0.8, ramp); top = t + T * 2; }
+      else if (sh === 'cone, point up' || sh === 'cone' || sh === 'cone, point down') { (sh === 'cone, point down' ? down : up)(t); top = t + T * 1.6; }
+      else if (sh === 'x-shape' || sh === 'cross') {
+        const c = t + T * 1.2;
+        if (sh === 'cross') {
+          pushPrism(verts, ramps, ramp, [x - T, c, z], [x + T, c, z], 0.12);
+          pushPrism(verts, ramps, ramp, [x, c - T, z], [x, c + T, z], 0.12);
+        } else {
+          pushPrism(verts, ramps, ramp, [x - T, c - T, z], [x + T, c + T, z], 0.12);
+          pushPrism(verts, ramps, ramp, [x - T, c + T, z], [x + T, c - T, z], 0.12);
+        }
+        top = c + T;
+      }
+    }
+    return top + 0.3;
   };
 
   for (const site of lightSites(points)) {
@@ -246,6 +416,8 @@ export function buildLighthouses(tile: Tile, points: ReadonlyArray<OsmPoint>, sa
       });
       frustum(x, z, g + H, g + H + 0.8, 0.5, 0, colourOf([30, 30, 32]));
       lightY = g + H + 1;
+    } else if (kind === 'buoy') {
+      lightY = buoy(x, z, g, buoyLook(site.tags)!);
     } else {
       // a post in its light's colour (a white one for a white or yellow light), its lamp on top
       const c = light?.colour === L.COLOURS.red ? red : light?.colour === L.COLOURS.green ? colourOf([40, 150, 70]) : white;

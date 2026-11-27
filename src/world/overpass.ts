@@ -1,5 +1,6 @@
 import { tileBounds, type Tile, type TileBounds } from './geodesy';
 import { cliffBands } from './cliffs';
+import { craneOnWay, isCrane } from './crane-mesher';
 import { isAntenna } from './mast-mesher';
 import { STYLE_AT_TAG, STYLE_TYPE_TAG, type LonLat, type OsmArea, type OsmBuilding, type OsmDetail, type OsmLine, type OsmPoint, type OsmTileData } from './osm-types';
 import { expandTemples, FOOTING_TAG } from './temples';
@@ -54,7 +55,9 @@ export function roadReachBounds(b: TileBounds): TileBounds {
 // Piers and breakwaters are solid bodies (pier-mesher.ts); a marina puts yachts at its pontoons (props-mesher).
 // Power lines stand their pylons or poles at their vertices and hang their conductors (power-mesher.ts).
 // Cable cars and chair lifts: their pylons and stations by the nodes, ropes and cabins (aerialway-mesher.ts).
-// Lighthouses and the sea's charted lights: towers, posts and beacons, flashing at night (lighthouse-mesher.ts).
+// Lighthouses and the sea's charted lights: towers, posts, beacons and buoys, flashing at night (lighthouse-mesher.ts).
+// Cranes: tower, portal, container and jib cranes, their booms over the water (crane-mesher.ts).
+// Docks: a wet one is water, a dry one a concrete basin, a floating one a pontoon (dock-mesher.ts).
 // Tombs: rock-cut fronts, Lycian sarcophagi and pillar tombs (tomb-mesher.ts); an outline at its middle.
 // Walls and fences: garden, retaining and town walls, fences, as solid bands along their lines (wall-mesher.ts).
 // Dams and weirs mapped as lines: an embankment, a sill (dam-mesher.ts).
@@ -84,7 +87,9 @@ const FULL_FILTER = `
   node["man_made"="tower"]["tower:type"="minaret"]; way["man_made"="tower"]["tower:type"="minaret"];
   way["power"~"^(line|minor_line)$"];
   way["aerialway"~"^(gondola|cable_car|chair_lift|mixed_lift)$"]; node["aerialway"~"^(pylon|station)$"];
-  node["man_made"~"^(lighthouse|beacon)$"]; way["man_made"="lighthouse"]; node["seamark:type"~"^(light_major|light_minor|beacon_)"];
+  node["man_made"~"^(lighthouse|beacon)$"]; way["man_made"="lighthouse"]; node["seamark:type"~"^(light_major|light_minor|beacon_|buoy_)"];
+  node["man_made"="crane"]; way["man_made"="crane"];
+  way["waterway"="dock"]; relation["waterway"="dock"];
   node["tomb"]; way["tomb"];
   way["barrier"~"^(wall|retaining_wall|city_wall|fence)$"];
   way["waterway"~"^(dam|weir)$"];
@@ -322,6 +327,11 @@ export function parseOverpass(json: OverpassJson): OsmTileData {
       let lon = 0, lat = 0;
       for (let i = 0; i < n; i++) { lon += geom[i][0]; lat += geom[i][1]; }
       points.push({ at: [lon / n, lat / n], tags });
+      continue;
+    }
+    // a crane mapped along its rails or by its footprint: a point with its rails' bearing (crane-mesher.ts)
+    if (!usedWays.has(w.id) && isCrane(tags) && !hasBuildingTags(tags)) {
+      points.push(craneOnWay(geom, tags));
       continue;
     }
     if (closed && !usedWays.has(w.id)) {

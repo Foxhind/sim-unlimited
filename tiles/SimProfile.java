@@ -98,11 +98,13 @@ public class SimProfile implements Profile {
     "crossing", "footway", "cycleway",
     // a place of worship's denomination: an Orthodox or a Western church (temples.ts faithOf)
     "denomination",
+    // a crane's kind (crane-mesher craneKind), a dock's (way-styles dockKind)
+    "crane:type", "dock",
     // the year a building was built (building-mesher hasPanoramicWindows, arch-styles inferArchitecture;
     // amenity=place_of_worship there too)
     "start_date");
-  /** the charted lights' keys (lighthouse-mesher.ts) */
-  static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:"};
+  /** the charted lights' keys, the buoys' shapes, colours and topmarks (lighthouse-mesher.ts) */
+  static final String[] SEAMARK_PREFIXES = {"seamark:light:", "seamark:beacon_cardinal:", "seamark:buoy_", "seamark:topmark:"};
   static final String[] KEY_PREFIXES = {"building:", "roof:"};
 
   static final String[] AREA_KEYS = {"natural", "landuse", "leisure", "aeroway", "waterway", "building"};
@@ -167,7 +169,9 @@ public class SimProfile implements Profile {
       find(LIFT, s(f, "aerialway")) ||
       isCarPark(f) ||
       isMast(f) || "lighthouse".equals(s(f, "man_made")) || f.hasTag("tomb") || find(WALL, s(f, "barrier")) ||
-      "dam".equals(s(f, "waterway")) || "weir".equals(s(f, "waterway")) || "tree_row".equals(s(f, "natural"));
+      "dam".equals(s(f, "waterway")) || "weir".equals(s(f, "waterway")) || "tree_row".equals(s(f, "natural")) ||
+      // cranes along their rails or by their footprints (crane-mesher), docks (dock-mesher, way-styles)
+      "crane".equals(s(f, "man_made")) || "dock".equals(s(f, "waterway"));
   }
 
   static boolean relationWanted(SourceFeature f) {
@@ -176,7 +180,7 @@ public class SimProfile implements Profile {
       "water".equals(s(f, "natural")) || "wood".equals(s(f, "natural")) ||
       "forest".equals(s(f, "landuse")) || "farmland".equals(s(f, "landuse")) || find(ORCHARD, s(f, "landuse")) ||
       isLandZone(f) ||
-      isCarPark(f);
+      isCarPark(f) || "dock".equals(s(f, "waterway"));
   }
 
   static boolean isMast(SourceFeature f) {
@@ -189,13 +193,14 @@ public class SimProfile implements Profile {
     return "helipad".equals(s(f, "aeroway")) || isMast(f) || f.hasTag("entrance") || "peak".equals(s(f, "natural")) ||
       "marina".equals(s(f, "leisure")) || find(LIFT_NODE, s(f, "aerialway")) || isSeaLight(f) || f.hasTag("tomb") || "tree".equals(s(f, "natural")) ||
       // traffic lights at junctions (osm-mesher: a post at each approach's stop line)
-      "traffic_signals".equals(s(f, "highway")) || "crossing".equals(s(f, "highway"));
+      "traffic_signals".equals(s(f, "highway")) || "crossing".equals(s(f, "highway")) ||
+      "crane".equals(s(f, "man_made"));
   }
 
-  /** overpass.ts: lighthouses, beacons and the charted lights */
+  /** overpass.ts: lighthouses, beacons, buoys and the charted lights */
   static boolean isSeaLight(SourceFeature f) {
     String st = s(f, "seamark:type");
-    return find(SEA_LIGHT, s(f, "man_made")) || (st != null && (st.equals("light_major") || st.equals("light_minor") || st.startsWith("beacon_")));
+    return find(SEA_LIGHT, s(f, "man_made")) || (st != null && (st.equals("light_major") || st.equals("light_minor") || st.startsWith("beacon_") || st.startsWith("buoy_")));
   }
 
   static Map<String, Object> keptTags(SourceFeature f) {
