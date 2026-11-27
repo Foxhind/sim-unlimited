@@ -52,6 +52,19 @@ describe('buildPower', () => {
     expect(wide).toBeLessThan(longest + 0.5);
   });
 
+  it('as lines (a phone): a shaft from the foot to the top and each tier’s arms tip to tip at every support', () => {
+    const p = buildPower(TILE, [line], ground);
+    const pts = wirePts(p.lines);
+    // two supports, each a shaft and one line per tier
+    expect(pts.length).toBe(2 * (1 + POWER.TIERS.length) * 2);
+    const shaft = pts.slice(0, 2);
+    expect(shaft[0][0]).toBeCloseTo(shaft[1][0], 5);
+    expect(shaft[0][1]).toBeCloseTo(50, 5);
+    expect(shaft[1][1]).toBeCloseTo(50 + 36, 5);
+    const longest = Math.max(...POWER.TIERS.map(([, a]) => a)) * 36;
+    expect(Math.max(...pts.map(([, , z]) => Math.abs(z)))).toBeCloseTo(longest, 2);
+  });
+
   it('six conductors and an earth wire a span: three tiers each side, sagging, square to the line', () => {
     const w = wirePts(buildPower(TILE, [line], ground).wires);
     expect(w.length).toBe(7 * POWER.PIECES * 2);

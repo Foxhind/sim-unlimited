@@ -66,6 +66,8 @@ export interface CachedMesh {
   roofLights?: ArrayBuffer;
   nightDots?: ArrayBuffer;
   mastLines?: ArrayBuffer;
+  /** OSM tiles: the power supports as lines (a phone's simple props) */
+  poleLines?: ArrayBuffer;
   beacons?: ArrayBuffer;
   /** OSM tiles: road ribbons (near) and their far 1 px lines */
   rVertices?: ArrayBuffer;
@@ -88,13 +90,13 @@ export interface CachedMesh {
   signals?: ArrayBuffer;
 }
 
-type MeshBuffers = 'vertices' | 'ramps' | 'index' | 'bIndex' | 'gIndex' | 'rIndex' | 'wIndex' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes' | 'signals';
+type MeshBuffers = 'vertices' | 'ramps' | 'index' | 'bIndex' | 'gIndex' | 'rIndex' | 'wIndex' | 'levels' | 'rLevels' | 'wLevels' | 'morph' | 'trees' | 'lights' | 'bVertices' | 'bRamps' | 'bWindows' | 'bKinds' | 'gVertices' | 'gRamps' | 'dots' | 'roofLights' | 'nightDots' | 'mastLines' | 'poleLines' | 'beacons' | 'rVertices' | 'rRamps' | 'rAttrs' | 'wVertices' | 'wRamps' | 'roadLines' | 'pitchLines' | 'lamps' | 'wires' | 'flashes' | 'signals';
 export function meshBytes(m: Pick<CachedMesh, 'vertices' | 'ramps'> & Partial<Pick<CachedMesh, MeshBuffers>>): number {
   return m.vertices.byteLength + m.ramps.byteLength +
     (m.index?.byteLength ?? 0) + (m.bIndex?.byteLength ?? 0) + (m.gIndex?.byteLength ?? 0) + (m.rIndex?.byteLength ?? 0) + (m.wIndex?.byteLength ?? 0) + (m.levels?.byteLength ?? 0) + (m.rLevels?.byteLength ?? 0) + (m.wLevels?.byteLength ?? 0) +
     (m.morph?.byteLength ?? 0) + (m.trees?.byteLength ?? 0) + (m.lights?.byteLength ?? 0) +
     (m.bVertices?.byteLength ?? 0) + (m.bRamps?.byteLength ?? 0) + (m.bWindows?.byteLength ?? 0) + (m.bKinds?.byteLength ?? 0) + (m.dots?.byteLength ?? 0) +
-    (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
+    (m.roofLights?.byteLength ?? 0) + (m.nightDots?.byteLength ?? 0) + (m.mastLines?.byteLength ?? 0) + (m.poleLines?.byteLength ?? 0) + (m.beacons?.byteLength ?? 0) +
     (m.rVertices?.byteLength ?? 0) + (m.rRamps?.byteLength ?? 0) + (m.rAttrs?.byteLength ?? 0) + (m.roadLines?.byteLength ?? 0) + (m.pitchLines?.byteLength ?? 0) +
     (m.wVertices?.byteLength ?? 0) + (m.wRamps?.byteLength ?? 0) +
     (m.gVertices?.byteLength ?? 0) + (m.gRamps?.byteLength ?? 0) + (m.wires?.byteLength ?? 0) + (m.flashes?.byteLength ?? 0) + (m.signals?.byteLength ?? 0) +

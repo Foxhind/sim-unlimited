@@ -52,6 +52,8 @@ export const POWER = {
 
 /** a conductor's colour: dark grey 1 px lines */
 const WIRE_INDEX = rampIndex(RAMP.ASPHALT, 3);
+/** the supports drawn as lines: the masts' grey (mast-mesher LINE_INDEX) */
+const SUPPORT_LINE_INDEX = rampIndex(RAMP.HULL_LIGHT, 8);
 
 export function isPowerLine(tags: Record<string, string>): boolean {
   return tags.power === 'line' || tags.power === 'minor_line';
@@ -72,6 +74,11 @@ export interface PowerData {
   ramps: Uint32Array;
   /** the conductors: GL line vertex pairs of x, y, z, palette index */
   wires: Float32Array;
+  /**
+   * the supports as 1 px lines (the same GL line pairs): the shaft and each crossarm tip to tip, for
+   * a phone's simple props (detail.ts simpleProps) in place of the solids
+   */
+  lines: Float32Array;
 }
 
 type V3 = [number, number, number];
@@ -176,12 +183,21 @@ export function buildPower(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
     return out;
   };
 
+  const supportLines: number[] = [];
   // the supports: each kept one once, by the tile holding its foot
   for (const s of order) {
     if (kept.get(s) !== s || !owns([s.lon, s.lat])) continue;
     const { x, z, y0, H } = s;
     const [ax, az] = s.arm;
     const hangs = attach(s, s.pylon, H, 1);
+    supportLines.push(x, y0, z, SUPPORT_LINE_INDEX, x, y0 + H, z, SUPPORT_LINE_INDEX);
+    if (s.pylon) {
+      for (const [hy, arm] of POWER.TIERS) {
+        supportLines.push(x - ax * arm * H, y0 + hy * H, z - az * arm * H, SUPPORT_LINE_INDEX, x + ax * arm * H, y0 + hy * H, z + az * arm * H, SUPPORT_LINE_INDEX);
+      }
+    } else {
+      supportLines.push(...hangs[0], SUPPORT_LINE_INDEX, ...hangs[1], SUPPORT_LINE_INDEX);
+    }
     if (s.pylon) {
       const t = Math.max(0.18, H * 0.008);
       const insulator = colourOf(POWER.INSULATOR_RGB);
@@ -264,5 +280,5 @@ export function buildPower(tile: Tile, lines: ReadonlyArray<OsmLine>, sampleHeig
       }
     }
   });
-  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), wires: new Float32Array(wires) };
+  return { vertices: new Float32Array(verts), ramps: new Uint32Array(ramps), wires: new Float32Array(wires), lines: new Float32Array(supportLines) };
 }

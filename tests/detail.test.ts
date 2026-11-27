@@ -40,3 +40,30 @@ describe('detail profiles', () => {
     expect(phone.near).toBeGreaterThan(0);
   });
 });
+
+describe('simple props', () => {
+  it('a lamp post is its pole and its raised arm, a traffic light its post', async () => {
+    const { propLines } = await import('../src/world/osm-manager');
+    const { INSTANCE, LAMP_SHAPE, SIGNAL_SHAPE, TREE_STRIDE } = await import('../src/world/props-mesher');
+    const inst = new Float32Array(3 * TREE_STRIDE);
+    // a tree, a lamp at (10, 2, 20) facing +x, a signal at (0, 0, 5)
+    inst.set([1, 0, 1, 10, 0, 0, 0, 0], 0);
+    inst.set([10, 2, 20, 1, 0, INSTANCE.LAMP, 0, 0], TREE_STRIDE);
+    inst.set([0, 0, 5, 1, 0, INSTANCE.SIGNAL, 0, 1], 2 * TREE_STRIDE);
+    const l = new Float32Array(propLines(inst));
+    expect(l.length).toBe(3 * 2 * 4);
+    expect([...l.slice(0, 3)]).toEqual([10, 2, 20]);
+    expect(l[5]).toBeCloseTo(2 + LAMP_SHAPE.HEIGHT, 5);
+    // the arm reaches out along +x and up
+    expect(l[12]).toBeGreaterThan(10 + 1);
+    expect(l[13]).toBeGreaterThan(2 + LAMP_SHAPE.HEIGHT);
+    expect(l[14]).toBeCloseTo(20, 5);
+    expect(l[21]).toBeCloseTo(SIGNAL_SHAPE.HEAD_TOP, 5);
+  });
+
+  it('the phone draws half the trees, as lines what the desktop draws solid', () => {
+    expect(PHONE_DETAIL.treeShare).toBeLessThan(FULL_DETAIL.treeShare);
+    expect(PHONE_DETAIL.simpleProps).toBe(true);
+    expect(FULL_DETAIL.simpleProps).toBe(false);
+  });
+});

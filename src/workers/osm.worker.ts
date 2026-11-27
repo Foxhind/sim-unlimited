@@ -38,8 +38,8 @@ import { isDefaultAreaStyles, type AreaStyles } from '../world/area-styles';
 import { KindRuns, STRUCTURE } from '../world/structure-kinds';
 import { applyGlow, applyGlowByRuns, applyGlowToTrees, buildingCoverage, glowLevels } from '../world/night-glow';
 
-// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged; 115: welded meshes drawn by their index (weld.ts); 116: a building's faces without windows carry their height over its ground (snow on roofs as on the ground)
-export const OSM_MESH_SCHEMA = 116;
+// 83: orchard trees, greenhouse glass (gVertices, gRamps) on a frame; 84: summits, cliff bands; 85: piers, yachts; 86: minarets; 87: power lines (wires); 88: double-circuit pylons; 89: pools; 90: land zones (the junior zone cover); 91: ruins (roofless walls); 92: cable cars and chair lifts; 93: lighthouses (flashes); 94: structure kinds of the building vertices (bKinds); 95: a house's night glow as one, by its footprint; 96: a level deck's slab and parapets level across; 97: tombs; 98: walls; 99: the shaded forest floor, far trees thinned; 100: sectored lights (the flashes' sectors); 101: every sports ground on a level pad; 102: stadium stands; 103: dams and weirs; 104: single trees and tree rows; 105: fences; 106: a 1 px line along every wall and fence; 107: masts as hexagonal monopoles with antenna housings; 108: power supports whose arms would cross merged into one; 109: facade codes with a 16-bit seed, two-floor buildings uniform, panoramic windows; 110: shop windows on every wall of supermarkets, malls, newer retail and commercial; 111: traffic lights on their cycle (signals), their lenses dark in the drape; 112: small yes/residential without levels are one-storey outbuildings under a flat roof; 113: architectural styles (building:architecture): cornices, belt courses, the profile on the facade's wall height; 114: the style inferred from start_date where untagged; 115: welded meshes drawn by their index (weld.ts); 116: a building's faces without windows carry their height over its ground (snow on roofs as on the ground); 117: power supports as 1 px lines too (poleLines: a phone's simple props)
+export const OSM_MESH_SCHEMA = 117;
 
 export interface OsmRequest {
   type: 'osm';
@@ -96,6 +96,8 @@ export interface OsmMeshResponse {
   beacons: ArrayBuffer;
   /** far stand-in for masts: GL line vertex pairs (x, y, z, palette index) */
   mastLines: ArrayBuffer;
+  /** the power supports as GL line vertex pairs (x, y, z, palette index): a phone's simple props */
+  poleLines: ArrayBuffer;
   /** road ribbons (near, pos+normal with Uint32 face colours) and their far 1 px GL lines (x, y, z, palette index) */
   rVertices: ArrayBuffer;
   rRamps: ArrayBuffer;
@@ -201,7 +203,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     const res: OsmMeshResponse = { type: 'mesh', id, ...m };
     ctx.postMessage(res, [
       res.vertices, res.ramps, res.index, res.bIndex, res.gIndex, res.rIndex, res.wIndex, res.levels, res.rLevels, res.wLevels, res.bVertices, res.bRamps, res.bWindows, res.bKinds, res.gVertices, res.gRamps, res.dots, res.trees, res.lights,
-      res.roofLights, res.nightDots, res.beacons, res.mastLines,
+      res.roofLights, res.nightDots, res.beacons, res.mastLines, res.poleLines,
       res.rVertices, res.rRamps, res.rAttrs, res.wVertices, res.wRamps, res.roadLines, res.pitchLines, res.lamps, res.wires, res.flashes, res.signals,
     ]);
   };
@@ -224,7 +226,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
         dots: cached.dots ?? empty(),
         trees: cached.trees ?? empty(), lights: cached.lights ?? empty(),
         roofLights: cached.roofLights ?? empty(), nightDots: cached.nightDots ?? empty(),
-        beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(),
+        beacons: cached.beacons ?? empty(), mastLines: cached.mastLines ?? empty(), poleLines: cached.poleLines ?? empty(),
         rVertices: cached.rVertices ?? empty(), rRamps: cached.rRamps ?? empty(), rAttrs: cached.rAttrs ?? empty(), roadLines: cached.roadLines ?? empty(), pitchLines: cached.pitchLines ?? empty(),
         wVertices: cached.wVertices ?? empty(), wRamps: cached.wRamps ?? empty(),
         lamps: cached.lamps ?? empty(), wires: cached.wires ?? empty(), flashes: cached.flashes ?? empty(), signals: cached.signals ?? empty(),
@@ -395,6 +397,7 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       trees: instances.buffer as ArrayBuffer, lights: props.lights.slice().buffer,
       roofLights: night.roofLights.slice().buffer, nightDots: night.dots.slice().buffer,
       beacons: masts.beacons.slice().buffer, mastLines: concatF32(masts.lines, minarets.lines).buffer as ArrayBuffer,
+      poleLines: power.lines.slice().buffer,
       rVertices: ribbons.streams[0], rRamps: ribbons.streams[1], rAttrs: ribbons.streams[2], rIndex: ribbons.index,
       wVertices: water.streams[0], wRamps: water.streams[1], wIndex: water.index,
       roadLines: mesh.roadLines.slice().buffer,

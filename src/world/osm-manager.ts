@@ -1,5 +1,6 @@
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import { detail, FULL_DETAIL } from './detail';
+import { RAMP, rampIndex } from '../engine/palette';
 import { RequestQueue, RetryableError, tileWorkerCount } from '../engine/queue';
 import { osmSourceMode } from './osm-source';
 import type { Mesh, Renderer } from '../engine/renderer';
@@ -10,7 +11,7 @@ import { frameYaw, latLonToEnu, tileCenter, tileSizeMeters, type LatLon, type Ti
 import { GREENHOUSE, WINDOW_ATTR_FLOATS } from './building-mesher';
 import { FLASH_STRIDE, litFlashes } from './lighthouse-mesher';
 import { LENS_VERTICES, litLenses, MAX_LIT, signalAspects, SIGNAL_STRIDE } from './traffic-signals';
-import { INSTANCE, lampLenses, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
+import { INSTANCE, LAMP_SHAPE, lampLenses, SIGNAL_SHAPE, TREE_GEOMETRY, TREE_MESHES, TREE_STRIDE, TREE_TYPES, TREE_VERTEX_FLOATS, treeKeep } from './props-mesher';
 import { NEUTRAL_GRADE, type ColourGrade } from './landsat-process';
 import type { AreaStyles } from './area-styles';
 import { ALL_STRUCTURES, shownRanges, STRUCTURE } from './structure-kinds';
@@ -101,6 +102,9 @@ interface OsmChunk {
   beacons?: PropSet;
   /** masts beyond the building radius: vertical GL lines */
   mastLines?: PropSet;
+  /** the power supports, and the lamp posts and traffic lights, as GL lines (detail.ts simpleProps) */
+  poleLines?: PropSet;
+  propLines?: PropSet;
   /** power line conductors: 1 px GL lines within detail.wireRadiusM (detail.ts) */
   wires?: PropSet;
   /** night: the lighthouses' lights (lighthouse-mesher FLASH_STRIDE), and the points of those lit now, written each frame */
@@ -150,6 +154,7 @@ interface MeshPayload {
   nightDots: ArrayBuffer;
   beacons: ArrayBuffer;
   mastLines: ArrayBuffer;
+  poleLines: ArrayBuffer;
   wires: ArrayBuffer;
   flashes: ArrayBuffer;
   signals: ArrayBuffer;
@@ -210,7 +215,40 @@ export function farLightSize(pointSize: number): number {
 function thinned(t: TreeSet, c: { centerEnu: vec3; radius: number }, camPos: vec3): number {
   if (t.type >= TREE_TYPES) return t.count;
   const near = Math.hypot(camPos[0] - c.centerEnu[0], camPos[2] - c.centerEnu[2]) - c.radius * 0.71;
-  return Math.ceil(t.count * treeKeep(near));
+  return Math.ceil(t.count * detail.treeShare * treeKeep(near));
+}
+
+/** the run a tree set is thinned over (renderer.drawTrees thinCount): only the profile's share of it (detail.ts) */
+function thinRun(t: TreeSet): number {
+  return t.type >= TREE_TYPES ? 0 : t.count * detail.treeShare;
+}
+
+/** lamp posts and traffic lights drawn as lines (detail.ts simpleProps): the masts' grey */
+const PROP_LINE_INDEX = rampIndex(RAMP.HULL_LIGHT, 8);
+const LAMP_TILT = (LAMP_SHAPE.TILT_DEG * Math.PI) / 180;
+
+/**
+ * The lamp posts and the traffic lights among a tile's instances (props-mesher pushInstance) as GL
+ * line pairs: a lamp's pole and its raised arm, a signal's post up to its head's top.
+ */
+export function propLines(inst: Float32Array): ArrayBuffer {
+  const out: number[] = [];
+  for (let i = 0; i + TREE_STRIDE <= inst.length; i += TREE_STRIDE) {
+    const type = inst[i + 5];
+    if (type !== INSTANCE.LAMP && type !== INSTANCE.SIGNAL) continue;
+    const x = inst[i], y = inst[i + 1], z = inst[i + 2], yaw = inst[i + 7];
+    const c = PROP_LINE_INDEX;
+    if (type === INSTANCE.SIGNAL) {
+      out.push(x, y, z, c, x, y + SIGNAL_SHAPE.HEAD_TOP, z, c);
+      continue;
+    }
+    const top = y + LAMP_SHAPE.HEIGHT;
+    // the mesh's +x turns towards (cos yaw, sin yaw) (TREE_VS): the arm reaches out that way, raised
+    const reach = LAMP_SHAPE.ARM * Math.cos(LAMP_TILT);
+    out.push(x, y, z, c, x, top, z, c);
+    out.push(x, top, z, c, x + Math.cos(yaw) * reach, top + LAMP_SHAPE.ARM * Math.sin(LAMP_TILT), z + Math.sin(yaw) * reach, c);
+  }
+  return new Float32Array(out).buffer;
 }
 
 export class OsmManager {
@@ -269,7 +307,7 @@ export class OsmManager {
             gVertices: buf(msg.gVertices), gRamps: buf(msg.gRamps),
             trees: buf(msg.trees), lights: buf(msg.lights),
             roofLights: buf(msg.roofLights), nightDots: buf(msg.nightDots),
-            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), wires: buf(msg.wires), flashes: buf(msg.flashes), signals: buf(msg.signals),
+            beacons: buf(msg.beacons), mastLines: buf(msg.mastLines), poleLines: buf(msg.poleLines), wires: buf(msg.wires), flashes: buf(msg.flashes), signals: buf(msg.signals),
             rVertices: buf(msg.rVertices), rRamps: buf(msg.rRamps), rAttrs: buf(msg.rAttrs), roadLines: buf(msg.roadLines), pitchLines: buf(msg.pitchLines),
             wVertices: buf(msg.wVertices), wRamps: buf(msg.wRamps),
             lamps: buf(msg.lamps), runways: msg.runways ?? 0, coast: msg.coast ?? false, roads: msg.roads ?? false,
@@ -295,7 +333,8 @@ export class OsmManager {
     }
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
-        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.wires ? 1 : 0);
+        (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.wires ? 1 : 0) +
+        (detail.simpleProps ? (c.poleLines ? 1 : 0) + (c.propLines ? 1 : 0) + (c.mastLines ? 1 : 0) : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -529,6 +568,8 @@ export class OsmManager {
     chunk.nightDots = this.points(chunk, data.nightDots);
     chunk.beacons = this.points(chunk, data.beacons);
     chunk.mastLines = this.points(chunk, data.mastLines);
+    chunk.poleLines = this.points(chunk, data.poleLines);
+    chunk.propLines = this.points(chunk, propLines(new Float32Array(data.trees)));
     chunk.wires = this.points(chunk, data.wires);
     if (data.flashes.byteLength > 0) {
       chunk.flashData = new Float32Array(data.flashes);
@@ -612,7 +653,7 @@ export class OsmManager {
     chunk.mesh = chunk.bmesh = chunk.bcore = undefined;
     chunk.bKinds = chunk.bParts = undefined;
     chunk.dots = chunk.trees = chunk.lights = undefined;
-    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
+    chunk.roofLights = chunk.nightDots = chunk.beacons = chunk.mastLines = chunk.poleLines = chunk.propLines = chunk.wires = chunk.flashes = chunk.flashData = undefined;
     chunk.signalData = chunk.signalLit = chunk.lenses = undefined;
     chunk.rmesh = chunk.wmesh = undefined;
     chunk.roadLines = chunk.pitchLines = chunk.lamps = chunk.lampLenses = undefined;
@@ -627,13 +668,20 @@ export class OsmManager {
   private houseParts(c: OsmChunk, near: boolean): Mesh[] {
     const mesh = near ? c.bmesh : c.bcore;
     if (!mesh) return [];
-    if (this.structures === ALL_STRUCTURES) return [mesh];
-    if (c.bParts?.mask !== this.structures) {
+    // simple props (detail.ts): the masts and the power supports are drawn as lines instead
+    const mask = detail.simpleProps ? this.structures & ~((1 << STRUCTURE.MAST) | (1 << STRUCTURE.POWER)) : this.structures;
+    if (mask === ALL_STRUCTURES) return [mesh];
+    if (c.bParts?.mask !== mask) {
       const cut = (m: Mesh | undefined): Mesh[] =>
-        m ? shownRanges(c.bKinds ?? [], m.vertexCount, this.structures).map(([first, vertexCount]) => ({ vao: m.vao, first, vertexCount })) : [];
-      c.bParts = { mask: this.structures, near: cut(c.bmesh), far: cut(c.bcore) };
+        m ? shownRanges(c.bKinds ?? [], m.vertexCount, mask).map(([first, vertexCount]) => ({ vao: m.vao, first, vertexCount })) : [];
+      c.bParts = { mask, near: cut(c.bmesh), far: cut(c.bcore) };
     }
     return near ? c.bParts.near : c.bParts.far;
+  }
+
+  /** a prop drawn as lines (propLines) instead of its mesh: lamp posts and traffic lights with simple props */
+  private lined(type: number): boolean {
+    return detail.simpleProps && (type === INSTANCE.LAMP || type === INSTANCE.SIGNAL);
   }
 
   /** a prop type (props-mesher: tree types, then INSTANCE) is drawn */
@@ -724,6 +772,14 @@ export class OsmManager {
         if (c.roofLights && lights && buildingsOn) {
           renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
+        if (detail.simpleProps) {
+          // a phone (detail.ts): masts, pylons and poles, lamp posts and traffic lights as 1 px lines
+          if (c.mastLines && (mastsOn || this.shows(STRUCTURE.MINARET))) renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
+          if (c.poleLines && this.shows(STRUCTURE.POWER)) renderer.drawLights(c.poleLines.vao, c.poleLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
+          if (c.propLines && L.props && slant - c.radius * 0.71 < (PROP_DETAIL_M[INSTANCE.LAMP] ?? 0) * detail.propScale) {
+            renderer.drawLights(c.propLines.vao, c.propLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
+          }
+        }
       } else {
         // far buildings by day: a 1 px roof-coloured dot over a 1 px wall-coloured one. By night the
         // same lit facades as near (the windows shader keeps sub-pixel panes, the walls hide what is
@@ -774,11 +830,11 @@ export class OsmManager {
       if (c.wires && slant - c.radius * 0.71 < detail.wireRadiusM && (this.shows(STRUCTURE.POWER) || this.shows(STRUCTURE.LIFT))) {
         renderer.drawLights(c.wires.vao, c.wires.count, c.offset, view, proj, camPos, 1, true, 'lines');
       }
-      if (c.trees && Math.hypot(dx, dz) < 2000 + c.radius * 0.71) {
+      if (c.trees && Math.hypot(dx, dz) < detail.treeRadiusM + c.radius * 0.71) {
         for (const t of c.trees) {
-          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type)) continue;
+          if (slant - c.radius * 0.71 > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type) || this.lined(t.type)) continue;
           const n = thinned(t, c, camPos);
-          renderer.drawTrees(t.vao, n, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, t.type >= TREE_TYPES ? 0 : t.count);
+          renderer.drawTrees(t.vao, n, t.first, t.vertexCount, c.offset, view, proj, camPos, sunDir, fogStart, fogEnd, thinRun(t));
         }
       }
       if (c.lights && lights) {
@@ -814,9 +870,9 @@ export class OsmManager {
       if (!trees || !c.trees) continue;
       const slant = slantTo(c, camPos) - c.radius * 0.71;
       for (const t of c.trees) {
-        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type)) continue;
+        if (slant > (PROP_DETAIL_M[t.type] ?? Infinity) * detail.propScale || !this.showsProp(t.type) || this.lined(t.type)) continue;
         const n = thinned(t, c, camPos);
-        renderer.shadowTrees(t.vao, n, t.first, t.vertexCount, c.offset, t.type >= TREE_TYPES ? 0 : t.count);
+        renderer.shadowTrees(t.vao, n, t.first, t.vertexCount, c.offset, thinRun(t));
       }
     }
   }

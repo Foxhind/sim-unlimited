@@ -128,8 +128,9 @@ or a gamepad is used), on, off.
 
 A phone also builds and draws less of the world in detail (`src/world/detail.ts`): OSM meshes
 within 4 km instead of 7, buildings and roads within 2.5 km instead of 3.5, the far dots out to
-14 km instead of 21. Over central Moscow that halves the detailed tiles and the far ones and cuts the
-draw calls by about 40 %. Settings › Detail range: auto (the phone profile where a finger is the
+14 km instead of 21; half the trees, out to 1.5 km instead of 2; lamp posts, traffic lights, masts
+and power pylons as 1 px lines instead of their models. Over central Moscow that halves the detailed
+tiles and the far ones and the OSM's GPU time. Settings › Detail range: auto (the phone profile where a finger is the
 only pointer), full, phone.
 
 **Gamepads and joysticks.** A gamepad the browser knows (Xbox, PlayStation): left stick pitch and
