@@ -1652,7 +1652,12 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
   const bridges = buildBridges();
 
   if (opts.buildings !== false && data.buildings.length) {
-    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points });
+    // the roads a garage's doors face: road-net isCarriageway (that module imports this one)
+    const roads = opts.data.lines.filter((l) => {
+      const style = l.tags.highway ? classifyLine(l.tags) : undefined;
+      return !!style && !style.path && !style.rail;
+    }).map((l) => l.points);
+    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points, roads });
     for (let i = 0; i < bm.vertices.length; i++) verts.push(bm.vertices[i]);
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);
   }

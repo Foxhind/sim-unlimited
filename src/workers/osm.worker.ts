@@ -25,6 +25,7 @@ import type { OsmDetail, OsmTileData } from '../world/osm-types';
 import { loadTileDem } from '../world/terrain-source';
 import { COAST_LEVEL, tinLocator, tinSampler } from '../world/terrain-tin';
 import { buildSurfaceTin, fetchRoadSurface } from '../world/surface-tin';
+import { isCarriageway } from '../world/road-net';
 import { canopyColour, greenColour, isMaterial, RAMP, snowy } from '../engine/palette';
 import { applyPads, loadPads, neighbourPads } from '../world/aerodrome';
 import { applyPeaks, groundPeaks, peaksOf } from '../world/peaks';
@@ -270,7 +271,9 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
       const ramp = ls.faceColor(tin.vx[t.a], tin.vy[t.a], tin.vx[t.b], tin.vy[t.b], tin.vx[t.c], tin.vy[t.c]);
       return ramp === RAMP.WATER ? ramp : snowy(ramp);
     };
-    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points, groundColour });
+    // the whole fetch's roads: a garage by the border faces a road of the next tile
+    const garageRoads = data.lines.filter((l) => isCarriageway(l.tags)).map((l) => l.points);
+    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points, groundColour, roads: garageRoads });
     // antenna trusses are drawn with the buildings (near), as lines far away
     const masts = buildMasts(clipped.points, tile, drape);
     // bridge bodies and embankments (bridge-mesher.ts) are solid like the buildings and drawn with

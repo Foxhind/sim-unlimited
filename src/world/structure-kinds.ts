@@ -78,7 +78,7 @@ export function structureKind(tags: Record<string, string>): StructureKind {
   if (TOWERS.has(mm) || TOWERS.has(type)) return STRUCTURE.TOWER;
   if (TANKS.has(mm) || TANKS.has(type)) return STRUCTURE.TANK;
   if (mm) return STRUCTURE.MAN_MADE;
-  if (type === 'roof') return STRUCTURE.CANOPY;
+  if (type === 'roof' || type === 'carport') return STRUCTURE.CANOPY;
   return STRUCTURE.BUILDING;
 }
 

@@ -78,6 +78,8 @@ export interface BuildingMeshOptions {
   groundColour?: (lon: number, lat: number) => number | undefined;
   /** OSM points: those tagged `entrance` on a building's outline become doors in its wall */
   points?: OsmPoint[];
+  /** the roads with a carriageway (road-net isCarriageway): a garage's doors face the nearest (garageDoors) */
+  roads?: LonLat[][];
 }
 
 /** a wall edge at least this long may carry balconies (one slot of WINDOWS.SPACING_M) */
@@ -116,6 +118,17 @@ const DOOR_SIZE: Record<string, [number, number]> = { main: [1.9, 2.4], garage: 
 const DOOR_FRAME_RGB: RGB = [58, 56, 54];
 const DOOR_LEAF_RGB: RGB[] = [[104, 70, 44], [70, 74, 80], [48, 82, 60], [96, 44, 40]];
 const GARAGE_DOOR_RGB: RGB = [150, 152, 150];
+/**
+ * building=garage | garages: one storey of WALL_M without `height` or `building:levels` (not the
+ * default two floors), and, unless OSM marks entrances on it, a row of doors on the wall facing the
+ * road (garageDoors): a door DOOR_W × DOOR_H in the middle of each box BOX_M wide. A row of garages
+ * (garages) takes one of its long walls (at least LONG_SHARE of the longest); the road counts within
+ * ROAD_REACH_M of the wall's middle, outside it. No road that near: the longest wall.
+ */
+export const GARAGES = { WALL_M: 2.8, BOX_M: 3.3, DOOR_W: 2.5, DOOR_H: 2.2, LONG_SHARE: 0.6, ROAD_REACH_M: 50 } as const;
+const GARAGE_TYPES = new Set(['garage', 'garages']);
+/** a garage door's paint, picked per door by its hash: grey, green, brown, blue-grey, rust */
+const GARAGE_LEAF_RGB: RGB[] = [GARAGE_DOOR_RGB, [74, 96, 72], [104, 78, 58], [92, 104, 116], [126, 74, 52]];
 /** standoff of the door layers from the wall (window cover, frame, leaf), so the depth test keeps the order */
 const DOOR_LAYERS_M = [0.03, 0.06, 0.09];
 
@@ -316,6 +329,26 @@ export const OUTBUILDING = { MAX_AREA_M2: 60, WALL_M: LEVEL_M } as const;
 
 /** building values that get a hipped roof by default when low-rise */
 const HIPPED_DEFAULT_TYPES = new Set(['yes', 'residential']);
+/**
+ * Houses get a pitched roof by default when low-rise, like HIPPED_DEFAULT_TYPES, but are never an
+ * outbuilding however small: hipped, a terrace's row gabled (its houses' gables meet their neighbours').
+ * A bungalow is one storey (its plinth and one level) without height or levels.
+ */
+const HOUSE_ROOFS: Record<string, string> = {
+  house: 'hipped', detached: 'hipped', semidetached_house: 'hipped', bungalow: 'hipped', terrace: 'gabled',
+};
+/** a shed or hut without height or levels: one low storey, WALL_M of wall under a flat roof */
+export const SHED = { WALL_M: 2.5 } as const;
+const SHED_TYPES = new Set(['shed', 'hut']);
+/**
+ * A canopy: a roof on posts, no walls (building=roof: a petrol station's, a platform's; carport: over
+ * parked cars, CARPORT_M high without height or levels).
+ */
+const CANOPY_TYPES = new Set(['roof', 'carport']);
+export const CARPORT_M = 2.4;
+export function isCanopy(tags: Record<string, string>): boolean {
+  return CANOPY_TYPES.has(tags.building);
+}
 /** a footprint larger than this (m²) keeps the flat default roof: a hipped roof over it would tower over the walls */
 export const HIPPED_DEFAULT_MAX_AREA_M2 = 1000;
 
@@ -341,14 +374,68 @@ export function withDefaultTags(tags: Record<string, string>, outer: XZ[] | unde
     out[FOOTPRINT_WALL_TAG] = String(footprintHeight(outer));
   }
   if (area !== undefined && area < FACADE_ZONES.BOOTH_MAX_AREA_M2) out[BOOTH_TAG] = 'yes';
+  if (untold && !isPart) {
+    if (tags.building === 'bungalow') out[FOOTPRINT_WALL_TAG] = String(FACADE_ZONES.PLINTH_M + LEVEL_M);
+    else if (SHED_TYPES.has(tags.building)) out[FOOTPRINT_WALL_TAG] = String(SHED.WALL_M);
+    else if (tags.building === 'carport') out[FOOTPRINT_WALL_TAG] = String(CARPORT_M);
+  }
   const small = area === undefined || area <= HIPPED_DEFAULT_MAX_AREA_M2;
-  if (out['roof:shape'] === undefined && !isPart && small && HIPPED_DEFAULT_TYPES.has(tags.building)) {
+  const pitched = HIPPED_DEFAULT_TYPES.has(tags.building) ? 'hipped' : HOUSE_ROOFS[tags.building];
+  if (out['roof:shape'] === undefined && !isPart && small && pitched) {
     const facade = parseLength(tags.height) ?? (levels !== undefined ? levels * LEVEL_M : undefined)
       ?? parseLength(out[FOOTPRINT_WALL_TAG]) ?? DEFAULT_LEVELS * LEVEL_M;
-    if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = 'hipped';
+    if (facade <= LOW_RISE_FACADE_M) out['roof:shape'] = pitched;
   }
   if (tags.building === 'greenhouse' && !isPart) greenhouseDefaults(tags, out, levels);
+  if (GARAGE_TYPES.has(tags.building) && untold && !isPart) out[FOOTPRINT_WALL_TAG] = String(GARAGES.WALL_M);
   return out;
+}
+
+/**
+ * Where a garage (building=garage | garages, GARAGES) has its doors: the wall edge of `outer` (ccw:
+ * (dz, -dx) is outward) and the doors' centres along it, from its first vertex. The edge is the one
+ * whose middle is nearest a road (polylines in the same metres) lying outside it; a row of garages
+ * looks only at its long walls. Undefined when no wall takes a door.
+ */
+export function garageDoors(outer: XZ[], roads: XZ[][], row: boolean): { edge: number; us: number[]; width: number } | undefined {
+  const lens = outer.map((p, i) => {
+    const q = outer[(i + 1) % outer.length];
+    return Math.hypot(q[0] - p[0], q[1] - p[1]);
+  });
+  const longest = Math.max(0, ...lens);
+  const minLen = Math.max(GARAGES.DOOR_W + 0.6, row ? longest * GARAGES.LONG_SHARE : 0);
+  let best: { edge: number; d: number } | undefined;
+  let fallback: number | undefined;
+  for (let i = 0; i < outer.length; i++) {
+    const len = lens[i];
+    if (len < minLen) continue;
+    if (fallback === undefined || len > lens[fallback]) fallback = i;
+    const p = outer[i], q = outer[(i + 1) % outer.length];
+    const m: XZ = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+    const n: XZ = [(q[1] - p[1]) / len, -(q[0] - p[0]) / len];
+    for (const road of roads) {
+      for (let k = 0; k + 1 < road.length; k++) {
+        const c = closestOnSegment(m, road[k], road[k + 1]);
+        const d = Math.hypot(c[0] - m[0], c[1] - m[1]);
+        // outside the wall: in front of it, not behind the building
+        if (d > GARAGES.ROAD_REACH_M || (c[0] - m[0]) * n[0] + (c[1] - m[1]) * n[1] <= 0.5) continue;
+        if (!best || d < best.d) best = { edge: i, d };
+      }
+    }
+  }
+  const edge = best?.edge ?? fallback;
+  if (edge === undefined) return undefined;
+  const len = lens[edge];
+  const boxes = Math.max(1, Math.floor(len / GARAGES.BOX_M));
+  const cw = len / boxes;
+  return { edge, us: Array.from({ length: boxes }, (_, k) => (k + 0.5) * cw), width: Math.min(GARAGES.DOOR_W, cw - 0.6) };
+}
+
+function closestOnSegment(p: XZ, a: XZ, b: XZ): XZ {
+  const dx = b[0] - a[0], dz = b[1] - a[1];
+  const l2 = dx * dx + dz * dz;
+  const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dz) / l2)) : 0;
+  return [a[0] + dx * t, a[1] + dz * t];
 }
 
 /**
@@ -816,6 +903,10 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     return [e, -n];
   };
   const entrances = entranceGrid((opts.points ?? []).filter((p) => p.tags.entrance !== undefined && p.tags.entrance !== 'no'), toXZ, sampleHeight);
+  const roadsXZ = (opts.roads ?? []).map((r) => {
+    const pts = r.map(toXZ);
+    return { pts, box: bbox(pts) };
+  });
   const emitTri = (a: V3, b: V3, c: V3, ramp: number, up: boolean): void => {
     const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
     const e2x = c[0] - a[0], e2y = c[1] - a[1], e2z = c[2] - a[2];
@@ -859,7 +950,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     const wallTop = wallBase + h.wall;
     const wRamp = wallRamp(tags, styleSeed(b));
     const rRamp = roofRamp(tags, styleSeed(b), outerLL[0][1]);
-    const isCanopy = tags.building === 'roof';
+    const canopy = isCanopy(tags);
     const roof = (skeleton && skeletonRoof(skeleton, shape, h.roof)) || roofModel(shape, frame, h.roof, outer, tags, firstEdgeOutward(rawOuter));
     const creases = roof.kind === 'planar' ? roofCreases(roof, bbox(outer)) : [];
     const centroid = areaCentroid(outer);
@@ -897,7 +988,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       + ((arch ? arch.panoramic : hasPanoramicWindows(tags, styleSeed(b))) ? FACADE_PANORAMIC : 0);
 
     // a plinth of the ground's colour from under the lowest ground up to the walls: a house on a slope
-    if (!isCanopy && h.min < 0.5 && base - low > 0.05) {
+    if (!canopy && h.min < 0.5 && base - low > 0.05) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
           const a = ring[i], c = ring[(i + 1) % ring.length];
@@ -915,7 +1006,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (glassy) ({ verts, ramps, win } = glass);
 
     // walls up to the roof profile (gable ends close themselves); none under a canopy
-    if (!isCanopy) {
+    if (!canopy) {
       for (const ring of [outer, ...holes]) {
         for (let i = 0; i < ring.length; i++) {
           wallUnderRoof(ring[i], ring[(i + 1) % ring.length], wallBase, wallTop, roof, creases, wRamp, centroid, windowed ? winH : 0, winBase, balconies, flags, uniformSeed, profile);
@@ -923,8 +1014,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       }
       // doors where OSM marks entrances on the outline, on walls standing on the ground
       if (h.min < 0.5 && h.wall >= 2.4 && !glassy) {
-        for (const e of entrances.near(bbox(outer), ENTRANCE_SNAP_M)) {
+        const mapped = entrances.near(bbox(outer), ENTRANCE_SNAP_M);
+        for (const e of mapped) {
           detail(() => door(e, [outer, ...holes], wallBase, wallTop, wRamp, windowed ? winH : 0, winBase, balconies, flags, uniformSeed, profile));
+        }
+        // a garage without mapped entrances: its row of doors on the wall facing the road
+        if (!mapped.length && GARAGE_TYPES.has(tags.building) && !isBuildingPart(tags)) {
+          detail(() => garageRow(outer, tags.building === 'garages', wallBase, wallTop));
         }
       }
       if (windowed && AC_TYPES.has(tags.building)) airConditioners(outer, winBase, winH, arch);
@@ -932,13 +1028,13 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     }
 
     // ceiling under elevated parts (arches, bridges)
-    if (h.min > 0.01 && !isCanopy) capRing(outer, holes, wallBase, wRamp, false);
+    if (h.min > 0.01 && !canopy) capRing(outer, holes, wallBase, wRamp, false);
 
     if (roof.kind === 'flat') {
       // a flat roof holds snow in winter
       // a parapet along the edges, the roof sunk behind it (not on a canopy or a too small building)
       const bb = bbox(outer);
-      const withParapet = !isCanopy && !glassy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
+      const withParapet = !canopy && !glassy && h.wall >= PARAPET.MIN_WALL_M && Math.min(bb.maxX - bb.minX, bb.maxZ - bb.minZ) >= PARAPET.MIN_SIDE_M;
       if (withParapet && isChimney(tags)) {
         const soot = rgbRamp(CHIMNEY.SOOT);
         const floorY = wallTop - CHIMNEY.DEPTH * h.wall;
@@ -971,7 +1067,7 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
     if (glassy) {
       ({ verts, ramps, win } = core);
       // the frame is a small part: the far LOD draws the glass alone
-      detail(() => glassFrame(outer, wallBase, wallTop, roof, creases, frame, rgbRamp([...GREENHOUSE.FRAME]), centroid, isCanopy));
+      detail(() => glassFrame(outer, wallBase, wallTop, roof, creases, frame, rgbRamp([...GREENHOUSE.FRAME]), centroid, canopy));
     }
     // the faces with no window attributes (roofs, rooftop plant, plain walls) carry their height over
     // the ground the walls stand on: snow on the roof as on that ground (WORLD_VS climate at the foot)
@@ -1200,6 +1296,37 @@ export function buildBuildingMesh(opts: BuildingMeshOptions): BuildingMeshData {
       wallRect(p, dir, n, u - w / 2, u - 0.03, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
       wallRect(p, dir, n, u + 0.03, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
     } else {
+      wallRect(p, dir, n, u - w / 2, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
+    }
+  }
+
+  /** the roads near a box (garageDoors), in tile-centre metres */
+  function roadsNear(b: ReturnType<typeof bbox>, pad: number): XZ[][] {
+    const out: XZ[][] = [];
+    for (const r of roadsXZ) {
+      const rb = r.box;
+      if (rb.maxX >= b.minX - pad && rb.minX <= b.maxX + pad && rb.maxZ >= b.minZ - pad && rb.minZ <= b.maxZ + pad) out.push(r.pts);
+    }
+    return out;
+  }
+
+  /** a garage's doors (garageDoors): frame and leaf, each on the ground under it */
+  function garageRow(outer: XZ[], row: boolean, wallBase: number, wallTop: number): void {
+    const at = garageDoors(outer, roadsNear(bbox(outer), GARAGES.ROAD_REACH_M), row);
+    if (!at) return;
+    const p = outer[at.edge], q = outer[(at.edge + 1) % outer.length];
+    const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const dir: XZ = [(q[0] - p[0]) / len, (q[1] - p[1]) / len];
+    const n: XZ = [dir[1], -dir[0]];
+    const w = at.width;
+    for (const u of at.us) {
+      const x = p[0] + dir[0] * u, z = p[1] + dir[1] * u;
+      const ll = enuToLatLon(center, x, -z, 0);
+      const y0 = Math.max(wallBase, sampleHeight(ll.lon, ll.lat));
+      const top = Math.min(wallTop - 0.2, y0 + GARAGES.DOOR_H);
+      if (top - y0 < 1.8) continue;
+      wallRect(p, dir, n, u - w / 2 - 0.08, u + w / 2 + 0.08, y0, top + 0.08, DOOR_LAYERS_M[1], rgbRamp(DOOR_FRAME_RGB));
+      const leaf = row ? GARAGE_LEAF_RGB[Math.floor(hash01(x, y0, z) * GARAGE_LEAF_RGB.length)] : GARAGE_DOOR_RGB;
       wallRect(p, dir, n, u - w / 2, u + w / 2, y0, top, DOOR_LAYERS_M[2], rgbRamp(leaf));
     }
   }
@@ -1651,7 +1778,7 @@ export function buildingNightLights(
     const cx = ring.reduce((s, p) => s + p[0], 0) / ring.length;
     const cz = ring.reduce((s, p) => s + p[1], 0) / ring.length;
     const tall = h.min + h.wall + h.roof > TALL_BUILDING_M;
-    const lit = isLitBuilding(b.tags) && b.tags.building !== 'roof';
+    const lit = isLitBuilding(b.tags) && !isCanopy(b.tags);
 
     const tags = buildingTags(b);
     if (lit && cellM > 0 && hasFacadeZones(tags)) {

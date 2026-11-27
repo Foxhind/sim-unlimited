@@ -9,6 +9,11 @@ import {
   BOOTH_TAG,
   FACADE_ZONES,
   footprintHeight,
+  GARAGES,
+  garageDoors,
+  CARPORT_M,
+  SHED,
+  withDefaultTags,
   GREENHOUSE,
   lineInside,
   PARAPET,
@@ -78,12 +83,15 @@ describe('default height and roof', () => {
   });
 
   it('other types without height/levels: 2 floors (plus the plinth and the technical floor), whatever the footprint', () => {
-    // flat roofs: 1 m plinth + 2 × 3 m + 1.5 m technical floor; a garage has no facade zones
-    for (const [building, wall] of [['yes', 8.5], ['house', 8.5], ['industrial', 8.5], ['garage', 6]] as const) {
+    // flat roofs: 1 m plinth + 2 × 3 m + 1.5 m technical floor; a barn has no facade zones
+    for (const [building, wall] of [['yes', 8.5], ['house', 8.5], ['industrial', 8.5], ['barn', 6]] as const) {
       const b: OsmBuilding = { rings: [rect()], tags: { building } };
       expect(buildingTags(b)['sim:footprint_wall']).toBeUndefined();
       expect(buildingHeights(b).wall).toBe(wall);
     }
+    // a garage is one storey (GARAGES), a shed low (SHED)
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'shed' } }).wall).toBeCloseTo(SHED.WALL_M);
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'garage' } }).wall).toBeCloseTo(GARAGES.WALL_M);
     // yes: 2 floors are low-rise → a hipped roof on top of the 1 m plinth and 6 m of floors
     const yes: OsmBuilding = { rings: [rect(0.00005, 0.00004)], tags: { building: 'yes' } };
     expect(buildingTags(yes)['roof:shape']).toBe('hipped');
@@ -102,11 +110,13 @@ describe('default height and roof', () => {
     // OSM levels, height or roof shape win; other types and the ~ 80 m² house keep their defaults
     expect(buildingHeights({ rings: [shed], tags: { building: 'yes', 'building:levels': '2' } }).wall).toBeCloseTo(7, 6);
     expect(buildingTags({ rings: [shed], tags: { building: 'yes', 'roof:shape': 'gabled' } })['roof:shape']).toBe('gabled');
-    expect(buildingHeights({ rings: [shed], tags: { building: 'house' } }).wall).toBe(8.5);
+    // a house that small is still two floors over its plinth, under a pitched roof (HOUSE_ROOFS)
+    expect(buildingHeights({ rings: [shed], tags: { building: 'house' } }).wall).toBeCloseTo(7, 6);
+    expect(buildingTags({ rings: [shed], tags: { building: 'house' } })['roof:shape']).toBe('hipped');
     expect(buildingTags({ rings: [rect(0.00005, 0.00004)], tags: { building: 'yes' } })['roof:shape']).toBe('hipped');
   });
 
-  it('default hipped only for low-rise yes/residential; OSM tags, other types and parts stay as they are', () => {
+  it('default hipped only for low-rise yes/residential (and houses); OSM tags, other types and parts stay as they are', () => {
     const ring = rect(0.00005, 0.00004);
     const roof = (tags: Record<string, string>) => buildingTags({ rings: [ring], tags })['roof:shape'];
     expect(buildingTags({ rings: [ring], tags: { building: 'yes', 'building:levels': '2' } })).toEqual({ building: 'yes', 'building:levels': '2', 'roof:shape': 'hipped' });
@@ -114,9 +124,10 @@ describe('default height and roof', () => {
     expect(roof({ building: 'yes', 'building:levels': '5' })).toBeUndefined();
     expect(roof({ building: 'yes', height: '20' })).toBeUndefined();
     expect(roof({ building: 'yes', height: '7', 'roof:shape': 'flat' })).toBe('flat');
-    for (const building of ['house', 'detached', 'apartments', 'industrial', 'school', 'garage']) {
+    for (const building of ['apartments', 'industrial', 'school', 'garage']) {
       expect(roof({ building, 'building:levels': '2' })).toBeUndefined();
     }
+    for (const building of ['house', 'detached']) expect(roof({ building, 'building:levels': '2' })).toBe('hipped');
     expect(roof({ 'building:part': 'yes', building: 'yes', height: '7' })).toBeUndefined();
     // a large footprint (~ 63 × 67 m) keeps the flat default; the small one above (~ 6 × 9 m) is hipped
     expect(buildingTags({ rings: [rect()], tags: { building: 'yes' } })['roof:shape']).toBeUndefined();
@@ -675,5 +686,101 @@ describe('lineInside', () => {
     // a U: the line through both arms comes out twice
     const u: [number, number][] = [[0, 0], [9, 0], [9, 9], [6, 9], [6, 3], [3, 3], [3, 9], [0, 9]];
     expect(lineInside([-1, 6], [1, 0], u)).toEqual([[1, 4], [7, 10]]);
+  });
+});
+
+describe('garages', () => {
+  // 30 × 6 m, z south; edges: 0 north, 1 east, 2 south, 3 west ((dz, -dx) outward)
+  const row: [number, number][] = [[0, 0], [30, 0], [30, 6], [0, 6]];
+  const line = (z: number): [number, number][] => [[-20, z], [50, z]];
+
+  it('one storey without height or levels; told levels stand', () => {
+    const t = withDefaultTags({ building: 'garages' }, row);
+    expect(computeHeights(t).wall).toBeCloseTo(GARAGES.WALL_M);
+    expect(computeHeights(withDefaultTags({ building: 'garage' }, row)).wall).toBeCloseTo(GARAGES.WALL_M);
+    expect(computeHeights(withDefaultTags({ building: 'garages', 'building:levels': '2' }, row)).wall).toBeCloseTo(6);
+  });
+
+  it('a row of doors, one per box, on the long wall facing the road', () => {
+    const north = garageDoors(row, [line(-8)], true)!;
+    expect(north.edge).toBe(0);
+    expect(north.us).toHaveLength(Math.floor(30 / GARAGES.BOX_M));
+    expect(north.width).toBe(GARAGES.DOOR_W);
+    expect(garageDoors(row, [line(14)], true)!.edge).toBe(2);
+    // the nearer of two roads
+    expect(garageDoors(row, [line(-30), line(9)], true)!.edge).toBe(2);
+  });
+
+  it('a row keeps to its long walls; a single garage may face the road with its end', () => {
+    const east: [number, number][] = [[40, -20], [40, 30]];
+    expect(garageDoors(row, [east], true)!.edge).toBe(0); // no long wall faces it: the longest
+    const single: [number, number][] = [[0, 0], [6, 0], [6, 4], [0, 4]];
+    const at = garageDoors(single, [[[20, -20], [20, 30]]], false)!;
+    expect(at.edge).toBe(1);
+    expect(at.us).toHaveLength(1);
+  });
+
+  it('a road behind the building or too far does not count', () => {
+    expect(garageDoors(row, [line(-8 - GARAGES.ROAD_REACH_M)], true)!.edge).toBe(0); // the longest, first
+    expect(garageDoors(row, [line(3)], true)!.edge).toBe(0); // through the building: not in front of either wall
+  });
+
+  it('the mesh puts the doors on the wall facing the road; mapped entrances replace them', () => {
+    const b = tileBounds(TILE);
+    const cx = (b.west + b.east) / 2, cy = (b.south + b.north) / 2;
+    const garages: OsmBuilding = { rings: [rect(0.0002, 0.00004)], tags: { building: 'garages' } };
+    const road = (lat: number): [number, number][] => [[cx - 0.001, lat], [cx + 0.001, lat]];
+    /** vertices of the small parts facing north (-z) and south (+z) */
+    const facing = (roads: [number, number][][], points = []) => {
+      const m = buildBuildingMesh({ tile: TILE, buildings: [garages], sampleHeight: () => 100, roads, points });
+      let n = 0, s = 0;
+      for (let i = m.coreVertexCount; i < m.vertexCount; i++) {
+        const nz = m.vertices[i * 6 + 5];
+        if (nz < -0.9) n++;
+        else if (nz > 0.9) s++;
+      }
+      return { n, s };
+    };
+    const north = facing([road(cy + 0.0002)]);
+    const south = facing([road(cy - 0.0002)]);
+    expect(north.n - south.n).toBeGreaterThan(0);
+    expect(south.s - north.s).toBe(north.n - south.n);
+    const mapped = facing([road(cy + 0.0002)], [{ at: [cx, cy + 0.00004], tags: { entrance: 'garage' } }] as never);
+    expect(mapped.n).toBeLessThan(north.n);
+  });
+});
+
+describe('houses, sheds and carports', () => {
+  const tagsOf = (building: string, extra: Record<string, string> = {}, w = 0.00008, h = 0.00006) =>
+    buildingTags({ rings: [rect(w, h)], tags: { building, ...extra } });
+
+  it('a house of any size gets a pitched roof when low-rise (a terrace gabled), not the outbuilding rule', () => {
+    for (const b of ['house', 'detached', 'semidetached_house', 'bungalow']) expect(tagsOf(b)['roof:shape']).toBe('hipped');
+    expect(tagsOf('terrace')['roof:shape']).toBe('gabled');
+    // a small house is still two storeys (not a one-storey outbuilding)
+    const small = tagsOf('house', {}, 0.00003, 0.00003);
+    expect(small['sim:footprint_wall']).toBeUndefined();
+    expect(small['roof:shape']).toBe('hipped');
+    // told shapes and tall ones stand
+    expect(tagsOf('house', { 'roof:shape': 'flat' })['roof:shape']).toBe('flat');
+    expect(tagsOf('house', { 'building:levels': '5' })['roof:shape']).toBeUndefined();
+  });
+
+  it('a bungalow is one storey over its plinth; a shed and a hut are low', () => {
+    expect(buildingHeights({ rings: [rect(0.00008, 0.00006)], tags: { building: 'bungalow' } }).wall).toBeCloseTo(FACADE_ZONES.PLINTH_M + 3);
+    for (const b of ['shed', 'hut']) {
+      const h = buildingHeights({ rings: [rect()], tags: { building: b } });
+      expect(h.wall).toBeCloseTo(SHED.WALL_M);
+      expect(h.roof).toBe(0);
+    }
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'shed', 'building:levels': '2' } }).wall).toBe(6);
+  });
+
+  it('a carport is a canopy CARPORT_M high: a roof and no walls', () => {
+    expect(buildingHeights({ rings: [rect()], tags: { building: 'carport' } }).wall).toBeCloseTo(CARPORT_M);
+    const m = build([{ rings: [rect()], tags: { building: 'carport' } }]);
+    // no wall faces: every normal is up or down
+    for (let i = 0; i < m.vertexCount; i++) expect(Math.abs(m.vertices[i * 6 + 4])).toBeGreaterThan(0.9);
+    expect(m.vertexCount).toBeGreaterThan(0);
   });
 });
