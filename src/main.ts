@@ -32,7 +32,7 @@ import { applyPreset, dryUnderThinCloud, parsePreset, type WeatherPreset } from 
 import { hazeDensity } from './world/haze';
 import { CameraMotion, FOG_CLEAR, GLOOM_LIGHT, fogRange, gloom, precipAltitudeFactor, precipDrift, precipParticles, precipVisibilityM, STORM_DAY_LIT } from './world/precipitation';
 import { boltPath, Lightning } from './world/lightning';
-import { AIRCRAFT, fitAircraft, type AircraftId } from './flight/aircraft';
+import { AIRCRAFT, aircraftMesh, fitAircraft, type AircraftId } from './flight/aircraft';
 import { FlightModel, type FlightControls } from './flight/model';
 import { approachSpeed, Autopilot } from './flight/autopilot';
 import { cdi, GS_ANTENNA_M, NavDb, offsetLatLon, receive, type Navaid, type NavKind } from './flight/navaids';
@@ -542,7 +542,8 @@ if (state === 'menu') menu.screen = consent === null ? 'consent' : 'start';
 
 // a map link pasted on the start screen sets the custom start point (same parser as the inspector)
 document.addEventListener('paste', (e) => {
-  if (state !== 'menu') return;
+  // into the search field it goes as text (the search reads a link there too)
+  if (state !== 'menu' || e.target instanceof HTMLInputElement) return;
   const text = e.clipboardData?.getData('text/plain') ?? '';
   if (menu.pasteLink(text)) e.preventDefault();
 });
@@ -645,6 +646,39 @@ const crashCamPos = vec3.create();
 const menuView = mat4.create();
 const menuCamPos = vec3.create();
 const menuTarget = vec3.create();
+
+/**
+ * The menu's backdrop: no land (no tiles are loaded for it), the sky of the chosen time and weather,
+ * and the chosen aircraft turning slowly in it, framed in the start screen's preview window
+ * (menu.preview) by an off-centre projection. SHOW.ALT_M: the height it hangs at; SHOW.FILL: the
+ * share of the window's width its size (the sphere round it) takes, FILL_H of its height (an aircraft
+ * is flat: its sphere may overflow it); SHOW.TURN: its turn, rad/s; SHOW.TILT: the camera above it, rad (the horizon then above the window, out of the menu's way).
+ */
+const SHOW = { ALT_M: 1200, FILL: 0.8, FILL_H: 1.6, TURN: 0.25, TILT: 0.4 } as const;
+let shown: { key: string; model: FlightModel; radius: number } | null = null;
+function shownAircraft(): { model: FlightModel; radius: number } {
+  const c = menu.config;
+  const key = `${c.aircraft}|${c.insignia}|${c.loadout}`;
+  if (shown?.key !== key) {
+    const m = new FlightModel(fitAircraft(AIRCRAFT[c.aircraft], c.insignia, c.loadout));
+    vec3.set(m.pos, 0, SHOW.ALT_M, 0);
+    const v = aircraftMesh(m.cfg).vertices, cg = m.meshCg;
+    let r = 1;
+    for (let i = 0; i < v.length; i += 6) r = Math.max(r, Math.hypot(v[i] - cg[0], v[i + 1] - cg[1], v[i + 2] - cg[2]));
+    shown = { key, model: m, radius: r };
+  }
+  return shown;
+}
+/** the camera's distance from the aircraft on show: its size filling SHOW.FILL of the preview window (both ways) */
+function showDistance(radius: number): number {
+  const p = menu.preview;
+  const tanY = Math.tan((30 * Math.PI) / 180);
+  if (!p) return radius * 3;
+  const aspect = renderer.width / renderer.height;
+  const byH = radius / (tanY * (p.h / renderer.height) * SHOW.FILL_H);
+  const byW = radius / (tanY * aspect * (p.w / renderer.width) * SHOW.FILL);
+  return Math.max(byH, byW);
+}
 
 /** where the aircraft is, for the radios */
 function ownLatLon(): LatLon {
@@ -771,6 +805,12 @@ function frame(now: number): void {
   // the middle of what is left, an off-centre projection, so the horizon and the conformal HUD sit there
   const viewShift = touchOn ? touch.layout.reserve.bottom / 2 : 0;
   proj[9] = (-2 * viewShift) / renderer.height;
+  // the menu's aircraft in the start screen's preview window (last frame's): the view's centre there
+  if (state === 'menu' && menu.preview) {
+    const p = menu.preview;
+    proj[8] = -(((p.x + p.w / 2) / renderer.width) * 2 - 1);
+    proj[9] = -(1 - ((p.y + p.h / 2) / renderer.height) * 2);
+  }
 
   presetNow = state === 'menu' ? menu.config.weather : start.weather;
   setDetail(detailFor(settings.detail, touchOnly));
@@ -946,11 +986,12 @@ function frame(now: number): void {
   // a drag over a menu scrolls it (a long one on a short screen) rather than swinging the view
   menu.takeScroll(input);
   if (state === 'menu') {
-    // slow orbit over the start area as a live backdrop for the menus
-    const a = now * 0.00004;
-    const gy = ground.heightAt(start.latLon.lon, start.latLon.lat) ?? 500;
-    vec3.set(menuTarget, 0, gy, 0);
-    vec3.set(menuCamPos, Math.cos(a) * 3200, gy + 2200, Math.sin(a) * 3200);
+    // the chosen aircraft on show in the sky (SHOW), the camera turning round it
+    const { model: m, radius } = shownAircraft();
+    const a = (now / 1000) * SHOW.TURN;
+    const d = showDistance(radius);
+    vec3.copy(menuTarget, m.pos);
+    vec3.set(menuCamPos, m.pos[0] + Math.cos(a) * Math.cos(SHOW.TILT) * d, m.pos[1] + Math.sin(SHOW.TILT) * d, m.pos[2] + Math.sin(a) * Math.cos(SHOW.TILT) * d);
     mat4.lookAt(menuView, menuCamPos, menuTarget, vec3.fromValues(0, 1, 0));
     view = menuView;
     camPos = menuCamPos;
@@ -972,10 +1013,14 @@ function frame(now: number): void {
 
   profiler.stage('тайлы: выбор и загрузка');
   // a detailed (z14) tile is shown only once its OSM is ready; until then its coarse parent stands in
-  chunks.update(camWorld, view, proj, now, (key) => osm.ready(key) || forcedDetail.has(key));
-  osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
-  const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
-  farOsm.update(camWorld, view, proj, now, chunks.origin, farOsmTiles(camWorld.latLon, camWorld.alt, detailKeys), chunks.shownDetail);
+  // the menu's backdrop has no land: no tiles are asked for it
+  const land = state !== 'menu';
+  if (land) {
+    chunks.update(camWorld, view, proj, now, (key) => osm.ready(key) || forcedDetail.has(key));
+    osm.update(camWorld, view, proj, now, chunks.origin, chunks.detailTiles, chunks.shownDetail);
+    const detailKeys = new Set(chunks.detailTiles.map((t) => `${t.z}/${t.x}/${t.y}`));
+    farOsm.update(camWorld, view, proj, now, chunks.origin, farOsmTiles(camWorld.latLon, camWorld.alt, detailKeys), chunks.shownDetail);
+  }
 
   profiler.stage('облака: тайлы');
   clouds.setLayers(cloudLayers(cloudInput()));
@@ -983,7 +1028,7 @@ function frame(now: number): void {
   const cloudDt = state === 'flying' && !rimLab.frozen ? dt * menu.config.timeAccel : state === 'menu' ? dt : 0;
   if (cloudDt > 0) clouds.advance(cloudDt, (alt) => air.meanWind(alt, alt - air.surfaceElevation));
   const camLatLon = enuToLatLon(chunks.origin, camPos[0], -camPos[2], camPos[1]);
-  clouds.update(camLatLon, chunks.origin, view, proj);
+  if (land) clouds.update(camLatLon, chunks.origin, view, proj);
 
   profiler.stage('осадки, видимость, гроза');
   const wx = weatherInForce();
@@ -1051,9 +1096,11 @@ function frame(now: number): void {
   const flashing = state === 'crashed' && now - crashTime < 150;
   profiler.stage('тени');
   if (renderer.beginShadows(camPos, baseGround(camPos[1]).y, view, sunDir)) {
-    chunks.drawShadows(renderer);
-    osm.drawShadows(renderer, camPos);
-    clouds.drawShadows(renderer);
+    if (land) {
+      chunks.drawShadows(renderer);
+      osm.drawShadows(renderer, camPos);
+      clouds.drawShadows(renderer);
+    }
     if (state !== 'crashed' && spawned) aircraftRenderer.drawShadow(renderer, model);
     renderer.endShadows();
   }
@@ -1096,19 +1143,25 @@ function frame(now: number): void {
   }
   renderer.rimWeight = rim.terrain;
   profiler.stage('рельеф');
-  chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, detail.houseRadiusM);
+  if (land) chunks.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, detail.houseRadiusM);
   renderer.rimWeight = rim.objects;
   renderer.rimTreeWeight = rim.trees;
   profiler.stage('OSM: здания, дороги, вода, деревья, огни');
-  osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u, stormDay || duskWindows, duskWindows);
-  farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM, duskWindows);
-  profiler.stage('облака');
-  clouds.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
+  if (land) {
+    osm.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM, lightsOn, 3 * u, stormDay || duskWindows, duskWindows);
+    farOsm.draw(renderer, view, proj, camPos, lightsOn, 3 * u, fogStartM, fogEndM, duskWindows);
+    profiler.stage('облака');
+    clouds.draw(renderer, view, proj, camPos, lightDir, fogStartM, fogEndM);
+  }
   renderer.rimWeight = rim.aircraft;
   profiler.stage('самолёт');
   if (rig.mode !== 'cockpit' && state !== 'crashed' && spawned) {
     renderer.outlined = true; // the silhouette rim: buildings and aircraft only
     aircraftRenderer.draw(renderer, model, view, proj, camPos, lightDir, flight.throttle, now / 1000);
+    renderer.outlined = false;
+  } else if (state === 'menu') {
+    renderer.outlined = true;
+    aircraftRenderer.draw(renderer, shownAircraft().model, view, proj, camPos, lightDir, 0, now / 1000);
     renderer.outlined = false;
   }
 
@@ -1227,7 +1280,7 @@ function frame(now: number): void {
   if (menu.screen !== 'none') {
     menu.footRows = attrLines.length + (import.meta.env.DEV ? 1 : 0);
     menu.draw(renderer.width, renderer.height, u, canvas.clientWidth, canvas.clientHeight, input, spawned ? camWorld.latLon : undefined, insets, controls);
-  }
+  } else menu.hideField();
   if (import.meta.env.DEV && rimLab.hud) {
     const st = chunks.stats;
     const os = osm.stats;

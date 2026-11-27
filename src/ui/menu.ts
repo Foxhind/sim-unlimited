@@ -9,10 +9,11 @@ import { t, type StringKey } from './i18n';
 import { saveSettings, type Settings } from './settings';
 import { AIRFIELDS, Minimap } from './minimap';
 import { MAP_SOURCE_NAME, parseMapLink } from './map-links';
+import { Geocoder, type Place } from './geocode';
 import type { LatLon } from '../world/geodesy';
 import { TIMES_OF_DAY, type TimeOfDay } from '../world/time-of-day';
 import { WEATHER_PRESETS, type WeatherPreset } from '../world/weather-preset';
-import { AIRCRAFT, type AircraftId } from '../flight/aircraft';
+import { AIRCRAFT, AIRCRAFT_ORDER, type AircraftId } from '../flight/aircraft';
 import { DEFAULT_BINDINGS, type Action, type Controls } from '../flight/controls';
 
 export type MenuScreen = 'consent' | 'start' | 'settings' | 'pause' | 'crashed' | 'none';
@@ -69,7 +70,10 @@ const TOD_KEY: Record<TimeOfDay, StringKey> = {
 const WX_KEY: Record<WeatherPreset, StringKey> = {
   real: 'wxReal', clear: 'wxClear', cloudy: 'wxCloudy', rain: 'wxRain', snow: 'wxSnow', storm: 'wxStorm',
 };
-const PANEL = rampIndex(RAMP.SKY, 2);
+/** the menus' panels: the HUD's darkest green, whatever the light (a sky ramp follows the day) */
+const PANEL = rampIndex(RAMP.HUD_GREEN, 1);
+/** the search field's text: the HUD's green (palette HUD_GREEN, its 13th step) */
+const FIELD_COLOUR = '#38e038';
 const DIM = rampIndex(RAMP.HUD_GREEN, 6);
 
 export class Menu {
@@ -123,6 +127,7 @@ export class Menu {
     }
     this.config.customPoint = { lat: p.lat, lon: p.lon };
     this.config.location = 'custom';
+    this.placeName = '';
     this.pasteNote = { text: `${t(L, 'pastedPoint')} ${MAP_SOURCE_NAME[p.source].toUpperCase()}`, error: false };
     return true;
   }
@@ -233,7 +238,7 @@ export class Menu {
       const hov = hover && hover[0] >= b.x && hover[0] <= b.x + b.w && hover[1] >= b.y && hover[1] <= b.y + b.h;
       const color = b.amber ? HUD_AMBER : HUD_GREEN;
       if (b.selected || hov) {
-        this.vec.fillRect(b.x, b.y, b.w, b.h, b.amber ? rampIndex(RAMP.HUD_AMBER, 3) : rampIndex(RAMP.HUD_GREEN, 3));
+        this.vec.fillRect(b.x, b.y, b.w, b.h, b.amber ? rampIndex(RAMP.HUD_AMBER, 5) : rampIndex(RAMP.HUD_GREEN, 5));
       }
       this.vec.rect(b.x, b.y, b.w, b.h, lw, color);
       const scale = this.u;
@@ -252,7 +257,12 @@ export class Menu {
     this.touch = input.device === 'touch';
     this.buttons = [];
     const sx = w / cssW, sy = h / cssH;
+    this.cssScale = cssW / w;
+    this.preview = null;
+    this.fieldShown = false;
     let click = input.consumeClick();
+    // a tap elsewhere takes the keyboard from the search field
+    if (click && this.typing()) this.field?.blur();
     const hover: [number, number] | null = this.touch ? null : [input.mouseX * sx + w / 2, input.mouseY * sy + h / 2];
 
     if (this.remap) {
@@ -300,8 +310,13 @@ export class Menu {
       case 'settings': bar = this.drawSettings(w, h, u, input); break;
       case 'pause': this.drawPause(w, h, u, marker); break;
       case 'crashed': this.drawCrashed(w, h, u); break;
-      case 'none': return;
+      case 'none': break;
     }
+    if (this.field && !this.fieldShown) {
+      this.field.style.display = 'none';
+      if (this.typing()) this.field.blur();
+    }
+    if (this.screen === 'none') return;
     // taller than the screen (above its bottom bar): it scrolls
     this.scrollMax = Math.max(0, this.bottom + 16 * u - (bar || h - inset.b));
     this.scroll = Math.min(this.scroll, this.scrollMax);
@@ -355,38 +370,73 @@ export class Menu {
     const cfg = this.config;
     const ins = this.inset;
     const two = w / u >= TWO_COLUMNS;
-    const top = ins.t + (two ? h * 0.05 : 16 * u);
+    const top = ins.t + (two ? h * 0.04 : 16 * u);
     this.center(t(L, 'title'), w / 2, top, u * 3, HUD_AMBER);
     this.center(t(L, 'subtitle'), w / 2, top + 42 * u, u, HUD_GREEN);
 
-    // two columns (options, map) on a wide screen; on a narrow one the map goes under the options
-    const x0 = two ? w * 0.06 : ins.l + 16 * u;
-    const cw = two ? w * 0.36 : w - x0 - ins.r - 16 * u;
-    const bh = 28 * u, gap = 6 * u;
-    let y = two ? Math.max(h * 0.17, top + 70 * u) : top + 70 * u;
-    const y0 = y;
-    const label = (key: StringKey): void => { this.text(t(L, key), x0, y, u, HUD_AMBER); y += 20 * u; };
+    // two columns on a wide screen: the aircraft and the flight's options, the place; on a narrow
+    // one the aircraft, the place, then the options, one under the other
+    const x0 = two ? w * 0.05 : ins.l + 16 * u;
+    const cw = two ? w * 0.4 : w - x0 - ins.r - 16 * u;
+    const rx = two ? w * 0.53 : x0;
+    const rw = two ? w * 0.42 : cw;
+    const bh = (this.touch ? 34 : 28) * u, gap = 6 * u;
+    const yTop = two ? Math.max(h * 0.14, top + 70 * u) : top + 70 * u;
+    // dark panels under the columns, as laid out last frame (the sky behind is light), but for the aircraft's window
+    for (const p of this.panels) this.vec.fillRect(p.x, p.y - this.oy, p.w, p.h, PANEL);
+    const panels: { x: number; y: number; w: number; h: number }[] = [];
+    const pad = 10 * u;
+    const panel = (px: number, y0: number, pw: number, y1: number): void => { if (y1 > y0) panels.push({ x: px - pad, y: y0, w: pw + 2 * pad, h: y1 - y0 }); };
+    let x = x0, colW = cw, y = yTop;
+    const label = (key: StringKey): void => { this.text(t(L, key), x, y, u, HUD_AMBER); y += 20 * u; };
     /** a row of buttons across the column, wrapped into more rows when their labels do not fit */
     const row = (items: [string, () => void, boolean][]): void => {
       const widest = Math.max(...items.map(([lbl]) => this.font.measure(lbl, u))) + 12 * u;
-      const per = Math.max(1, Math.min(items.length, Math.floor((cw + gap) / (widest + gap))));
+      const per = Math.max(1, Math.min(items.length, Math.floor((colW + gap) / (widest + gap))));
       for (let i = 0; i < items.length; i += per) {
         const chunk = items.slice(i, i + per);
-        const bw = (cw - gap * (chunk.length - 1)) / chunk.length;
-        chunk.forEach(([lbl, act, sel], k) => this.button(x0 + k * (bw + gap), y, bw, bh, lbl, act, sel));
+        const bw = (colW - gap * (chunk.length - 1)) / chunk.length;
+        chunk.forEach(([lbl, act, sel], k) => this.button(x + k * (bw + gap), y, bw, bh, lbl, act, sel));
         y += bh + gap * 2;
       }
     };
 
+    // the aircraft: its model turning in a window (drawn behind the menu by main.ts in `preview`),
+    // its name between the arrows that step through them (also ← →), its role under it
     label('aircraft');
-    const pick = (id: AircraftId, name: string): [string, () => void, boolean] => [name, () => {
-      if (cfg.aircraft !== id) Object.assign(cfg, { aircraft: id, insignia: '', loadout: '' });
-    }, cfg.aircraft === id];
-    row([pick('su27', 'SU-27 FLANKER'), pick('f117', 'F-117A NIGHTHAWK')]);
-    row([pick('f16', 'F-16AM FALCON'), pick('an225', 'AN-225 MRIYA')]);
-    row([pick('c150', 'CESSNA 150')]);
-    // the chosen aircraft's markings and loadouts, when it has a choice of them (the first is its default)
+    const ph = Math.min(colW * 0.42, two ? h * 0.24 : 200 * u);
+    this.preview = { x, y: y - this.oy, w: colW, h: ph };
+    panel(x, yTop - pad, colW, y);
+    const underPreview = y + ph;
+    this.vec.rect(x, y - this.oy, colW, ph, Math.max(1, u), DIM);
+    this.bottom = Math.max(this.bottom, y + ph);
+    y += ph + gap;
+    const step = (d: number): void => {
+      const i = AIRCRAFT_ORDER.indexOf(cfg.aircraft);
+      const id = AIRCRAFT_ORDER[(i + d + AIRCRAFT_ORDER.length) % AIRCRAFT_ORDER.length];
+      Object.assign(cfg, { aircraft: id, insignia: '', loadout: '' });
+    };
+    if (!this.typing()) {
+      const key = input.consumeKey();
+      if (key === 'ArrowLeft') step(-1);
+      else if (key === 'ArrowRight') step(1);
+    }
+    const ab = Math.max(bh, 40 * u);
+    this.button(x, y, ab, ab, '<', () => step(-1));
+    this.button(x + colW - ab, y, ab, ab, '>', () => step(1));
     const ac = AIRCRAFT[cfg.aircraft];
+    this.center(this.fit(ac.name, colW - 2 * ab - 8 * u, u * 2), x + colW / 2, y + ab / 2 - 16 * u, u * 2, HUD_WHITE);
+    y += ab + gap;
+    // a dot for each aircraft, the chosen one lit
+    const dot = 6 * u, dg = 8 * u, dw = AIRCRAFT_ORDER.length * (dot + dg) - dg;
+    AIRCRAFT_ORDER.forEach((id, i) => {
+      const dx = x + colW / 2 - dw / 2 + i * (dot + dg), dy = y - this.oy;
+      if (id === cfg.aircraft) this.vec.fillRect(dx, dy, dot, dot, HUD_GREEN);
+      else this.vec.rect(dx, dy, dot, dot, Math.max(1, u), DIM);
+    });
+    y += dot + gap;
+    y = this.para(t(L, `acRole_${cfg.aircraft}` as StringKey), x, y, colW, DIM, true) + gap;
+    // the chosen aircraft's markings and loadouts, when it has a choice of them (the first is its default)
     const choose = (key: StringKey, items: { id: string; name: string }[] | undefined, field: 'insignia' | 'loadout'): void => {
       if (!items || items.length < 2) return;
       label(key);
@@ -397,53 +447,82 @@ export class Menu {
     };
     choose('insignia', ac.insignia, 'insignia');
     choose('loadout', ac.loadouts, 'loadout');
-    label('location');
-    row([
-      ['LTBS', () => { cfg.location = 'LTBS'; }, cfg.location === 'LTBS'],
-      ['LOWI', () => { cfg.location = 'LOWI'; }, cfg.location === 'LOWI'],
-      [t(L, 'custom'), () => { cfg.location = 'custom'; }, cfg.location === 'custom'],
-    ]);
-    label('startMode');
-    row([
-      [t(L, 'runway'), () => { cfg.startMode = 'runway'; }, cfg.startMode === 'runway'],
-      [t(L, 'air'), () => { cfg.startMode = 'air'; }, cfg.startMode === 'air'],
-    ]);
-    label('time');
-    row(TIME_STEPS.map((s) => [`x${s}`, () => { cfg.timeAccel = s; }, cfg.timeAccel === s] as [string, () => void, boolean]));
-    label('timeOfDay');
-    row(TIMES_OF_DAY.map((k) => [t(L, TOD_KEY[k]), () => { cfg.timeOfDay = k; }, cfg.timeOfDay === k] as [string, () => void, boolean]));
-    label('weather');
-    row(WEATHER_PRESETS.map((k) => [t(L, WX_KEY[k]), () => { cfg.weather = k; }, cfg.weather === k] as [string, () => void, boolean]));
 
-    // minimap: click to pick an arbitrary point (Q29); beside the options, or under them
-    const size = two ? Math.min(w * 0.42, h * 0.52) : Math.min(cw, 360 * u);
-    const mx = two ? w * 0.52 : x0 + (cw - size) / 2;
-    const my = two ? y0 : y + 8 * u;
+    const options = (): void => {
+      label('startMode');
+      row([
+        [t(L, 'runway'), () => { cfg.startMode = 'runway'; }, cfg.startMode === 'runway'],
+        [t(L, 'air'), () => { cfg.startMode = 'air'; }, cfg.startMode === 'air'],
+      ]);
+      label('time');
+      row(TIME_STEPS.map((s) => [`x${s}`, () => { cfg.timeAccel = s; }, cfg.timeAccel === s] as [string, () => void, boolean]));
+      label('timeOfDay');
+      row(TIMES_OF_DAY.map((k) => [t(L, TOD_KEY[k]), () => { cfg.timeOfDay = k; }, cfg.timeOfDay === k] as [string, () => void, boolean]));
+      label('weather');
+      row(WEATHER_PRESETS.map((k) => [t(L, WX_KEY[k]), () => { cfg.weather = k; }, cfg.weather === k] as [string, () => void, boolean]));
+    };
+    if (two) options();
+    const leftBottom = y;
+    if (two) panel(x0, underPreview, cw, leftBottom + pad);
+
+    // the place: found by name (Nominatim), one of the airfields, or picked on the map (Q29)
+    if (two) { x = rx; colW = rw; y = yTop; } else y += gap;
+    label('location');
+    const fb = Math.max(this.font.measure(t(L, 'search'), u) + 24 * u, 80 * u);
+    this.placeField(x, y - this.oy, colW - fb - gap, bh, h, u);
+    this.button(x + colW - fb, y, fb, bh, t(L, 'search'), () => this.runSearch(), false, true);
+    y += bh + gap;
+    const found = this.found;
+    if (found.status === 'busy' || found.status === 'none' || found.status === 'error') {
+      const key: StringKey = found.status === 'busy' ? 'searching' : found.status === 'none' ? 'searchNone' : 'searchError';
+      y = this.para(t(L, key), x, y, colW, found.status === 'error' ? HUD_AMBER : DIM) + gap;
+    }
+    if (found.status === 'done') {
+      for (const p of found.places) {
+        const lbl = this.fit(p.where ? `${p.name} - ${p.where}` : p.name, colW - 12 * u, u);
+        this.button(x, y, colW, bh, lbl, () => this.choosePlace(p), cfg.location === 'custom' && cfg.customPoint?.lat === p.lat && cfg.customPoint?.lon === p.lon);
+        y += bh + gap;
+      }
+      this.text(t(L, 'searchCredit'), x, y, u, DIM);
+      y += 20 * u;
+    }
+    row([
+      ...AIRFIELDS.map((a): [string, () => void, boolean] => [`${a.icao} ${a.name}`, () => { cfg.location = a.icao; }, cfg.location === a.icao]),
+    ]);
+    const size = two ? Math.min(colW, Math.max(160 * u, this.barTopAhead(h) - 60 * u - y)) : Math.min(colW, 360 * u);
+    const mx = x + (colW - size) / 2, my = y;
     const af = AIRFIELDS.find((a) => a.icao === cfg.location);
     const center = af ?? cfg.customPoint ?? { lat: 47.2603, lon: 11.3439 };
-    this.minimap.setView(center, 500000);
+    this.minimap.setView(center, af || !this.placeName ? 500000 : 150000);
     this.minimap.lang = this.settings.lang;
     this.minimap.draw(this.vec, this.font, mx, my - this.oy, size, u, cfg.customPoint ?? undefined);
     this.bottom = Math.max(this.bottom, my + size);
     if (click && click[1] < this.barTopAhead(h)) {
       const p = this.minimap.pick(click[0], click[1], mx, my - this.oy, size);
-      if (p) { cfg.customPoint = p; cfg.location = 'custom'; this.pasteNote = null; }
+      if (p) { cfg.customPoint = p; cfg.location = 'custom'; this.pasteNote = null; this.placeName = ''; }
     }
     const note = this.pasteNote;
-    const noteW = two ? w * 0.44 : cw;
-    let ny = this.para(note ? note.text : t(L, this.touch ? 'pickOnMapTouch' : 'pickOnMap'), mx + size / 2 - noteW / 2, my + size + 10 * u, noteW, note ? (note.error ? HUD_AMBER : HUD_GREEN) : DIM, true);
+    let ny = this.para(note ? note.text : t(L, this.touch ? 'pickOnMapTouch' : 'pickOnMap'), x, my + size + 10 * u, colW, note ? (note.error ? HUD_AMBER : HUD_GREEN) : DIM, true);
     const pt = cfg.location === 'custom' && cfg.customPoint
-      ? `${cfg.customPoint.lat.toFixed(3)}, ${cfg.customPoint.lon.toFixed(3)}`
+      ? `${this.placeName ? `${this.placeName}  ` : ''}${cfg.customPoint.lat.toFixed(3)}, ${cfg.customPoint.lon.toFixed(3)}`
       : af ? `${af.icao} ${af.name}  ${af.lat.toFixed(3)}, ${af.lon.toFixed(3)}` : '';
-    ny = this.para(pt, mx + size / 2 - noteW / 2, ny + 2 * u, noteW, HUD_GREEN, true);
+    ny = this.para(pt, x, ny + 2 * u, colW, HUD_GREEN, true);
+    y = ny + 8 * u;
+    if (two) panel(rx, yTop - pad, rw, y + pad);
 
-    // the controls' help: the keys, a gamepad's, or the touch controls'; after the options (wide:
-    // just over the bottom bar when there is room)
+    if (!two) { x = x0; colW = cw; options(); }
+
+    // the controls' help: the keys, a gamepad's, or the touch controls'; at the end (wide: under the
+    // options, just over the bottom bar when there is room)
     const help: string[] = this.touch ? [t(L, 'helpTouch')] : input.pad ? [t(L, 'helpPad')] : [t(L, 'helpAp'), t(L, 'helpNav'), t(L, 'helpFly'), t(L, 'helpKeys')];
     const barY = this.barTopAhead(h) + 8 * u;
     const lines = help.flatMap((line) => this.wrap(line, cw, u));
-    let hy = two ? Math.max(y + 4 * u, barY - 16 * u - lines.length * 18 * u) : ny + 12 * u;
+    let hy = two ? Math.max(leftBottom + 4 * u + pad, barY - 16 * u - lines.length * 18 * u) : y + 4 * u;
+    const helpTop = hy - 4 * u;
     for (const line of lines) { this.text(line, x0, hy, u, DIM); hy += 18 * u; }
+    if (two) panel(x0, helpTop, cw, hy + 4 * u);
+    else panel(x0, underPreview, cw, hy + pad);
+    this.panels = panels;
 
     const bw = two ? cw : Math.min(cw, 420 * u);
     const bx = two ? x0 : x0 + (cw - bw) / 2;
@@ -451,6 +530,96 @@ export class Menu {
       this.button(bx, barY, bw * 0.45, 40 * u, t(L, 'settings'), () => this.openSettings('start'));
       this.button(bx + bw * 0.5, barY, bw * 0.5, 40 * u, t(L, 'fly') + ' >', () => this.cb.onFly({ ...cfg }), false, true);
     });
+  }
+
+  /** `s` cut to `maxW` at this scale, with an ellipsis when it was longer */
+  private fit(s: string, maxW: number, scale: number): string {
+    if (this.font.measure(s, scale) <= maxW) return s;
+    let n = s.length;
+    while (n > 1 && this.font.measure(`${s.slice(0, n)}...`, scale) > maxW) n--;
+    return `${s.slice(0, n).trimEnd()}...`;
+  }
+
+  /** the start screen's panels as laid out last frame (unscrolled device px) */
+  private panels: { x: number; y: number; w: number; h: number }[] = [];
+
+  /** where the chosen aircraft is shown on the start screen (device px, as drawn this frame); null on others */
+  preview: { x: number; y: number; w: number; h: number } | null = null;
+
+  /** the name of the found place chosen as the start point ('' for a point picked on the map) */
+  private placeName = '';
+  private readonly geocoder = new Geocoder();
+  private found: { status: 'idle' | 'busy' | 'done' | 'none' | 'error'; places: Place[] } = { status: 'idle', places: [] };
+  /** the search field: an HTML input over the canvas (a phone's keyboard comes up for it) */
+  private field: HTMLInputElement | null = null;
+  /** the field shown this frame */
+  private fieldShown = false;
+
+  /** the search field has the keyboard */
+  private typing(): boolean {
+    return !!this.field && document.activeElement === this.field;
+  }
+
+  /** the search field over the canvas at (x, y) device px, `fw` × `fh`; hidden under the bottom bar or off screen */
+  private placeField(x: number, y: number, fw: number, fh: number, h: number, u: number): void {
+    this.vec.rect(x, y, fw, fh, Math.max(1, u), HUD_GREEN);
+    if (typeof document === 'undefined') return;
+    if (!this.field) {
+      const f = document.createElement('input');
+      f.type = 'search';
+      f.enterKeyHint = 'search';
+      f.autocomplete = 'off';
+      f.spellcheck = false;
+      Object.assign(f.style, {
+        position: 'fixed', boxSizing: 'border-box', margin: '0', border: 'none', outline: 'none', background: 'transparent',
+        color: FIELD_COLOUR, caretColor: FIELD_COLOUR, fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+        // 16 px at least: iOS zooms the page into a smaller one
+        fontSize: '16px', padding: '0 8px', textTransform: 'uppercase', zIndex: '2',
+      } satisfies Partial<CSSStyleDeclaration>);
+      f.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); this.runSearch(); f.blur(); }
+        if (e.key === 'Escape') f.blur();
+      });
+      document.body.appendChild(f);
+      this.field = f;
+    }
+    const f = this.field;
+    f.placeholder = t(this.settings.lang, 'searchHint');
+    const visible = y >= this.inset.t && y + fh <= Math.min(h, this.barTopAhead(h)) && !this.remap && !this.remapAxis;
+    // the canvas fills the window from its corner: device px × cssScale are the page's px
+    const k = this.cssScale;
+    Object.assign(f.style, { left: `${x * k}px`, top: `${y * k}px`, width: `${fw * k}px`, height: `${fh * k}px`, display: visible ? 'block' : 'none' });
+    this.fieldShown = visible;
+  }
+
+  /** off the start screen (no menu drawn at all): no search field */
+  hideField(): void {
+    if (!this.field || this.field.style.display === 'none') return;
+    this.field.style.display = 'none';
+    this.field.blur();
+  }
+
+  /** css px per device px of the canvas, set by draw */
+  private cssScale = 0;
+
+  private runSearch(): void {
+    const q = this.field?.value ?? '';
+    if (!q.trim() || this.found.status === 'busy') return;
+    this.found = { status: 'busy', places: [] };
+    this.geocoder.search(q, this.settings.lang === 'ua' ? 'uk' : this.settings.lang).then(
+      (places) => {
+        this.found = { status: places.length ? 'done' : 'none', places };
+        if (places.length === 1) this.choosePlace(places[0]);
+      },
+      () => { this.found = { status: 'error', places: [] }; },
+    );
+  }
+
+  private choosePlace(p: Place): void {
+    this.config.customPoint = { lat: p.lat, lon: p.lon };
+    this.config.location = 'custom';
+    this.placeName = p.name;
+    this.pasteNote = null;
   }
 
   /** rows of text along the screen's bottom under the menus (the attribution, in dev the stats) */

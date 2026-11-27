@@ -686,6 +686,8 @@ export const C150: AircraftConfig = fromModel({
 });
 
 export const AIRCRAFT: Record<AircraftId, AircraftConfig> = { su27: SU27, f117: F117, an225: AN225, f16: F16, c150: C150 };
+/** the order the start screen steps through them */
+export const AIRCRAFT_ORDER: AircraftId[] = ['su27', 'f16', 'f117', 'an225', 'c150'];
 
 export function tableLookup(table: AeroTable, x: number): number {
   if (x <= table[0][0]) return table[0][1];

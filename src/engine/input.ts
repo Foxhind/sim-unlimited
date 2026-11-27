@@ -35,6 +35,12 @@ export interface PadState {
   buttons: readonly number[];
 }
 
+/** a keyboard event's target is a field being typed in */
+function typing(target: EventTarget | null): boolean {
+  return typeof HTMLElement !== 'undefined' && target instanceof HTMLElement
+    && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+}
+
 export class Input {
   readonly keys = new Set<string>();
   mouseDX = 0;
@@ -65,6 +71,8 @@ export class Input {
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
+      // typing in a text field (the start screen's search): its keys, not the sim's
+      if (typing(e.target)) return;
       this.keys.add(e.code);
       if (!e.repeat) this.presses.add(e.code);
       this.lastKey = e.code;

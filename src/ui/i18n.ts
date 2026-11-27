@@ -85,6 +85,17 @@ const en = {
   helpTouch: 'LEFT THUMB: STICK   RIGHT THUMB: THROTTLE   SWIPE: LOOK AROUND',
   helpPad: 'GAMEPAD: STICKS FLY  TRIGGERS THROTTLE  X GEAR  Y FLAPS  START PAUSE',
   pickOnMapTouch: 'TAP THE MAP TO PICK A START POINT',
+  search: 'FIND',
+  searchHint: 'CITY, AIRPORT OR LAT, LON',
+  searching: 'SEARCHING...',
+  searchNone: 'NOTHING FOUND',
+  searchError: 'SEARCH FAILED: NO CONNECTION OR TOO MANY REQUESTS',
+  searchCredit: 'SEARCH: NOMINATIM / OPENSTREETMAP',
+  acRole_su27: 'AIR SUPERIORITY FIGHTER, TWO ENGINES',
+  acRole_f117: 'STEALTH ATTACK AIRCRAFT',
+  acRole_f16: 'MULTIROLE FIGHTER, ONE ENGINE',
+  acRole_an225: 'HEAVY TRANSPORT, SIX ENGINES',
+  acRole_c150: 'LIGHT TRAINER, PISTON ENGINE',
 };
 
 export type StringKey = keyof typeof en;
@@ -172,6 +183,17 @@ const ru: Record<StringKey, string> = {
   helpTouch: 'ЛЕВЫЙ ПАЛЕЦ: РУЧКА   ПРАВЫЙ: ТЯГА   СВАЙП: ОБЗОР',
   helpPad: 'ГЕЙМПАД: СТИКИ РУЛИ  КУРКИ ТЯГА  X ШАССИ  Y ЗАКРЫЛКИ  START ПАУЗА',
   pickOnMapTouch: 'КОСНИТЕСЬ КАРТЫ, ЧТОБЫ ВЫБРАТЬ ТОЧКУ СТАРТА',
+  search: 'НАЙТИ',
+  searchHint: 'ГОРОД, АЭРОПОРТ ИЛИ КООРДИНАТЫ',
+  searching: 'ИЩУ...',
+  searchNone: 'НИЧЕГО НЕ НАЙДЕНО',
+  searchError: 'ПОИСК НЕ УДАЛСЯ: НЕТ СВЯЗИ ИЛИ СЛИШКОМ ЧАСТО',
+  searchCredit: 'ПОИСК: NOMINATIM / OPENSTREETMAP',
+  acRole_su27: 'ИСТРЕБИТЕЛЬ ЗАВОЕВАНИЯ ПРЕВОСХОДСТВА, ДВА ДВИГАТЕЛЯ',
+  acRole_f117: 'МАЛОЗАМЕТНЫЙ УДАРНЫЙ САМОЛЁТ',
+  acRole_f16: 'МНОГОЦЕЛЕВОЙ ИСТРЕБИТЕЛЬ, ОДИН ДВИГАТЕЛЬ',
+  acRole_an225: 'ТЯЖЁЛЫЙ ТРАНСПОРТНЫЙ, ШЕСТЬ ДВИГАТЕЛЕЙ',
+  acRole_c150: 'ЛЁГКИЙ УЧЕБНЫЙ, ПОРШНЕВОЙ',
 };
 
 const ua: Record<StringKey, string> = {
@@ -257,6 +279,17 @@ const ua: Record<StringKey, string> = {
   helpTouch: 'ЛІВИЙ ПАЛЕЦЬ: РУЧКА   ПРАВИЙ: ТЯГА   СВАЙП: ОГЛЯД',
   helpPad: 'ГЕЙМПАД: СТІКИ КЕРМУЮТЬ  КУРКИ ТЯГА  X ШАСІ  Y ЗАКРИЛКИ  START ПАУЗА',
   pickOnMapTouch: 'ТОРКНІТЬСЯ МАПИ, ЩОБ ОБРАТИ ТОЧКУ СТАРТУ',
+  search: 'ЗНАЙТИ',
+  searchHint: 'МІСТО, АЕРОПОРТ АБО КООРДИНАТИ',
+  searching: 'ШУКАЮ...',
+  searchNone: 'НІЧОГО НЕ ЗНАЙДЕНО',
+  searchError: 'ПОШУК НЕ ВДАВСЯ: НЕМАЄ ЗВ’ЯЗКУ АБО ЗАНАДТО ЧАСТО',
+  searchCredit: 'ПОШУК: NOMINATIM / OPENSTREETMAP',
+  acRole_su27: 'ВИНИЩУВАЧ ЗАВОЮВАННЯ ПЕРЕВАГИ, ДВА ДВИГУНИ',
+  acRole_f117: 'МАЛОПОМІТНИЙ УДАРНИЙ ЛІТАК',
+  acRole_f16: 'БАГАТОЦІЛЬОВИЙ ВИНИЩУВАЧ, ОДИН ДВИГУН',
+  acRole_an225: 'ВАЖКИЙ ТРАНСПОРТНИЙ, ШІСТЬ ДВИГУНІВ',
+  acRole_c150: 'ЛЕГКИЙ НАВЧАЛЬНИЙ, ПОРШНЕВИЙ',
 };
 
 const DICTS: Record<Lang, Record<StringKey, string>> = { en, ru, ua };
