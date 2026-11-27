@@ -66,4 +66,9 @@ describe('simple props', () => {
     expect(PHONE_DETAIL.simpleProps).toBe(true);
     expect(FULL_DETAIL.simpleProps).toBe(false);
   });
+
+  it('the phone’s lines are near only, and no conductor hangs past the last support drawn', () => {
+    expect(PHONE_DETAIL.lineRadiusM).toBeLessThan(PHONE_DETAIL.houseRadiusM);
+    expect(PHONE_DETAIL.wireRadiusM).toBeLessThanOrEqual(PHONE_DETAIL.lineRadiusM);
+  });
 });

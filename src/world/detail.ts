@@ -26,10 +26,15 @@ export interface DetailProfile {
   /** the share of each tile's trees drawn (all of them near, thinned farther still: props-mesher TREE_THIN) */
   treeShare: number;
   /**
-   * lamp posts, traffic lights, masts and power supports as 1 px lines instead of their solids
-   * (the lit lamp lenses, the signals' lenses and the masts' beacons stay)
+   * lamp posts, traffic lights, masts and power supports as 1 px lines instead of their solids, near
+   * only (the lit lamp lenses, the signals' lenses and the masts' beacons stay)
    */
   simpleProps: boolean;
+  /**
+   * with simpleProps: masts (and minarets) and power supports as lines within this slant of a tile's
+   * nearest part, m; beyond, not at all (lamp posts and traffic lights: their own, shorter PROP_DETAIL_M)
+   */
+  lineRadiusM: number;
 }
 
 export const FULL_DETAIL: Readonly<DetailProfile> = {
@@ -43,24 +48,26 @@ export const FULL_DETAIL: Readonly<DetailProfile> = {
   treeRadiusM: 2000,
   treeShare: 1,
   simpleProps: false,
+  lineRadiusM: Infinity,
 };
 
 /**
  * A phone: the detailed ring cut to about a third of its area, the buildings and the drape to about
  * half, the far dots to under half, half the trees out to 1.5 km, and the street furniture, masts
- * and pylons as lines. From 1–2 km up a phone's screen shows little more anyway.
+ * and pylons as lines near and not at all farther. From 1–2 km up a phone's screen shows little more anyway.
  */
 export const PHONE_DETAIL: Readonly<DetailProfile> = {
   detailRadiusM: 4000,
   houseRadiusM: 2500,
   drapeRadiusM: 2000,
   buildingDetailM: 900,
-  wireRadiusM: 2500,
+  wireRadiusM: 1500,
   propScale: 0.6,
   farOsmRadiusM: 14000,
   treeRadiusM: 1500,
   treeShare: 0.5,
   simpleProps: true,
+  lineRadiusM: 1500,
 };
 
 export type DetailMode = 'auto' | 'full' | 'phone';

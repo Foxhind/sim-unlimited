@@ -334,7 +334,7 @@ export class OsmManager {
     for (const c of this.renderList) {
       draws += (c.mesh ? 1 : 0) + (c.rmesh || c.roadLines ? 1 : 0) + (c.lamps ? 1 : 0) + (c.bmesh || c.dots ? 1 : 0) + (c.trees?.length ?? 0) + (c.lights ? 1 : 0) +
         (c.roofLights || c.nightDots ? 1 : 0) + (c.beacons ? 1 : 0) + (c.mastLines ? 1 : 0) + (c.wires ? 1 : 0) +
-        (detail.simpleProps ? (c.poleLines ? 1 : 0) + (c.propLines ? 1 : 0) + (c.mastLines ? 1 : 0) : 0);
+        (detail.simpleProps ? (c.poleLines ? 1 : 0) + (c.propLines ? 1 : 0) : 0);
     }
     return { chunks: this.chunks.size, pending, drawCalls: draws, errors };
   }
@@ -772,8 +772,9 @@ export class OsmManager {
         if (c.roofLights && lights && buildingsOn) {
           renderer.drawLights(c.roofLights.vao, c.roofLights.count, c.offset, view, proj, camPos, Math.max(2, pointSize * 0.67), true);
         }
-        if (detail.simpleProps) {
-          // a phone (detail.ts): masts, pylons and poles, lamp posts and traffic lights as 1 px lines
+        if (detail.simpleProps && slant - c.radius * 0.71 < detail.lineRadiusM) {
+          // a phone (detail.ts): masts, pylons and poles, lamp posts and traffic lights as 1 px lines,
+          // near only; farther they are not drawn
           if (c.mastLines && (mastsOn || this.shows(STRUCTURE.MINARET))) renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
           if (c.poleLines && this.shows(STRUCTURE.POWER)) renderer.drawLights(c.poleLines.vao, c.poleLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
           if (c.propLines && L.props && slant - c.radius * 0.71 < (PROP_DETAIL_M[INSTANCE.LAMP] ?? 0) * detail.propScale) {
@@ -804,8 +805,8 @@ export class OsmManager {
         } else if (c.roadLines && L.roads) {
           renderer.drawLights(c.roadLines.vao, c.roadLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }
-        // far lines: the masts' and the minarets'
-        if (c.mastLines && (mastsOn || this.shows(STRUCTURE.MINARET))) {
+        // far lines: the masts' and the minarets' (not on a phone: its simple props are near only)
+        if (c.mastLines && !detail.simpleProps && (mastsOn || this.shows(STRUCTURE.MINARET))) {
           renderer.drawLights(c.mastLines.vao, c.mastLines.count, c.offset, view, proj, camPos, 1, true, 'lines');
         }
       }
