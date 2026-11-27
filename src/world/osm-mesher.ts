@@ -3,7 +3,7 @@ import { colour, colourOf, isMaterial, LUT_SIZE, streetLampValue, RAMP, rampGlow
 import { DEFAULT_AREA_STYLES, filterColour, type AreaFilter, type AreaStyles } from './area-styles';
 import type { FaceColor } from './landsat';
 import { enuToLatLon, gridLatLon, latLonToEnu, tileBounds, tileCenter, tileLattice, tileSizeMeters, type Tile } from './geodesy';
-import { buildBuildingMesh } from './building-mesher';
+import { buildBuildingMesh, hangarTargets } from './building-mesher';
 import { clipTileData } from './clip';
 import { INSTANCE, LAMP_SHAPE, lampHead, pushInstance } from './props-mesher';
 import { LENS, LENS_OUT, LENS_RGB, lensCorners, lensY } from './traffic-signals';
@@ -1657,7 +1657,7 @@ export function buildOsmMesh(opts: OsmMeshOptions): OsmMeshData {
       const style = l.tags.highway ? classifyLine(l.tags) : undefined;
       return !!style && !style.path && !style.rail;
     }).map((l) => l.points);
-    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points, roads });
+    const bm = buildBuildingMesh({ tile, buildings: data.buildings, sampleHeight, points: data.points, roads, ...hangarTargets(opts.data.areas, opts.data.lines) });
     for (let i = 0; i < bm.vertices.length; i++) verts.push(bm.vertices[i]);
     for (let i = 0; i < bm.ramps.length; i++) ramps.push(bm.ramps[i]);
   }

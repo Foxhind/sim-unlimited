@@ -4,7 +4,7 @@ import { tileKey, type Tile } from '../world/geodesy';
 import { buildOsmMesh } from '../world/osm-mesher';
 import { buildTerrainMesh, terrainMeshBuffers } from '../world/terrain-mesher';
 import { weld } from '../world/weld';
-import { buildBuildingMesh, buildingDots, buildingNightLights, WINDOW_ATTR_FLOATS } from '../world/building-mesher';
+import { buildBuildingMesh, buildingDots, buildingNightLights, hangarTargets, WINDOW_ATTR_FLOATS } from '../world/building-mesher';
 import { buildMasts } from '../world/mast-mesher';
 import { clipTileData } from '../world/clip';
 import { buildProps } from '../world/props-mesher';
@@ -275,7 +275,8 @@ ctx.onmessage = async (e: MessageEvent<OsmRequest>) => {
     };
     // the whole fetch's roads: a garage by the border faces a road of the next tile
     const garageRoads = data.lines.filter((l) => isCarriageway(l.tags)).map((l) => l.points);
-    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points, groundColour, roads: garageRoads });
+    // and its aprons and taxiways: a hangar by the border faces the next tile's apron
+    const houses = buildBuildingMesh({ tile, buildings: own, sampleHeight: drape, points: data.points, groundColour, roads: garageRoads, ...hangarTargets(data.areas, data.lines) });
     // antenna trusses are drawn with the buildings (near), as lines far away
     const masts = buildMasts(clipped.points, tile, drape);
     // bridge bodies and embankments (bridge-mesher.ts) are solid like the buildings and drawn with
