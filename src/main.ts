@@ -1,3 +1,4 @@
+import { FramePacer } from './engine/frame-pace';
 import { mat4, vec3 } from 'gl-matrix';
 import unsciiHex from '../assets/fonts/unscii-16.hex?raw';
 import uaPatchHex from '../assets/fonts/unscii-16-ua-patch.hex?raw';
@@ -782,13 +783,35 @@ function updateNav(now: number): HudNav {
   return { nav1: n1, adf: adfRx, runway, ra, vapp: approachSpeed(model) };
 }
 
+const pacer = new FramePacer();
+let idleSkipped = false;
+
+/** paused with nothing new to show (frame-pace.ts): this frame need not be drawn */
+function stillPicture(now: number): boolean {
+  if (state !== 'paused') {
+    pacer.wake();
+    return false;
+  }
+  // a pad's button is noticed between drawn frames too (its press is kept for the next one)
+  input.pollPads();
+  return pacer.still(now, `${menu.screen}|${canvas.clientWidth}x${canvas.clientHeight}@${window.devicePixelRatio}|${input.activity}`);
+}
+
 function frame(now: number): void {
   requestAnimationFrame(frame); // scheduled first: a bad frame must not kill the loop
+  if (pacer.capped(now)) return;
+  if (stillPicture(now)) {
+    last = now; // the sim stands still meanwhile: no long step after it
+    idleSkipped = true;
+    return;
+  }
   profiler.frameStart(now);
   profiler.stage('управление и физика');
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  if (dt > 0) fpsAvg += (1 / dt - fpsAvg) * 0.05;
+  // the drawn frames' rate: not the vsync after a skipped still one
+  if (dt > 0 && !idleSkipped) fpsAvg += (1 / dt - fpsAvg) * 0.05;
+  idleSkipped = false;
 
   renderer.resize(canvas.clientWidth, canvas.clientHeight, window.devicePixelRatio || 1);
   mat4.perspective(proj, (60 * Math.PI) / 180, renderer.width / renderer.height, 0.5, DEPTH_FAR);

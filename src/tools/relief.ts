@@ -4,6 +4,7 @@
  * level-of-detail boundaries and whole neighbourhoods of tiles can be looked at from above.
  * Levels of detail are chosen from a "simulator camera" (a point and an altitude), as in flight.
  */
+import { FramePacer, inputEvents } from '../engine/frame-pace';
 import { mat4, vec3, vec4 } from 'gl-matrix';
 import type { HdrBlocker } from '../engine/output-mode';
 import { BASE_LAND, frameLighting, litShare, moonLightOn, paletteAt, seasonOf, snowy, solarHour, sunColour, windowsOn, WINDOWS } from '../engine/palette';
@@ -347,7 +348,37 @@ let fps = 0;
 let fpsSince = performance.now();
 let hashAt = 0;
 
+/** frames with nothing new to show are not drawn (frame-pace.ts) */
+const pacer = new FramePacer();
+const events = inputEvents();
+
+/**
+ * Nothing moves, no tile arrived, nothing was touched: this frame need not be drawn. A tile counts by
+ * its arrival (the managers' counts change), not by being queued: a detailed tile waits for its OSM,
+ * which may never come (an Overpass outage), and the loading itself runs on promises, not frames.
+ */
+function stillView(now: number): boolean {
+  if (fly.on && Object.values(fly.keys).some(Boolean)) {
+    pacer.wake();
+    return false;
+  }
+  return pacer.still(now, [
+    `${canvas.clientWidth}x${canvas.clientHeight}@${window.devicePixelRatio}`, events.count, renderer.output,
+    JSON.stringify(state), fly.on, fly.latLon.lat, fly.latLon.lon, fly.alt, fly.yaw, fly.pitch,
+    JSON.stringify(chunks.stats), JSON.stringify(osm.stats), JSON.stringify(farOsm.stats),
+  ].join('|'));
+}
+
 function frame(now: number): void {
+  if (pacer.capped(now)) {
+    requestAnimationFrame(frame);
+    return;
+  }
+  if (stillView(now)) {
+    fly.last = 0; // the flight stood still meanwhile: no long step after it
+    requestAnimationFrame(frame);
+    return;
+  }
   const dpr = window.devicePixelRatio || 1;
   renderer.resize(canvas.clientWidth, canvas.clientHeight, dpr);
 

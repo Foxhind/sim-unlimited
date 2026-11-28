@@ -1,3 +1,5 @@
+import { inputEvents } from './frame-pace';
+
 /** a finger on the screen, CSS px relative to the target */
 export interface Touch {
   id: number;
@@ -68,6 +70,15 @@ export class Input {
   private dragging = false;
   private downAt: [number, number] | null = null;
   private pinch = 0;
+  /**
+   * Bumped by every key, pointer and wheel event and every pad button or stick crossing its
+   * threshold: a frame that would show the same picture as the last one can be skipped while it holds.
+   */
+  get activity(): number {
+    return this.events.count + this.padChanges;
+  }
+  private readonly events = inputEvents();
+  private padChanges = 0;
 
   constructor(target: HTMLElement) {
     window.addEventListener('keydown', (e) => {
@@ -191,6 +202,7 @@ export class Input {
     const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : [];
     const p = Array.from(pads).find((g) => g && g.connected) ?? null;
     if (!p) {
+      if (this.pad) this.padChanges++;
       if (this.pad) for (const c of this.padValues.keys()) this.keys.delete(c);
       this.padValues.clear();
       this.pad = null;
@@ -205,11 +217,13 @@ export class Input {
         this.keys.add(code);
         this.padValues.set(code, v);
         if (!was) {
+          this.padChanges++;
           this.presses.add(code);
           this.lastKey = code;
           this.device = 'pad';
         }
       } else if (was) {
+        this.padChanges++;
         this.keys.delete(code);
         this.padValues.delete(code);
       }
